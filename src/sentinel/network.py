@@ -268,10 +268,33 @@ def _has_usable_tello_subnet(adapter: AdapterInfo) -> bool:
 
 
 def _probe_tello_endpoint(adapter: AdapterInfo) -> bool:
-    return (
-        route_source_ip(TELLO_ENDPOINT, local_ip=adapter.local_ip)
-        == adapter.local_ip
-    )
+    """Check Tello reachability with only the harmless SDK ``command``.
+
+    The UDP socket is bound to the candidate address, connected to the Tello
+    command endpoint, and required to receive a non-empty response.  This
+    sends only the SDK ``command`` string; it never sends movement commands or
+    changes host networking.
+    """
+
+    probe: socket.socket | None = None
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.settimeout(1.0)
+        probe.bind((adapter.local_ip, 0))
+        probe.connect((TELLO_ENDPOINT, 8889))
+        if probe.getsockname()[0] != adapter.local_ip:
+            return False
+        probe.send(b"command")
+        response = probe.recv(1024)
+        return bool(response and response.strip())
+    except OSError:
+        return False
+    finally:
+        if probe is not None:
+            try:
+                probe.close()
+            except OSError:
+                pass
 
 
 def _is_safe_candidate(
@@ -290,7 +313,8 @@ def _is_safe_candidate(
         return False
     try:
         return bool(reachability_probe(adapter))
-    except OSError:
+    except Exception:
+        # An injected probe failure is also an unsafe reachability result.
         return False
 
 
@@ -313,26 +337,34 @@ class NetworkAdapterSelector:
             route_snapshot_provider
         ):
             raise TypeError("route_snapshot_provider must be callable or None")
-        self.reachability_probe = reachability_probe or _probe_tello_endpoint
+        self.reachability_probe = (
+            reachability_probe
+            if reachability_probe is not None
+            else _probe_tello_endpoint
+        )
         self.route_snapshot_provider = route_snapshot_provider
 
     def _selection_route(self) -> RouteSnapshot:
         if self.route_snapshot_provider is not None:
-            self.default_route = self.route_snapshot_provider()
+            route = self.route_snapshot_provider()
         elif self.default_route is None:
-            self.default_route = capture_default_route(adapters=self.adapters)
-        if not isinstance(self.default_route, RouteSnapshot):
+            # Do not cache discovered routes: the second snapshot in a
+            # selection and the next select call must observe current state.
+            route = capture_default_route(adapters=self.adapters)
+        else:
+            route = self.default_route
+        if not isinstance(route, RouteSnapshot):
             raise RouteDiscoveryError(
                 "default route snapshot must be a RouteSnapshot"
             )
         if (
-            self.default_route.source_ip is None
-            or self.default_route.interface_index is None
+            route.source_ip is None
+            or route.interface_index is None
         ):
             raise RouteDiscoveryError(
                 "default route snapshot is incomplete; source IP and interface are required"
             )
-        return self.default_route
+        return route
 
     def select(
         self,
@@ -351,47 +383,60 @@ class NetworkAdapterSelector:
             )
 
         explicit = any(overrides)
-        default_route = self._selection_route()
+        before_route = self._selection_route()
         if local_ip is not None:
-            candidates = [
+            raw_candidates = [
                 adapter for adapter in self.adapters if adapter.local_ip == local_ip
             ]
         elif interface_name is not None:
-            candidates = [
+            raw_candidates = [
                 adapter for adapter in self.adapters if adapter.name == interface_name
             ]
         elif interface_index is not None:
-            candidates = [
+            raw_candidates = [
                 adapter
                 for adapter in self.adapters
                 if adapter.index == interface_index
             ]
         else:
-            candidates = [
-                adapter
-                for adapter in self.adapters
-                if _is_safe_candidate(
-                    adapter, default_route, self.reachability_probe
-                )
-            ]
+            raw_candidates = list(self.adapters)
 
-        if not candidates:
-            raise NoTelloAdapter("no adapter matched the requested selection")
-        if len(candidates) != 1:
+        if explicit and len(raw_candidates) > 1:
+            after_route = self._selection_route()
+            assert_default_route_unchanged(before_route, after_route)
             raise AmbiguousAdapter(
                 "multiple adapters matched; pass --local-ip or an interface override"
             )
 
-        selected = candidates[0]
-        if not _is_safe_candidate(
-            selected, default_route, self.reachability_probe
-        ):
+        probe_results: dict[int, bool] = {}
+
+        def is_safe(candidate: AdapterInfo) -> bool:
+            candidate_key = id(candidate)
+            if candidate_key not in probe_results:
+                probe_results[candidate_key] = _is_safe_candidate(
+                    candidate, before_route, self.reachability_probe
+                )
+            return probe_results[candidate_key]
+
+        candidates = [
+            candidate for candidate in raw_candidates if is_safe(candidate)
+        ]
+
+        after_route = self._selection_route()
+        assert_default_route_unchanged(before_route, after_route)
+
+        if not candidates:
             if explicit:
                 raise NoTelloAdapter(
                     "selected adapter is inactive, unsafe, or owns the default route"
                 )
             raise NoTelloAdapter("no safe adapter matched the requested selection")
-        return selected
+        if len(candidates) != 1:
+            raise AmbiguousAdapter(
+                "multiple adapters matched; pass --local-ip or an interface override"
+            )
+
+        return candidates[0]
 
     @staticmethod
     def assert_default_route_unchanged(

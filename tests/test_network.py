@@ -270,14 +270,9 @@ def test_selector_uses_injected_reachability_probe_without_hardware():
     assert calls == [adapter.local_ip]
 
 
-def test_selector_default_probe_checks_tello_endpoint_from_candidate_ip(monkeypatch):
-    calls = []
-
-    def fake_route_source_ip(destination, *, local_ip=None):
-        calls.append((destination, local_ip))
-        return local_ip
-
-    monkeypatch.setattr(network, "route_source_ip", fake_route_source_ip)
+def test_selector_default_probe_sends_only_tello_command(monkeypatch):
+    probe = FakeProbe()
+    monkeypatch.setattr(network.socket, "socket", lambda *args: probe)
     adapter = AdapterInfo(
         "USB Wi-Fi", 19, "192.168.10.2", True, False, netmask="255.255.255.0"
     )
@@ -287,12 +282,78 @@ def test_selector_default_probe_checks_tello_endpoint_from_candidate_ip(monkeypa
     ).select(local_ip=adapter.local_ip)
 
     assert selected == adapter
-    assert calls == [("192.168.10.1", "192.168.10.2")]
+    assert probe.bound_to == ("192.168.10.2", 0)
+    assert probe.connected_to == ("192.168.10.1", 8889)
+    assert probe.sent == [b"command"]
+    assert probe.timeout == 1.0
+    assert probe.closed is True
+
+
+def test_selector_probes_each_candidate_once_without_rechecking_selected():
+    calls = []
+    adapter = AdapterInfo(
+        "USB Wi-Fi", 19, "192.168.10.2", True, False, netmask="255.255.255.0"
+    )
+
+    def probe(candidate):
+        calls.append(candidate.local_ip)
+        return True
+
+    selected = NetworkAdapterSelector(
+        [adapter], default_route=DEFAULT_ROUTE, reachability_probe=probe
+    ).select()
+
+    assert selected == adapter
+    assert calls == [adapter.local_ip]
+
+
+def test_selector_rejects_probe_failure_without_reprobing():
+    calls = []
+    adapter = AdapterInfo(
+        "USB Wi-Fi", 19, "192.168.10.2", True, False, netmask="255.255.255.0"
+    )
+
+    def probe(candidate):
+        calls.append(candidate.local_ip)
+        return False
+
+    with pytest.raises(NoTelloAdapter):
+        NetworkAdapterSelector(
+            [adapter], default_route=DEFAULT_ROUTE, reachability_probe=probe
+        ).select()
+
+    assert calls == [adapter.local_ip]
+
+
+def test_selector_preserves_falsey_injected_reachability_probe():
+    calls = []
+
+    class FalseyProbe:
+        def __bool__(self):
+            return False
+
+        def __call__(self, candidate):
+            calls.append(candidate.local_ip)
+            return True
+
+    adapter = AdapterInfo(
+        "USB Wi-Fi", 19, "192.168.10.2", True, False, netmask="255.255.255.0"
+    )
+    selected = NetworkAdapterSelector(
+        [adapter],
+        default_route=DEFAULT_ROUTE,
+        reachability_probe=FalseyProbe(),
+    ).select()
+
+    assert selected == adapter
+    assert calls == [adapter.local_ip]
 
 
 def test_selector_refreshes_route_snapshot_provider_on_each_select():
     routes = iter(
         [
+            DEFAULT_ROUTE,
+            DEFAULT_ROUTE,
             DEFAULT_ROUTE,
             RouteSnapshot(source_ip="192.168.10.2", interface_index=19),
         ]
@@ -307,7 +368,26 @@ def test_selector_refreshes_route_snapshot_provider_on_each_select():
     )
 
     assert selector.select(local_ip=adapter.local_ip) == adapter
-    with pytest.raises(NoTelloAdapter):
+    with pytest.raises(DefaultRouteChanged):
+        selector.select(local_ip=adapter.local_ip)
+
+
+def test_selector_detects_route_change_after_probe():
+    routes = iter(
+        [
+            DEFAULT_ROUTE,
+            RouteSnapshot(source_ip="192.168.1.45", interface_index=7),
+        ]
+    )
+    adapter = AdapterInfo(
+        "USB Wi-Fi", 19, "192.168.10.2", True, False, netmask="255.255.255.0"
+    )
+
+    selector = selector_for_test(
+        [adapter], route_snapshot_provider=lambda: next(routes)
+    )
+
+    with pytest.raises(DefaultRouteChanged):
         selector.select(local_ip=adapter.local_ip)
 
 
@@ -348,6 +428,8 @@ class FakeProbe:
         self.closed = False
         self.connected_to = None
         self.bound_to = None
+        self.sent = []
+        self.timeout = None
 
     def bind(self, address):
         self.bound_to = address
@@ -361,6 +443,20 @@ class FakeProbe:
         if self.error is not None:
             raise self.error
         return (self.local_ip, 45678)
+
+    def settimeout(self, timeout):
+        self.timeout = timeout
+
+    def send(self, payload):
+        if self.error is not None:
+            raise self.error
+        self.sent.append(payload)
+        return len(payload)
+
+    def recv(self, _size):
+        if self.error is not None:
+            raise self.error
+        return b"ok"
 
     def close(self):
         self.closed = True
@@ -392,6 +488,24 @@ def test_route_source_ip_returns_none_and_closes_after_os_error(monkeypatch):
     monkeypatch.setattr(network.socket, "socket", lambda *args: probe)
 
     assert route_source_ip("1.1.1.1") is None
+    assert probe.closed is True
+
+
+def test_selector_default_probe_rejects_missing_tello_response(monkeypatch):
+    class NoResponseProbe(FakeProbe):
+        def recv(self, _size):
+            raise TimeoutError("no response")
+
+    probe = NoResponseProbe()
+    monkeypatch.setattr(network.socket, "socket", lambda *args: probe)
+    adapter = AdapterInfo(
+        "USB Wi-Fi", 19, "192.168.10.2", True, False, netmask="255.255.255.0"
+    )
+
+    with pytest.raises(NoTelloAdapter):
+        NetworkAdapterSelector([adapter], default_route=DEFAULT_ROUTE).select()
+
+    assert probe.sent == [b"command"]
     assert probe.closed is True
 
 
@@ -608,7 +722,7 @@ def test_automatic_selection_captures_route_when_snapshot_is_not_supplied(monkey
     monkeypatch.setattr(network, "capture_default_route", fake_capture)
 
     assert selector_for_test(adapters).select() == adapters[0]
-    assert captured == [tuple(adapters)]
+    assert captured == [tuple(adapters), tuple(adapters)]
 
 
 def test_automatic_selection_rejects_candidate_owned_by_default_route():
