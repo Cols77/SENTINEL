@@ -271,9 +271,9 @@ def _probe_tello_endpoint(adapter: AdapterInfo) -> bool:
     """Check Tello reachability with only the harmless SDK ``command``.
 
     The UDP socket is bound to the candidate address, connected to the Tello
-    command endpoint, and required to receive a non-empty response.  This
-    sends only the SDK ``command`` string; it never sends movement commands or
-    changes host networking.
+    command endpoint, and required to receive the normalized ``ok`` response.
+    This sends only the SDK ``command`` string; it never sends movement
+    commands or changes host networking.
     """
 
     probe: socket.socket | None = None
@@ -286,7 +286,7 @@ def _probe_tello_endpoint(adapter: AdapterInfo) -> bool:
             return False
         probe.send(b"command")
         response = probe.recv(1024)
-        return bool(response and response.strip())
+        return response.strip() == b"ok"
     except OSError:
         return False
     finally:
@@ -366,6 +366,44 @@ class NetworkAdapterSelector:
             )
         return route
 
+    @staticmethod
+    def _candidate_diagnostics(
+        candidates: Iterable[AdapterInfo],
+        before_route: RouteSnapshot,
+        current_route: RouteSnapshot | None = None,
+    ) -> str:
+        candidate_details = "; ".join(
+            (
+                f"name={candidate.name!r}, interface_index={candidate.index}, "
+                f"local_ip={candidate.local_ip}, netmask={candidate.netmask}, "
+                f"gateway={candidate.gateway}, metric={candidate.metric}, "
+                f"is_up={candidate.is_up}, "
+                f"is_default_route={candidate.is_default_route}"
+            )
+            for candidate in candidates
+        ) or "none"
+        route_details = f"route snapshot={before_route!r}"
+        if current_route is not None:
+            route_details += (
+                f", current {current_route.__class__.__name__}={current_route!r}"
+            )
+        return f"candidate adapters: [{candidate_details}]; {route_details}"
+
+    @classmethod
+    def _selection_route_check(
+        cls,
+        before_route: RouteSnapshot,
+        current_route: RouteSnapshot,
+        candidates: Iterable[AdapterInfo],
+    ) -> None:
+        try:
+            assert_default_route_unchanged(before_route, current_route)
+        except DefaultRouteChanged as exc:
+            diagnostics = cls._candidate_diagnostics(
+                candidates, before_route, current_route
+            )
+            raise DefaultRouteChanged(f"{exc}; {diagnostics}") from exc
+
     def select(
         self,
         *,
@@ -403,9 +441,11 @@ class NetworkAdapterSelector:
 
         if explicit and len(raw_candidates) > 1:
             after_route = self._selection_route()
-            assert_default_route_unchanged(before_route, after_route)
+            self._selection_route_check(before_route, after_route, raw_candidates)
             raise AmbiguousAdapter(
-                "multiple adapters matched; pass --local-ip or an interface override"
+                "multiple adapters matched; pass --local-ip or an interface "
+                "override; "
+                f"{self._candidate_diagnostics(raw_candidates, before_route, after_route)}"
             )
 
         probe_results: dict[int, bool] = {}
@@ -423,17 +463,24 @@ class NetworkAdapterSelector:
         ]
 
         after_route = self._selection_route()
-        assert_default_route_unchanged(before_route, after_route)
+        self._selection_route_check(before_route, after_route, raw_candidates)
 
         if not candidates:
             if explicit:
                 raise NoTelloAdapter(
-                    "selected adapter is inactive, unsafe, or owns the default route"
+                    "selected adapter is inactive, unsafe, or owns the default "
+                    "route; "
+                    f"{self._candidate_diagnostics(raw_candidates, before_route, after_route)}"
                 )
-            raise NoTelloAdapter("no safe adapter matched the requested selection")
+            raise NoTelloAdapter(
+                "no safe adapter matched the requested selection; "
+                f"{self._candidate_diagnostics(raw_candidates, before_route, after_route)}"
+            )
         if len(candidates) != 1:
             raise AmbiguousAdapter(
-                "multiple adapters matched; pass --local-ip or an interface override"
+                "multiple adapters matched; pass --local-ip or an interface "
+                "override; "
+                f"{self._candidate_diagnostics(raw_candidates, before_route, after_route)}"
             )
 
         return candidates[0]

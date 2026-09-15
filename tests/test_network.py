@@ -289,6 +289,142 @@ def test_selector_default_probe_sends_only_tello_command(monkeypatch):
     assert probe.closed is True
 
 
+def test_selector_default_probe_accepts_normalized_ok_response(monkeypatch):
+    class WhitespaceProbe(FakeProbe):
+        def recv(self, _size):
+            return b"\r\nok\r\n"
+
+    probe = WhitespaceProbe()
+    monkeypatch.setattr(network.socket, "socket", lambda *args: probe)
+    adapter = AdapterInfo(
+        "USB Wi-Fi", 19, "192.168.10.2", True, False, netmask="255.255.255.0"
+    )
+
+    assert NetworkAdapterSelector([adapter], default_route=DEFAULT_ROUTE).select(
+        local_ip=adapter.local_ip
+    ) == adapter
+
+
+@pytest.mark.parametrize("response", [b"error", b"arbitrary payload"])
+def test_selector_default_probe_rejects_non_ok_response(monkeypatch, response):
+    class ResponseProbe(FakeProbe):
+        def recv(self, _size):
+            return response
+
+    probe = ResponseProbe()
+    monkeypatch.setattr(network.socket, "socket", lambda *args: probe)
+    adapter = AdapterInfo(
+        "USB Wi-Fi", 19, "192.168.10.2", True, False, netmask="255.255.255.0"
+    )
+
+    with pytest.raises(NoTelloAdapter):
+        NetworkAdapterSelector([adapter], default_route=DEFAULT_ROUTE).select(
+            local_ip=adapter.local_ip
+        )
+
+    assert probe.sent == [b"command"]
+    assert probe.closed is True
+
+
+def test_no_tello_error_includes_candidate_diagnostics():
+    adapter = AdapterInfo(
+        "USB Wi-Fi",
+        19,
+        "192.168.10.2",
+        True,
+        False,
+        gateway="192.168.10.1",
+        metric=25,
+        netmask="255.255.255.0",
+    )
+
+    with pytest.raises(NoTelloAdapter) as error:
+        NetworkAdapterSelector(
+            [adapter],
+            default_route=DEFAULT_ROUTE,
+            reachability_probe=lambda _adapter: False,
+        ).select()
+
+    message = str(error.value)
+    assert "USB Wi-Fi" in message
+    assert "index=19" in message
+    assert "local_ip=192.168.10.2" in message
+    assert "netmask=255.255.255.0" in message
+    assert "gateway=192.168.10.1" in message
+    assert "metric=25" in message
+    assert repr(DEFAULT_ROUTE) in message
+
+
+def test_ambiguous_error_includes_candidate_diagnostics():
+    adapters = [
+        AdapterInfo(
+            "USB Wi-Fi A",
+            19,
+            "192.168.10.2",
+            True,
+            False,
+            gateway="192.168.10.1",
+            metric=25,
+            netmask="255.255.255.0",
+        ),
+        AdapterInfo(
+            "USB Wi-Fi B",
+            20,
+            "192.168.10.3",
+            True,
+            False,
+            gateway="192.168.10.1",
+            metric=30,
+            netmask="255.255.255.0",
+        ),
+    ]
+
+    with pytest.raises(AmbiguousAdapter) as error:
+        selector_for_test(adapters, default_route=DEFAULT_ROUTE).select()
+
+    message = str(error.value)
+    assert "USB Wi-Fi A" in message
+    assert "index=19" in message
+    assert "local_ip=192.168.10.2" in message
+    assert "metric=25" in message
+    assert "USB Wi-Fi B" in message
+    assert "index=20" in message
+    assert "local_ip=192.168.10.3" in message
+    assert "metric=30" in message
+    assert repr(DEFAULT_ROUTE) in message
+
+
+def test_route_change_error_includes_candidate_diagnostics():
+    routes = iter(
+        [
+            DEFAULT_ROUTE,
+            RouteSnapshot(source_ip="192.168.1.45", interface_index=7),
+        ]
+    )
+    adapter = AdapterInfo(
+        "USB Wi-Fi",
+        19,
+        "192.168.10.2",
+        True,
+        False,
+        netmask="255.255.255.0",
+    )
+
+    with pytest.raises(DefaultRouteChanged) as error:
+        NetworkAdapterSelector(
+            [adapter],
+            reachability_probe=always_reachable,
+            route_snapshot_provider=lambda: next(routes),
+        ).select()
+
+    message = str(error.value)
+    assert "USB Wi-Fi" in message
+    assert "index=19" in message
+    assert "local_ip=192.168.10.2" in message
+    assert "current RouteSnapshot" in message
+    assert "192.168.1.45" in message
+
+
 def test_selector_probes_each_candidate_once_without_rechecking_selected():
     calls = []
     adapter = AdapterInfo(
