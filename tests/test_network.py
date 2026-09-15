@@ -23,13 +23,22 @@ from sentinel.network import (
 DEFAULT_ROUTE = RouteSnapshot("192.168.1.44", 7)
 
 
+def always_reachable(_adapter):
+    return True
+
+
+def selector_for_test(adapters, **kwargs):
+    kwargs.setdefault("reachability_probe", always_reachable)
+    return NetworkAdapterSelector(adapters, **kwargs)
+
+
 def test_auto_selection_prefers_tello_subnet_on_non_default_adapter():
     adapters = [
         AdapterInfo("Wi-Fi", 7, "192.168.1.44", True, True),
         AdapterInfo("USB Wi-Fi", 19, "192.168.10.2", True, False),
     ]
 
-    selected = NetworkAdapterSelector(adapters, default_route=DEFAULT_ROUTE).select()
+    selected = selector_for_test(adapters, default_route=DEFAULT_ROUTE).select()
 
     assert selected.name == "USB Wi-Fi"
     assert selected.local_ip == "192.168.10.2"
@@ -37,13 +46,13 @@ def test_auto_selection_prefers_tello_subnet_on_non_default_adapter():
 
 def test_selection_rejects_missing_or_ambiguous_adapter():
     with pytest.raises(NoTelloAdapter):
-        NetworkAdapterSelector(
+        selector_for_test(
             [AdapterInfo("Wi-Fi", 7, "192.168.1.44", True, True)],
             default_route=DEFAULT_ROUTE,
         ).select()
 
     with pytest.raises(AmbiguousAdapter):
-        NetworkAdapterSelector(
+        selector_for_test(
             [
                 AdapterInfo("Wi-Fi", 7, "192.168.1.44", True, True),
                 AdapterInfo("USB Wi-Fi A", 19, "192.168.10.2", True, False),
@@ -62,7 +71,7 @@ def test_selection_rejects_missing_or_ambiguous_adapter():
     ],
 )
 def test_explicit_override_selects_exact_adapter(kwargs, expected_name):
-    selected = NetworkAdapterSelector(
+    selected = selector_for_test(
         [
             AdapterInfo("USB Wi-Fi A", 19, "192.168.10.2", True, False),
             AdapterInfo("USB Wi-Fi B", 20, "192.168.10.3", True, False),
@@ -84,7 +93,7 @@ def test_explicit_override_rejects_unsafe_adapter(field):
     )
 
     with pytest.raises(NoTelloAdapter):
-        NetworkAdapterSelector(
+        selector_for_test(
             [adapter], default_route=DEFAULT_ROUTE
         ).select(interface_index=19)
 
@@ -98,14 +107,14 @@ def test_explicit_override_rejects_unsafe_adapter(field):
 )
 def test_explicit_override_rejects_non_tello_or_loopback_adapter(adapter):
     with pytest.raises(NoTelloAdapter):
-        NetworkAdapterSelector(
+        selector_for_test(
             [adapter], default_route=DEFAULT_ROUTE
         ).select(interface_index=adapter.index)
 
 
 def test_selector_rejects_conflicting_overrides():
     with pytest.raises(NetworkSelectionError, match="exactly one"):
-        NetworkAdapterSelector(
+        selector_for_test(
             [AdapterInfo("USB Wi-Fi", 19, "192.168.10.2", True, False)],
             default_route=DEFAULT_ROUTE,
         ).select(local_ip="192.168.10.2", interface_index=19)
@@ -129,7 +138,7 @@ def test_explicit_override_requires_a_complete_default_route_snapshot(
     )
 
     with pytest.raises(RouteDiscoveryError, match="complete"):
-        NetworkAdapterSelector(
+        selector_for_test(
             [AdapterInfo("USB Wi-Fi", 19, "192.168.10.2", True, False)]
         ).select(**kwargs)
 
@@ -144,7 +153,7 @@ def test_explicit_override_requires_a_complete_default_route_snapshot(
 )
 def test_explicit_override_rejects_candidate_owned_by_current_default_route(kwargs):
     with pytest.raises(NoTelloAdapter):
-        NetworkAdapterSelector(
+        selector_for_test(
             [AdapterInfo("USB Wi-Fi", 19, "192.168.10.2", True, False)],
             default_route=RouteSnapshot("192.168.10.2", 19),
         ).select(**kwargs)
@@ -152,7 +161,7 @@ def test_explicit_override_rejects_candidate_owned_by_current_default_route(kwar
 
 @pytest.mark.parametrize(
     "source_ip",
-    ["not-an-ip", "2001:db8::1", ""],
+    ["not-an-ip", "2001:db8::1", "", "0.0.0.0", "127.0.0.1", "224.0.0.1"],
 )
 def test_route_snapshot_rejects_malformed_source_ip(source_ip):
     with pytest.raises(ValueError, match="source_ip"):
@@ -168,10 +177,138 @@ def test_route_snapshot_rejects_invalid_interface_index(interface_index):
 @pytest.mark.parametrize("local_ip", ["192.168.10.0", "192.168.10.255"])
 def test_selection_rejects_tello_network_and_broadcast_addresses(local_ip):
     with pytest.raises(NoTelloAdapter):
-        NetworkAdapterSelector(
+        selector_for_test(
             [AdapterInfo("USB Wi-Fi", 19, local_ip, True, False)],
             default_route=DEFAULT_ROUTE,
         ).select(local_ip=local_ip)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"index": True},
+        {"index": 0},
+        {"index": -1},
+        {"local_ip": "not-an-ip"},
+        {"local_ip": "2001:db8::1"},
+        {"is_up": 1},
+        {"is_default_route": 0},
+        {"is_up": "yes"},
+        {"is_default_route": None},
+    ],
+)
+def test_adapter_info_rejects_invalid_metadata(kwargs):
+    values = {
+        "name": "USB Wi-Fi",
+        "index": 19,
+        "local_ip": "192.168.10.2",
+        "is_up": True,
+        "is_default_route": False,
+    }
+    values.update(kwargs)
+
+    with pytest.raises(ValueError):
+        AdapterInfo(**values)
+
+
+@pytest.mark.parametrize(
+    "netmask",
+    ["not-a-mask", "2001:db8::1", "255.0.255.0", True, 24],
+)
+def test_adapter_info_rejects_invalid_netmask(netmask):
+    with pytest.raises(ValueError, match="netmask"):
+        AdapterInfo("USB Wi-Fi", 19, "192.168.10.2", True, False, netmask=netmask)
+
+
+def test_adapter_info_keeps_loopback_representable_for_selector_safety():
+    adapter = AdapterInfo(
+        "Loopback",
+        1,
+        "127.0.0.1",
+        True,
+        False,
+        netmask="255.0.0.0",
+    )
+
+    assert adapter.local_ip == "127.0.0.1"
+
+
+@pytest.mark.parametrize(
+    ("local_ip", "netmask"),
+    [
+        ("192.168.10.2", "255.255.255.255"),
+        ("192.168.10.2", "255.255.255.254"),
+    ],
+)
+def test_selector_rejects_unusable_tello_subnet(local_ip, netmask):
+    adapter = AdapterInfo("USB Wi-Fi", 19, local_ip, True, False, netmask=netmask)
+
+    with pytest.raises(NoTelloAdapter):
+        selector_for_test(
+            [adapter], default_route=DEFAULT_ROUTE
+        ).select(local_ip=local_ip)
+
+
+def test_selector_uses_injected_reachability_probe_without_hardware():
+    calls = []
+
+    def unreachable(adapter):
+        calls.append(adapter.local_ip)
+        return False
+
+    adapter = AdapterInfo(
+        "USB Wi-Fi", 19, "192.168.10.2", True, False, netmask="255.255.255.0"
+    )
+
+    with pytest.raises(NoTelloAdapter):
+        selector_for_test(
+            [adapter],
+            default_route=DEFAULT_ROUTE,
+            reachability_probe=unreachable,
+        ).select(local_ip=adapter.local_ip)
+
+    assert calls == [adapter.local_ip]
+
+
+def test_selector_default_probe_checks_tello_endpoint_from_candidate_ip(monkeypatch):
+    calls = []
+
+    def fake_route_source_ip(destination, *, local_ip=None):
+        calls.append((destination, local_ip))
+        return local_ip
+
+    monkeypatch.setattr(network, "route_source_ip", fake_route_source_ip)
+    adapter = AdapterInfo(
+        "USB Wi-Fi", 19, "192.168.10.2", True, False, netmask="255.255.255.0"
+    )
+
+    selected = NetworkAdapterSelector(
+        [adapter], default_route=DEFAULT_ROUTE
+    ).select(local_ip=adapter.local_ip)
+
+    assert selected == adapter
+    assert calls == [("192.168.10.1", "192.168.10.2")]
+
+
+def test_selector_refreshes_route_snapshot_provider_on_each_select():
+    routes = iter(
+        [
+            DEFAULT_ROUTE,
+            RouteSnapshot(source_ip="192.168.10.2", interface_index=19),
+        ]
+    )
+    adapter = AdapterInfo(
+        "USB Wi-Fi", 19, "192.168.10.2", True, False, netmask="255.255.255.0"
+    )
+    selector = selector_for_test(
+        [adapter],
+        default_route=DEFAULT_ROUTE,
+        route_snapshot_provider=lambda: next(routes),
+    )
+
+    assert selector.select(local_ip=adapter.local_ip) == adapter
+    with pytest.raises(NoTelloAdapter):
+        selector.select(local_ip=adapter.local_ip)
 
 
 def test_automatic_selection_rejects_incomplete_default_route_snapshot():
@@ -181,7 +318,7 @@ def test_automatic_selection_rejects_incomplete_default_route_snapshot():
     ]
 
     with pytest.raises(RouteDiscoveryError, match="default route"):
-        NetworkAdapterSelector(
+        selector_for_test(
             adapters,
             default_route=RouteSnapshot(source_ip=None, interface_index=None),
         ).select()
@@ -210,6 +347,10 @@ class FakeProbe:
         self.error = error
         self.closed = False
         self.connected_to = None
+        self.bound_to = None
+
+    def bind(self, address):
+        self.bound_to = address
 
     def connect(self, address):
         self.connected_to = address
@@ -231,6 +372,18 @@ def test_route_source_ip_closes_udp_probe_after_success(monkeypatch):
 
     assert route_source_ip("192.168.10.1") == "192.168.10.2"
     assert probe.connected_to == ("192.168.10.1", 8889)
+    assert probe.closed is True
+
+
+def test_route_source_ip_can_bind_to_candidate_local_ip(monkeypatch):
+    probe = FakeProbe()
+    monkeypatch.setattr(network.socket, "socket", lambda *args: probe)
+
+    assert (
+        route_source_ip("192.168.10.1", local_ip="192.168.10.2")
+        == "192.168.10.2"
+    )
+    assert probe.bound_to == ("192.168.10.2", 0)
     assert probe.closed is True
 
 
@@ -339,9 +492,19 @@ def test_discover_adapters_uses_read_only_psutil_data_and_marks_default_route(
             "Offline": SimpleNamespace(isup=False),
         },
         net_if_addrs=lambda: {
-            "Wi-Fi": [SimpleNamespace(family=network.socket.AF_INET, address="192.168.1.44")],
+            "Wi-Fi": [
+                SimpleNamespace(
+                    family=network.socket.AF_INET,
+                    address="192.168.1.44",
+                    netmask="255.255.255.0",
+                )
+            ],
             "USB Wi-Fi": [
-                SimpleNamespace(family=network.socket.AF_INET, address="192.168.10.2"),
+                SimpleNamespace(
+                    family=network.socket.AF_INET,
+                    address="192.168.10.2",
+                    netmask="255.255.255.0",
+                ),
                 SimpleNamespace(family=network.socket.AF_INET6, address="::1"),
             ],
             "Loopback": [
@@ -367,8 +530,12 @@ def test_discover_adapters_uses_read_only_psutil_data_and_marks_default_route(
     discovered = discover_adapters()
 
     assert discovered == (
-        AdapterInfo("Wi-Fi", 7, "192.168.1.44", True, True),
-        AdapterInfo("USB Wi-Fi", 19, "192.168.10.2", True, False),
+        AdapterInfo(
+            "Wi-Fi", 7, "192.168.1.44", True, True, netmask="255.255.255.0"
+        ),
+        AdapterInfo(
+            "USB Wi-Fi", 19, "192.168.10.2", True, False, netmask="255.255.255.0"
+        ),
     )
 
 
@@ -440,7 +607,7 @@ def test_automatic_selection_captures_route_when_snapshot_is_not_supplied(monkey
 
     monkeypatch.setattr(network, "capture_default_route", fake_capture)
 
-    assert NetworkAdapterSelector(adapters).select() == adapters[0]
+    assert selector_for_test(adapters).select() == adapters[0]
     assert captured == [tuple(adapters)]
 
 
@@ -448,7 +615,7 @@ def test_automatic_selection_rejects_candidate_owned_by_default_route():
     adapter = AdapterInfo("USB Wi-Fi", 19, "192.168.10.2", True, False)
 
     with pytest.raises(NoTelloAdapter):
-        NetworkAdapterSelector(
+        selector_for_test(
             [adapter],
             default_route=RouteSnapshot("192.168.10.2", 19),
         ).select()

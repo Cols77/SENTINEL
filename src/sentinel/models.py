@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from ipaddress import IPv4Address, IPv4Network
 
 
 def _validate_timestamp(timestamp: object, field_name: str) -> None:
@@ -58,6 +59,7 @@ class AdapterInfo:
     ``gateway`` and ``metric`` are optional observations. ``None`` means the
     read-only discovery source did not provide that value; it is never a
     signal to infer or mutate the host's routing configuration.
+    ``netmask`` is the optional IPv4 subnet mask reported for the address.
     """
 
     name: str
@@ -67,6 +69,39 @@ class AdapterInfo:
     is_default_route: bool
     gateway: str | None = None
     metric: int | None = None
+    netmask: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.index, bool)
+            or not isinstance(self.index, int)
+            or self.index <= 0
+        ):
+            raise ValueError("AdapterInfo index must be a positive integer")
+        if not isinstance(self.local_ip, str):
+            raise ValueError("AdapterInfo local_ip must be a valid IPv4 address")
+        try:
+            IPv4Address(self.local_ip)
+        except ValueError as exc:
+            raise ValueError(
+                "AdapterInfo local_ip must be a valid IPv4 address"
+            ) from exc
+        if type(self.is_up) is not bool:
+            raise ValueError("AdapterInfo is_up must be a bool")
+        if type(self.is_default_route) is not bool:
+            raise ValueError("AdapterInfo is_default_route must be a bool")
+        if self.netmask is not None:
+            if not isinstance(self.netmask, str):
+                raise ValueError(
+                    "AdapterInfo netmask must be a valid IPv4 netmask"
+                )
+            try:
+                mask = IPv4Address(self.netmask)
+                IPv4Network(f"0.0.0.0/{mask}")
+            except ValueError as exc:
+                raise ValueError(
+                    "AdapterInfo netmask must be a valid IPv4 netmask"
+                ) from exc
 
 
 @dataclass(frozen=True)

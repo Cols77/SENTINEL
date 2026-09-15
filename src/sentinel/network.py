@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
 import socket
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .models import AdapterInfo
 
@@ -12,6 +12,7 @@ psutil = None
 
 
 TELLO_SUBNET = IPv4Network("192.168.10.0/24")
+TELLO_ENDPOINT = "192.168.10.1"
 
 
 class NetworkSelectionError(RuntimeError):
@@ -46,11 +47,19 @@ class RouteSnapshot:
             if not isinstance(self.source_ip, str):
                 raise ValueError("source_ip must be a valid IPv4 address or None")
             try:
-                IPv4Address(self.source_ip)
+                source_address = IPv4Address(self.source_ip)
             except ValueError as exc:
                 raise ValueError(
                     "source_ip must be a valid IPv4 address or None"
                 ) from exc
+            if (
+                source_address.is_unspecified
+                or source_address.is_loopback
+                or source_address.is_multicast
+            ):
+                raise ValueError(
+                    "source_ip must be a usable non-loopback IPv4 address or None"
+                )
         if (
             self.interface_index is not None
             and (
@@ -64,7 +73,7 @@ class RouteSnapshot:
             )
 
 
-def route_source_ip(destination: str) -> str | None:
+def route_source_ip(destination: str, *, local_ip: str | None = None) -> str | None:
     """Return the local source address selected for a UDP probe.
 
     UDP ``connect`` does not send a datagram, but asks the OS to resolve the
@@ -75,6 +84,8 @@ def route_source_ip(destination: str) -> str | None:
     probe: socket.socket | None = None
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        if local_ip is not None:
+            probe.bind((local_ip, 0))
         probe.connect((destination, 8889))
         return probe.getsockname()[0]
     except OSError:
@@ -202,12 +213,19 @@ def capture_default_route(
             "could not determine the source IP for the default route"
         )
     try:
-        if IPv4Address(source_ip).is_loopback:
-            raise ValueError
+        source_address = IPv4Address(source_ip)
     except ValueError as exc:
         raise RouteDiscoveryError(
             "could not determine a usable source IP for the default route"
         ) from exc
+    if (
+        source_address.is_unspecified
+        or source_address.is_loopback
+        or source_address.is_multicast
+    ):
+        raise RouteDiscoveryError(
+            "could not determine a usable source IP for the default route"
+        )
 
     interface_index = _interface_index_for_source(source_ip, adapters)
     return RouteSnapshot(source_ip=source_ip, interface_index=interface_index)
@@ -235,19 +253,45 @@ def _is_tello_address(local_ip: str) -> bool:
     )
 
 
+def _has_usable_tello_subnet(adapter: AdapterInfo) -> bool:
+    if not _is_tello_address(adapter.local_ip):
+        return False
+    if adapter.netmask is None:
+        return True
+    try:
+        network = IPv4Network(
+            f"{adapter.local_ip}/{adapter.netmask}", strict=False
+        )
+    except ValueError:
+        return False
+    return network.prefixlen < 32 and IPv4Address(TELLO_ENDPOINT) in network
+
+
+def _probe_tello_endpoint(adapter: AdapterInfo) -> bool:
+    return (
+        route_source_ip(TELLO_ENDPOINT, local_ip=adapter.local_ip)
+        == adapter.local_ip
+    )
+
+
 def _is_safe_candidate(
-    adapter: AdapterInfo, default_route: RouteSnapshot | None
+    adapter: AdapterInfo,
+    default_route: RouteSnapshot | None,
+    reachability_probe: Callable[[AdapterInfo], bool],
 ) -> bool:
     if not adapter.is_up or adapter.is_default_route:
         return False
-    if not _is_tello_address(adapter.local_ip):
+    if not _has_usable_tello_subnet(adapter):
         return False
     if default_route is not None and (
         adapter.local_ip == default_route.source_ip
         or adapter.index == default_route.interface_index
     ):
         return False
-    return True
+    try:
+        return bool(reachability_probe(adapter))
+    except OSError:
+        return False
 
 
 class NetworkAdapterSelector:
@@ -258,12 +302,24 @@ class NetworkAdapterSelector:
         adapters: Iterable[AdapterInfo],
         *,
         default_route: RouteSnapshot | None = None,
+        reachability_probe: Callable[[AdapterInfo], bool] | None = None,
+        route_snapshot_provider: Callable[[], RouteSnapshot] | None = None,
     ) -> None:
         self.adapters = tuple(adapters)
         self.default_route = default_route
+        if reachability_probe is not None and not callable(reachability_probe):
+            raise TypeError("reachability_probe must be callable or None")
+        if route_snapshot_provider is not None and not callable(
+            route_snapshot_provider
+        ):
+            raise TypeError("route_snapshot_provider must be callable or None")
+        self.reachability_probe = reachability_probe or _probe_tello_endpoint
+        self.route_snapshot_provider = route_snapshot_provider
 
     def _selection_route(self) -> RouteSnapshot:
-        if self.default_route is None:
+        if self.route_snapshot_provider is not None:
+            self.default_route = self.route_snapshot_provider()
+        elif self.default_route is None:
             self.default_route = capture_default_route(adapters=self.adapters)
         if not isinstance(self.default_route, RouteSnapshot):
             raise RouteDiscoveryError(
@@ -314,7 +370,9 @@ class NetworkAdapterSelector:
             candidates = [
                 adapter
                 for adapter in self.adapters
-                if _is_safe_candidate(adapter, default_route)
+                if _is_safe_candidate(
+                    adapter, default_route, self.reachability_probe
+                )
             ]
 
         if not candidates:
@@ -325,7 +383,9 @@ class NetworkAdapterSelector:
             )
 
         selected = candidates[0]
-        if not _is_safe_candidate(selected, default_route):
+        if not _is_safe_candidate(
+            selected, default_route, self.reachability_probe
+        ):
             if explicit:
                 raise NoTelloAdapter(
                     "selected adapter is inactive, unsafe, or owns the default route"
@@ -374,15 +434,21 @@ def _active_ipv4_adapters(psutil_module) -> tuple[AdapterInfo, ...]:
                 continue
             if parsed_address.is_loopback:
                 continue
-            adapters.append(
-                AdapterInfo(
-                    name=name,
-                    index=interface_index,
-                    local_ip=address.address,
-                    is_up=True,
-                    is_default_route=False,
+            try:
+                adapters.append(
+                    AdapterInfo(
+                        name=name,
+                        index=interface_index,
+                        local_ip=address.address,
+                        is_up=True,
+                        is_default_route=False,
+                        netmask=getattr(address, "netmask", None),
+                    )
                 )
-            )
+            except ValueError as exc:
+                raise RouteDiscoveryError(
+                    f"invalid address metadata for interface {name}"
+                ) from exc
     return tuple(adapters)
 
 
@@ -429,6 +495,7 @@ def discover_adapters() -> tuple[AdapterInfo, ...]:
             ),
             gateway=adapter.gateway,
             metric=adapter.metric,
+            netmask=adapter.netmask,
         )
         for adapter in adapters
     )
