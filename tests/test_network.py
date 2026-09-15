@@ -29,6 +29,11 @@ def always_reachable(_adapter):
 
 def selector_for_test(adapters, **kwargs):
     kwargs.setdefault("reachability_probe", always_reachable)
+    if kwargs.get("default_route") is not None:
+        kwargs.setdefault(
+            "route_snapshot_provider",
+            lambda route=kwargs["default_route"]: route,
+        )
     return NetworkAdapterSelector(adapters, **kwargs)
 
 
@@ -278,7 +283,9 @@ def test_selector_default_probe_sends_only_tello_command(monkeypatch):
     )
 
     selected = NetworkAdapterSelector(
-        [adapter], default_route=DEFAULT_ROUTE
+        [adapter],
+        default_route=DEFAULT_ROUTE,
+        route_snapshot_provider=lambda: DEFAULT_ROUTE,
     ).select(local_ip=adapter.local_ip)
 
     assert selected == adapter
@@ -300,9 +307,11 @@ def test_selector_default_probe_accepts_normalized_ok_response(monkeypatch):
         "USB Wi-Fi", 19, "192.168.10.2", True, False, netmask="255.255.255.0"
     )
 
-    assert NetworkAdapterSelector([adapter], default_route=DEFAULT_ROUTE).select(
-        local_ip=adapter.local_ip
-    ) == adapter
+    assert NetworkAdapterSelector(
+        [adapter],
+        default_route=DEFAULT_ROUTE,
+        route_snapshot_provider=lambda: DEFAULT_ROUTE,
+    ).select(local_ip=adapter.local_ip) == adapter
 
 
 @pytest.mark.parametrize("response", [b"error", b"arbitrary payload"])
@@ -318,9 +327,11 @@ def test_selector_default_probe_rejects_non_ok_response(monkeypatch, response):
     )
 
     with pytest.raises(NoTelloAdapter):
-        NetworkAdapterSelector([adapter], default_route=DEFAULT_ROUTE).select(
-            local_ip=adapter.local_ip
-        )
+        NetworkAdapterSelector(
+            [adapter],
+            default_route=DEFAULT_ROUTE,
+            route_snapshot_provider=lambda: DEFAULT_ROUTE,
+        ).select(local_ip=adapter.local_ip)
 
     assert probe.sent == [b"command"]
     assert probe.closed is True
@@ -343,6 +354,7 @@ def test_no_tello_error_includes_candidate_diagnostics():
             [adapter],
             default_route=DEFAULT_ROUTE,
             reachability_probe=lambda _adapter: False,
+            route_snapshot_provider=lambda: DEFAULT_ROUTE,
         ).select()
 
     message = str(error.value)
@@ -436,7 +448,10 @@ def test_selector_probes_each_candidate_once_without_rechecking_selected():
         return True
 
     selected = NetworkAdapterSelector(
-        [adapter], default_route=DEFAULT_ROUTE, reachability_probe=probe
+        [adapter],
+        default_route=DEFAULT_ROUTE,
+        reachability_probe=probe,
+        route_snapshot_provider=lambda: DEFAULT_ROUTE,
     ).select()
 
     assert selected == adapter
@@ -455,7 +470,10 @@ def test_selector_rejects_probe_failure_without_reprobing():
 
     with pytest.raises(NoTelloAdapter):
         NetworkAdapterSelector(
-            [adapter], default_route=DEFAULT_ROUTE, reachability_probe=probe
+            [adapter],
+            default_route=DEFAULT_ROUTE,
+            reachability_probe=probe,
+            route_snapshot_provider=lambda: DEFAULT_ROUTE,
         ).select()
 
     assert calls == [adapter.local_ip]
@@ -479,6 +497,7 @@ def test_selector_preserves_falsey_injected_reachability_probe():
         [adapter],
         default_route=DEFAULT_ROUTE,
         reachability_probe=FalseyProbe(),
+        route_snapshot_provider=lambda: DEFAULT_ROUTE,
     ).select()
 
     assert selected == adapter
@@ -525,6 +544,31 @@ def test_selector_detects_route_change_after_probe():
 
     with pytest.raises(DefaultRouteChanged):
         selector.select(local_ip=adapter.local_ip)
+
+
+def test_selector_refreshes_fixed_default_route_after_probe(monkeypatch):
+    captured = []
+    current_route = RouteSnapshot(source_ip="192.168.1.45", interface_index=7)
+    adapter = AdapterInfo(
+        "USB Wi-Fi", 19, "192.168.10.2", True, False, netmask="255.255.255.0"
+    )
+
+    def capture_current_route(*, adapters):
+        captured.append(tuple(adapters))
+        return current_route
+
+    monkeypatch.setattr(network, "capture_default_route", capture_current_route)
+
+    selector = NetworkAdapterSelector(
+        [adapter],
+        default_route=DEFAULT_ROUTE,
+        reachability_probe=always_reachable,
+    )
+
+    with pytest.raises(DefaultRouteChanged):
+        selector.select(local_ip=adapter.local_ip)
+
+    assert captured == [(adapter,)]
 
 
 def test_automatic_selection_rejects_incomplete_default_route_snapshot():
@@ -639,7 +683,11 @@ def test_selector_default_probe_rejects_missing_tello_response(monkeypatch):
     )
 
     with pytest.raises(NoTelloAdapter):
-        NetworkAdapterSelector([adapter], default_route=DEFAULT_ROUTE).select()
+        NetworkAdapterSelector(
+            [adapter],
+            default_route=DEFAULT_ROUTE,
+            route_snapshot_provider=lambda: DEFAULT_ROUTE,
+        ).select()
 
     assert probe.sent == [b"command"]
     assert probe.closed is True

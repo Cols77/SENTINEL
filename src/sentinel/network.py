@@ -344,15 +344,15 @@ class NetworkAdapterSelector:
         )
         self.route_snapshot_provider = route_snapshot_provider
 
-    def _selection_route(self) -> RouteSnapshot:
+    def _selection_route(self, *, use_supplied_default: bool = False) -> RouteSnapshot:
         if self.route_snapshot_provider is not None:
             route = self.route_snapshot_provider()
-        elif self.default_route is None:
-            # Do not cache discovered routes: the second snapshot in a
-            # selection and the next select call must observe current state.
-            route = capture_default_route(adapters=self.adapters)
-        else:
+        elif self.default_route is not None and use_supplied_default:
             route = self.default_route
+        else:
+            # Do not reuse a supplied or discovered route after probing: the
+            # post-selection snapshot must observe current state.
+            route = capture_default_route(adapters=self.adapters)
         if not isinstance(route, RouteSnapshot):
             raise RouteDiscoveryError(
                 "default route snapshot must be a RouteSnapshot"
@@ -421,7 +421,7 @@ class NetworkAdapterSelector:
             )
 
         explicit = any(overrides)
-        before_route = self._selection_route()
+        before_route = self._selection_route(use_supplied_default=True)
         if local_ip is not None:
             raw_candidates = [
                 adapter for adapter in self.adapters if adapter.local_ip == local_ip
