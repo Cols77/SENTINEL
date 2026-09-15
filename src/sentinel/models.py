@@ -52,6 +52,19 @@ class VideoFrame:
 
 
 @dataclass(frozen=True)
+class AdapterInfo:
+    """Immutable metadata for one local IPv4 network adapter."""
+
+    name: str
+    index: int
+    local_ip: str
+    is_up: bool
+    is_default_route: bool
+    gateway: str | None = None
+    metric: int | None = None
+
+
+@dataclass(frozen=True)
 class CommandRecord:
     """An immutable client command and its observed response."""
 
