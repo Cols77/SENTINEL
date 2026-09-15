@@ -144,3 +144,38 @@ def test_udp_video_receiver_read_exposes_queue_timeout_and_close_stops_thread():
     receiver.close()
     assert not receiver.thread.is_alive()
     assert fake_socket.closed is True
+
+
+def test_udp_video_receiver_records_decoder_error_and_continues_receiving():
+    class FailingOnceDecoder:
+        def __init__(self):
+            self.calls = 0
+
+        def decode(self, _payload):
+            self.calls += 1
+            if self.calls == 1:
+                raise ValueError("synthetic decoder failure")
+            return [(800, 600)]
+
+    fake_socket = FakeVideoSocket([b"bad-frame", b"good-frame"])
+    decoder = FailingOnceDecoder()
+    receiver = UdpVideoReceiver(
+        "192.168.10.2",
+        timeout=0.01,
+        socket_factory=lambda *_args: fake_socket,
+        decoder_factory=lambda: decoder,
+        assembler_factory=H264FrameAssembler,
+    )
+
+    receiver.start()
+    frame = receiver.read(timeout=0.5)
+
+    assert (frame.width, frame.height) == (800, 600)
+    assert isinstance(receiver.last_error, ValueError)
+    assert str(receiver.last_error) == "synthetic decoder failure"
+    assert receiver.error is receiver.last_error
+
+    receiver.close()
+    receiver.close()
+    assert not receiver.thread.is_alive()
+    assert fake_socket.close_calls == 1

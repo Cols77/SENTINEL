@@ -31,6 +31,11 @@ class H264FrameAssembler:
         self._payload.clear()
         return self.decoder.decode(payload)
 
+    def reset(self) -> None:
+        """Discard the incomplete frame currently being assembled."""
+
+        self._payload.clear()
+
 
 class PyAVDecoder:
     """Decode H.264 payloads with PyAV, importing it on first use."""
@@ -76,6 +81,7 @@ class UdpVideoReceiver:
         self._state_lock = Lock()
         self._started = False
         self._closed = False
+        self.last_error: Exception | None = None
 
         video_socket = socket_factory(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket = video_socket
@@ -116,10 +122,27 @@ class UdpVideoReceiver:
                     return
                 return
 
-            for width, height in self.assembler.push(packet):
-                self.frames.put(
-                    VideoFrame(width, height, datetime.now(timezone.utc))
-                )
+            try:
+                decoded_frames = self.assembler.push(packet)
+                for width, height in decoded_frames:
+                    self.frames.put(
+                        VideoFrame(width, height, datetime.now(timezone.utc))
+                    )
+            except Exception as exc:
+                self.last_error = exc
+                reset = getattr(self.assembler, "reset", None)
+                if callable(reset):
+                    try:
+                        reset()
+                    except Exception as reset_error:
+                        self.last_error = reset_error
+                continue
+
+    @property
+    def error(self) -> Exception | None:
+        """Alias for the most recent packet/decode error, if any."""
+
+        return self.last_error
 
     def read(self, timeout: float | None = None) -> VideoFrame:
         return self.frames.get(timeout=timeout)

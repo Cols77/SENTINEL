@@ -182,6 +182,7 @@ class UdpTelloClient:
         socket_factory: Callable[..., Any] = socket.socket,
         video_factory: Callable[[str], Any] = UdpVideoReceiver,
         state_listener_factory: Callable[..., Any] = TelloStateListener,
+        emergency_socket_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.local_ip = local_ip
         self.tello_address = (tello_ip, 8889)
@@ -189,6 +190,11 @@ class UdpTelloClient:
         self.socket_factory = socket_factory
         self.video_factory = video_factory
         self.state_listener_factory = state_listener_factory
+        self.emergency_socket_factory = (
+            socket_factory
+            if emergency_socket_factory is None
+            else emergency_socket_factory
+        )
         self.socket: Any | None = None
         self.video: Any | None = None
         self.state_listener: Any | None = None
@@ -196,6 +202,7 @@ class UdpTelloClient:
         self.emergency_triggered = False
         self.records: list[CommandRecord] = []
         self._lock = RLock()
+        self._emergency_lock = Lock()
         self._connected = False
 
     @property
@@ -357,19 +364,29 @@ class UdpTelloClient:
             raise DroneError("no decodable video frame arrived before timeout") from exc
 
     def emergency(self) -> str:
-        with self._lock:
+        with self._emergency_lock:
             if self.emergency_triggered:
                 return "ok"
             if self.socket is None:
                 raise DroneError("Tello client is not connected")
-            self.socket.sendto(b"emergency", self.tello_address)
             self.emergency_triggered = True
-            self.records.append(
-                CommandRecord(
-                    command="emergency",
-                    response="ok",
-                    position=None,
-                    timestamp=datetime.now(timezone.utc),
-                )
+            emergency_socket = self.emergency_socket_factory(
+                socket.AF_INET, socket.SOCK_DGRAM
             )
-            return "ok"
+            try:
+                emergency_socket.bind((self.local_ip, 0))
+                emergency_socket.sendto(b"emergency", self.tello_address)
+                self.records.append(
+                    CommandRecord(
+                        command="emergency",
+                        response="ok",
+                        position=None,
+                        timestamp=datetime.now(timezone.utc),
+                    )
+                )
+                return "ok"
+            finally:
+                try:
+                    emergency_socket.close()
+                except Exception:
+                    pass

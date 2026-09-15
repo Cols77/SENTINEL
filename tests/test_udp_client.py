@@ -2,6 +2,7 @@ import socket
 import time
 from collections import deque
 from queue import Empty
+from threading import Event, Thread
 
 import pytest
 
@@ -49,6 +50,20 @@ class FakeSocket:
         self.close_calls += 1
         self.closed = True
         self.events.append(("close", self))
+
+
+class BlockingCommandSocket(FakeSocket):
+    def __init__(self, responses=(), events=None):
+        super().__init__(responses, events)
+        self.recv_started = Event()
+        self.release_recv = Event()
+
+    def recvfrom(self, size):
+        if self.responses:
+            return super().recvfrom(size)
+        self.recv_started.set()
+        self.release_recv.wait(timeout=5.0)
+        return b"ok", ("192.168.10.1", 8889)
 
 
 class FakeStateListener:
@@ -326,3 +341,46 @@ def test_emergency_sends_without_waiting_latches_and_prevents_later_commands():
 
     assert client.emergency() == "ok"
     assert [payload for payload, _ in command_socket.sent].count(b"emergency") == 1
+
+
+def test_emergency_does_not_wait_behind_blocked_normal_response():
+    events = []
+    command_socket = BlockingCommandSocket([b"ok"], events)
+    emergency_socket = FakeSocket(events=events)
+    sockets = deque([command_socket, emergency_socket])
+
+    def socket_factory(*_args):
+        return sockets.popleft()
+
+    def state_factory(local_ip, *, socket_factory):
+        return FakeStateListener(local_ip, socket_factory=socket_factory, events=events)
+
+    client = UdpTelloClient(
+        "192.168.10.2",
+        timeout=5.0,
+        socket_factory=socket_factory,
+        state_listener_factory=state_factory,
+    )
+    client.connect()
+
+    normal_result = []
+    normal_thread = Thread(target=lambda: normal_result.append(client.stop()))
+    normal_thread.start()
+    assert command_socket.recv_started.wait(timeout=0.5)
+
+    started_at = time.monotonic()
+    assert client.emergency() == "ok"
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.5
+    assert emergency_socket.bound_to == ("192.168.10.2", 0)
+    assert emergency_socket.sent == [
+        (b"emergency", ("192.168.10.1", 8889)),
+    ]
+    assert emergency_socket.closed is True
+    assert client.emergency_triggered is True
+
+    command_socket.release_recv.set()
+    normal_thread.join(timeout=0.5)
+    assert not normal_thread.is_alive()
+    assert normal_result == ["ok"]
