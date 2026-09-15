@@ -1,81 +1,153 @@
+from dataclasses import FrozenInstanceError
+
 import pytest
 
-from sentinel.envelope import FlightEnvelope, Position
+from sentinel.envelope import EnvelopeViolation, FlightEnvelope
+from sentinel.models import Position
 
 
-def test_exact_boundary_points_are_inside_the_default_envelope():
+def test_position_is_frozen_and_uses_integer_centimetres():
+    position = Position(1, 2, 3)
+
+    with pytest.raises(FrozenInstanceError):
+        position.x = 4
+
+
+def test_default_envelope_starts_at_launch_origin_and_lower_altitude():
     envelope = FlightEnvelope()
 
-    boundary_points = (
-        Position(-50, -50, 150),
-        Position(-50, 50, 250),
-        Position(50, -50, 250),
-        Position(50, 50, 150),
+    assert envelope.position == Position(0, 0, 150)
+    assert envelope.contains(envelope.position)
+
+
+@pytest.mark.parametrize(
+    "position",
+    [
+        Position(-50, 0, 200),
+        Position(50, 0, 200),
+        Position(0, -50, 200),
+        Position(0, 50, 200),
         Position(0, 0, 150),
         Position(0, 0, 250),
-    )
-
-    for point in boundary_points:
-        assert envelope.contains(point)
-
-
-def test_initial_position_is_one_point_five_metres_above_ground():
-    assert FlightEnvelope().initial_position == Position(0, 0, 150)
+        Position(-50, -50, 150),
+        Position(50, 50, 250),
+    ],
+)
+def test_exact_boundary_points_are_inside_the_default_envelope(position):
+    assert FlightEnvelope().contains(position)
 
 
 @pytest.mark.parametrize(
     ("direction", "expected"),
-    (
-        ("up", Position(0, 0, 220)),
-        ("down", Position(0, 0, 180)),
-        ("forward", Position(0, 20, 200)),
-        ("back", Position(0, -20, 200)),
-        ("left", Position(-20, 0, 200)),
-        ("right", Position(20, 0, 200)),
-    ),
+    [
+        ("forward", Position(0, 50, 150)),
+        ("back", Position(0, -50, 150)),
+        ("right", Position(50, 0, 150)),
+        ("left", Position(-50, 0, 150)),
+        ("up", Position(0, 0, 200)),
+    ],
 )
-def test_each_direction_changes_its_expected_coordinate(direction, expected):
-    assert FlightEnvelope().commit_move(Position(0, 0, 200), direction, 20) == expected
+def test_project_move_returns_expected_position_without_updating_state(
+    direction, expected
+):
+    envelope = FlightEnvelope()
+
+    assert envelope.project_move(direction, 50) == expected
+    assert envelope.position == Position(0, 0, 150)
 
 
-def test_down_from_two_metres_to_one_point_eight_metres_is_allowed():
-    assert FlightEnvelope().commit_move(Position(0, 0, 200), "down", 20) == Position(
-        0, 0, 180
-    )
+def test_project_move_allows_down_inside_the_cube():
+    envelope = FlightEnvelope(position=Position(0, 0, 200))
+
+    assert envelope.project_move("down", 50) == Position(0, 0, 150)
+    assert envelope.position == Position(0, 0, 200)
 
 
 @pytest.mark.parametrize(
     ("position", "direction"),
-    (
-        (Position(-50, 0, 200), "left"),
-        (Position(50, 0, 200), "right"),
-        (Position(0, -50, 200), "back"),
-        (Position(0, 50, 200), "forward"),
-        (Position(0, 0, 150), "down"),
+    [
+        (Position(50, 0, 150), "right"),
+        (Position(-50, 0, 150), "left"),
+        (Position(0, 50, 150), "forward"),
+        (Position(0, -50, 150), "back"),
         (Position(0, 0, 250), "up"),
-    ),
+        (Position(0, 0, 150), "down"),
+    ],
 )
-def test_every_face_rejects_an_outward_move(position, direction):
-    with pytest.raises(ValueError, match="outside the flight envelope"):
-        FlightEnvelope().commit_move(position, direction, 20)
+def test_project_move_rejects_crossing_any_cube_face(position, direction):
+    envelope = FlightEnvelope(position=position)
+
+    with pytest.raises(EnvelopeViolation):
+        envelope.project_move(direction, 20)
+
+    assert envelope.position == position
 
 
-@pytest.mark.parametrize("direction", ("hover", "UP", ""))
-def test_unknown_directions_are_rejected(direction):
-    with pytest.raises(ValueError, match="unsupported direction"):
-        FlightEnvelope().project_move(Position(0, 0, 200), direction, 20)
+def test_commit_move_updates_position_only_after_validation():
+    envelope = FlightEnvelope()
+
+    assert envelope.commit_move("forward", 50) == Position(0, 50, 150)
+    assert envelope.position == Position(0, 50, 150)
+
+    with pytest.raises(EnvelopeViolation):
+        envelope.commit_move("forward", 20)
+
+    assert envelope.position == Position(0, 50, 150)
 
 
-@pytest.mark.parametrize("distance", (None, True, 0, -20, 19, 501, 20.5, "20"))
-def test_invalid_distances_are_rejected(distance):
-    with pytest.raises(ValueError, match="distance_cm must be an integer from 20 to 500"):
-        FlightEnvelope().project_move(Position(0, 0, 200), "up", distance)
+@pytest.mark.parametrize("direction", ["hover", "UP", ""])
+def test_malformed_direction_raises_value_error_not_envelope_violation(direction):
+    with pytest.raises(ValueError, match="unsupported movement direction") as error:
+        FlightEnvelope().project_move(direction, 20)
+
+    assert not isinstance(error.value, EnvelopeViolation)
 
 
-def test_invalid_transition_leaves_original_position_unchanged():
-    original = Position(50, 0, 200)
+@pytest.mark.parametrize("distance_cm", [None, True, 0, -20, 19, 501, 20.5, "20"])
+def test_malformed_distance_raises_value_error_not_envelope_violation(distance_cm):
+    with pytest.raises(ValueError, match="between 20 and 500 cm") as error:
+        FlightEnvelope().project_move("up", distance_cm)
 
+    assert not isinstance(error.value, EnvelopeViolation)
+
+
+@pytest.mark.parametrize(
+    "configuration",
+    [
+        {"min_x": True},
+        {"max_y": 50.5},
+        {"min_z": "150"},
+        {"max_z": False},
+    ],
+)
+def test_envelope_rejects_non_integer_or_boolean_bounds(configuration):
+    with pytest.raises(ValueError, match="bounds must be integers"):
+        FlightEnvelope(**configuration)
+
+
+def test_envelope_rejects_unordered_bounds():
+    with pytest.raises(ValueError, match="bounds must be ordered"):
+        FlightEnvelope(min_x=50, max_x=-50)
+
+
+@pytest.mark.parametrize(
+    "position",
+    [
+        (0, 0, 150),
+        Position(51, 0, 150),
+        Position(0, 0, 149),
+    ],
+)
+def test_envelope_rejects_invalid_initial_position(position):
     with pytest.raises(ValueError):
-        FlightEnvelope().commit_move(original, "right", 20)
+        FlightEnvelope(position=position)
 
-    assert original == Position(50, 0, 200)
+
+def test_position_rejects_non_integer_coordinates():
+    with pytest.raises(ValueError, match="Position coordinates must be integers"):
+        Position(0, 0.5, 150)
+
+
+def test_contains_rejects_a_non_position_value():
+    with pytest.raises(ValueError, match="position must be a Position"):
+        FlightEnvelope().contains((0, 0, 150))
