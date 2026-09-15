@@ -70,6 +70,17 @@ def test_emergency_is_terminal_even_for_later_connect():
     assert client.emergency() == "ok"
 
 
+def test_emergency_latch_is_read_only_and_cannot_be_cleared():
+    client = DryRunClient()
+    client.emergency()
+
+    assert client.emergency_triggered is True
+    with pytest.raises(AttributeError):
+        client.emergency_triggered = False
+    with pytest.raises(EmergencyAborted):
+        client.connect()
+
+
 def test_dry_run_simulates_video_and_command_state():
     client = DryRunClient()
     client.connect()
@@ -181,6 +192,51 @@ def test_dry_run_records_supported_commands_exactly():
     assert client.height_cm() == 0
 
 
+def test_raw_send_routes_supported_flight_commands_through_state():
+    client = DryRunClient()
+    client.connect()
+
+    assert client.send("takeoff") == "ok"
+    assert client.send("up 50") == "ok"
+
+    assert client.airborne is True
+    assert client.height_cm() == 150
+    assert [record.command for record in client.records] == [
+        "command",
+        "takeoff",
+        "up 50",
+    ]
+
+
+def test_invalid_raw_commands_cannot_diverge_state_or_audit_history():
+    client = DryRunClient()
+    client.connect()
+    client.takeoff()
+    original_height = client.height_cm()
+    original_records = client.records
+
+    with pytest.raises(ValueError, match="unsupported raw command"):
+        client.send("dance")
+    with pytest.raises(ValueError, match="distance"):
+        client.send("up 19")
+    with pytest.raises(ValueError, match="speed"):
+        client.send("speed 101")
+    with pytest.raises(DroneError, match="already airborne"):
+        client.send("takeoff")
+
+    assert client.height_cm() == original_height
+    assert client.records == original_records
+
+
+def test_raw_send_emergency_uses_terminal_emergency_transition():
+    client = DryRunClient()
+
+    assert client.send("emergency") == "ok"
+    assert client.emergency_triggered is True
+    with pytest.raises(EmergencyAborted):
+        client.send("takeoff")
+
+
 def test_dry_run_emergency_prevents_later_flight_commands():
     client = DryRunClient()
     client.connect()
@@ -210,6 +266,58 @@ def test_injected_clock_makes_records_and_frames_deterministic():
 
     assert frame.captured_at == timestamp
     assert all(record.timestamp == timestamp for record in client.records)
+
+
+class _FailingClock:
+    def __init__(self):
+        self.fail = False
+
+    def __call__(self):
+        if self.fail:
+            raise RuntimeError("clock failure")
+        return datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
+
+
+def test_failing_clock_does_not_mutate_connect_or_emergency():
+    connect_clock = _FailingClock()
+    connect_clock.fail = True
+    client = DryRunClient(clock=connect_clock)
+
+    with pytest.raises(RuntimeError, match="clock failure"):
+        client.connect()
+    assert client.connected is False
+    assert client.records == ()
+
+    emergency_clock = _FailingClock()
+    emergency_clock.fail = True
+    client = DryRunClient(clock=emergency_clock)
+    with pytest.raises(RuntimeError, match="clock failure"):
+        client.emergency()
+    assert client.emergency_triggered is False
+    assert client.records == ()
+
+
+@pytest.mark.parametrize(
+    ("setup", "operation"),
+    [
+        (lambda client: None, lambda client: client.takeoff()),
+        (lambda client: client.takeoff(), lambda client: client.move("up", 20)),
+        (lambda client: client.takeoff(), lambda client: client.land()),
+        (lambda client: None, lambda client: client.stream_on()),
+    ],
+)
+def test_failing_clock_does_not_mutate_flight_or_stream_state(setup, operation):
+    clock = _FailingClock()
+    client = DryRunClient(clock=clock)
+    client.connect()
+    setup(client)
+    clock.fail = True
+    before = (client.airborne, client.height_cm(), client.streaming, client.records)
+
+    with pytest.raises(RuntimeError, match="clock failure"):
+        operation(client)
+
+    assert (client.airborne, client.height_cm(), client.streaming, client.records) == before
 
 
 @pytest.mark.parametrize(
@@ -270,6 +378,7 @@ def test_move_rejects_invalid_distances(distance_cm):
 def test_rotate_rejects_unsupported_directions(direction):
     client = DryRunClient()
     client.connect()
+    client.takeoff()
     with pytest.raises(ValueError, match="rotation direction"):
         client.rotate(direction, 90)
 
@@ -278,6 +387,7 @@ def test_rotate_rejects_unsupported_directions(direction):
 def test_rotate_rejects_invalid_degrees(degrees):
     client = DryRunClient()
     client.connect()
+    client.takeoff()
     with pytest.raises(ValueError, match="degrees"):
         client.rotate("cw", degrees)
 

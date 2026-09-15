@@ -16,16 +16,20 @@ class DryRunClient:
     """Simulate the supported Tello operations without opening a socket."""
 
     def __init__(self, clock: Callable[[], datetime] | None = None) -> None:
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock if clock is not None else lambda: datetime.now(timezone.utc)
         self.network_opened = False
         self.connected = False
         self.streaming = False
         self.airborne = False
-        self.emergency_triggered = False
+        self._emergency_triggered = False
         self._battery = 100
         self._height = 0
         self._speed = 10
         self._records: list[CommandRecord] = []
+
+    @property
+    def emergency_triggered(self) -> bool:
+        return self._emergency_triggered
 
     @property
     def records(self) -> tuple[CommandRecord, ...]:
@@ -34,7 +38,7 @@ class DryRunClient:
         return tuple(self._records)
 
     def _ensure_available(self) -> None:
-        if self.emergency_triggered:
+        if self._emergency_triggered:
             raise EmergencyAborted("dry-run emergency stop has been triggered")
 
     def _ensure_connected(self) -> None:
@@ -52,15 +56,19 @@ class DryRunClient:
             raise ValueError("clock must return a timezone-aware datetime")
         return timestamp.astimezone(timezone.utc)
 
-    def _record(self, command: str, response: str = "ok") -> str:
-        self._records.append(
-            CommandRecord(
-                command=command,
-                response=response,
-                position=None,
-                timestamp=self._timestamp(),
-            )
+    def _make_record(self, command: str, response: str = "ok") -> CommandRecord:
+        return CommandRecord(
+            command=command,
+            response=response,
+            position=None,
+            timestamp=self._timestamp(),
         )
+
+    def _append_record(self, record: CommandRecord) -> None:
+        self._records.append(record)
+
+    def _record(self, command: str, response: str = "ok") -> str:
+        self._append_record(self._make_record(command, response))
         return response
 
     @staticmethod
@@ -82,8 +90,9 @@ class DryRunClient:
 
     def connect(self) -> None:
         self._ensure_available()
+        record = self._make_record("command")
         self.connected = True
-        self._record("command")
+        self._append_record(record)
 
     def close(self) -> None:
         """Close the simulated resources; safe even after emergency abort."""
@@ -92,9 +101,40 @@ class DryRunClient:
         self.connected = False
 
     def send(self, command: str) -> str:
+        if isinstance(command, str) and command.strip() == "emergency":
+            self._validate_command(command)
+            return self.emergency()
         self._ensure_connected()
         self._validate_command(command)
-        return self._record(command)
+        parts = command.strip().split()
+        verb = parts[0]
+
+        if verb == "command" and len(parts) == 1:
+            return self._record(command)
+        if verb == "takeoff" and len(parts) == 1:
+            return self.takeoff()
+        if verb == "land" and len(parts) == 1:
+            return self.land()
+        if verb in {"stop", "streamon", "streamoff"} and len(parts) == 1:
+            return {
+                "stop": self.stop,
+                "streamon": self.stream_on,
+                "streamoff": self.stream_off,
+            }[verb]()
+        if verb in _MOVEMENT_DIRECTIONS and len(parts) == 2:
+            return self.move(verb, self._parse_raw_int(parts[1], "distance"))
+        if verb in _ROTATION_DIRECTIONS and len(parts) == 2:
+            return self.rotate(verb, self._parse_raw_int(parts[1], "degrees"))
+        if verb == "speed" and len(parts) == 2:
+            return self.set_speed(self._parse_raw_int(parts[1], "speed"))
+        raise ValueError(f"unsupported raw command: {command}")
+
+    @staticmethod
+    def _parse_raw_int(value: str, name: str) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid raw command {name}: {value}") from exc
 
     def battery(self) -> int:
         self._ensure_connected()
@@ -115,24 +155,30 @@ class DryRunClient:
     def set_speed(self, cm_per_second: int) -> str:
         self._ensure_connected()
         self._validate_range(cm_per_second, "speed", 10, 100)
+        record = self._make_record(f"speed {cm_per_second}")
         self._speed = cm_per_second
-        return self._record(f"speed {cm_per_second}")
+        self._append_record(record)
+        return record.response
 
     def takeoff(self) -> str:
         self._ensure_connected()
         if self.airborne:
             raise DroneError("dry-run drone is already airborne")
+        record = self._make_record("takeoff")
         self.airborne = True
         self._height = 100
-        return self._record("takeoff")
+        self._append_record(record)
+        return record.response
 
     def land(self) -> str:
         self._ensure_connected()
         if not self.airborne:
             raise DroneError("dry-run drone is already grounded")
+        record = self._make_record("land")
         self.airborne = False
         self._height = 0
-        return self._record("land")
+        self._append_record(record)
+        return record.response
 
     def move(self, direction: str, distance_cm: int) -> str:
         self._ensure_connected()
@@ -141,18 +187,26 @@ class DryRunClient:
         if not isinstance(direction, str) or direction not in _MOVEMENT_DIRECTIONS:
             raise ValueError(f"unsupported movement direction: {direction}")
         self._validate_range(distance_cm, "distance", 20, 500)
+        new_height = self._height
+        new_airborne = self.airborne
         if direction == "up":
-            self._height += distance_cm
+            new_height += distance_cm
         elif direction == "down":
-            if distance_cm > self._height:
+            if distance_cm > new_height:
                 raise DroneError("dry-run movement cannot go below ground")
-            self._height -= distance_cm
-            if self._height == 0:
-                self.airborne = False
-        return self._record(f"{direction} {distance_cm}")
+            new_height -= distance_cm
+            if new_height == 0:
+                new_airborne = False
+        record = self._make_record(f"{direction} {distance_cm}")
+        self._height = new_height
+        self.airborne = new_airborne
+        self._append_record(record)
+        return record.response
 
     def rotate(self, direction: str, degrees: int) -> str:
         self._ensure_connected()
+        if not self.airborne:
+            raise DroneError("dry-run rotation requires an airborne drone")
         if not isinstance(direction, str) or direction not in _ROTATION_DIRECTIONS:
             raise ValueError(f"unsupported rotation direction: {direction}")
         self._validate_range(degrees, "degrees", 1, 360)
@@ -164,13 +218,17 @@ class DryRunClient:
 
     def stream_on(self) -> str:
         self._ensure_connected()
+        record = self._make_record("streamon")
         self.streaming = True
-        return self._record("streamon")
+        self._append_record(record)
+        return record.response
 
     def stream_off(self) -> str:
         self._ensure_connected()
+        record = self._make_record("streamoff")
         self.streaming = False
-        return self._record("streamoff")
+        self._append_record(record)
+        return record.response
 
     def read_frame(self, timeout: float) -> VideoFrame:
         self._ensure_connected()
@@ -186,7 +244,9 @@ class DryRunClient:
         return VideoFrame(640, 480, self._timestamp())
 
     def emergency(self) -> str:
-        if not self.emergency_triggered:
-            self.emergency_triggered = True
-            self._record("emergency")
-        return "ok"
+        if self._emergency_triggered:
+            return "ok"
+        record = self._make_record("emergency")
+        self._emergency_triggered = True
+        self._append_record(record)
+        return record.response
