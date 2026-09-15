@@ -16,7 +16,7 @@ class EmergencyAborted(DroneError):
 class DroneClient(Protocol):
     """Operations required by the flight runner from a drone client."""
 
-    records: list[CommandRecord]
+    records: tuple[CommandRecord, ...]
 
     def connect(self) -> None: ...
 
