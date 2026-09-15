@@ -91,6 +91,7 @@ addopts = "-ra"
 Create `.gitignore`:
 
 ```gitignore
+/.worktrees/
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -1623,7 +1624,7 @@ gh repo create SENTINEL --private --source . --remote origin --push
 Do not delete, overwrite, or reinitialize an existing remote. If local commits are ahead after implementation, run:
 
 ```powershell
-git push origin master
+git push origin main
 ```
 
 The official `gh repo create` command supports `--private`, `--source`, `--remote`, and `--push`.
