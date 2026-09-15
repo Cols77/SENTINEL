@@ -66,7 +66,8 @@ def test_explicit_override_selects_exact_adapter(kwargs, expected_name):
         [
             AdapterInfo("USB Wi-Fi A", 19, "192.168.10.2", True, False),
             AdapterInfo("USB Wi-Fi B", 20, "192.168.10.3", True, False),
-        ]
+        ],
+        default_route=DEFAULT_ROUTE,
     ).select(**kwargs)
 
     assert selected.name == expected_name
@@ -83,7 +84,9 @@ def test_explicit_override_rejects_unsafe_adapter(field):
     )
 
     with pytest.raises(NoTelloAdapter):
-        NetworkAdapterSelector([adapter]).select(interface_index=19)
+        NetworkAdapterSelector(
+            [adapter], default_route=DEFAULT_ROUTE
+        ).select(interface_index=19)
 
 
 @pytest.mark.parametrize(
@@ -95,14 +98,80 @@ def test_explicit_override_rejects_unsafe_adapter(field):
 )
 def test_explicit_override_rejects_non_tello_or_loopback_adapter(adapter):
     with pytest.raises(NoTelloAdapter):
-        NetworkAdapterSelector([adapter]).select(interface_index=adapter.index)
+        NetworkAdapterSelector(
+            [adapter], default_route=DEFAULT_ROUTE
+        ).select(interface_index=adapter.index)
 
 
 def test_selector_rejects_conflicting_overrides():
     with pytest.raises(NetworkSelectionError, match="exactly one"):
         NetworkAdapterSelector(
-            [AdapterInfo("USB Wi-Fi", 19, "192.168.10.2", True, False)]
+            [AdapterInfo("USB Wi-Fi", 19, "192.168.10.2", True, False)],
+            default_route=DEFAULT_ROUTE,
         ).select(local_ip="192.168.10.2", interface_index=19)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"local_ip": "192.168.10.2"},
+        {"interface_name": "USB Wi-Fi"},
+        {"interface_index": 19},
+    ],
+)
+def test_explicit_override_requires_a_complete_default_route_snapshot(
+    monkeypatch, kwargs
+):
+    monkeypatch.setattr(
+        network,
+        "capture_default_route",
+        lambda adapters=None: RouteSnapshot(None, None),
+    )
+
+    with pytest.raises(RouteDiscoveryError, match="complete"):
+        NetworkAdapterSelector(
+            [AdapterInfo("USB Wi-Fi", 19, "192.168.10.2", True, False)]
+        ).select(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"local_ip": "192.168.10.2"},
+        {"interface_name": "USB Wi-Fi"},
+        {"interface_index": 19},
+    ],
+)
+def test_explicit_override_rejects_candidate_owned_by_current_default_route(kwargs):
+    with pytest.raises(NoTelloAdapter):
+        NetworkAdapterSelector(
+            [AdapterInfo("USB Wi-Fi", 19, "192.168.10.2", True, False)],
+            default_route=RouteSnapshot("192.168.10.2", 19),
+        ).select(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "source_ip",
+    ["not-an-ip", "2001:db8::1", ""],
+)
+def test_route_snapshot_rejects_malformed_source_ip(source_ip):
+    with pytest.raises(ValueError, match="source_ip"):
+        RouteSnapshot(source_ip, 7)
+
+
+@pytest.mark.parametrize("interface_index", [True, 0, -1, 1.5, "7"])
+def test_route_snapshot_rejects_invalid_interface_index(interface_index):
+    with pytest.raises(ValueError, match="interface_index"):
+        RouteSnapshot("192.168.1.44", interface_index)
+
+
+@pytest.mark.parametrize("local_ip", ["192.168.10.0", "192.168.10.255"])
+def test_selection_rejects_tello_network_and_broadcast_addresses(local_ip):
+    with pytest.raises(NoTelloAdapter):
+        NetworkAdapterSelector(
+            [AdapterInfo("USB Wi-Fi", 19, local_ip, True, False)],
+            default_route=DEFAULT_ROUTE,
+        ).select(local_ip=local_ip)
 
 
 def test_automatic_selection_rejects_incomplete_default_route_snapshot():
@@ -200,6 +269,8 @@ def test_capture_default_route_fails_closed_when_probe_has_no_source(monkeypatch
 
 
 def test_resolve_interface_indexes_prefers_if_nameindex(monkeypatch):
+    fallback_calls = []
+
     monkeypatch.setattr(
         network.socket,
         "if_nameindex",
@@ -208,13 +279,37 @@ def test_resolve_interface_indexes_prefers_if_nameindex(monkeypatch):
     monkeypatch.setattr(
         network.socket,
         "if_nametoindex",
-        lambda name: pytest.fail("if_nametoindex should not be used when mapping exists"),
+        lambda name: fallback_calls.append(name) or 23,
     )
 
     assert resolve_interface_indexes(["USB Wi-Fi", "Wi-Fi", "Missing"]) == {
         "USB Wi-Fi": 19,
         "Wi-Fi": 7,
+        "Missing": 23,
     }
+    assert fallback_calls == ["Missing"]
+
+
+def test_resolve_interface_indexes_falls_back_for_windows_name_form_mismatch(
+    monkeypatch,
+):
+    def fallback(name):
+        if name == "USB_Wi-Fi":
+            return 19
+        raise OSError(name)
+
+    monkeypatch.setattr(
+        network.socket,
+        "if_nameindex",
+        lambda: [(19, "USB Wi-Fi")],
+    )
+    monkeypatch.setattr(
+        network.socket,
+        "if_nametoindex",
+        fallback,
+    )
+
+    assert resolve_interface_indexes(["USB_Wi-Fi"]) == {"USB_Wi-Fi": 19}
 
 
 def test_resolve_interface_indexes_uses_safe_fallback_when_mapping_unavailable(

@@ -41,6 +41,28 @@ class RouteSnapshot:
     source_ip: str | None
     interface_index: int | None
 
+    def __post_init__(self) -> None:
+        if self.source_ip is not None:
+            if not isinstance(self.source_ip, str):
+                raise ValueError("source_ip must be a valid IPv4 address or None")
+            try:
+                IPv4Address(self.source_ip)
+            except ValueError as exc:
+                raise ValueError(
+                    "source_ip must be a valid IPv4 address or None"
+                ) from exc
+        if (
+            self.interface_index is not None
+            and (
+                isinstance(self.interface_index, bool)
+                or not isinstance(self.interface_index, int)
+                or self.interface_index <= 0
+            )
+        ):
+            raise ValueError(
+                "interface_index must be a positive integer or None"
+            )
+
 
 def route_source_ip(destination: str) -> str | None:
     """Return the local source address selected for a UDP probe.
@@ -77,7 +99,6 @@ def resolve_interface_indexes(names: Iterable[str]) -> dict[str, int]:
 
     requested = tuple(dict.fromkeys(names))
     mapped: dict[str, int] = {}
-    mapping_available = True
     try:
         for index, name in socket.if_nameindex():
             if name not in requested:
@@ -86,13 +107,12 @@ def resolve_interface_indexes(names: Iterable[str]) -> dict[str, int]:
                 continue
             mapped[name] = index
     except (AttributeError, NotImplementedError, OSError, TypeError, ValueError):
-        mapping_available = False
         mapped.clear()
 
     resolved: dict[str, int] = {}
     for name in requested:
         index = mapped.get(name)
-        if index is None and not mapping_available:
+        if index is None:
             try:
                 index = socket.if_nametoindex(name)
             except (
@@ -204,12 +224,15 @@ def assert_default_route_unchanged(
         )
 
 
-def _is_non_loopback_tello_address(local_ip: str) -> bool:
+def _is_tello_address(local_ip: str) -> bool:
     try:
         address = IPv4Address(local_ip)
     except ValueError:
         return False
-    return not address.is_loopback and address in TELLO_SUBNET
+    return address in TELLO_SUBNET and address not in (
+        TELLO_SUBNET.network_address,
+        TELLO_SUBNET.broadcast_address,
+    )
 
 
 def _is_safe_candidate(
@@ -217,7 +240,7 @@ def _is_safe_candidate(
 ) -> bool:
     if not adapter.is_up or adapter.is_default_route:
         return False
-    if not _is_non_loopback_tello_address(adapter.local_ip):
+    if not _is_tello_address(adapter.local_ip):
         return False
     if default_route is not None and (
         adapter.local_ip == default_route.source_ip
@@ -239,9 +262,13 @@ class NetworkAdapterSelector:
         self.adapters = tuple(adapters)
         self.default_route = default_route
 
-    def _automatic_route(self) -> RouteSnapshot:
+    def _selection_route(self) -> RouteSnapshot:
         if self.default_route is None:
             self.default_route = capture_default_route(adapters=self.adapters)
+        if not isinstance(self.default_route, RouteSnapshot):
+            raise RouteDiscoveryError(
+                "default route snapshot must be a RouteSnapshot"
+            )
         if (
             self.default_route.source_ip is None
             or self.default_route.interface_index is None
@@ -268,25 +295,22 @@ class NetworkAdapterSelector:
             )
 
         explicit = any(overrides)
+        default_route = self._selection_route()
         if local_ip is not None:
             candidates = [
                 adapter for adapter in self.adapters if adapter.local_ip == local_ip
             ]
-            default_route = self.default_route
         elif interface_name is not None:
             candidates = [
                 adapter for adapter in self.adapters if adapter.name == interface_name
             ]
-            default_route = self.default_route
         elif interface_index is not None:
             candidates = [
                 adapter
                 for adapter in self.adapters
                 if adapter.index == interface_index
             ]
-            default_route = self.default_route
         else:
-            default_route = self._automatic_route()
             candidates = [
                 adapter
                 for adapter in self.adapters
@@ -319,10 +343,7 @@ class NetworkAdapterSelector:
     def _is_tello_address(local_ip: str) -> bool:
         """Preserve the original subnet predicate for existing callers."""
 
-        try:
-            return IPv4Address(local_ip) in TELLO_SUBNET
-        except ValueError:
-            return False
+        return _is_tello_address(local_ip)
 
 
 def _active_ipv4_adapters(psutil_module) -> tuple[AdapterInfo, ...]:
