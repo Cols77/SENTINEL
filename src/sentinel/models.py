@@ -53,7 +53,12 @@ class VideoFrame:
 
 @dataclass(frozen=True)
 class AdapterInfo:
-    """Immutable metadata for one local IPv4 network adapter."""
+    """Immutable metadata for one local IPv4 network adapter.
+
+    ``gateway`` and ``metric`` are optional observations. ``None`` means the
+    read-only discovery source did not provide that value; it is never a
+    signal to infer or mutate the host's routing configuration.
+    """
 
     name: str
     index: int
