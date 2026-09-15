@@ -27,6 +27,7 @@ SENTINEL will implement a small Python 3 UDP client around those protocol semant
 - Software-tracked flight-envelope enforcement.
 - Structured run logs and nonzero exit codes for failed validation.
 - Immediate operator emergency-stop hotkey and a separate emergency command.
+- Automatic selection of a dedicated USB Wi-Fi adapter while preserving the primary internet adapter.
 - Unit and dry-run integration tests suitable for CI.
 
 ### Explicitly excluded from the first version
@@ -80,6 +81,22 @@ The runner depends on a narrow client interface with these behaviors:
 
 The real client will not start video by default outside the test sequence. It will shut the stream down during cleanup.
 
+### Dual-adapter network selection
+
+The intended Windows setup has two active Wi-Fi adapters: the primary adapter remains connected to the internet, while a USB Wi-Fi adapter connects to the Tello access point. SENTINEL will be multihoming-aware and will never disable, disconnect, rename, or change the route metrics of the primary adapter.
+
+With the default `--interface auto` behavior, `NetworkAdapterSelector` will:
+
+1. Enumerate active, non-loopback IPv4 interfaces.
+2. Find the interface with a directly reachable route to the Tello endpoint `192.168.10.1`, preferring an address in the Tello subnet `192.168.10.0/24`.
+3. Prefer the dedicated interface that is not the system's internet default-route interface.
+4. Reject zero or multiple equally valid candidates and print each candidate's adapter name, interface index, IPv4 address, gateway, and route details.
+5. Snapshot the internet default route and refuse to continue if selecting the Tello interface would change it.
+
+All command, state, and video sockets will bind explicitly to the selected adapter's local IPv4 address. This prevents wildcard socket binding from choosing the primary internet interface on a multihomed host. The selected adapter metadata will be written to the run log.
+
+The CLI will support `--interface-name`, `--interface-index`, and `--local-ip` overrides for cases where automatic selection is ambiguous. The first version will not silently change the host's network metrics or disconnect an existing network. If the USB adapter is not already connected to the Tello SSID, SENTINEL will fail with setup instructions rather than touching the primary adapter. A later Windows-specific opt-in may use `netsh wlan connect` with an explicit interface, but it is not required for the core flight test.
+
 ### Dry-run client
 
 `DryRunClient` will implement the same interface without sockets. It will:
@@ -98,14 +115,15 @@ The real client will not start video by default outside the test sequence. It wi
 
 The real mode requires explicit operator confirmation before takeoff. The sequence is:
 
-1. Connect and enter SDK mode.
-2. Read battery, height, speed, and SDK version where supported.
-3. Fail preflight if battery is below the configured 40% minimum or required telemetry is invalid.
-4. Set the movement speed to 20 cm/s and verify the speed acknowledgement and readback.
-5. Start the video stream, wait for one decodable frame within the configured timeout, record its dimensions, and stop the stream.
-6. Take off.
-7. Read height and use 20 cm upward moves until the measured height is at least 150 cm, checking the upper boundary after each move.
-8. Execute the bounded translation loop:
+1. Select the Tello network adapter and bind all sockets to its local IPv4 address.
+2. Connect and enter SDK mode.
+3. Read battery, height, speed, and SDK version where supported.
+4. Fail preflight if battery is below the configured 40% minimum, required telemetry is invalid, or the internet default route changed.
+5. Set the movement speed to 20 cm/s and verify the speed acknowledgement and readback.
+6. Start the video stream, wait for one decodable frame within the configured timeout, record its dimensions, and stop the stream.
+7. Take off.
+8. Read height and use 20 cm upward moves until the measured height is at least 150 cm, checking the upper boundary after each move.
+9. Execute the bounded translation loop:
 
    ```text
    forward 50 cm
@@ -116,10 +134,10 @@ The real mode requires explicit operator confirmation before takeoff. The sequen
    down 50 cm
    ```
 
-9. Rotate clockwise 90 degrees and counter-clockwise 90 degrees.
-10. Send `stop` and verify an acknowledgement.
-11. Land and verify an acknowledgement.
-12. Stop any remaining stream, close sockets, and write the result log.
+10. Rotate clockwise 90 degrees and counter-clockwise 90 degrees.
+11. Send `stop` and verify an acknowledgement.
+12. Land and verify an acknowledgement.
+13. Stop any remaining stream, close sockets, and write the result log.
 
 The runner will check the height after each vertical movement. Rotation and hover do not change the planned position. A failed command, invalid response, lost telemetry, or failed cleanup is recorded as a failed run.
 
@@ -174,6 +192,7 @@ Tests will be written before implementation in short red-green cycles.
 - `FlightEnvelope` unit tests will cover each axis, both movement directions, exact faces, and out-of-bounds endpoints.
 - Runner tests will prove the approved command order and that every planned position remains in the envelope.
 - Dry-run integration tests will prove connection, telemetry, video-frame validation, cleanup, and emergency behavior without network access.
+- Network-selection tests will prove Tello-subnet preference, explicit local-IP binding, default-route preservation, ambiguity rejection, and dry-run adapter isolation.
 - CLI tests will prove dry-run isolation and exit-code behavior.
 - No CI test will send real flight commands. Real-drone verification will be a documented manual procedure using `--real`.
 
