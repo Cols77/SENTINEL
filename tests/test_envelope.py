@@ -95,6 +95,73 @@ def test_commit_move_updates_position_only_after_validation():
     assert envelope.position == Position(0, 50, 150)
 
 
+def test_commit_moves_compose_state_across_multiple_steps():
+    envelope = FlightEnvelope()
+
+    assert envelope.commit_move("forward", 50) == Position(0, 50, 150)
+    assert envelope.commit_move("right", 50) == Position(50, 50, 150)
+    assert envelope.position == Position(50, 50, 150)
+
+
+def test_invalid_position_assignment_raises_and_preserves_state():
+    envelope = FlightEnvelope()
+    original = envelope.position
+
+    with pytest.raises(ValueError, match="position must be inside the envelope"):
+        envelope.position = Position(51, 0, 150)
+
+    assert envelope.position == original
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [
+        ("min_x", 51),
+        ("max_x", -51),
+        ("min_y", 51),
+        ("max_y", -51),
+        ("min_z", 160),
+        ("max_z", 149),
+    ],
+)
+def test_invalid_bound_assignment_raises_and_preserves_configuration(
+    attribute, value
+):
+    envelope = FlightEnvelope()
+    original_bounds = (
+        envelope.min_x,
+        envelope.max_x,
+        envelope.min_y,
+        envelope.max_y,
+        envelope.min_z,
+        envelope.max_z,
+    )
+
+    with pytest.raises(ValueError):
+        setattr(envelope, attribute, value)
+
+    assert (
+        envelope.min_x,
+        envelope.max_x,
+        envelope.min_y,
+        envelope.max_y,
+        envelope.min_z,
+        envelope.max_z,
+    ) == original_bounds
+    assert envelope.position == Position(0, 0, 150)
+
+
+@pytest.mark.parametrize("attribute", ["min_x", "max_y"])
+def test_non_integer_bound_assignment_raises_and_preserves_configuration(attribute):
+    envelope = FlightEnvelope()
+    original = getattr(envelope, attribute)
+
+    with pytest.raises(ValueError, match="bounds must be integers"):
+        setattr(envelope, attribute, True if attribute == "min_x" else 50.5)
+
+    assert getattr(envelope, attribute) == original
+
+
 @pytest.mark.parametrize("direction", ["hover", "UP", ""])
 def test_malformed_direction_raises_value_error_not_envelope_violation(direction):
     with pytest.raises(ValueError, match="unsupported movement direction") as error:

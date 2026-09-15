@@ -5,6 +5,12 @@ from dataclasses import dataclass
 from .models import Position
 
 
+_BOUND_FIELDS = frozenset(
+    {"min_x", "max_x", "min_y", "max_y", "min_z", "max_z"}
+)
+_CONFIGURATION_FIELDS = _BOUND_FIELDS | {"position"}
+
+
 class EnvelopeViolation(ValueError):
     """Raised when a planned movement leaves the flight envelope."""
 
@@ -26,13 +32,31 @@ class FlightEnvelope:
     max_z: int = 250
     position: Position = Position(0, 0, 150)
 
+    def __setattr__(self, name: str, value: object) -> None:
+        """Validate public state assignments without leaving partial changes."""
+
+        if name not in _CONFIGURATION_FIELDS:
+            object.__setattr__(self, name, value)
+            return
+
+        previous = self.__dict__.get(name)
+        had_previous = name in self.__dict__
+        object.__setattr__(self, name, value)
+
+        if not _CONFIGURATION_FIELDS.issubset(self.__dict__):
+            return
+
+        try:
+            self._validate_configuration()
+        except ValueError:
+            if had_previous:
+                object.__setattr__(self, name, previous)
+            else:
+                del self.__dict__[name]
+            raise
+
     def __post_init__(self) -> None:
-        self._validate_bounds()
-        self._validate_position(self.position)
-        if not self.contains(self.position):
-            raise ValueError(
-                f"initial position {self.position} must be inside the envelope"
-            )
+        self._validate_configuration()
 
     def contains(self, position: Position) -> bool:
         """Return whether *position* is inside all six inclusive bounds."""
@@ -45,7 +69,11 @@ class FlightEnvelope:
         )
 
     def project_move(self, direction: str, distance_cm: int) -> Position:
-        """Validate and return a candidate position without changing state."""
+        """Validate and return a candidate position without changing state.
+
+        Malformed directions and distances raise ``ValueError``.  A valid
+        command whose candidate crosses a boundary raises ``EnvelopeViolation``.
+        """
 
         self._validate_distance(distance_cm)
         try:
@@ -98,6 +126,14 @@ class FlightEnvelope:
             or self.min_z > self.max_z
         ):
             raise ValueError("envelope bounds must be ordered from minimum to maximum")
+
+    def _validate_configuration(self) -> None:
+        self._validate_bounds()
+        self._validate_position(self.position)
+        if not self.contains(self.position):
+            raise ValueError(
+                f"position must be inside the envelope: {self.position}"
+            )
 
     @staticmethod
     def _validate_position(position: Position) -> None:
