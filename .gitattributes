@@ -1,0 +1,3 @@
+# Binary perception captures are versioned through Git LFS.
+fixtures/perception/**/*.h264 filter=lfs diff=lfs merge=lfs -text
+fixtures/perception/**/*.mp4 filter=lfs diff=lfs merge=lfs -text
