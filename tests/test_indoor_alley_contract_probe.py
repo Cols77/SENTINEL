@@ -30,7 +30,7 @@ def test_wire_contract_exposes_immutable_plan_preflight_and_capture_records():
         "SurveyPlanReference",
         "PreflightReport",
         "StationCaptureProvenance",
-        "ForceRunApproval",
+        "PlanApproval",
     ):
         assert definition in defs
 
@@ -66,7 +66,6 @@ def test_review_rework_adds_plan_approval_catalogue_lifecycle_and_preflight_read
         "PlanApproval",
         "SurveyPlanReference",
         "StationCaptureProvenance",
-        "ForceRunApproval",
         "CommandForceRunCreatePayload",
         "PlanReadModel",
     ):

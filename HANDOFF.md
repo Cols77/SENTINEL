@@ -2,7 +2,7 @@
 
 ## State
 
-- Branch: `docs/indoor-alley-v0-spec-rework` at `8a90c5f` (`fix: bind V0 wire contract to six-zone snapshot and force-run discriminator`), on top of the V0 spec-rework commit `8ffa751`.
+- Branch: `docs/indoor-alley-v0-spec-rework` at `11a25b1` (`docs: close round-2 review residuals on the V0 contract set`), on top of `6aa8f84` (`docs: close the V0 wire-contract gaps found by peer review`), `8a90c5f` (`fix: bind V0 wire contract to six-zone snapshot and force-run discriminator`) and the base spec-rework commit `8ffa751`.
 - This branch defines the reworked V0 specification set under `docs/superpowers/specs/` for the six-zone indoor-alley survey: the canonical V0 coherence spec, an approved indoor-alley survey design (the V0 decision record), WP0 shared contracts, and WP1–WP4 component specs, plus `docs/safety.md`.
 - No push to `main` was performed. No real-drone or USB-adapter validation was claimed.
 
@@ -12,7 +12,7 @@
 - Immutable `SurveyPlanReference` + `approval_reference` + exact `PreflightReport` bound to dispatch; operator approves the exact plan version before `DRONE_DISPATCH_REQUESTED`.
 - Provider gate: named joint Colin+Dzivha approval over a versioned, reproducible test-image-set hash (approval/review shared; execution of provider work is Dzivha's). No candidate list, no fixed 0.90 threshold.
 - Terminal run outcomes: `COMPLETED`, `FAILED`, `EMERGENCY`; `NEEDS_REVIEW` is a review-hold escaped only by an approved new/revisit plan; `REJECTED` is event-only (reject → refine → re-propose).
-- Preflight is exactly the 8 named checks (Wi-Fi/interface, drone link, battery/telemetry, live video, layout/markers, bounded area + route/height envelope, no active latch, operator approval).
+- Preflight is exactly the 8 named checks (`WIFI_INTERFACE`, `DRONE_LINK`, `BATTERY_TELEMETRY`, `LIVE_VIDEO`, `LAYOUT_MARKERS`, `BOUNDED_AREA`, `HEIGHT_ENVELOPE`, `EMERGENCY_LATCH`); operator authorization is the plan's `approval_reference` evaluated at dispatch, not a preflight check.
 - Real execution is DJITelloPy-only, fresh-process with fresh preflight and `--real --confirm`. The `EMERGENCY` latch is terminal and non-overridable; force-run after a failed preflight is operator-only `FORCE_RUN_CREATE` naming a new run/plan, never a resume, never under an active latch, always with fresh preflight and `--real --confirm`.
 
 ## Gate status (G0–G4)
@@ -29,7 +29,7 @@ From this branch:
 
 ```text
 uv run python -m pytest -q
-102 passed in 2.32s
+103 passed in 1.60s
 ```
 
 The V0 contract root is `docs/superpowers/specs/contracts/sentinel-v0-contract.schema.json`, with the `oneOf` port registry at `sentinel-v0-wire.schema.json`. The live yaw-scan fixture is `fixtures/perception/live/yaw-scan-20260916.h264` (plus `.manifest.json`/`.mp4`).

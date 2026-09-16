@@ -1,12 +1,12 @@
 {
   "contract_version": "sentinel.survey-catalogue.v1",
   "catalogue_id": "SURVEY_CATALOGUE_V1",
-  "revision": "R1",
+  "revision": "REV_1",
   "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "entries": [
     {
       "id": "PLAN_MARKER_VERIFIED_6",
-      "revision": "R1",
+      "revision": "REV_1",
       "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "mode": "MARKER_VERIFIED",
       "station_steps": [
@@ -33,7 +33,7 @@
     },
     {
       "id": "PLAN_ROUTE_ONLY_2_ZONE",
-      "revision": "R1",
+      "revision": "REV_1",
       "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "mode": "ROUTE_ONLY_2_ZONE",
       "station_steps": [

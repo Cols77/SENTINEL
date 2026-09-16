@@ -20,7 +20,7 @@ read_evidence(artifact_id) -> #ArtifactRef + #EvidenceContentHandle
 read_hazard(target_id) -> #HazardReadModel
 read_approval(task_id) -> #ApprovalReadModel
 read_plan(plan_id) -> #PlanReadModel
-read_preflight(preflight_report_id) -> #PreflightReport
+read_preflight(run_id) -> #PreflightReport
 read_perception(result_id) -> #PerceptionResult
 read_video_status(run_id) -> #VideoStatus
 open_live_video(run_id) -> #SafeVideoStreamHandle
@@ -62,7 +62,7 @@ Emergency has a permanently visible one-click `EMERGENCY STOP` control and keybo
 - Fixture-driven unit tests render every fixed zone state and click-through read path, including marker and route-only facts.
 - `uv run python -m sentinel.ui --smoke --fixture fixtures/sentinel/v0/run-approval.json` is the required smoke command. Its test harness is Playwright launched by `tests/ui/test_smoke.py` against the local NiceGUI process with the fake `CoordinatorClient`; it sets a 1440×900 viewport, asserts each named Header/Left/Center/Right/Bottom region has a visible bounding box within that viewport and asserts no document horizontal overflow. It writes the captured full-page screenshot to `artifacts/ui-smoke/1440x900.png` and emits `UI_SMOKE_OK` only after those assertions. Because this smoke screenshot is the G2 human-surface evidence artifact, it is always retained on a passing run (`artifacts/ui-smoke/1440x900.png`); it is not deleted on success. Teardown never removes a passing G2 artifact.
 - Confirm, Reject, stale version, duplicate idempotency (including identical transmitted key on duplicate click), evidence-missing, `IN_DOUBT` and emergency states have direct tests. The smoke test also uses a fake `VideoStatus`/`SafeVideoStreamHandle` to assert LIVE rendering, selected-frame correlation, and visible `DEGRADED` fallback without raw-frame access.
-- Direct client tests cover `read_plan(plan_id)`, `read_preflight(preflight_report_id)`, typed `PreflightReport` rendering, and operator-only `FORCE_RUN_CREATE` semantics (new run, failed-report/reason recorded, no resume, disabled under emergency).
+- Direct client tests cover `read_plan(plan_id)`, `read_preflight(run_id)`, typed `PreflightReport` rendering, and operator-only `FORCE_RUN_CREATE` semantics (new run, failed-report/reason recorded, no resume, disabled under emergency).
 - The smoke harness launches the local NiceGUI process on an OS-assigned port, waits at most 15 seconds for one machine-readable `UI_READY http://127.0.0.1:<port>` line, connects Playwright to that URL, and always terminates and reaps the process in teardown. The passing G2 screenshot `artifacts/ui-smoke/1440x900.png` is always retained. `SENTINEL_KEEP_UI_SMOKE_ARTIFACTS=1` additionally keeps the screenshot on an assertion failure; otherwise teardown removes a failed run's screenshot.
 - Tests use fake `CoordinatorClient`; Alan owns the fake-agent runtime/UI-client test seam, while coordinator persistence remains Colin’s WP1 responsibility. No network, drone or provider credential is required.
 

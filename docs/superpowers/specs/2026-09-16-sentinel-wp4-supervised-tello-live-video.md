@@ -20,14 +20,16 @@ Perception may run asynchronously while the worker follows its already-approved 
 
 Real flight is DJITelloPy-only. Each real run starts in a fresh process with a fresh preflight and `--real --confirm`. Before takeoff exactly the 8 named preflight checks must pass:
 
-1. selected Wi-Fi/interface route,
-2. drone link,
-3. battery/telemetry,
-4. live video,
-5. selected layout / expected markers,
-6. bounded area and route/height envelope inside the room safety envelope,
-7. no active emergency latch,
-8. explicit operator approval.
+1. WIFI_INTERFACE,
+2. DRONE_LINK,
+3. BATTERY_TELEMETRY,
+4. LIVE_VIDEO,
+5. LAYOUT_MARKERS,
+6. BOUNDED_AREA,
+7. HEIGHT_ENVELOPE,
+8. EMERGENCY_LATCH.
+
+Operator authorization is not a preflight check: it is carried as the plan's `approval_reference` and evaluated by the coordinator at dispatch.
 
 The preflight report is immutable and run-and-plan-bound; the agent receives it read-only and may assess only its structured pass/fail facts. A failed preflight may be overridden only by an operator-only `FORCE_RUN_CREATE` naming the failed report, an operator reason, and a new run/plan ID — never a resume of the prior operation and never under an active latch. It always requires fresh preflight and `--real --confirm`.
 

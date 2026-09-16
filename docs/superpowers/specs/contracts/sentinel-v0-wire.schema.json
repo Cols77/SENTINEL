@@ -2487,20 +2487,6 @@
         "expires_at": {"$ref": "#/$defs/timestamp"}
       }
     },
-    "ForceRunApproval": {
-      "$anchor": "ForceRunApproval",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["approval_id", "failed_report_id", "operator_reason", "new_run_id", "new_plan_id", "approved_at"],
-      "properties": {
-        "approval_id": {"$ref": "#/$defs/uuid"},
-        "failed_report_id": {"$ref": "#/$defs/uuid"},
-        "operator_reason": {"type": "string", "minLength": 1, "maxLength": 1000},
-        "new_run_id": {"$ref": "#/$defs/uuid"},
-        "new_plan_id": {"$ref": "#/$defs/uuid"},
-        "approved_at": {"$ref": "#/$defs/timestamp"}
-      }
-    },
     "WorkerDispatch": {
       "$anchor": "WorkerDispatch",
       "allOf": [
@@ -2845,7 +2831,12 @@
               "then": {
                 "required": [
                   "task_id"
-                ]
+                ],
+                "properties": {
+                  "plan_reference": {
+                    "type": "null"
+                  }
+                }
               }
             }
           ]

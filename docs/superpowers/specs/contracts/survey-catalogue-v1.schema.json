@@ -9,7 +9,7 @@
   "properties": {
     "contract_version": {"const": "sentinel.survey-catalogue.v1"},
     "catalogue_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"},
-    "revision": {"type": "string", "pattern": "^[A-Z0-9_]{1,63}$"},
+    "revision": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"},
     "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "entries": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/survey_plan_entry"}}
   },
@@ -37,7 +37,7 @@
           "required": ["id", "revision", "sha256", "mode", "station_steps", "capture_headings_deg", "capture_count", "segment_heights_m", "route_bounds", "timeout", "command_budget"],
           "properties": {
             "id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"},
-            "revision": {"type": "string", "pattern": "^[A-Z0-9_]{1,63}$"},
+            "revision": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"},
             "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
             "mode": {"type": "string", "enum": ["MARKER_VERIFIED", "ROUTE_ONLY_2_ZONE"]},
             "station_steps": {
@@ -72,6 +72,7 @@
                 "minItems": 6,
                 "maxItems": 6,
                 "items": {
+                  "required": ["marker_id"],
                   "properties": {
                     "marker_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"}
                   }
