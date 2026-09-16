@@ -1,29 +1,55 @@
 # SENTINEL
 
-SENTINEL is a conservative, supervised DJI Tello command test harness. It supports deterministic dry-run execution and a real-drone backend built around a pinned, locally maintained DJITelloPy compatibility boundary.
+SENTINEL is a supervised physical-AI demonstrator for mountain inspection. An orchestrator agent dispatches a Tello drone, selected video frames are analysed for rocks or pebble clusters, and the resulting evidence drives a proposed patroller task.
 
-## Safety boundary
+The complete product and database contract is defined in the [SENTINEL Demo State Database Specification](docs/SENTINEL_Demo_State_Database_Spec_v0.2.md). This README is only a quick-start overview.
 
-The test plans a 1 m × 1 m × 1 m cube:
+## V0 demonstration loop
 
-- x: −50 to +50 cm;
-- y: −50 to +50 cm;
-- z: 150 to 250 cm above ground.
+```text
+User request → orchestrator → authorised Tello mission
+             → selected frame → rock/pebble detection
+             → event-driven agent resume → task proposal
+             → operator confirmation → simulated patroller assignment
+```
 
-The x/y position is an open-loop estimate derived from acknowledged movement commands. It is not physical localization. Use a clear area substantially larger than the cube, propeller guards where appropriate, and an operator who can intervene independently.
+V0 is complete when the loop runs end to end and its history can be reconstructed from the append-only event stream. The minimum loop uses one drone, one orchestrator and a simulated patroller roster. Trail mapping, patroller data and other mountain context must be visibly labelled as simulated when used.
+
+## Architecture and state
+
+The local coordinator owns SQLite in WAL mode and is the only database writer. Drone workers, the UI and the agent communicate through APIs and events.
+
+The database separates:
+
+- **Factual state:** drone status, captured observations, detector results and completed tool calls.
+- **Agent state:** current phase, pending call, target, retry count and event resume cursor. Do not store private chain-of-thought.
+- **Derived state:** targets, confidence decisions and assignment recommendations, each linked to evidence and policy/model versions.
+
+Every observation, detection and patroller record carries provenance (`LIVE`, `SIMULATED`, `REPLAYED`, `OPERATOR_PROVIDED` or `INFERRED`) plus source, timestamps, confidence where applicable and `run_id`.
+
+## Safety boundaries
+
+- Real movement is restricted to a validated mission envelope and choreography.
+- The operator activates the envelope during setup; valid text-triggered inspections may then dispatch inside it.
+- Emergency stop remains available throughout the run.
+- Heartbeat, battery, timeout and idempotency checks fail closed.
+- The agent cannot write drone state or detections directly.
+- A proposed patroller assignment remains inactive until the operator confirms it.
+- No GPS arrival or precise horizontal position is claimed for a standard Tello; V0 uses section-level localisation.
+- Continuous video is for operator visibility. Only selected, quality-gated frames are persisted and sent to perception.
+
+Use a clear area substantially larger than the movement envelope, an operator who can intervene independently, and propeller guards where appropriate.
 
 ## Installation
 
-Python 3.11 or newer is required. Create an environment and install the package with development dependencies:
+Python 3.11 or newer is required:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -e ".[dev]"
 ```
 
-The real backend reuses [DJITelloPy](https://github.com/damiafuentes/DJITelloPy) and PyAV for Tello control and video decoding. The compatibility boundary binds command, state, and video sockets to the selected local adapter address. Upstream attribution is retained in `NOTICE.md`.
-
-DJITelloPy 2.5.0 owns process-global command/state receiver threads. SENTINEL therefore permits one real backend per process and fails closed if a second one is attempted; start a fresh process for the next real run.
+The real backend uses [DJITelloPy](https://github.com/damiafuentes/DJITelloPy) behind a pinned local compatibility boundary, with PyAV for video decoding. DJITelloPy owns process-global command/state receiver threads, so SENTINEL permits one real backend per process.
 
 ## Commands
 
@@ -57,153 +83,27 @@ scan below 40% battery, and escalates to the independent emergency path if an
 airborne stream, telemetry, yaw, or landing operation fails. Obtain supervised
 operator authorization for each real sequence.
 
-Run on a real Tello only after the physical preflight and explicit confirmation.
-On Windows PowerShell, load the machine-local `env.ps1` into the **current**
-PowerShell session. Dot-sourcing (`. .\env.ps1`) is required; running
-`.\env.ps1` without the leading dot does not preserve the environment variable
-after the script exits.
+Run on a real Tello only after physical preflight and explicit confirmation:
 
 ```powershell
-# env.ps1 (machine-local; do not commit)
-$env:SENTINEL_LOCAL_IP = "192.168.10.2"
-
-. .\env.ps1
-if ([string]::IsNullOrWhiteSpace($env:SENTINEL_LOCAL_IP)) {
-    throw "SENTINEL_LOCAL_IP was not loaded"
-}
-$env:SENTINEL_LOCAL_IP
+python -m sentinel run --real --confirm
 ```
 
-Create stable absolute artifact paths and run with unbuffered console output:
+Send an emergency motor stop from an independent terminal:
 
 ```powershell
-$artifactDir = Join-Path (Get-Location) "artifacts"
-New-Item -ItemType Directory -Force $artifactDir | Out-Null
-$finalLog = Join-Path $artifactDir "real-run.jsonl"
-$progressLog = Join-Path $artifactDir "real-run.progress.jsonl"
-
-& .\.venv\Scripts\python.exe -u -m sentinel run --real --confirm --local-ip $env:SENTINEL_LOCAL_IP --tello-ip 192.168.10.1 --log $finalLog --progress-log $progressLog
+python -m sentinel emergency
 ```
 
-The single-line invocation avoids PowerShell continuation errors. If you use
-the multiline form, each backtick must be the final character on its line. A
-PowerShell `>>` prompt means the command is still incomplete; press `Ctrl+C`
-and paste the complete command again.
+Real mode accepts `--local-ip`, `--interface-name` and `--interface-index`. SENTINEL does not disable adapters, change route metrics or switch Wi-Fi networks. Reports are JSONL files under `artifacts/` by default.
 
-While the real run is active, watch the **progress** log from a second
-PowerShell window:
+## Perception
 
-```powershell
-Get-Content -Path ./artifacts/real-run.progress.jsonl -Wait
-```
+The first hosted perception candidate is Grounding DINO on selected still frames, with Replicate as the first endpoint to test and Roboflow as an alternative. OpenAI vision and OpenRouter/Qwen are evaluation candidates for semantic verification, not assumed detector replacements.
 
-The progress log is flushed after every phase and should begin with
-`run_started`. The final `real-run.jsonl` report is written only when the run
-finishes or fails; it is not the live log.
+The initial target-confirmation threshold is a configurable raw detector score of `0.90`. It is not a calibrated probability. Store the raw response, provider, model, prompt and policy versions; scores from different models are not automatically comparable.
 
-Send the emergency motor-stop command from an independent terminal:
-
-```powershell
-.\.venv\Scripts\python.exe -u -m sentinel emergency `
-    --local-ip $env:SENTINEL_LOCAL_IP
-```
-
-The standalone emergency path uses only local adapter/route validation and
-local socket binding; it does not wait for the normal `command`/`ok` probe
-before attempting the motor-stop datagram.
-
-Real mode also accepts `--local-ip`, `--interface-name`, and `--interface-index`. Automatic selection prefers an active interface that can reach `192.168.10.1` and is not the primary internet default-route interface. SENTINEL does not disable adapters, change route metrics, or switch Wi-Fi networks.
-
-The Tello command, state, and video ports are 8889, 8890, and 11111. The run starts the video stream, validates at least one decoded frame, and stops the stream before the flight sequence.
-
-Reports are JSONL files under `artifacts/` by default. Real runs also flush a
-progress log at `artifacts/run.progress.jsonl` unless `--progress-log` is
-specified. It records adapter selection, connection, telemetry, video, and
-flight phases before the final report exists. The console prints the same
-phase messages.
-
-Real mode fails closed: adapter reachability, Tello connectivity, telemetry,
-speed readback, route preservation, and video-frame validation must all pass
-before takeoff. A normal failure after takeoff may attempt a landing.
-
-Emergency stop is an immediate motor-stop datagram and is terminal: SENTINEL
-will not send a later landing or flight command after it. The Tello protocol
-does not acknowledge `emergency`; a successful command means the local OS
-accepted the complete UDP datagram, not that motor stoppage has been observed.
-
-## Wi-Fi troubleshooting
-
-SENTINEL expects the dedicated USB adapter to be connected to the Tello network
-while the normal Wi-Fi adapter remains connected to the internet. The expected
-Windows state is:
-
-```text
-Wi-Fi   -> MBS-Data (or another normal network)
-Wi-Fi 2 -> TELLO-XXXXXX
-Wi-Fi 2 IPv4 -> 192.168.10.2/24
-```
-
-Check the adapter and Wi-Fi association:
-
-```powershell
-netsh interface show interface
-netsh wlan show interfaces
-netsh wlan show networks interface="Wi-Fi 2"
-Get-NetIPAddress -InterfaceAlias "Wi-Fi 2" -AddressFamily IPv4
-```
-
-`Wi-Fi 2` must be **connected** to `TELLO-XXXXXX`. An address in
-`169.254.0.0/16` means Windows assigned a link-local fallback address; it is
-not a usable Tello address. If the Tello network is not listed, power on the
-drone, wait for its SSID to appear, and reconnect the TP-Link adapter.
-
-If the adapter is connected but still has `169.254.*`, configure IPv4 on
-`Wi-Fi 2` as `192.168.10.2` with prefix length `24` (subnet mask
-`255.255.255.0`). Leave the default gateway and DNS fields blank. Do not move
-the internet default route to the Tello adapter.
-
-Common failures:
-
-- **No console output and no progress file:** the command did not reach
-  SENTINEL. Confirm the prompt is `C:\coding\sentinel`, use
-  `& .\.venv\Scripts\python.exe`, and dot-source `env.ps1` in that same
-  PowerShell window.
-- **Progress file exists but the final report does not:** the run is still
-  active or stopped during setup. Read the progress file with `-Wait`.
-- **`169.254.*` or `Wi-Fi 2` disconnected:** connect the USB adapter to the
-  Tello SSID and configure `192.168.10.2/24`.
-- **`selected adapter is inactive` or `no safe Tello adapter`:** the address
-  from `env.ps1` is not currently assigned to an active adapter.
-- **`could not resolve the default route source IP`:** update to the current
-  SENTINEL code; Windows adapter-name/index compatibility is handled by the
-  network selector.
-- **Ping and ARP work, but `command` times out:** Windows may be blocking the
-  Tello's UDP responses. The default firewall policy may be
-  `BlockInbound,AllowOutbound`. In an elevated PowerShell window, add a narrow
-  rule for the SENTINEL interpreter, the Tello address, the Tello adapter, and
-  the command/state/video ports:
-
-  ```powershell
-  $python = (Resolve-Path ./.venv/Scripts/python.exe).Path
-  New-NetFirewallRule -DisplayName "SENTINEL Tello UDP" -Direction Inbound -Action Allow -Program $python -Protocol UDP -LocalPort 8889,8890,11111 -RemoteAddress 192.168.10.1 -InterfaceAlias "Wi-Fi 2" -Profile Any
-  ```
-
-  Remove it after testing if it is no longer needed:
-
-  ```powershell
-  Remove-NetFirewallRule -DisplayName "SENTINEL Tello UDP"
-  ```
-
-  If `New-NetFirewallRule` returns **Access denied**, close that window and
-  open **Windows PowerShell → Run as administrator**, accept the UAC prompt, and
-  run the rule command again. If it still fails, local firewall-rule changes
-  are restricted by Group Policy; an administrator must create the equivalent
-  narrow rule, or the test must be run on a machine where local rules are
-  permitted. Do not disable the firewall globally.
-
-## Position estimation
-
-Human pose recognition from the original DJI sample is intentionally not used for drone localization. A future optional vision layer may use calibrated AprilTag/ArUco markers or Tello EDU mission-pad telemetry, but the first conservative runner remains open-loop in x/y.
+A replay path may support rehearsal or emergency presentation only when it is persistently labelled `REPLAYED FALLBACK`. It does not prove live perception.
 
 ## Development
 
@@ -212,10 +112,21 @@ python -m pytest
 python -m sentinel run --dry-run --log artifacts/verification.jsonl
 ```
 
-No automated test sends real flight commands. Do not describe a real-drone run as validated until it has been supervised with the dedicated USB Wi-Fi adapter and fresh evidence has been recorded.
+No automated test sends real flight commands. Do not describe a real-drone run as validated without fresh supervised evidence.
+
+## Roadmap
+
+- **V0:** one complete inspection-to-assignment loop.
+- **V0.1:** repeatable local observation poses and coarse positioning.
+- **V0.2:** possible-casualty detection and human-reviewed response.
+- **V0.3:** one bounded closer observation for ambiguous detections.
+- **V1+:** trail-opening operations, multi-source state and coordinated multi-drone inspection.
+
+Later releases must preserve the event, provenance, tool and approval contracts established by V0.
 
 ## References
 
-- [DJI Tello-Python](https://github.com/dji-sdk/Tello-Python) — protocol/sample reference, not the runtime base.
-- [DJI Tello SDK 2.0 guide](https://dl-cdn.ryzerobotics.com/downloads/Tello/Tello%20SDK%202.0%20User%20Guide.pdf).
-- [DJITelloPy](https://github.com/damiafuentes/DJITelloPy) — Python 3 control and video API used behind SENTINEL’s adapter.
+- [Demo State Database Specification](docs/SENTINEL_Demo_State_Database_Spec_v0.2.md)
+- [DJI Tello-Python](https://github.com/dji-sdk/Tello-Python) — protocol/sample reference
+- [DJI Tello SDK 2.0 guide](https://dl-cdn.ryzerobotics.com/downloads/Tello/Tello%20SDK%202.0%20User%20Guide.pdf)
+- [DJITelloPy](https://github.com/damiafuentes/DJITelloPy) — runtime control and video API
