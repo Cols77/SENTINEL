@@ -1,29 +1,55 @@
 # SENTINEL
 
-SENTINEL is a conservative, supervised DJI Tello command test harness. It supports deterministic dry-run execution and a real-drone backend built around a pinned, locally maintained DJITelloPy compatibility boundary.
+SENTINEL is a supervised physical-AI demonstrator for mountain inspection. An orchestrator agent dispatches a Tello drone, selected video frames are analysed for rocks or pebble clusters, and the resulting evidence drives a proposed patroller task.
 
-## Safety boundary
+The complete product and database contract is defined in the [SENTINEL Demo State Database Specification](docs/SENTINEL_Demo_State_Database_Spec_v0.2.md). This README is only a quick-start overview.
 
-The test plans a 1 m × 1 m × 1 m cube:
+## V0 demonstration loop
 
-- x: −50 to +50 cm;
-- y: −50 to +50 cm;
-- z: 150 to 250 cm above ground.
+```text
+User request → orchestrator → authorised Tello mission
+             → selected frame → rock/pebble detection
+             → event-driven agent resume → task proposal
+             → operator confirmation → simulated patroller assignment
+```
 
-The x/y position is an open-loop estimate derived from acknowledged movement commands. It is not physical localization. Use a clear area substantially larger than the cube, propeller guards where appropriate, and an operator who can intervene independently.
+V0 is complete when the loop runs end to end and its history can be reconstructed from the append-only event stream. The minimum loop uses one drone, one orchestrator and a simulated patroller roster. Trail mapping, patroller data and other mountain context must be visibly labelled as simulated when used.
+
+## Architecture and state
+
+The local coordinator owns SQLite in WAL mode and is the only database writer. Drone workers, the UI and the agent communicate through APIs and events.
+
+The database separates:
+
+- **Factual state:** drone status, captured observations, detector results and completed tool calls.
+- **Agent state:** current phase, pending call, target, retry count and event resume cursor. Do not store private chain-of-thought.
+- **Derived state:** targets, confidence decisions and assignment recommendations, each linked to evidence and policy/model versions.
+
+Every observation, detection and patroller record carries provenance (`LIVE`, `SIMULATED`, `REPLAYED`, `OPERATOR_PROVIDED` or `INFERRED`) plus source, timestamps, confidence where applicable and `run_id`.
+
+## Safety boundaries
+
+- Real movement is restricted to a validated mission envelope and choreography.
+- The operator activates the envelope during setup; valid text-triggered inspections may then dispatch inside it.
+- Emergency stop remains available throughout the run.
+- Heartbeat, battery, timeout and idempotency checks fail closed.
+- The agent cannot write drone state or detections directly.
+- A proposed patroller assignment remains inactive until the operator confirms it.
+- No GPS arrival or precise horizontal position is claimed for a standard Tello; V0 uses section-level localisation.
+- Continuous video is for operator visibility. Only selected, quality-gated frames are persisted and sent to perception.
+
+Use a clear area substantially larger than the movement envelope, an operator who can intervene independently, and propeller guards where appropriate.
 
 ## Installation
 
-Python 3.11 or newer is required. Create an environment and install the package with development dependencies:
+Python 3.11 or newer is required:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -e ".[dev]"
 ```
 
-The real backend reuses [DJITelloPy](https://github.com/damiafuentes/DJITelloPy) and PyAV for Tello control and video decoding. The compatibility boundary binds command, state, and video sockets to the selected local adapter address. Upstream attribution is retained in `NOTICE.md`.
-
-DJITelloPy 2.5.0 owns process-global command/state receiver threads. SENTINEL therefore permits one real backend per process and fails closed if a second one is attempted; start a fresh process for the next real run.
+The real backend uses [DJITelloPy](https://github.com/damiafuentes/DJITelloPy) behind a pinned local compatibility boundary, with PyAV for video decoding. DJITelloPy owns process-global command/state receiver threads, so SENTINEL permits one real backend per process.
 
 ## Commands
 
@@ -33,27 +59,27 @@ Run the complete sequence without opening a network socket:
 python -m sentinel run --dry-run
 ```
 
-Run on a real Tello only after the physical preflight and explicit confirmation:
+Run on a real Tello only after physical preflight and explicit confirmation:
 
 ```powershell
 python -m sentinel run --real --confirm
 ```
 
-Send the emergency motor-stop command from an independent terminal:
+Send an emergency motor stop from an independent terminal:
 
 ```powershell
 python -m sentinel emergency
 ```
 
-Real mode also accepts `--local-ip`, `--interface-name`, and `--interface-index`. Automatic selection prefers an active interface that can reach `192.168.10.1` and is not the primary internet default-route interface. SENTINEL does not disable adapters, change route metrics, or switch Wi-Fi networks.
+Real mode accepts `--local-ip`, `--interface-name` and `--interface-index`. SENTINEL does not disable adapters, change route metrics or switch Wi-Fi networks. Reports are JSONL files under `artifacts/` by default.
 
-The Tello command, state, and video ports are 8889, 8890, and 11111. The run starts the video stream, validates at least one decoded frame, and stops the stream before the flight sequence.
+## Perception
 
-Reports are JSONL files under `artifacts/` by default. A normal failure may attempt a landing. Emergency stop is an immediate motor stop and is terminal: SENTINEL will not send a later landing or flight command after it.
+The first hosted perception candidate is Grounding DINO on selected still frames, with Replicate as the first endpoint to test and Roboflow as an alternative. OpenAI vision and OpenRouter/Qwen are evaluation candidates for semantic verification, not assumed detector replacements.
 
-## Position estimation
+The initial target-confirmation threshold is a configurable raw detector score of `0.90`. It is not a calibrated probability. Store the raw response, provider, model, prompt and policy versions; scores from different models are not automatically comparable.
 
-Human pose recognition from the original DJI sample is intentionally not used for drone localization. A future optional vision layer may use calibrated AprilTag/ArUco markers or Tello EDU mission-pad telemetry, but the first conservative runner remains open-loop in x/y.
+A replay path may support rehearsal or emergency presentation only when it is persistently labelled `REPLAYED FALLBACK`. It does not prove live perception.
 
 ## Development
 
@@ -62,10 +88,21 @@ python -m pytest
 python -m sentinel run --dry-run --log artifacts/verification.jsonl
 ```
 
-No automated test sends real flight commands. Do not describe a real-drone run as validated until it has been supervised with the dedicated USB Wi-Fi adapter and fresh evidence has been recorded.
+No automated test sends real flight commands. Do not describe a real-drone run as validated without fresh supervised evidence.
+
+## Roadmap
+
+- **V0:** one complete inspection-to-assignment loop.
+- **V0.1:** repeatable local observation poses and coarse positioning.
+- **V0.2:** possible-casualty detection and human-reviewed response.
+- **V0.3:** one bounded closer observation for ambiguous detections.
+- **V1+:** trail-opening operations, multi-source state and coordinated multi-drone inspection.
+
+Later releases must preserve the event, provenance, tool and approval contracts established by V0.
 
 ## References
 
-- [DJI Tello-Python](https://github.com/dji-sdk/Tello-Python) — protocol/sample reference, not the runtime base.
-- [DJI Tello SDK 2.0 guide](https://dl-cdn.ryzerobotics.com/downloads/Tello/Tello%20SDK%202.0%20User%20Guide.pdf).
-- [DJITelloPy](https://github.com/damiafuentes/DJITelloPy) — Python 3 control and video API used behind SENTINEL’s adapter.
+- [Demo State Database Specification](docs/SENTINEL_Demo_State_Database_Spec_v0.2.md)
+- [DJI Tello-Python](https://github.com/dji-sdk/Tello-Python) — protocol/sample reference
+- [DJI Tello SDK 2.0 guide](https://dl-cdn.ryzerobotics.com/downloads/Tello/Tello%20SDK%202.0%20User%20Guide.pdf)
+- [DJITelloPy](https://github.com/damiafuentes/DJITelloPy) — runtime control and video API
