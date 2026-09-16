@@ -2,7 +2,7 @@
 
 ## State
 
-- Branch: `docs/indoor-alley-v0-spec-rework` at `11a25b1` (`docs: close round-2 review residuals on the V0 contract set`), on top of `6aa8f84` (`docs: close the V0 wire-contract gaps found by peer review`), `8a90c5f` (`fix: bind V0 wire contract to six-zone snapshot and force-run discriminator`) and the base spec-rework commit `8ffa751`.
+- Branch: `docs/indoor-alley-v0-spec-rework` at `10bbe73` (`docs: close round-2 review residuals on the V0 contract set`), on top of `6aa8f84` (`docs: close the V0 wire-contract gaps found by peer review`), `8a90c5f` (`fix: bind V0 wire contract to six-zone snapshot and force-run discriminator`) and the base spec-rework commit `8ffa751`.
 - This branch defines the reworked V0 specification set under `docs/superpowers/specs/` for the six-zone indoor-alley survey: the canonical V0 coherence spec, an approved indoor-alley survey design (the V0 decision record), WP0 shared contracts, and WP1–WP4 component specs, plus `docs/safety.md`.
 - No push to `main` was performed. No real-drone or USB-adapter validation was claimed.
 
