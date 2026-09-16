@@ -1,3 +1,8 @@
+> **Status:** Superseded historical implementation plan; non-authoritative for V0.
+> **Replacement:** [V0 Indoor Alley Survey Design](../2026-09-16-sentinel-v0-indoor-alley-survey-design.md), [V0 Coherence Specification](../2026-09-16-sentinel-v0-coherence-spec.md), [WP0–WP4 specifications](..), and [Current safety checklist](../../../safety.md).
+>
+> Retained for historical context only. This plan describes the earlier direct flight-test slice and must not be treated as the current implementation backlog.
+
 # SENTINEL Flight Test Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
