@@ -40,6 +40,10 @@ Install the package on the target machine, connect the USB Wi-Fi adapter to the 
 
 Each real run must be started as a fresh process because the pinned DJITelloPy receiver threads are process-global. Full flight details, force-run semantics and the terminal emergency latch are in `docs/safety.md`.
 
-## Open follow-up (not done in this branch)
+## Follow-up completion
 
-- Archiving superseded flight material under `docs/superpowers/specs/superseded/` remains an open task; no `superseded/` directory or files were created here.
+- Superseded direct flight-test material is archived under
+  `docs/superpowers/specs/superseded/` with replacement headers, a replacement
+  map, and links to the active V0 contracts. The broad historical worker
+  specification remains in place as non-authoritative support, as required by
+  the V0 design.
