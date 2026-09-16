@@ -1,0 +1,22 @@
+{
+  "decoded_frame_probe": {
+    "data_bytes": 720,
+    "frame_number": 0,
+    "height": 720,
+    "pixel_format": "rgb24",
+    "timestamp": "2026-09-16T05:07:09.215143+00:00",
+    "timestamp_ms": 0,
+    "width": 960
+  },
+  "format": "h264-annex-b",
+  "run_status": "PASS",
+  "schema_version": "sentinel.perception.video.v1",
+  "sha256": "c8e0fb275a74ee177d3ab59ca2a5f3b588e9382e271d3e3aad41cf37c9b53b9a",
+  "size_bytes": 8223399,
+  "source": {
+    "device": "DJI Tello",
+    "sdk_documentation": "https://dl-cdn.ryzerobotics.com/downloads/tello/20180910/Tello%20SDK%20Documentation%20EN_1.3.pdf",
+    "video_port": 11111
+  },
+  "video_path": "fixtures/perception/live/yaw-scan-20260916.h264"
+}

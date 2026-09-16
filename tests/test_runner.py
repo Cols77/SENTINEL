@@ -147,6 +147,82 @@ def test_runner_executes_approved_sequence_and_enters_altitude_band():
     assert client.closed is True
 
 
+def test_runner_emits_progressive_preflight_and_flight_events():
+    client = _FakeClient()
+    events: list[tuple[str, str]] = []
+
+    report = FlightTestRunner(
+        client,
+        mode="real",
+        progress=lambda event, message: events.append((event, message)),
+    ).run(confirm=True)
+
+    assert report.status == "PASS"
+    assert events[0] == ("run_started", "starting preflight")
+    assert ("preflight", "connecting to Tello") in events
+    assert ("preflight", "validating battery telemetry") in events
+    assert ("preflight", "validating decoded video frame") in events
+    assert ("flight", "sending takeoff") in events
+    assert ("flight", "sending landing") in events
+    assert events[-1] == ("run_complete", "flight sequence passed")
+
+
+def test_runner_does_not_probe_unsupported_sdk_version_command():
+    class Sdk13Client(_FakeClient):
+        def sdk_version(self) -> str:
+            raise AssertionError("SDK 1.3 has no sdk? command")
+
+    report = FlightTestRunner(Sdk13Client(), mode="dry-run").run(confirm=True)
+
+    assert report.status == "PASS"
+
+
+def test_runner_can_retain_video_stream_for_recording():
+    client = _FakeClient()
+
+    report = FlightTestRunner(
+        client,
+        mode="dry-run",
+        retain_video_stream=True,
+    ).run(confirm=True)
+
+    assert report.status == "PASS"
+    assert "streamoff" not in [record.command for record in client.records]
+    assert client.closed is True
+
+
+def test_runner_video_only_does_not_send_flight_commands():
+    client = _FakeClient(battery_level=20)
+
+    report = FlightTestRunner(
+        client,
+        mode="real",
+        retain_video_stream=True,
+        video_only=True,
+        video_only_duration_s=0,
+    ).run(confirm=True)
+
+    assert report.status == "PASS"
+    commands = [record.command for record in client.records]
+    assert "takeoff" not in commands
+    assert "land" not in commands
+    assert not any(
+        command in {
+            "forward",
+            "right",
+            "back",
+            "left",
+            "up",
+            "down",
+            "cw",
+            "ccw",
+            "stop",
+        }
+        for command in commands
+    )
+    assert client.closed is True
+
+
 def test_runner_prevalidates_envelope_before_transmitting_movement():
     client = _FakeClient()
     runner = FlightTestRunner(client, mode="dry-run")
@@ -165,6 +241,22 @@ def test_low_battery_fails_preflight_before_takeoff():
 
     assert report.status == "FAIL"
     assert "takeoff" not in [record.command for record in client.records]
+    assert client.closed is True
+
+
+def test_connectivity_failure_fails_hard_before_takeoff():
+    client = _FakeClient()
+
+    def fail_connect() -> None:
+        raise TimeoutError("Tello did not acknowledge command mode")
+
+    client.connect = fail_connect  # type: ignore[method-assign]
+
+    report = FlightTestRunner(client, mode="real").run(confirm=True)
+
+    assert report.status == "FAIL"
+    assert report.error == "Tello did not acknowledge command mode"
+    assert [record.command for record in client.records] == []
     assert client.closed is True
 
 
@@ -204,6 +296,25 @@ def test_emergency_is_terminal_and_never_lands_or_sends_later_flight_commands():
     assert "land" not in commands
     assert not any(command in {"forward 50", "right 50", "up 50"} for command in commands)
     assert client.closed is True
+
+
+def test_emergency_send_failure_is_retained_in_terminal_report():
+    client = _FakeClient()
+
+    def failed_emergency() -> str:
+        client.emergency_triggered = True
+        client._record("emergency", "error: socket send failed")
+        raise OSError("socket send failed")
+
+    client.emergency = failed_emergency  # type: ignore[method-assign]
+    runner = FlightTestRunner(client, mode="real")
+    runner.trigger_emergency()
+
+    report = runner.run(confirm=True)
+
+    assert report.status == "EMERGENCY_ABORTED"
+    assert report.error is not None
+    assert "emergency send failed: socket send failed" in report.error
 
 
 def test_post_emergency_runner_calls_are_rejected_without_backend_transmission():

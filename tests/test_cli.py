@@ -2,10 +2,12 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+import pytest
+
 from sentinel.cli import main
 from sentinel.emergency import EmergencySender
 from sentinel.models import CommandRecord, RunReport, VideoFrame
-from sentinel.reporting import write_report
+from sentinel.reporting import write_report, write_video_manifest
 
 
 def test_dry_run_cli_returns_zero_and_writes_jsonl(monkeypatch, tmp_path):
@@ -50,6 +52,66 @@ def test_real_cli_requires_explicit_confirmation_without_constructing_client(mon
     assert main(["run", "--real"]) == 1
 
 
+def test_yaw_scan_dry_run_is_limited_to_z_rotation(tmp_path):
+    output = tmp_path / "yaw-scan.jsonl"
+    assert (
+        main(
+            [
+                "yaw-scan",
+                "--dry-run",
+                "--video-path",
+                str(tmp_path / "capture.h264"),
+                "--dwell-seconds",
+                "0.01",
+                "--turn",
+                "cw:90",
+                "--turn",
+                "cw:90",
+                "--log",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    displays = [command["display"] for command in payload["commands"]]
+    assert displays == [
+        "command",
+        "speed 20",
+        "takeoff",
+        "streamon",
+        "video frame",
+        "cw 90",
+        "video frame",
+        "cw 90",
+        "video frame",
+        "streamoff",
+        "land",
+    ]
+    assert not any(
+        display.startswith(("forward ", "back ", "left ", "right ", "up ", "down "))
+        for display in displays
+    )
+
+
+def test_yaw_scan_rejects_directional_turn_before_client_creation(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "sentinel.cli.DryRunClient",
+        lambda: (_ for _ in ()).throw(AssertionError("client must not be created")),
+    )
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "yaw-scan",
+                "--dry-run",
+                "--video-path",
+                str(tmp_path / "capture.h264"),
+                "--turn",
+                "front:90",
+            ]
+        )
+
+
 def test_real_cli_writes_failure_report_when_backend_setup_fails(monkeypatch, tmp_path):
     output = tmp_path / "setup-failure.jsonl"
 
@@ -63,6 +125,39 @@ def test_real_cli_writes_failure_report_when_backend_setup_fails(monkeypatch, tm
     assert payload["status"] == "FAIL"
     assert payload["backend"] == "real"
     assert "USB Tello adapter" in payload["error"]
+
+
+def test_real_cli_creates_progress_log_before_backend_setup_fails(
+    monkeypatch, tmp_path, capsys
+):
+    output = tmp_path / "run.jsonl"
+    progress = tmp_path / "run.progress.jsonl"
+
+    def fail_setup(_args):
+        raise RuntimeError("Tello connectivity failed")
+
+    monkeypatch.setattr("sentinel.cli.build_real_client", fail_setup)
+
+    assert (
+        main(
+            [
+                "run",
+                "--real",
+                "--confirm",
+                "--log",
+                str(output),
+                "--progress-log",
+                str(progress),
+            ]
+        )
+        == 1
+    )
+
+    events = [json.loads(line) for line in progress.read_text().splitlines()]
+    assert events[0]["event"] == "run_started"
+    assert events[-1]["event"] == "run_failed"
+    assert "Tello connectivity failed" in events[-1]["message"]
+    assert "Tello connectivity failed" in capsys.readouterr().out
 
 
 def test_cli_maps_failure_and_emergency_statuses_to_exit_codes(monkeypatch, tmp_path):
@@ -107,7 +202,10 @@ def test_emergency_cli_resolves_a_local_adapter_before_sending(monkeypatch):
             sent.append("emergency")
 
     monkeypatch.setattr("sentinel.cli.EmergencySender", FakeSender)
-    monkeypatch.setattr("sentinel.cli.resolve_local_ip", lambda args: "192.168.10.2")
+    monkeypatch.setattr(
+        "sentinel.cli.resolve_local_ip",
+        lambda args, **_kwargs: "192.168.10.2",
+    )
 
     assert main(["emergency"]) == 0
     assert sent == [("192.168.10.2", "192.168.10.1"), "emergency"]
@@ -144,6 +242,23 @@ def test_jsonl_report_contains_status_commands_and_video_metadata(tmp_path):
     assert "data" not in payload["video_frame"]
 
 
+def test_video_manifest_records_hash_and_decoder_probe(tmp_path):
+    video = tmp_path / "capture.h264"
+    video.write_bytes(b"raw-h264")
+    report = RunReport(
+        status="FAIL",
+        mode="real",
+        video_frame=VideoFrame(width=960, height=720, data=b"abc"),
+    )
+
+    manifest_path = write_video_manifest(video, report)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert payload["format"] == "h264-annex-b"
+    assert payload["size_bytes"] == len(b"raw-h264")
+    assert payload["sha256"] == "d2666a33ee2ec446628af320470961921a4e558e5ae0d0445320bdc5565dc11d"
+    assert payload["decoded_frame_probe"]["width"] == 960
+
 def test_emergency_sender_binds_selected_ip_and_sends_exact_command(monkeypatch):
     events = []
 
@@ -153,16 +268,97 @@ def test_emergency_sender_binds_selected_ip_and_sends_exact_command(monkeypatch)
 
         def sendto(self, payload, address):
             events.append(("sendto", payload, address))
+            return len(payload)
 
         def close(self):
             events.append(("close",))
 
     monkeypatch.setattr("sentinel.emergency.socket.socket", lambda *args: FakeSocket())
 
-    EmergencySender(local_ip="192.168.10.2").send()
+    assert EmergencySender(local_ip="192.168.10.2").send() == len(b"emergency")
 
     assert events == [
         ("bind", ("192.168.10.2", 0)),
         ("sendto", b"emergency", ("192.168.10.1", 8889)),
         ("close",),
     ]
+
+
+def test_emergency_sender_rejects_partial_datagram():
+    class PartialSocket:
+        def bind(self, _address):
+            pass
+
+        def sendto(self, payload, _address):
+            return len(payload) - 1
+
+        def close(self):
+            pass
+
+    sender = EmergencySender(
+        local_ip="192.168.10.2",
+        socket_factory=lambda *_args: PartialSocket(),
+    )
+
+    with pytest.raises(OSError, match="emergency datagram incomplete"):
+        sender.send()
+
+
+def test_emergency_cli_reports_success(capsys, monkeypatch):
+    class FakeSender:
+        def __init__(self, local_ip, tello_ip="192.168.10.1"):
+            assert local_ip == "192.168.10.2"
+            assert tello_ip == "192.168.10.1"
+
+        def send(self):
+            return len(b"emergency")
+
+    monkeypatch.setattr("sentinel.cli.EmergencySender", FakeSender)
+    monkeypatch.setattr(
+        "sentinel.cli.resolve_local_ip",
+        lambda _args, **_kwargs: "192.168.10.2",
+    )
+
+    assert main(["emergency"]) == 0
+    output = capsys.readouterr().out
+    assert "emergency" in output.lower()
+    assert "192.168.10.2" in output
+    assert "sent" in output.lower()
+
+
+def test_emergency_cli_bypasses_ack_reachability_probe(monkeypatch):
+    class FakeSender:
+        def __init__(self, local_ip, tello_ip="192.168.10.1"):
+            assert local_ip == "192.168.10.2"
+            assert tello_ip == "192.168.10.1"
+
+        def send(self):
+            return len(b"emergency")
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("explicit emergency IP must not resolve the default route")
+
+    monkeypatch.setattr("sentinel.cli._select_adapter", fail_if_called)
+    monkeypatch.setattr("sentinel.cli.EmergencySender", FakeSender)
+
+    assert main(["emergency", "--local-ip", "192.168.10.2"]) == 0
+
+
+def test_explicit_emergency_ip_reaches_sender_when_route_discovery_fails(monkeypatch):
+    class FakeSender:
+        def __init__(self, local_ip, tello_ip="192.168.10.1"):
+            assert local_ip == "192.168.10.2"
+            assert tello_ip == "192.168.10.1"
+
+        def send(self):
+            return len(b"emergency")
+
+    monkeypatch.setattr(
+        "sentinel.cli._select_adapter",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("default route unavailable")
+        ),
+    )
+    monkeypatch.setattr("sentinel.cli.EmergencySender", FakeSender)
+
+    assert main(["emergency", "--local-ip", "192.168.10.2"]) == 0

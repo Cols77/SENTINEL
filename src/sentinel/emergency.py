@@ -26,7 +26,7 @@ class EmergencySender:
         # argument captured during module import.
         self.socket_factory = socket_factory or socket.socket
 
-    def send(self) -> None:
+    def send(self) -> int:
         if not self.local_ip:
             raise ValueError(
                 "emergency sender requires the selected Tello adapter local IP"
@@ -34,10 +34,17 @@ class EmergencySender:
         if self.local_ip == "0.0.0.0":
             raise ValueError("wildcard local IP is unsafe for emergency sending")
 
+        payload = b"emergency"
         sock = self.socket_factory(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sock.bind((self.local_ip, 0))
-            sock.sendto(b"emergency", self.address)
+            bytes_sent = sock.sendto(payload, self.address)
+            if bytes_sent != len(payload):
+                raise OSError(
+                    "emergency datagram incomplete: "
+                    f"sent {bytes_sent} of {len(payload)} bytes"
+                )
+            return bytes_sent
         finally:
             sock.close()
 
@@ -49,6 +56,7 @@ class EmergencyHotkey:
         self.on_emergency = on_emergency
         self.stop_event = Event()
         self.triggered = Event()
+        self.error: Exception | None = None
         self.thread = Thread(target=self._listen, daemon=True)
 
     def start(self) -> None:
@@ -69,6 +77,9 @@ class EmergencyHotkey:
             if msvcrt.kbhit() and msvcrt.getwch().lower() == "e":
                 if not self.triggered.is_set():
                     self.triggered.set()
-                    self.on_emergency()
+                    try:
+                        self.on_emergency()
+                    except Exception as exc:
+                        self.error = exc
                 return
             time.sleep(0.02)

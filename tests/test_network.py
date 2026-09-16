@@ -24,6 +24,20 @@ def reachable(_adapter: AdapterInfo) -> bool:
     return True
 
 
+def test_resolve_interface_indexes_uses_windows_friendly_name_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(network.os, "name", "nt")
+    monkeypatch.setattr(
+        network,
+        "_windows_interface_indexes",
+        lambda _names: {"Wi-Fi": 7},
+    )
+    monkeypatch.setattr(network.socket, "if_nameindex", lambda: [])
+
+    assert network.resolve_interface_indexes(["Wi-Fi"]) == {"Wi-Fi": 7}
+
+
 def selector_for_test(
     adapters, *, default_route: RouteSnapshot | None = DEFAULT_ROUTE, **kwargs
 ) -> NetworkAdapterSelector:
@@ -284,7 +298,7 @@ def test_default_reachability_probe_binds_candidate_and_closes_socket(
     )
 
     assert network.probe_tello_endpoint(adapter) is True
-    assert probe.bound_to == (adapter.local_ip, 0)
+    assert probe.bound_to == (adapter.local_ip, 8889)
     assert probe.connected_to == ("192.168.10.1", 8889)
     assert probe.sent == [b"command"]
     assert probe.closed is True

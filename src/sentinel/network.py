@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass, replace
 from ipaddress import IPv4Address, IPv4Network
+import os
 import socket
 from typing import Any, Callable, Iterable, Protocol
+
+from ctypes import wintypes
 
 
 TELLO_SUBNET = IPv4Network("192.168.10.0/24")
@@ -188,9 +192,10 @@ def resolve_interface_indexes(names: Iterable[str]) -> dict[str, int]:
     except (AttributeError, NotImplementedError, OSError, TypeError, ValueError):
         mapped.clear()
 
+    windows_mapped = _windows_interface_indexes(requested)
     resolved: dict[str, int] = {}
     for name in requested:
-        index = mapped.get(name)
+        index = mapped.get(name) or windows_mapped.get(name)
         if index is None:
             try:
                 index = socket.if_nametoindex(name)
@@ -206,6 +211,73 @@ def resolve_interface_indexes(names: Iterable[str]) -> dict[str, int]:
         if isinstance(index, bool) or not isinstance(index, int) or index <= 0:
             continue
         resolved[name] = index
+    return resolved
+
+
+def _windows_interface_indexes(names: Iterable[str]) -> dict[str, int]:
+    """Map Windows adapter friendly names to native interface indexes."""
+
+    requested = set(names)
+    if os.name != "nt" or not requested:
+        return {}
+
+    class IPAdapterAddresses(ctypes.Structure):
+        pass
+
+    IPAdapterAddresses._fields_ = [
+        ("length", wintypes.ULONG),
+        ("if_index", wintypes.DWORD),
+        ("next", ctypes.POINTER(IPAdapterAddresses)),
+        ("adapter_name", ctypes.c_char_p),
+        ("first_unicast", ctypes.c_void_p),
+        ("first_anycast", ctypes.c_void_p),
+        ("first_multicast", ctypes.c_void_p),
+        ("first_dns", ctypes.c_void_p),
+        ("dns_suffix", wintypes.LPWSTR),
+        ("description", wintypes.LPWSTR),
+        ("friendly_name", wintypes.LPWSTR),
+    ]
+
+    try:
+        iphlpapi = ctypes.WinDLL("iphlpapi.dll")
+        get_adapters = iphlpapi.GetAdaptersAddresses
+        get_adapters.argtypes = [
+            wintypes.ULONG,
+            wintypes.ULONG,
+            ctypes.c_void_p,
+            ctypes.POINTER(IPAdapterAddresses),
+            ctypes.POINTER(wintypes.ULONG),
+        ]
+        get_adapters.restype = wintypes.ULONG
+        size = wintypes.ULONG(0)
+        result = get_adapters(socket.AF_INET, 0, None, None, ctypes.byref(size))
+        if result != 111 or size.value <= 0:  # ERROR_BUFFER_OVERFLOW
+            return {}
+        buffer = ctypes.create_string_buffer(size.value)
+        head = ctypes.cast(buffer, ctypes.POINTER(IPAdapterAddresses))
+        result = get_adapters(
+            socket.AF_INET, 0, None, head, ctypes.byref(size)
+        )
+        if result != 0:  # NO_ERROR
+            return {}
+    except (AttributeError, OSError, TypeError, ValueError):
+        return {}
+
+    resolved: dict[str, int] = {}
+    current = head
+    while bool(current):
+        entry = current.contents
+        friendly_name = entry.friendly_name
+        description = entry.description
+        adapter_name = (
+            entry.adapter_name.decode(errors="replace")
+            if entry.adapter_name
+            else None
+        )
+        for candidate in (friendly_name, description, adapter_name):
+            if candidate in requested and entry.if_index:
+                resolved[candidate] = int(entry.if_index)
+        current = entry.next
     return resolved
 
 
@@ -293,7 +365,7 @@ def probe_tello_endpoint(
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         probe.settimeout(timeout)
-        probe.bind((adapter.local_ip, 0))
+        probe.bind((adapter.local_ip, TELLO_COMMAND_PORT))
         probe.connect((TELLO_ENDPOINT, TELLO_COMMAND_PORT))
         if probe.getsockname()[0] != adapter.local_ip:
             return False

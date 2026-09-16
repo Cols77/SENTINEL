@@ -1,0 +1,12 @@
+{
+  "contract_version": "sentinel.v0",
+  "mountain_id": "DEMO_MOUNTAIN",
+  "coordinate_system": "local-schematic-100x100",
+  "snapshot_stale_after_ms": 5000,
+  "sections": [
+    {"section_id":"NORTH_TRAIL","name":"North Trail","polygon":[[8,68],[92,68],[92,94],[8,94],[8,68]],"initial_status":"UNSURVEYED"},
+    {"section_id":"EAST_RIDGE","name":"East Ridge","polygon":[[58,12],[92,12],[92,62],[58,62],[58,12]],"initial_status":"UNSURVEYED"},
+    {"section_id":"SOUTH_BOWL","name":"South Bowl","polygon":[[8,12],[52,12],[52,62],[8,62],[8,12]],"initial_status":"UNSURVEYED"}
+  ],
+  "compatibility_mapping":{"NOT_INSPECTED":"UNSURVEYED","INSPECTING":"SURVEYING","CLEAR":"SURVEYED","HAZARD_FOUND":"HAZARD_PENDING","FAILED":"BLOCKED"}
+}

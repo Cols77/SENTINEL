@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol, Sequence, runtime_checkable
 
 from .models import CommandRecord, Direction, Telemetry, VideoFrame
@@ -47,6 +48,8 @@ class DroneClient(Protocol):
     def sdk_version(self) -> str: ...
 
     def set_speed(self, cm_per_second: int) -> str: ...
+
+    def set_video_record_path(self, path: str | Path) -> None: ...
 
     def start_video(self) -> None: ...
 

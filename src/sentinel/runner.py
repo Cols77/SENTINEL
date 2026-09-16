@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from threading import Event, RLock
 from typing import Any, Callable, TypeVar
@@ -32,6 +33,10 @@ class FlightTestRunner:
         route_before: Any | None = None,
         route_after: Any | None = None,
         route_snapshot_provider: Callable[[], Any] | None = None,
+        progress: Callable[[str, str], None] | None = None,
+        retain_video_stream: bool = False,
+        video_only: bool = False,
+        video_only_duration_s: float = 30.0,
     ) -> None:
         self.client = client
         self.mode = mode
@@ -40,12 +45,22 @@ class FlightTestRunner:
         self.route_before = route_before
         self.route_after = route_after
         self.route_snapshot_provider = route_snapshot_provider
+        self.progress = progress
+        self.retain_video_stream = retain_video_stream
+        if video_only_duration_s < 0:
+            raise ValueError("video_only_duration_s must not be negative")
+        self.video_only = video_only
+        self.video_only_duration_s = video_only_duration_s
         self.envelope = FlightEnvelope()
         self.video_frame: VideoFrame | None = None
         self.history: list[CommandRecord] = []
         self.emergency_event = Event()
         self._emergency_error: Exception | None = None
         self._emergency_lock = RLock()
+
+    def _emit(self, event: str, message: str) -> None:
+        if self.progress is not None:
+            self.progress(event, message)
 
     @property
     def emergency_triggered(self) -> bool:
@@ -135,6 +150,7 @@ class FlightTestRunner:
         candidate = self.envelope.validate_move(
             self.envelope.position, direction, distance_cm
         )
+        self._emit("flight", f"sending {direction} {distance_cm} cm")
         response = self._call(
             lambda: self.client.move(direction, distance_cm), candidate
         )
@@ -144,6 +160,7 @@ class FlightTestRunner:
             )
         self.envelope.position = candidate
         if direction in {"up", "down"}:
+            self._emit("flight", "validating altitude telemetry")
             measured_height = self._require_height(
                 self._call(self.client.height_cm)
             )
@@ -174,6 +191,7 @@ class FlightTestRunner:
     def _enter_altitude_band(self) -> None:
         """Take 20 cm steps until measured height reaches the cube floor."""
 
+        self._emit("flight", "validating initial altitude")
         height = self._require_height(self._call(self.client.height_cm))
         if height > self.envelope.max_z_cm:
             raise EnvelopeViolation(
@@ -184,6 +202,7 @@ class FlightTestRunner:
             if height + 20 > self.envelope.max_z_cm:
                 raise EnvelopeViolation("20 cm altitude step would cross upper face")
 
+            self._emit("flight", f"sending altitude move up 20 cm from {height} cm")
             response = self._call(
                 lambda: self.client.move("up", 20),
                 Position(0, 0, height + 20),
@@ -191,6 +210,7 @@ class FlightTestRunner:
             if not self._is_ok(response):
                 raise RuntimeError(f"altitude-entry move failed: {response}")
 
+            self._emit("flight", "validating altitude telemetry")
             next_height = self._require_height(self._call(self.client.height_cm))
             if next_height > self.envelope.max_z_cm:
                 raise EnvelopeViolation(
@@ -203,8 +223,10 @@ class FlightTestRunner:
         self.envelope.position = Position(0, 0, height)
 
     def _preflight(self) -> None:
+        self._emit("preflight", "connecting to Tello")
         self._call(self.client.connect)
 
+        self._emit("preflight", "validating battery telemetry")
         battery = self._call(self.client.battery)
         if (
             isinstance(battery, bool)
@@ -213,36 +235,50 @@ class FlightTestRunner:
         ):
             raise RuntimeError(f"invalid battery telemetry: {battery!r}")
         if battery < self.minimum_battery:
-            raise RuntimeError(
-                f"battery is below the {self.minimum_battery}% minimum"
-            )
+            if self.video_only:
+                self._emit(
+                    "preflight",
+                    f"battery is {battery}%: below flight minimum, "
+                    "continuing in no-flight video-only mode",
+                )
+            else:
+                raise RuntimeError(
+                    f"battery is below the {self.minimum_battery}% minimum"
+                )
 
+        self._emit("preflight", "validating current altitude telemetry")
         height = self._require_height(self._call(self.client.height_cm))
         if height > self.envelope.max_z_cm:
             raise EnvelopeViolation(
                 f"preflight height exceeds upper face: {height} cm"
             )
 
-        sdk_version = self._call(self.client.sdk_version)
-        if not str(sdk_version).strip():
-            raise RuntimeError("SDK version telemetry is empty")
+        # SDK 1.3 does not define an sdk? read command.  Command-mode
+        # acknowledgement plus the documented battery?/height?/speed? and
+        # stream commands below are the compatibility checks.
+        self._emit("preflight", "validating SDK 1.3 command compatibility")
 
+        self._emit("preflight", "setting command speed to 20 cm/s")
         response = self._call(lambda: self.client.set_speed(20))
         if not self._is_ok(response):
             raise RuntimeError(f"speed command failed: {response}")
+        self._emit("preflight", "validating speed readback")
         if self._call(self.client.speed_cm_per_second) != 20:
             raise RuntimeError("speed readback did not match 20 cm/s")
 
-            self._assert_route_unchanged()
+        self._assert_route_unchanged()
 
+        self._emit("preflight", "starting video stream")
         self._call(self.client.stream_on)
         try:
+            self._emit("preflight", "validating decoded video frame")
             frame = self._call(lambda: self.client.read_frame(timeout=10))
             if frame is None or frame.width <= 0 or frame.height <= 0:
                 raise RuntimeError("video frame dimensions are invalid")
             self.video_frame = frame
         finally:
-            if not self.emergency_event.is_set():
+            if not self.emergency_event.is_set() and not self.retain_video_stream:
+                self._emit("preflight", "stopping video stream")
                 self._call(self.client.stream_off)
 
     def _make_report(self, status: str, error: str | None = None) -> RunReport:
@@ -255,6 +291,25 @@ class FlightTestRunner:
             adapter=self.adapter,
             error=error,
         )
+
+    def _record_video_only(self) -> None:
+        self._emit(
+            "video_only",
+            f"recording video for {self.video_only_duration_s:.1f} seconds",
+        )
+        deadline = time.monotonic() + self.video_only_duration_s
+        while True:
+            if self.emergency_event.is_set():
+                raise EmergencyAborted("emergency stop triggered during video capture")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.25, remaining))
+
+    def _emergency_report_error(self, error: Exception) -> str:
+        if self._emergency_error is None:
+            return str(error)
+        return f"{error}; emergency send failed: {self._emergency_error}"
 
     def _attempt_normal_landing(self) -> None:
         if self.emergency_event.is_set():
@@ -284,59 +339,80 @@ class FlightTestRunner:
         self.video_frame = None
 
         try:
+            self._emit("run_started", "starting preflight")
             self._preflight()
+            if self.video_only:
+                self._record_video_only()
+                report = self._make_report("PASS")
+                self._emit("run_complete", "video-only capture passed")
+            else:
+                self._emit("preflight", "preflight passed; starting flight sequence")
 
-            # Once the takeoff request is about to be transmitted, an error
-            # can mean the drone is airborne even when no ACK arrived.
-            airborne = True
-            self._assert_route_unchanged()
-            response = self._call(self.client.takeoff)
-            if not self._is_ok(response):
-                raise RuntimeError(f"takeoff failed: {response}")
-            if self.emergency_event.is_set() or bool(
-                getattr(self.client, "emergency_triggered", False)
-            ):
-                raise EmergencyAborted("emergency stop triggered during takeoff")
-            airborne = True
+                # Once the takeoff request is about to be transmitted, an error
+                # can mean the drone is airborne even when no ACK arrived.
+                airborne = True
+                self._assert_route_unchanged()
+                self._emit("flight", "sending takeoff")
+                response = self._call(self.client.takeoff)
+                if not self._is_ok(response):
+                    raise RuntimeError(f"takeoff failed: {response}")
+                if self.emergency_event.is_set() or bool(
+                    getattr(self.client, "emergency_triggered", False)
+                ):
+                    raise EmergencyAborted("emergency stop triggered during takeoff")
+                airborne = True
 
-            self._enter_altitude_band()
-            for direction in ("forward", "right", "back", "left", "up", "down"):
-                self.move_checked(direction, 50)
+                self._enter_altitude_band()
+                for direction in ("forward", "right", "back", "left", "up", "down"):
+                    self.move_checked(direction, 50)
 
-            response = self._call(lambda: self.client.rotate("cw", 90))
-            if not self._is_ok(response):
-                raise RuntimeError(f"clockwise rotation failed: {response}")
-            response = self._call(lambda: self.client.rotate("ccw", 90))
-            if not self._is_ok(response):
-                raise RuntimeError(f"counter-clockwise rotation failed: {response}")
-            response = self._call(self.client.stop)
-            if not self._is_ok(response):
-                raise RuntimeError(f"hover/stop failed: {response}")
-            response = self._call(self.client.land)
-            if not self._is_ok(response):
-                raise RuntimeError(f"landing failed: {response}")
-            airborne = False
-            report = self._make_report("PASS")
+                self._emit("flight", "sending clockwise rotation 90 degrees")
+                response = self._call(lambda: self.client.rotate("cw", 90))
+                if not self._is_ok(response):
+                    raise RuntimeError(f"clockwise rotation failed: {response}")
+                self._emit("flight", "sending counter-clockwise rotation 90 degrees")
+                response = self._call(lambda: self.client.rotate("ccw", 90))
+                if not self._is_ok(response):
+                    raise RuntimeError(f"counter-clockwise rotation failed: {response}")
+                self._emit("flight", "sending hover/stop")
+                response = self._call(self.client.stop)
+                if not self._is_ok(response):
+                    raise RuntimeError(f"hover/stop failed: {response}")
+                self._emit("flight", "sending landing")
+                response = self._call(self.client.land)
+                if not self._is_ok(response):
+                    raise RuntimeError(f"landing failed: {response}")
+                airborne = False
+                report = self._make_report("PASS")
+                self._emit("run_complete", "flight sequence passed")
         except KeyboardInterrupt:
             if airborne:
                 self._attempt_normal_landing()
             report = self._make_report(
                 "FAIL", "operator interrupted; controlled landing attempted"
             )
+            self._emit("run_failed", report.error or "operator interrupted")
         except EmergencyAborted as exc:
             self.emergency_event.set()
-            report = self._make_report("EMERGENCY_ABORTED", str(exc))
+            report = self._make_report(
+                "EMERGENCY_ABORTED", self._emergency_report_error(exc)
+            )
+            self._emit("emergency_aborted", report.error or str(exc))
         except Exception as exc:
             emergency = self.emergency_event.is_set() or bool(
                 getattr(self.client, "emergency_triggered", False)
             )
             if emergency:
                 self.emergency_event.set()
-                report = self._make_report("EMERGENCY_ABORTED", str(exc))
+                report = self._make_report(
+                    "EMERGENCY_ABORTED", self._emergency_report_error(exc)
+                )
+                self._emit("emergency_aborted", report.error or str(exc))
             else:
                 if airborne:
                     self._attempt_normal_landing()
                 report = self._make_report("FAIL", str(exc))
+                self._emit("run_failed", report.error or str(exc))
         finally:
             try:
                 self.client.close()
@@ -351,4 +427,9 @@ class FlightTestRunner:
         """Return a terminal report for an emergency latched elsewhere."""
 
         self.emergency_event.set()
-        return self._make_report("EMERGENCY_ABORTED", "emergency stop triggered")
+        return self._make_report(
+            "EMERGENCY_ABORTED",
+            self._emergency_report_error(
+                EmergencyAborted("emergency stop triggered")
+            ),
+        )

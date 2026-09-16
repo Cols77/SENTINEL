@@ -9,25 +9,20 @@ and supplies the same explicit binding to the dedicated video receiver.
 from __future__ import annotations
 
 import inspect
+import math
 import socket
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
+from .client import EmergencyAborted
 from .video import VideoReceiver
 
 
-try:  # The Task 1 client boundary is supplied by the surrounding branch.
-    from .client import DroneError as _DroneError
-    from .client import EmergencyAborted
-except ImportError:  # pragma: no cover - used only before Task 1 lands
-    class _DroneError(RuntimeError):
-        """Fallback base exception for isolated Task 3 tests."""
-
-    class EmergencyAborted(_DroneError):
-        """Raised after the emergency command has latched."""
+_DroneError = RuntimeError
 
 
 class DjitellopyBackendError(_DroneError):
@@ -170,6 +165,7 @@ class DjitellopyClient:
         retry_count: int = 3,
         timeout: float = 7.0,
         pixel_format: str = "rgb24",
+        video_record_path: str | Path | None = None,
         tello_factory: Callable[..., Any] | None = None,
         socket_factory: Callable[..., Any] | None = None,
         video_factory: Callable[..., Any] | None = None,
@@ -182,6 +178,9 @@ class DjitellopyClient:
             raise ValueError("timeout must be positive")
         self.timeout = timeout
         self.pixel_format = pixel_format
+        self.video_record_path = (
+            Path(video_record_path) if video_record_path is not None else None
+        )
         self._tello_factory = tello_factory or _default_tello_factory
         self._socket_factory = socket_factory or socket.socket
         self._video_factory = video_factory or VideoReceiver
@@ -194,6 +193,10 @@ class DjitellopyClient:
         self._closed = False
         self._emergency_triggered = False
         self._command_lock = threading.RLock()
+        self._emergency_lock = threading.Lock()
+        self._emergency_done = threading.Event()
+        self._emergency_error: Exception | None = None
+        self._emergency_result: str | None = None
         self.records: list[Any] = []
 
     @property
@@ -372,10 +375,60 @@ class DjitellopyClient:
         return int(self._telemetry(("get_battery",), "bat"))
 
     def height_cm(self) -> int:
-        return int(self._telemetry(("get_height",), "h"))
+        # SDK 1.3 defines height? as a 0-3000 cm read command.  The
+        # asynchronous state field h can transiently report -10 while the
+        # altitude sensor is not ready, so use the explicit query first.
+        read_command = getattr(self._tello, "send_read_command", None)
+        if read_command is not None:
+            raw_height = read_command("height?")
+        else:
+            raw_height = self._telemetry(("query_height", "get_height"), "h")
+        return self._parse_height_cm(raw_height)
+
+    @staticmethod
+    def _parse_height_cm(raw_height: Any) -> int:
+        """Normalize cm and basic-Tello decimeter height responses."""
+        text = str(raw_height).strip().lower()
+        multiplier = 1
+        if text.endswith("dm"):
+            multiplier = 10
+            text = text[:-2].strip()
+        elif text.endswith("cm"):
+            text = text[:-2].strip()
+        try:
+            parsed_height = float(text)
+        except (TypeError, ValueError) as exc:
+            raise DjitellopyBackendError(
+                f"invalid height telemetry: {raw_height!r}"
+            ) from exc
+        height_cm = parsed_height * multiplier
+        if not math.isfinite(height_cm) or not height_cm.is_integer():
+            raise DjitellopyBackendError(
+                f"height telemetry is not an integer: {raw_height!r}"
+            )
+        return int(height_cm)
 
     def speed_cm_per_second(self) -> int:
-        return int(self._telemetry(("get_speed", "query_speed"), "vgx"))
+        # DJITelloPy's query_speed() parses the response with int(), but some
+        # Tello firmware versions return integral speeds as decimal strings
+        # such as "20.0". Prefer its raw string reader so SENTINEL owns the
+        # compatibility parsing instead of inheriting that library failure.
+        read_command = getattr(self._tello, "send_read_command", None)
+        if read_command is not None:
+            raw_speed = read_command("speed?")
+        else:
+            raw_speed = self._telemetry(("get_speed", "query_speed"), "vgx")
+        try:
+            parsed_speed = float(raw_speed)
+        except (TypeError, ValueError) as exc:
+            raise DjitellopyBackendError(
+                f"invalid speed telemetry: {raw_speed!r}"
+            ) from exc
+        if not parsed_speed.is_integer():
+            raise DjitellopyBackendError(
+                f"speed telemetry is not an integer: {raw_speed!r}"
+            )
+        return int(parsed_speed)
 
     def sdk_version(self) -> str:
         return str(self._telemetry(("query_sdk_version", "get_sdk_version"), "sdk"))
@@ -421,6 +474,14 @@ class DjitellopyClient:
     def set_speed(self, cm_per_second: int) -> str:
         return self._command_method(("set_speed",), f"speed {cm_per_second}", cm_per_second)
 
+    def set_video_record_path(self, path: str | Path) -> None:
+        with self._command_lock:
+            if self._streaming:
+                raise DjitellopyBackendError(
+                    "video record path cannot change while streaming"
+                )
+            self.video_record_path = Path(path)
+
     def takeoff(self) -> str:
         return self._command_method(("takeoff",), "takeoff")
 
@@ -431,14 +492,15 @@ class DjitellopyClient:
         return self._command_method(("move",), f"{direction} {distance_cm}", direction, distance_cm)
 
     def rotate(self, direction: str, degrees: int) -> str:
+        if not isinstance(direction, str) or direction not in {"cw", "ccw"}:
+            raise ValueError("rotation direction must be 'cw' or 'ccw'")
+        if type(degrees) is not int or not 1 <= degrees <= 360:
+            raise ValueError("rotation degrees must be an integer between 1 and 360")
         methods = {
             "cw": ("rotate_clockwise",),
             "ccw": ("rotate_counter_clockwise",),
         }
-        try:
-            candidates = methods[direction]
-        except KeyError as exc:
-            raise ValueError("rotation direction must be 'cw' or 'ccw'") from exc
+        candidates = methods[direction]
         return self._command_method(candidates, f"{direction} {degrees}", degrees)
 
     def stop(self) -> str:
@@ -459,6 +521,7 @@ class DjitellopyClient:
             "port": self.video_port,
             "socket_factory": self._bound_sockets,
             "pixel_format": self.pixel_format,
+            "record_path": self.video_record_path,
         }
         video = self._call_factory(self._video_factory, video_values)
         video.start()
@@ -506,32 +569,65 @@ class DjitellopyClient:
         return self._video.read(timeout)
 
     def emergency(self) -> str:
-        with self._command_lock:
+        with self._emergency_lock:
             if self._emergency_triggered:
-                return "ok"
-            self._emergency_triggered = True
-            try:
-                # Do not route this through DJITelloPy's shared response socket:
-                # a normal command may be waiting for a response there.  Emergency
-                # gets a fresh, explicitly bound socket and never waits for ACK.
-                response = self._send_emergency_datagram()
-                return self._record("emergency", response)
-            except Exception as exc:
-                self.records.append(self._make_record("emergency", f"error: {exc}"))
-                raise DjitellopyBackendError(f"emergency send failed: {exc}") from exc
+                first_send_in_flight = not self._emergency_done.is_set()
+            else:
+                first_send_in_flight = False
+                self._emergency_triggered = True
 
-    def _send_emergency_datagram(self) -> str:
+        if first_send_in_flight:
+            self._emergency_done.wait()
+            with self._emergency_lock:
+                if self._emergency_error is not None:
+                    raise DjitellopyBackendError(
+                        "emergency send previously failed: "
+                        f"{self._emergency_error}"
+                    ) from self._emergency_error
+                return self._emergency_result or "sent 9 bytes"
+
+        with self._emergency_lock:
+            if self._emergency_error is not None:
+                raise DjitellopyBackendError(
+                    "emergency send previously failed: "
+                    f"{self._emergency_error}"
+                ) from self._emergency_error
+            if self._emergency_result is not None:
+                return self._emergency_result
+
+        try:
+            # Do not route this through DJITelloPy's shared response socket or
+            # the normal command lock. A command may be waiting for a response
+            # there; emergency must remain able to transmit immediately.
+            bytes_sent = self._send_emergency_datagram()
+            response = f"sent {bytes_sent} bytes"
+            self.records.append(self._make_record("emergency", response))
+            with self._emergency_lock:
+                self._emergency_result = response
+            return response
+        except Exception as exc:
+            self.records.append(self._make_record("emergency", f"error: {exc}"))
+            with self._emergency_lock:
+                self._emergency_error = exc
+            raise DjitellopyBackendError(f"emergency send failed: {exc}") from exc
+        finally:
+            self._emergency_done.set()
+
+    def _send_emergency_datagram(self) -> int:
         emergency_socket = self._socket_factory(socket.AF_INET, socket.SOCK_DGRAM)
+        payload = b"emergency"
         try:
             set_blocking = getattr(emergency_socket, "setblocking", None)
             if set_blocking is not None:
                 set_blocking(False)
             emergency_socket.bind((self.local_ip, 0))
-            emergency_socket.sendto(
-                b"emergency",
-                (self.tello_ip, 8889),
-            )
-            return "ok"
+            bytes_sent = emergency_socket.sendto(payload, (self.tello_ip, 8889))
+            if bytes_sent != len(payload):
+                raise OSError(
+                    "emergency datagram incomplete: "
+                    f"sent {bytes_sent} of {len(payload)} bytes"
+                )
+            return bytes_sent
         finally:
             emergency_socket.close()
 

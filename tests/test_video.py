@@ -2,6 +2,7 @@ import threading
 import time
 
 import pytest
+from av.error import InvalidDataError
 
 from sentinel.video import (
     VideoDecoderError,
@@ -63,7 +64,9 @@ class FakeDecoder:
 
 
 def test_video_receiver_binds_ip_and_decodes_dimensions_in_explicit_pixel_format():
-    fake_socket = FakeSocket([b"short", b"a much longer datagram"])
+    fake_socket = FakeSocket(
+        [b"a" * 1460, b"frame-1", b"b" * 1460, b"frame-2"]
+    )
     formats = []
     decoder = FakeDecoder(formats)
 
@@ -84,42 +87,57 @@ def test_video_receiver_binds_ip_and_decodes_dimensions_in_explicit_pixel_format
     while len(decoder.packets) < 2 and time.monotonic() < deadline:
         time.sleep(0.001)
     assert formats == ["rgb24", "rgb24"]
-    assert decoder.packets == [b"short", b"a much longer datagram"]
+    assert decoder.packets == [
+        b"a" * 1460 + b"frame-1",
+        b"b" * 1460 + b"frame-2",
+    ]
     assert fake_socket.bindings == [("192.168.10.2", 11111)]
 
     receiver.stop()
     assert fake_socket.closed is True
 
 
-def test_video_receiver_uses_codec_parser_for_fragmented_h264_datagrams():
-    fake_socket = FakeSocket([b"fragment-1", b"fragment-2"])
+def test_video_receiver_decodes_reassembled_payload_as_one_codec_packet():
+    fake_socket = FakeSocket([b"a" * 1460, b"fragment-2"])
     formats = []
-    parsed = []
 
-    class ParsingDecoder(FakeDecoder):
+    class DirectDecoder(FakeDecoder):
         def parse(self, payload):
-            parsed.append(payload)
-            return [payload]
+            raise AssertionError("assembled Tello frames must use direct packets")
 
-    decoder = ParsingDecoder(formats)
+    decoder = DirectDecoder(formats)
     receiver = VideoReceiver(
         local_ip="192.168.10.2",
         socket_factory=lambda *_args, **_kwargs: fake_socket,
         decoder_factory=lambda: decoder,
-        packet_factory=lambda _payload: (_ for _ in ()).throw(
-            AssertionError("parser path must not use packet_factory")
-        ),
+        packet_factory=lambda payload: payload,
     )
 
     receiver.start()
     frame = receiver.read(timeout=1.0)
     assert frame.width == 640
-    deadline = time.monotonic() + 1.0
-    while len(parsed) < 2 and time.monotonic() < deadline:
-        time.sleep(0.001)
     receiver.stop()
 
-    assert parsed == [b"fragment-1", b"fragment-2"]
+    assert decoder.packets == [b"a" * 1460 + b"fragment-2"]
+
+
+def test_video_receiver_records_reassembled_h264_stream(tmp_path):
+    fake_socket = FakeSocket([b"a" * 1460, b"frame"])
+    decoder = FakeDecoder([])
+    output = tmp_path / "tello.h264"
+    receiver = VideoReceiver(
+        local_ip="192.168.10.2",
+        socket_factory=lambda *_args, **_kwargs: fake_socket,
+        decoder_factory=lambda: decoder,
+        packet_factory=lambda payload: payload,
+        record_path=output,
+    )
+
+    receiver.start()
+    receiver.read(timeout=1.0)
+    receiver.stop()
+
+    assert output.read_bytes() == b"a" * 1460 + b"frame"
 
 
 @pytest.mark.parametrize("pixel_format", ["rgb24", "bgr24"])
@@ -162,6 +180,32 @@ def test_video_receiver_surfaces_decoder_failure():
         receiver.read(timeout=1.0)
 
     assert receiver.last_error is not None
+    receiver.stop()
+
+
+def test_video_receiver_waits_through_pre_keyframe_invalid_data():
+    fake_socket = FakeSocket([b"pre-keyframe", b"keyframe"])
+
+    class RecoveringDecoder(FakeDecoder):
+        def decode(self, packet):
+            if packet == b"pre-keyframe":
+                raise InvalidDataError(1094995529, "pre-keyframe")
+            return super().decode(packet)
+
+    formats = []
+    decoder = RecoveringDecoder(formats)
+    receiver = VideoReceiver(
+        local_ip="192.168.10.2",
+        socket_factory=lambda *_args, **_kwargs: fake_socket,
+        decoder_factory=lambda: decoder,
+        packet_factory=lambda payload: payload,
+    )
+    receiver.start()
+
+    frame = receiver.read(timeout=1.0)
+
+    assert frame.width == 640
+    assert receiver.last_error is None
     receiver.stop()
 
 

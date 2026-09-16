@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .client import EmergencyAborted
 from .envelope import FlightEnvelope
 from .models import CommandRecord, Direction, Telemetry, VideoFrame
@@ -29,6 +31,7 @@ class DryRunClient:
         self._envelope = FlightEnvelope()
         self._height = 0
         self._speed = 10
+        self._video_record_path: Path | None = None
 
     @property
     def command_history(self) -> tuple[CommandRecord, ...]:
@@ -95,6 +98,11 @@ class DryRunClient:
         response = self._send("speed", cm_per_second)
         self._speed = cm_per_second
         return response
+
+    def set_video_record_path(self, path: str | Path) -> None:
+        if self._video_active:
+            raise ClientStateError("video record path cannot change while streaming")
+        self._video_record_path = Path(path)
 
     def start_video(self) -> None:
         self.stream_on()
