@@ -1,9 +1,39 @@
 {
   "$schema":"https://json-schema.org/draft/2020-12/schema",
   "$id":"https://sentinel.local/contracts/provider-profile-v1.schema.json",
-  "title":"SENTINEL V0 perception provider profile",
-  "type":"object","additionalProperties":false,
-  "required":["profile_version","profile_id","approval_status","selection_decision_id","provider","model","model_revision","prompt_revision","transform_revision","evaluation_pack_sha256","score_semantics","decision_threshold","max_p95_latency_ms","max_provider_failure_rate","replay_allowed_in_judged_path"],
-  "properties":{"profile_version":{"const":"provider-profile.v1"},"profile_id":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},"approval_status":{"enum":["UNAPPROVED","APPROVED"]},"selection_decision_id":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]},"provider":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]},"model":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]},"model_revision":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]},"prompt_revision":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]},"transform_revision":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]},"evaluation_pack_sha256":{"anyOf":[{"type":"string","pattern":"^[a-f0-9]{64}$"},{"type":"null"}]},"score_semantics":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]},"decision_threshold":{"anyOf":[{"type":"number","minimum":0,"maximum":1},{"type":"null"}]},"max_p95_latency_ms":{"anyOf":[{"type":"integer","minimum":1},{"type":"null"}]},"max_provider_failure_rate":{"anyOf":[{"type":"number","minimum":0,"maximum":1},{"type":"null"}]},"replay_allowed_in_judged_path":{"const":false},"box_required":{"type":"boolean"},"redaction_policy_revision":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]}},
-  "allOf":[{"if":{"properties":{"approval_status":{"const":"APPROVED"}}},"then":{"properties":{"selection_decision_id":{"type":"string","minLength":1},"provider":{"type":"string","minLength":1},"model":{"type":"string","minLength":1},"model_revision":{"type":"string","minLength":1},"prompt_revision":{"type":"string","minLength":1},"transform_revision":{"type":"string","minLength":1},"evaluation_pack_sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"},"score_semantics":{"type":"string","minLength":1},"decision_threshold":{"type":"number"},"max_p95_latency_ms":{"type":"integer"},"max_provider_failure_rate":{"type":"number"}}}}]
+  "title":"SENTINEL V0 demo perception provider profile",
+  "description":"An approved V0 profile is reproducible through its owner approval record and versioned demo test-image-set hash. Release benchmark governance, latency/failure targets, redaction policy and provider failover are out of scope.",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["profile_version","profile_id","approval_status","selection_decision_id","provider","model","model_revision","prompt_revision","transform_revision","evaluation_pack_sha256","score_semantics","decision_threshold","replay_allowed_in_judged_path"],
+  "properties":{
+    "profile_version":{"const":"provider-profile.v1"},
+    "profile_id":{"type":"string","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "approval_status":{"enum":["UNAPPROVED","APPROVED"]},
+    "selection_decision_id":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]},
+    "provider":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]},
+    "model":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]},
+    "model_revision":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]},
+    "prompt_revision":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]},
+    "transform_revision":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]},
+    "evaluation_pack_sha256":{"anyOf":[{"type":"string","pattern":"^[a-f0-9]{64}$"},{"type":"null"}]},
+    "score_semantics":{"anyOf":[{"type":"string","minLength":1},{"type":"null"}]},
+    "decision_threshold":{"anyOf":[{"type":"number","minimum":0,"maximum":1},{"type":"null"}]},
+    "replay_allowed_in_judged_path":{"const":false},
+    "box_required":{"type":"boolean"}
+  },
+  "allOf":[{
+    "if":{"properties":{"approval_status":{"const":"APPROVED"}}},
+    "then":{"properties":{
+      "selection_decision_id":{"type":"string","minLength":1},
+      "provider":{"type":"string","minLength":1},
+      "model":{"type":"string","minLength":1},
+      "model_revision":{"type":"string","minLength":1},
+      "prompt_revision":{"type":"string","minLength":1},
+      "transform_revision":{"type":"string","minLength":1},
+      "evaluation_pack_sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"},
+      "score_semantics":{"type":"string","minLength":1},
+      "decision_threshold":{"type":"number"}
+    }}
+  }]
 }

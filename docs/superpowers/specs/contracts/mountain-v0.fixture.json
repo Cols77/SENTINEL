@@ -3,10 +3,17 @@
   "mountain_id": "DEMO_MOUNTAIN",
   "coordinate_system": "local-schematic-100x100",
   "snapshot_stale_after_ms": 5000,
+  "layout_modes": [
+    {"mode":"MARKER_VERIFIED","active_zone_ids":["LEFT_ALLEY_FRONT","LEFT_ALLEY_MIDDLE","LEFT_ALLEY_BACK","RIGHT_ALLEY_FRONT","RIGHT_ALLEY_MIDDLE","RIGHT_ALLEY_BACK"],"marker_verified":true},
+    {"mode":"ROUTE_ONLY_2_ZONE","active_zone_ids":["LEFT_ALLEY_MIDDLE","RIGHT_ALLEY_MIDDLE"],"marker_verified":false}
+  ],
   "sections": [
-    {"section_id":"NORTH_TRAIL","name":"North Trail","polygon":[[8,68],[92,68],[92,94],[8,94],[8,68]],"initial_status":"UNSURVEYED"},
-    {"section_id":"EAST_RIDGE","name":"East Ridge","polygon":[[58,12],[92,12],[92,62],[58,62],[58,12]],"initial_status":"UNSURVEYED"},
-    {"section_id":"SOUTH_BOWL","name":"South Bowl","polygon":[[8,12],[52,12],[52,62],[8,62],[8,12]],"initial_status":"UNSURVEYED"}
+    {"section_id":"LEFT_ALLEY_FRONT","name":"Left Alley Front","polygon":[[8,68],[30,68],[30,94],[8,94],[8,68]],"initial_status":"UNSURVEYED"},
+    {"section_id":"LEFT_ALLEY_MIDDLE","name":"Left Alley Middle","polygon":[[34,68],[56,68],[56,94],[34,94],[34,68]],"initial_status":"UNSURVEYED"},
+    {"section_id":"LEFT_ALLEY_BACK","name":"Left Alley Back","polygon":[[60,68],[92,68],[92,94],[60,94],[60,68]],"initial_status":"UNSURVEYED"},
+    {"section_id":"RIGHT_ALLEY_FRONT","name":"Right Alley Front","polygon":[[8,12],[30,12],[30,38],[8,38],[8,12]],"initial_status":"UNSURVEYED"},
+    {"section_id":"RIGHT_ALLEY_MIDDLE","name":"Right Alley Middle","polygon":[[34,12],[56,12],[56,38],[34,38],[34,12]],"initial_status":"UNSURVEYED"},
+    {"section_id":"RIGHT_ALLEY_BACK","name":"Right Alley Back","polygon":[[60,12],[92,12],[92,38],[60,38],[60,12]],"initial_status":"UNSURVEYED"}
   ],
   "compatibility_mapping":{"NOT_INSPECTED":"UNSURVEYED","INSPECTING":"SURVEYING","CLEAR":"SURVEYED","HAZARD_FOUND":"HAZARD_PENDING","FAILED":"BLOCKED"}
 }

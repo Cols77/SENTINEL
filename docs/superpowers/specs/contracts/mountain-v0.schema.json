@@ -1,16 +1,17 @@
 {
   "$schema":"https://json-schema.org/draft/2020-12/schema",
   "$id":"https://sentinel.local/contracts/mountain-v0.schema.json",
-  "title":"SENTINEL V0 three-section mountain fixture",
+  "title":"SENTINEL V0 fixed six-zone indoor-alley fixture",
   "type":"object",
   "additionalProperties":false,
-  "required":["contract_version","mountain_id","coordinate_system","snapshot_stale_after_ms","sections","compatibility_mapping"],
+  "required":["contract_version","mountain_id","coordinate_system","snapshot_stale_after_ms","sections","layout_modes","compatibility_mapping"],
   "properties":{
     "contract_version":{"const":"sentinel.v0"},
     "mountain_id":{"type":"string","pattern":"^[A-Z][A-Z0-9_]{2,63}$"},
     "coordinate_system":{"const":"local-schematic-100x100"},
     "snapshot_stale_after_ms":{"type":"integer","minimum":1},
-    "sections":{"type":"array","minItems":3,"maxItems":3,"uniqueItems":true,"items":{"type":"object","additionalProperties":false,"required":["section_id","name","polygon","initial_status"],"properties":{"section_id":{"type":"string","pattern":"^[A-Z][A-Z0-9_]{2,63}$"},"name":{"type":"string","minLength":1},"polygon":{"type":"array","minItems":4,"maxItems":129,"items":{"type":"array","items":{"type":"number","minimum":0,"maximum":100},"minItems":2,"maxItems":2},"description":"Closed polygon ring in (x,y) local-schematic coordinates; first and last coordinate are identical. Rings must be non-self-intersecting; this geometric invariant is checked by the WP0 fixture test."},"initial_status":{"enum":["UNSURVEYED","SURVEYING","SURVEYED","HAZARD_PENDING","BLOCKED"]}}}},
+    "layout_modes":{"type":"array","minItems":2,"maxItems":2,"uniqueItems":true,"items":{"type":"object","additionalProperties":false,"required":["mode","active_zone_ids","marker_verified"],"properties":{"mode":{"enum":["MARKER_VERIFIED","ROUTE_ONLY_2_ZONE"]},"active_zone_ids":{"type":"array","minItems":2,"maxItems":6,"uniqueItems":true,"items":{"enum":["LEFT_ALLEY_FRONT","LEFT_ALLEY_MIDDLE","LEFT_ALLEY_BACK","RIGHT_ALLEY_FRONT","RIGHT_ALLEY_MIDDLE","RIGHT_ALLEY_BACK"]}},"marker_verified":{"type":"boolean"}}}},
+    "sections":{"type":"array","minItems":6,"maxItems":6,"uniqueItems":true,"items":{"type":"object","additionalProperties":false,"required":["section_id","name","polygon","initial_status"],"properties":{"section_id":{"enum":["LEFT_ALLEY_FRONT","LEFT_ALLEY_MIDDLE","LEFT_ALLEY_BACK","RIGHT_ALLEY_FRONT","RIGHT_ALLEY_MIDDLE","RIGHT_ALLEY_BACK"]},"name":{"type":"string","minLength":1},"polygon":{"type":"array","minItems":4,"maxItems":129,"items":{"type":"array","items":{"type":"number","minimum":0,"maximum":100},"minItems":2,"maxItems":2},"description":"Closed polygon ring in (x,y) local-schematic coordinates; first and last coordinate are identical. Rings must be non-self-intersecting; this geometric invariant is checked by the WP0 fixture test."},"initial_status":{"enum":["UNSURVEYED","SURVEYING","SURVEYED","HAZARD_PENDING","BLOCKED"]}}}},
     "compatibility_mapping":{"type":"object","additionalProperties":false,"required":["NOT_INSPECTED","INSPECTING","CLEAR","HAZARD_FOUND","FAILED"],"properties":{"NOT_INSPECTED":{"const":"UNSURVEYED"},"INSPECTING":{"const":"SURVEYING"},"CLEAR":{"const":"SURVEYED"},"HAZARD_FOUND":{"const":"HAZARD_PENDING"},"FAILED":{"const":"BLOCKED"}}}
   }
 }
