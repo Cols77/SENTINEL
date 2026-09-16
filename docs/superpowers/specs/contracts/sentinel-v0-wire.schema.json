@@ -178,7 +178,7 @@
       "items": {
         "$ref": "#/$defs/LocalPoint"
       },
-      "minItems": 3,
+      "minItems": 4,
       "maxItems": 128,
       "description": "Closed local-schematic ring. First coordinate MUST equal last coordinate; implementation validates closure and non-self-intersection."
     },
@@ -463,6 +463,29 @@
                 "properties": {
                   "payload": {
                     "$ref": "#/$defs/CommandOperationReconcilePayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "command_type": {
+                    "const": "FORCE_RUN_CREATE"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "expected_state_version"
+                ],
+                "properties": {
+                  "expected_state_version": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "payload": {
+                    "$ref": "#/$defs/CommandForceRunCreatePayload"
                   }
                 }
               }
@@ -1715,8 +1738,8 @@
               "items": {
                 "$ref": "#/$defs/SectionState"
               },
-              "minItems": 3,
-              "maxItems": 3
+              "minItems": 6,
+              "maxItems": 6
             },
             "source_kind": {
               "$ref": "#/$defs/source_kind"
@@ -2216,9 +2239,7 @@
               "maxLength": 512
             },
             "catalogue_plan_id": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128
+              "$ref": "#/$defs/configured_id"
             }
           }
         },
@@ -2313,7 +2334,7 @@
         "plan_id": {"$ref": "#/$defs/uuid"},
         "plan_sha256": {"$ref": "#/$defs/hash"},
         "passed": {"type": "boolean"},
-        "checks": {"type": "array", "minItems": 8, "maxItems": 8, "items": {"type": "object", "additionalProperties": false, "required": ["name", "passed", "checked_at"], "properties": {"name": {"enum": ["WIFI_INTERFACE", "DRONE_LINK", "BATTERY_TELEMETRY", "LIVE_VIDEO", "LAYOUT_MARKERS", "BOUNDED_AREA", "HEIGHT_ENVELOPE", "EMERGENCY_LATCH"]}, "passed": {"type": "boolean"}, "checked_at": {"$ref": "#/$defs/timestamp"}}}},
+        "checks": {"type": "array", "minItems": 8, "maxItems": 8, "uniqueItems": true, "items": {"type": "object", "additionalProperties": false, "required": ["name", "passed", "checked_at"], "properties": {"name": {"enum": ["WIFI_INTERFACE", "DRONE_LINK", "BATTERY_TELEMETRY", "LIVE_VIDEO", "LAYOUT_MARKERS", "BOUNDED_AREA", "HEIGHT_ENVELOPE", "EMERGENCY_LATCH"]}, "passed": {"type": "boolean"}, "checked_at": {"$ref": "#/$defs/timestamp"}}}},
         "checked_at": {"$ref": "#/$defs/timestamp"}
       }
     },
