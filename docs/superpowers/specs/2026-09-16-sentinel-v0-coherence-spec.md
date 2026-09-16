@@ -24,7 +24,7 @@ operator request -> real LLM intent -> coordinator -> supervised Tello mission
 | D-001 | WP0–WP3 are the immediate planning/implementation priorities | Each has one dedicated spec and a common contract revision |
 | D-002 | Colin owns coordinator semantics; Alan owns the LLM adapter and WP2; Dzivha owns WP3 | No overlapping write ownership |
 | D-003 | NiceGUI is the V0 UI | Replaceable read/command client only |
-| D-004 | Mountain state is a three-section deterministic schematic | Fixture is `contracts/mountain-v0.fixture.json`; no GIS/SLAM/GPS |
+| D-004 | Mountain state is a fixed six-zone indoor-alley schematic | Fixture is `contracts/mountain-v0.fixture.json`; no GIS/SLAM/GPS |
 | D-005 | First integration is transport-neutral and in-process | HTTP/SSE/broker are deferred transport decisions |
 | D-006 | Judged path uses a real LLM; tests use a deterministic fake | Model provenance is required; fake fallback is forbidden in judged mode |
 | D-007 | Provider is selected by benchmark | A PM-approved provider profile freezes score semantics and threshold |
@@ -64,7 +64,7 @@ No component may use a parent value outside this table without a WP0 compatibili
 Operator request:
 
 ```text
-Inspect North Trail for rocks
+Inspect the left and right table alleys for rocks
 ```
 
 1. NiceGUI submits `RUN_CREATE` through `CoordinatorPort`.
@@ -80,17 +80,18 @@ Inspect North Trail for rocks
 
 Live: LLM, one Tello, preflight/flight/video/still capture, selected detector provider, coordinator persistence and operator decision.
 
-Simulated: three-section geometry, nonvisited context, patrollers, travel time and external notifications.
+Simulated: fixed six-zone geometry, nonvisited context, patrollers, travel time and external notifications.
 
 Replay is rehearsal-only and is rejected in a judged run.
 
 ## 5. Mountain-state fixture
 
-The normative fixture [`contracts/mountain-v0.fixture.json`](contracts/mountain-v0.fixture.json) defines exactly:
+The normative fixture [`contracts/mountain-v0.fixture.json`](contracts/mountain-v0.fixture.json) defines exactly six fixed zones:
 
-- `NORTH_TRAIL` — North Trail — judged section;
-- `EAST_RIDGE` — East Ridge;
-- `SOUTH_BOWL` — South Bowl.
+- `LEFT_ALLEY_FRONT`, `LEFT_ALLEY_MIDDLE`, `LEFT_ALLEY_BACK`;
+- `RIGHT_ALLEY_FRONT`, `RIGHT_ALLEY_MIDDLE`, `RIGHT_ALLEY_BACK`.
+
+The normal mode is marker-verified. `ROUTE_ONLY_2_ZONE` is the explicit fallback and activates only `LEFT_ALLEY_MIDDLE` and `RIGHT_ALLEY_MIDDLE`; it never claims visual marker verification. A marker-mode run fails when an expected marker is missing.
 
 All coordinates are local schematic `0..100`, not geographic. Each section polygon is a closed, non-self-intersecting `(x,y)` ring: first point equals last point and every coordinate is in inclusive `0..100`. `STALE` is not persisted section status: it is a derived boolean when `now - as_of > snapshot_stale_after_ms`, or when `snapshot_version < StateSnapshot.latest_event_sequence`. Snapshot/state/event advancement is defined normatively in WP0 §3.5. The UI renders unknown/stale values; it never interpolates them.
 
@@ -135,12 +136,12 @@ WP4 acceptance command (implementation work, not evidence fabricated by this spe
 | G0 Contract | Colin | schema/fixture validation, DDL constraint manifest, contract tests |
 | G1 Coordinator simulation | Colin + Alan | deterministic fake-agent replay, duplicate and `IN_DOUBT` tests |
 | G2 Human surface | Alan | NiceGUI smoke fixture, click-through evidence, Confirm/Reject stale-version test |
-| G3 Perception | Colin + Dzivha | reproducible evaluation manifest/benchmark evidence and named joint Colin-and-Dzivha-approved `provider-profile.v1` |
+| G3 Perception | Colin + Dzivha | reproducible evaluation manifest evidence and named owner-approved `provider-profile.v1` |
 | G4 Physical | Colin | supervised one-Tello rehearsal using WP0 operation/evidence contracts |
 
 V0 release requires G0–G4. G0–G3 can be completed without live hardware; G4 cannot be substituted by dry-run success.
 
-**G3 is BLOCKED.** The only checked-in provider-profile instance is the `UNAPPROVED` template. No provider profile may be used in the judged path until Colin and Dzivha jointly make a named decision approving a concrete instance and reproducible benchmark evidence exists. This specification intentionally declares no provider name, score threshold, evaluation data, or benchmark result.
+**G3 is BLOCKED.** The only checked-in provider-profile instance is the `UNAPPROVED` template. No provider profile may be used in the judged path until the owner makes a named decision approving a concrete instance and reproducible evaluation-pack evidence exists. This specification intentionally declares no provider name, score threshold, evaluation data, or benchmark result.
 
 ## 9. Non-goals
 

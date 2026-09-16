@@ -50,6 +50,9 @@
       "$ref": "#/$defs/WorkerDispatch"
     },
     {
+      "$ref": "#/$defs/PlanReadModel"
+    },
+    {
       "$ref": "#/$defs/VideoStatus"
     },
     {
@@ -207,6 +210,9 @@
         },
         {
           "$ref": "#/$defs/CommandOperationReconcilePayload"
+        },
+        {
+          "$ref": "#/$defs/CommandForceRunCreatePayload"
         }
       ]
     },
@@ -251,7 +257,8 @@
                 "TASK_RANK",
                 "OPERATOR_DECIDE",
                 "EMERGENCY_SIGNAL",
-                "OPERATION_RECONCILE"
+                "OPERATION_RECONCILE",
+                "FORCE_RUN_CREATE"
               ]
             },
             "run_id": {
@@ -1181,7 +1188,8 @@
             "artifact_sha256",
             "target_class",
             "judged_path",
-            "provider_profile_id"
+            "provider_profile_id",
+            "station_capture"
           ],
           "properties": {
             "contract_version": {
@@ -1213,6 +1221,9 @@
             },
             "provider_profile_id": {
               "$ref": "#/$defs/uuid"
+            },
+            "station_capture": {
+              "$ref": "#/$defs/StationCaptureProvenance"
             },
             "image_width": {
               "type": "integer",
@@ -1277,7 +1288,8 @@
             "transform_revision",
             "class_mapping_revision",
             "source_kind",
-            "created_at"
+            "created_at",
+            "station_capture"
           ],
           "properties": {
             "contract_version": {
@@ -1405,6 +1417,9 @@
             },
             "created_at": {
               "$ref": "#/$defs/timestamp"
+            },
+            "station_capture": {
+              "$ref": "#/$defs/StationCaptureProvenance"
             }
           }
         },
@@ -2199,6 +2214,11 @@
             "diagnostic": {
               "type": "string",
               "maxLength": 512
+            },
+            "catalogue_plan_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
             }
           }
         },
@@ -2214,7 +2234,8 @@
               },
               "then": {
                 "required": [
-                  "intent"
+                  "intent",
+                  "catalogue_plan_id"
                 ],
                 "properties": {
                   "intent": {
@@ -2268,6 +2289,64 @@
         }
       ]
     },
+    "SurveyPlanReference": {
+      "$anchor": "SurveyPlanReference",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plan_id", "catalogue_id", "catalogue_revision", "plan_sha256", "station_ids"],
+      "properties": {
+        "plan_id": {"$ref": "#/$defs/uuid"},
+        "catalogue_id": {"$ref": "#/$defs/configured_id"},
+        "catalogue_revision": {"$ref": "#/$defs/configured_id"},
+        "plan_sha256": {"$ref": "#/$defs/hash"},
+        "station_ids": {"type": "array", "minItems": 1, "maxItems": 6, "items": {"$ref": "#/$defs/configured_id"}}
+      }
+    },
+    "PreflightReport": {
+      "$anchor": "PreflightReport",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["report_id", "run_id", "plan_id", "plan_sha256", "passed", "checks", "checked_at"],
+      "properties": {
+        "report_id": {"$ref": "#/$defs/uuid"},
+        "run_id": {"$ref": "#/$defs/uuid"},
+        "plan_id": {"$ref": "#/$defs/uuid"},
+        "plan_sha256": {"$ref": "#/$defs/hash"},
+        "passed": {"type": "boolean"},
+        "checks": {"type": "array", "minItems": 8, "maxItems": 8, "items": {"type": "object", "additionalProperties": false, "required": ["name", "passed", "checked_at"], "properties": {"name": {"enum": ["WIFI_INTERFACE", "DRONE_LINK", "BATTERY_TELEMETRY", "LIVE_VIDEO", "LAYOUT_MARKERS", "BOUNDED_AREA", "HEIGHT_ENVELOPE", "EMERGENCY_LATCH"]}, "passed": {"type": "boolean"}, "checked_at": {"$ref": "#/$defs/timestamp"}}}},
+        "checked_at": {"$ref": "#/$defs/timestamp"}
+      }
+    },
+    "StationCaptureProvenance": {
+      "$anchor": "StationCaptureProvenance",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plan_id", "plan_sha256", "plan_step", "station_id", "zone_id", "height_m", "captured_at"],
+      "properties": {
+        "plan_id": {"$ref": "#/$defs/uuid"},
+        "plan_sha256": {"$ref": "#/$defs/hash"},
+        "plan_step": {"type": "integer", "minimum": 1, "maximum": 6},
+        "station_id": {"$ref": "#/$defs/configured_id"},
+        "zone_id": {"$ref": "#/$defs/configured_id"},
+        "marker_id": {"anyOf": [{"$ref": "#/$defs/configured_id"}, {"type": "null"}]},
+        "height_m": {"type": "number", "minimum": 0},
+        "captured_at": {"$ref": "#/$defs/timestamp"}
+      }
+    },
+    "ForceRunApproval": {
+      "$anchor": "ForceRunApproval",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approval_id", "failed_report_id", "operator_reason", "new_run_id", "new_plan_id", "approved_at"],
+      "properties": {
+        "approval_id": {"$ref": "#/$defs/uuid"},
+        "failed_report_id": {"$ref": "#/$defs/uuid"},
+        "operator_reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "new_run_id": {"$ref": "#/$defs/uuid"},
+        "new_plan_id": {"$ref": "#/$defs/uuid"},
+        "approved_at": {"$ref": "#/$defs/timestamp"}
+      }
+    },
     "WorkerDispatch": {
       "$anchor": "WorkerDispatch",
       "allOf": [
@@ -2284,7 +2363,10 @@
             "mission_id",
             "worker_id",
             "idempotency_key",
-            "choreography_id"
+            "choreography_id",
+            "plan_reference",
+            "approval_reference",
+            "preflight_report"
           ],
           "properties": {
             "contract_version": {
@@ -2311,6 +2393,15 @@
             },
             "choreography_id": {
               "$ref": "#/$defs/configured_id"
+            },
+            "plan_reference": {
+              "$ref": "#/$defs/SurveyPlanReference"
+            },
+            "approval_reference": {
+              "$ref": "#/$defs/uuid"
+            },
+            "preflight_report": {
+              "$ref": "#/$defs/PreflightReport"
             }
           }
         }
@@ -2563,6 +2654,31 @@
         "signal_id": {
           "$ref": "#/$defs/uuid"
         }
+      }
+    },
+    "CommandForceRunCreatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prior_run_id", "failed_report_id", "operator_reason", "new_plan_reference", "real_confirm"],
+      "properties": {
+        "prior_run_id": {"$ref": "#/$defs/uuid"},
+        "failed_report_id": {"$ref": "#/$defs/uuid"},
+        "operator_reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "new_plan_reference": {"$ref": "#/$defs/SurveyPlanReference"},
+        "real_confirm": {"const": true}
+      }
+    },
+    "PlanReadModel": {
+      "$anchor": "PlanReadModel",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plan_id", "plan_sha256", "mode", "station_ids", "approval_id"],
+      "properties": {
+        "plan_id": {"$ref": "#/$defs/uuid"},
+        "plan_sha256": {"$ref": "#/$defs/hash"},
+        "mode": {"enum": ["MARKER_VERIFIED", "ROUTE_ONLY_2_ZONE"]},
+        "station_ids": {"type": "array", "minItems": 1, "maxItems": 6, "items": {"$ref": "#/$defs/configured_id"}},
+        "approval_id": {"anyOf": [{"$ref": "#/$defs/uuid"}, {"type": "null"}]}
       }
     },
     "CommandOperationReconcilePayload": {

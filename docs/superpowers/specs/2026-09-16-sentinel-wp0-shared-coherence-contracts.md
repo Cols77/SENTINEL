@@ -73,7 +73,16 @@ The schema contains `ArtifactRef`, `CommandEnvelope`, `ResultEnvelope`, `EventEn
 ```text
 StateSnapshot(run_id, state_version, run_status, agent_phase,
               legal_operator_actions, active_operation, latest_event_sequence,
-              mountain_snapshot_version, updated_at)
+                      mountain_snapshot_version, updated_at)
+
+Indoor-alley runs use only the six catalogue-bound zones in `mountain-v0.fixture.json`.
+The worker emits an immutable `SurveyPlanReference`, `PreflightReport` and
+`StationCaptureProvenance`. `WorkerDispatch` must carry the exact plan reference,
+approval reference and preflight report; equality of IDs/hashes is checked by the
+semantic validator. `ROUTE_ONLY_2_ZONE` is the only fallback and is limited to the
+two middle zones. A failed preflight may be overridden only by a durable
+force-new-run approval that names the failed report, operator reason and new run
+and plan IDs; it cannot resume or redispatch the old operation.
 
 LocalPoint(x: float[0..100], y: float[0..100])
 LocalPose(point: LocalPoint, heading_deg: float|None, observed_at, source_kind)
@@ -84,7 +93,7 @@ SectionState(section_id, name, polygon, status, coverage_percent|None,
 HazardMarker(target_id, section_id, perception_result_id,
              point: LocalPoint|None, status, evidence_artifact_id)
 
-MountainStateSnapshot(run_id, snapshot_version, as_of, sections[3],
+MountainStateSnapshot(run_id, snapshot_version, as_of, sections[6],
                       drone_pose|None, flight_path, hazards,
                       active_mission_id|None, active_task_id|None,
                       source_kind, stale)
@@ -99,6 +108,9 @@ OperationRecord(operation_id, run_id, mission_id, command_id, worker_id,
 
 EmergencySignal(signal_id, run_id|None, mission_id|None, worker_id,
                 latched_at, source_kind, reason_code)
+
+The only V0 terminal/outcome vocabulary is `FAILED`, `NEEDS_REVIEW`, `COMPLETED`
+and `EMERGENCY`; an active emergency latch is terminal and cannot be forced.
 ```
 
 ### 3.4 Snapshot/version rule
@@ -127,7 +139,7 @@ Stable error codes include `INVALID_CONTRACT`, `IDEMPOTENCY_KEY_CONFLICT`, `STAL
 
 `ArtifactStorePort.put_selected_frame()` accepts only JPEG/PNG below 10 MiB, computes SHA-256, writes only run-scoped `storage_key` paths and returns `ArtifactRef`. `get(artifact_id)` is coordinator-mediated; UI receives bytes or a safe served response, never a raw path. The V0 retention policy is run-lifetime plus explicit manual cleanup; absence/corruption fails evidence use.
 
-A selected provider profile must validate against [`provider-profile-v1.schema.json`](contracts/provider-profile-v1.schema.json). [`provider-profile-unapproved.template.json`](contracts/provider-profile-unapproved.template.json) is deliberately `UNAPPROVED`; it is not selectable. An approved profile requires a named joint Colin-and-Dzivha decision and reproducible evaluation-pack hash. [`evaluation-manifest-v1.schema.json`](contracts/evaluation-manifest-v1.schema.json) defines those reproducible inputs. It includes the joint decision ID, evaluation-pack hash, score semantics, decision threshold, latency/failure limits, redaction policy revision and `replay_allowed_in_judged_path: false`.
+A selected provider profile must validate against [`provider-profile-v1.schema.json`](contracts/provider-profile-v1.schema.json). [`provider-profile-unapproved.template.json`](contracts/provider-profile-unapproved.template.json) is deliberately `UNAPPROVED`; it is not selectable. For this demo, an approved profile requires a named owner decision and reproducible evaluation-pack hash. [`evaluation-manifest-v1.schema.json`](contracts/evaluation-manifest-v1.schema.json) defines those reproducible inputs.
 
 For `judged_path: true`, both the selected `ArtifactRef.source_kind` and `PerceptionResult.source_kind`/`artifact_source_kind` MUST be `LIVE`; schema conditionals reject `SIMULATED` and `REPLAYED`. Deterministic fakes always emit `SIMULATED`; there is no "fake real-mode".
 
@@ -140,6 +152,7 @@ CoordinatorPort.read_events(run_id, after_sequence, limit) -> #EventEnvelope[]
 CoordinatorPort.read_mountain(run_id) -> #MountainStateSnapshot
 CoordinatorPort.read_evidence(artifact_id) -> #ArtifactRef + safe content handle
 CoordinatorPort.read_approval(task_id) -> #ApprovalReadModel
+CoordinatorPort.read_plan(plan_id) -> #PlanReadModel
 CoordinatorPort.read_hazard(target_id) -> #HazardReadModel
 CoordinatorPort.read_perception(result_id) -> #PerceptionResult
 CoordinatorPort.read_video_status(run_id) -> #VideoStatus
@@ -164,7 +177,7 @@ WP0 passes only when all are true:
 - WP0 semantic validator tests load `perception-request-artifact-hash-mismatch.invalid.json` and reject it with `ARTIFACT_HASH_MISMATCH`; they compare `PerceptionRequest.artifact_sha256` exactly to nested `ArtifactRef.sha256` rather than relying on JSON Schema.
 - WP0 semantic validator tests reject inverted and zero-area normalized `bbox_xyxy` fixture values.
 - Fixtures cover success, rejection, scoreless result, provider error, stale version, duplicate key conflict, `IN_DOUBT`, emergency and restart cursor replay.
-- The mountain fixture has exactly three valid sections and deterministic serialization.
+- The mountain fixture has exactly six valid zones and deterministic serialization.
 - The fixture validates against `mountain-v0.schema.json`; every polygon is a closed, non-self-intersecting `(x,y)` local-schematic ring in inclusive `[0,100]` bounds.
 - DDL/constraint manifest names every cross-WP entity and invariant.
 - A fake consumer from WP1, WP2 and WP3 imports only `sentinel.contracts` and fixtures.
