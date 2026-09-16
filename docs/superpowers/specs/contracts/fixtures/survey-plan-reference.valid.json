@@ -1,0 +1,7 @@
+{
+  "plan_id": "66666666-6666-4666-8666-666666666666",
+  "catalogue_id": "SURVEY_CATALOGUE_V1",
+  "catalogue_revision": "R1_0",
+  "plan_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "station_ids": ["LEFT_ALLEY_FRONT", "LEFT_ALLEY_MIDDLE", "LEFT_ALLEY_BACK", "RIGHT_ALLEY_FRONT", "RIGHT_ALLEY_MIDDLE", "RIGHT_ALLEY_BACK"]
+}

@@ -1,0 +1,11 @@
+{
+  "approval_id": "77777777-7777-4777-8777-777777777777",
+  "plan_id": "66666666-6666-4666-8666-666666666666",
+  "plan_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "worker_id": "WORKER_ALPHA",
+  "choreography_id": "CHOREO_SURVEY_V0",
+  "run_id": "22222222-2222-4222-8222-222222222222",
+  "expected_state_version": 5,
+  "approved_at": "2026-09-16T00:00:00Z",
+  "expires_at": "2026-09-16T00:10:00Z"
+}

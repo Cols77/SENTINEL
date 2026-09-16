@@ -1,0 +1,54 @@
+{
+  "contract_version": "sentinel.survey-catalogue.v1",
+  "catalogue_id": "SURVEY_CATALOGUE_V1",
+  "revision": "R1",
+  "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "entries": [
+    {
+      "id": "PLAN_MARKER_VERIFIED_6",
+      "revision": "R1",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mode": "MARKER_VERIFIED",
+      "station_steps": [
+        {"index": 1, "zone_id": "LEFT_ALLEY_FRONT", "marker_id": "TAG_LEFT_FRONT"},
+        {"index": 2, "zone_id": "LEFT_ALLEY_MIDDLE", "marker_id": "TAG_LEFT_MIDDLE"},
+        {"index": 3, "zone_id": "LEFT_ALLEY_BACK", "marker_id": "TAG_LEFT_BACK"},
+        {"index": 4, "zone_id": "RIGHT_ALLEY_FRONT", "marker_id": "TAG_RIGHT_FRONT"},
+        {"index": 5, "zone_id": "RIGHT_ALLEY_MIDDLE", "marker_id": "TAG_RIGHT_MIDDLE"},
+        {"index": 6, "zone_id": "RIGHT_ALLEY_BACK", "marker_id": "TAG_RIGHT_BACK"}
+      ],
+      "capture_headings_deg": [0, 90, 180, 270],
+      "capture_count": 3,
+      "segment_heights_m": [
+        {"zone_id": "LEFT_ALLEY_FRONT", "height_m": 1.2},
+        {"zone_id": "LEFT_ALLEY_MIDDLE", "height_m": 1.2},
+        {"zone_id": "LEFT_ALLEY_BACK", "height_m": 1.2},
+        {"zone_id": "RIGHT_ALLEY_FRONT", "height_m": 1.2},
+        {"zone_id": "RIGHT_ALLEY_MIDDLE", "height_m": 1.2},
+        {"zone_id": "RIGHT_ALLEY_BACK", "height_m": 1.2}
+      ],
+      "route_bounds": {"min_x": 8, "min_y": 12, "max_x": 92, "max_y": 94},
+      "timeout": 300,
+      "command_budget": 60
+    },
+    {
+      "id": "PLAN_ROUTE_ONLY_2_ZONE",
+      "revision": "R1",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "mode": "ROUTE_ONLY_2_ZONE",
+      "station_steps": [
+        {"index": 1, "zone_id": "LEFT_ALLEY_MIDDLE", "marker_id": null},
+        {"index": 2, "zone_id": "RIGHT_ALLEY_MIDDLE", "marker_id": null}
+      ],
+      "capture_headings_deg": [0, 180],
+      "capture_count": 2,
+      "segment_heights_m": [
+        {"zone_id": "LEFT_ALLEY_MIDDLE", "height_m": 1.2},
+        {"zone_id": "RIGHT_ALLEY_MIDDLE", "height_m": 1.2}
+      ],
+      "route_bounds": {"min_x": 34, "min_y": 12, "max_x": 56, "max_y": 94},
+      "timeout": 180,
+      "command_budget": 24
+    }
+  ]
+}

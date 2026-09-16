@@ -2,7 +2,7 @@
 
 SENTINEL is a supervised physical-AI demonstrator for mountain inspection. An orchestrator agent dispatches a Tello drone, selected video frames are analysed for rocks or pebble clusters, and the resulting evidence drives a proposed patroller task.
 
-The complete product and database contract is defined in the [SENTINEL Demo State Database Specification](docs/SENTINEL_Demo_State_Database_Spec_v0.2.md). This README is only a quick-start overview.
+The complete product and database contract is defined in the [SENTINEL V0 Coherence Specification](docs/superpowers/specs/2026-09-16-sentinel-v0-coherence-spec.md), whose [indoor-alley survey design](docs/superpowers/specs/2026-09-16-sentinel-v0-indoor-alley-survey-design.md) and [WP0–WP4](docs/superpowers/specs/) specifications define the executable V0 profile. This README is only a quick-start overview.
 
 ## V0 demonstration loop
 
@@ -13,7 +13,7 @@ User request → orchestrator → authorised Tello mission
              → operator confirmation → simulated patroller assignment
 ```
 
-V0 is complete when the loop runs end to end and its history can be reconstructed from the append-only event stream. The minimum loop uses one drone, one orchestrator and a simulated patroller roster. Trail mapping, patroller data and other mountain context must be visibly labelled as simulated when used.
+V0 is complete when the loop runs end to end and its history can be reconstructed from the append-only event stream. The minimum loop uses one drone, one orchestrator and a simulated patroller roster. Patroller data, travel time, and the fixed six-zone alley geometry must be visibly labelled as simulated when used.
 
 ## Architecture and state
 
@@ -73,7 +73,7 @@ or translation tool. The default sequence is four `cw:90` turns; every turn is
 capped at 90 degrees and the total yaw budget is capped at 360 degrees:
 
 ```powershell
-python -m sentinel yaw-scan --real --confirm --local-ip $env:SENTINEL_LOCAL_IP --tello-ip 192.168.10.1 --video-path fixtures/perception/live/yaw-scan.h264 --dwell-seconds 2 --turn cw:90 --turn cw:90 --turn cw:90 --turn cw:90
+python -m sentinel yaw-scan --real --confirm --local-ip $env:SENTINEL_LOCAL_IP --tello-ip 192.168.10.1 --video-path fixtures/perception/live/yaw-scan-20260916.h264 --dwell-seconds 2 --turn cw:90 --turn cw:90 --turn cw:90 --turn cw:90
 ```
 
 This is command-level position control only: Tello can drift in x/y/z because
@@ -99,9 +99,7 @@ Real mode accepts `--local-ip`, `--interface-name` and `--interface-index`. SENT
 
 ## Perception
 
-The first hosted perception candidate is Grounding DINO on selected still frames, with Replicate as the first endpoint to test and Roboflow as an alternative. OpenAI vision and OpenRouter/Qwen are evaluation candidates for semantic verification, not assumed detector replacements.
-
-The initial target-confirmation threshold is a configurable raw detector score of `0.90`. It is not a calibrated probability. Store the raw response, provider, model, prompt and policy versions; scores from different models are not automatically comparable.
+The first hosted perception route is a selected detector provider (DJITelloPy-framed frames) gated by a named joint Colin+Dzivha approval over a versioned, reproducible test-image-set hash and a matching evaluation manifest. Approval is shared between Colin and Dzivha; execution of the provider work is Dzivha's. Store the raw response, provider, model, prompt and policy versions; scores from different models are not automatically comparable.
 
 A replay path may support rehearsal or emergency presentation only when it is persistently labelled `REPLAYED FALLBACK`. It does not prove live perception.
 
@@ -116,16 +114,19 @@ No automated test sends real flight commands. Do not describe a real-drone run a
 
 ## Roadmap
 
-- **V0:** one complete inspection-to-assignment loop.
-- **V0.1:** repeatable local observation poses and coarse positioning.
+- **V0:** one complete inspection-to-assignment loop on the fixed six-zone indoor-alley profile.
+- **V0.1:** a numbered planned-route overlay and capture points on the coordinator UI, plus a drawn revisit proposal for re-inspection. These render coordinator facts only; they never calculate or command flight movement.
 - **V0.2:** possible-casualty detection and human-reviewed response.
 - **V0.3:** one bounded closer observation for ambiguous detections.
-- **V1+:** trail-opening operations, multi-source state and coordinated multi-drone inspection.
+- **V1+:** six-zone alley reopen/survey operations, multi-source state and coordinated multi-drone inspection.
 
 Later releases must preserve the event, provenance, tool and approval contracts established by V0.
 
 ## References
 
+- [SENTINEL V0 Coherence Specification](docs/superpowers/specs/2026-09-16-sentinel-v0-coherence-spec.md) — canonical V0 product/integration profile
+- [V0 Indoor Alley Survey Design](docs/superpowers/specs/2026-09-16-sentinel-v0-indoor-alley-survey-design.md) — approved decision record for the room-demo
+- [WP0–WP4 V0 specifications](docs/superpowers/specs/) — shared contracts, coordinator, NiceGUI, perception and Tello worker
 - [Demo State Database Specification](docs/SENTINEL_Demo_State_Database_Spec_v0.2.md)
 - [DJI Tello-Python](https://github.com/dji-sdk/Tello-Python) — protocol/sample reference
 - [DJI Tello SDK 2.0 guide](https://dl-cdn.ryzerobotics.com/downloads/Tello/Tello%20SDK%202.0%20User%20Guide.pdf)

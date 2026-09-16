@@ -66,9 +66,12 @@ revisit always requires a fresh approval and a new dispatch.
 ## 3. Preflight, force-run and emergency
 
 The worker—not the agent—performs preflight and emits an immutable,
-run-and-plan-bound report. It checks the selected Wi-Fi/interface, drone link,
-battery/telemetry, live video, selected layout/expected markers, bounded area,
-route/height envelope, emergency-latch state and operator approval. The agent
+run-and-plan-bound report. It runs exactly eight checks —
+`WIFI_INTERFACE`, `DRONE_LINK`, `BATTERY_TELEMETRY`, `LIVE_VIDEO`,
+`LAYOUT_MARKERS`, `BOUNDED_AREA`, `HEIGHT_ENVELOPE`, `EMERGENCY_LATCH`.
+Operator authorization is not a ninth check: it is carried as the plan's
+`approval_reference` and evaluated by the coordinator at dispatch, not by the
+preflight itself. The agent
 receives the report read-only and may only assess its structured pass/fail facts.
 
 An ordinary run dispatches only after a fresh passing preflight. A real run also
@@ -89,9 +92,11 @@ fresh manual preflight.
 ## 4. Capture, perception and evidence
 
 At each approved station the worker captures one to three live JPEG/PNG frames
-using the approved headings/count. A station capture records the immutable plan
-hash, plan step, station ID, zone ID, marker ID when applicable, configured
-height, timestamp, artifact ID and SHA-256 hash. A marker-mode capture is
+using the approved headings/count. Each capture is a distinct record carrying its
+`StationCaptureProvenance` (`plan_id`, `plan_sha256`, `plan_step`, `station_id`,
+`zone_id`, `marker_id` when applicable, `height_m`, `captured_at`), its ordered
+per-station `capture_index` (1–3), and its typed `ArtifactRef` with `artifact_id`
+and SHA-256 hash. A marker-mode capture is
 accepted only with its expected marker; a route-only capture has no marker
 claim.
 
@@ -155,6 +160,11 @@ latency targets, formal benchmark governance and provider failover are deferred.
   The direct-UDP command-test design is superseded. The historical broad worker
   specification is retained as non-authoritative support unless a focused review
   shows a whole file has no remaining live content.
+  **Retained open task (not executed in this rework):** the physical move of the
+  superseded files into `superseded/`, the replacement headers and the links are
+  a separate follow-up and are explicitly out of scope for the indoor-alley V0
+  spec rework. No spec file is moved or rewritten as part of approving this
+  design.
 
 ## 9. Acceptance evidence
 
