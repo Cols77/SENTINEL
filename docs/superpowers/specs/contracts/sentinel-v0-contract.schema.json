@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinel.local/contracts/sentinel-v0-contract.schema.json",
+  "title": "SENTINEL V0 public contract root",
+  "$ref": "sentinel-v0-wire.schema.json",
+  "description": "Compatibility root. Validate any public V0 wire document here or against sentinel-v0-wire.schema.json. Concrete schema IDs are anchors in the registry."
+}
