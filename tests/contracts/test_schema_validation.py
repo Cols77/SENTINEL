@@ -19,6 +19,11 @@ def test_valid_live_perception_fixture_is_accepted_by_public_root():
     assert validate_document(load("judged-perception-live.valid.json")) == []
 
 
+def test_non_wire_survey_plan_reference_is_rejected_by_public_root():
+    with pytest.raises(ContractValidationError):
+        validate_document(load("survey-plan-reference.valid.json"), schema="root")
+
+
 @pytest.mark.parametrize(
     "name",
     [

@@ -62,6 +62,13 @@ def _validator(name: str) -> Draft202012Validator:
         "sentinel-v0-contract.schema.json": root,
         "mountain-v0.schema.json": mountain,
     }
+    if name in {"root", "contract"}:
+        schema = {
+            **schema,
+            "$ref": WIRE_SCHEMA_URI,
+            "type": "object",
+            "required": ["wire_type"],
+        }
     return Draft202012Validator(
         schema,
         resolver=RefResolver.from_schema(schema, store=store),
