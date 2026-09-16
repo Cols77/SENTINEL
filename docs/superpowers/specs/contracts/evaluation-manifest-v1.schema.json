@@ -1,0 +1,9 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://sentinel.local/contracts/evaluation-manifest-v1.schema.json",
+  "title":"SENTINEL perception evaluation manifest",
+  "type":"object","additionalProperties":false,
+  "required":["manifest_version","evaluation_pack_id","created_at","label_schema_revision","cases"],
+  "properties":{"manifest_version":{"const":"perception-evaluation-manifest.v1"},"evaluation_pack_id":{"type":"string","pattern":"^[A-Z][A-Z0-9_]{2,63}$"},"created_at":{"type":"string","format":"date-time"},"label_schema_revision":{"type":"string","minLength":1},"cases":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["case_id","artifact_sha256","label_ref"],"properties":{"case_id":{"type":"string","pattern":"^[A-Z][A-Z0-9_]{2,63}$"},"artifact_sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"},"label_ref":{"type":"string","minLength":1},"split":{"enum":["positive","negative","holdout"]}}}}},
+  "description":"This manifest records reproducible inputs and labels; it contains no provider selection or benchmark result."
+}

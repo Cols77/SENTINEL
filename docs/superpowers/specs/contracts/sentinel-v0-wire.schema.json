@@ -1,0 +1,3153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinel.local/contracts/sentinel-v0-wire.schema.json",
+  "title": "SENTINEL V0 rooted wire schema registry",
+  "description": "Validate a complete public wire document at this root. Every document is discriminated by wire_type; command, event, and agent-result discriminators bind to closed typed branches. Cross-field artifact hash equality is enforced by the WP0 semantic validator, not JSON Schema.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/CommandEnvelope"
+    },
+    {
+      "$ref": "#/$defs/ResultEnvelope"
+    },
+    {
+      "$ref": "#/$defs/EventEnvelope"
+    },
+    {
+      "$ref": "#/$defs/PerceptionRequest"
+    },
+    {
+      "$ref": "#/$defs/PerceptionResult"
+    },
+    {
+      "$ref": "#/$defs/StateSnapshot"
+    },
+    {
+      "$ref": "#/$defs/MountainStateSnapshot"
+    },
+    {
+      "$ref": "#/$defs/ApprovalReadModel"
+    },
+    {
+      "$ref": "#/$defs/HazardReadModel"
+    },
+    {
+      "$ref": "#/$defs/OperationRecord"
+    },
+    {
+      "$ref": "#/$defs/ReconciliationResult"
+    },
+    {
+      "$ref": "#/$defs/EmergencySignal"
+    },
+    {
+      "$ref": "#/$defs/AgentRequest"
+    },
+    {
+      "$ref": "#/$defs/AgentModelResult"
+    },
+    {
+      "$ref": "#/$defs/WorkerDispatch"
+    },
+    {
+      "$ref": "#/$defs/VideoStatus"
+    },
+    {
+      "$ref": "#/$defs/SafeVideoStreamHandle"
+    }
+  ],
+  "$defs": {
+    "uuid": {
+      "$anchor": "uuid",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "configured_id": {
+      "$anchor": "configured_id",
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "source_kind": {
+      "enum": [
+        "LIVE",
+        "SIMULATED",
+        "REPLAYED"
+      ]
+    },
+    "wire_base": {
+      "type": "object",
+      "required": [
+        "contract_version",
+        "wire_type"
+      ],
+      "properties": {
+        "contract_version": {
+          "const": "sentinel.v0"
+        },
+        "wire_type": {
+          "type": "string"
+        }
+      }
+    },
+    "ArtifactRef": {
+      "$anchor": "ArtifactRef",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "artifact_id",
+            "run_id",
+            "media_type",
+            "byte_size",
+            "sha256",
+            "storage_key",
+            "created_at",
+            "source_kind"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "artifact_ref"
+            },
+            "artifact_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "run_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "media_type": {
+              "enum": [
+                "image/jpeg",
+                "image/png"
+              ]
+            },
+            "byte_size": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10485760
+            },
+            "sha256": {
+              "$ref": "#/$defs/hash"
+            },
+            "storage_key": {
+              "type": "string",
+              "pattern": "^runs/[0-9a-f-]{36}/artifacts/[0-9a-f-]{36}\\.(jpg|png)$"
+            },
+            "created_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "source_kind": {
+              "$ref": "#/$defs/source_kind"
+            }
+          }
+        }
+      ]
+    },
+    "LocalPoint": {
+      "$anchor": "LocalPoint",
+      "type": "array",
+      "items": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 100
+      },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "Polygon": {
+      "$anchor": "Polygon",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/LocalPoint"
+      },
+      "minItems": 3,
+      "maxItems": 128,
+      "description": "Closed local-schematic ring. First coordinate MUST equal last coordinate; implementation validates closure and non-self-intersection."
+    },
+    "command_payload": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/CommandRunCreatePayload"
+        },
+        {
+          "$ref": "#/$defs/CommandAgentIntentProposePayload"
+        },
+        {
+          "$ref": "#/$defs/CommandInspectionDispatchPayload"
+        },
+        {
+          "$ref": "#/$defs/CommandPerceptionIngestPayload"
+        },
+        {
+          "$ref": "#/$defs/CommandTaskCreatePayload"
+        },
+        {
+          "$ref": "#/$defs/CommandTaskRankPayload"
+        },
+        {
+          "$ref": "#/$defs/CommandOperatorDecidePayload"
+        },
+        {
+          "$ref": "#/$defs/CommandEmergencySignalPayload"
+        },
+        {
+          "$ref": "#/$defs/CommandOperationReconcilePayload"
+        }
+      ]
+    },
+    "CommandEnvelope": {
+      "$anchor": "CommandEnvelope",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "command_id",
+            "command_type",
+            "run_id",
+            "actor_type",
+            "actor_id",
+            "correlation_id",
+            "idempotency_key",
+            "issued_at",
+            "payload"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "command_envelope"
+            },
+            "command_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "command_type": {
+              "enum": [
+                "RUN_CREATE",
+                "AGENT_INTENT_PROPOSE",
+                "INSPECTION_DISPATCH",
+                "PERCEPTION_INGEST",
+                "TASK_CREATE",
+                "TASK_RANK",
+                "OPERATOR_DECIDE",
+                "EMERGENCY_SIGNAL",
+                "OPERATION_RECONCILE"
+              ]
+            },
+            "run_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "actor_type": {
+              "enum": [
+                "AGENT",
+                "OPERATOR",
+                "COORDINATOR",
+                "WORKER",
+                "SYSTEM"
+              ]
+            },
+            "actor_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "causation_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "correlation_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{8,128}$"
+            },
+            "expected_state_version": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "issued_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "payload": {
+              "$ref": "#/$defs/command_payload"
+            }
+          }
+        },
+        {
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "command_type": {
+                    "const": "RUN_CREATE"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/CommandRunCreatePayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "command_type": {
+                    "const": "AGENT_INTENT_PROPOSE"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/CommandAgentIntentProposePayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "command_type": {
+                    "const": "INSPECTION_DISPATCH"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/CommandInspectionDispatchPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "command_type": {
+                    "const": "PERCEPTION_INGEST"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/CommandPerceptionIngestPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "command_type": {
+                    "const": "TASK_CREATE"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/CommandTaskCreatePayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "command_type": {
+                    "const": "TASK_RANK"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/CommandTaskRankPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "command_type": {
+                    "const": "OPERATOR_DECIDE"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "expected_state_version"
+                ],
+                "properties": {
+                  "expected_state_version": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "payload": {
+                    "$ref": "#/$defs/CommandOperatorDecidePayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "command_type": {
+                    "const": "EMERGENCY_SIGNAL"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/CommandEmergencySignalPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "command_type": {
+                    "const": "OPERATION_RECONCILE"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/CommandOperationReconcilePayload"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "result_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "reconciliation": {
+          "$ref": "#/$defs/ReconciliationResult"
+        }
+      }
+    },
+    "ResultEnvelope": {
+      "$anchor": "ResultEnvelope",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "command_id",
+            "run_id",
+            "status",
+            "state_version",
+            "recorded_at",
+            "payload"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "result_envelope"
+            },
+            "command_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "run_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "status": {
+              "enum": [
+                "ACCEPTED",
+                "COMPLETED",
+                "REJECTED",
+                "IN_DOUBT"
+              ]
+            },
+            "state_version": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "event_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "operation_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "error_code": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "payload": {
+              "$ref": "#/$defs/result_payload"
+            },
+            "recorded_at": {
+              "$ref": "#/$defs/timestamp"
+            }
+          }
+        }
+      ]
+    },
+    "event_payload": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EventRunCreatedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventUserMessageReceivedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventAgentStartedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventAgentWaitingPayload"
+        },
+        {
+          "$ref": "#/$defs/EventAgentResumedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventAgentCompletedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventAgentIntentProposedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventAgentIntentRejectedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventMissionCreatedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventMissionAuthorisedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventMissionCompletedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventMissionAbortedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventDroneDispatchRequestedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventDroneCommandCompletedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventObservationCapturedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventDetectionRecordedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventTaskCreatedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventPatrollerAssignmentProposedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventPatrollerAssignmentConfirmedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventOperatorAssignmentRejectedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventOperationReconciledSucceededPayload"
+        },
+        {
+          "$ref": "#/$defs/EventOperationReconciledFailedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventOperationReconciliationUnknownPayload"
+        },
+        {
+          "$ref": "#/$defs/EventSystemFaultRecordedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventEmergencyLatchedPayload"
+        }
+      ]
+    },
+    "EventEnvelope": {
+      "$anchor": "EventEnvelope",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "event_id",
+            "run_id",
+            "sequence_no",
+            "event_type",
+            "actor_type",
+            "actor_id",
+            "correlation_id",
+            "state_version",
+            "occurred_at",
+            "recorded_at",
+            "payload"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "event_envelope"
+            },
+            "event_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "run_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "sequence_no": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "event_type": {
+              "enum": [
+                "RUN_CREATED",
+                "USER_MESSAGE_RECEIVED",
+                "AGENT_STARTED",
+                "AGENT_INTENT_PROPOSED",
+                "AGENT_INTENT_REJECTED",
+                "AGENT_WAITING",
+                "AGENT_RESUMED",
+                "AGENT_COMPLETED",
+                "MISSION_CREATED",
+                "MISSION_AUTHORISED",
+                "DRONE_DISPATCH_REQUESTED",
+                "DRONE_COMMAND_COMPLETED",
+                "OBSERVATION_CAPTURED",
+                "DETECTION_RECORDED",
+                "TASK_CREATED",
+                "PATROLLER_ASSIGNMENT_PROPOSED",
+                "PATROLLER_ASSIGNMENT_CONFIRMED",
+                "OPERATOR_ASSIGNMENT_REJECTED",
+                "MISSION_COMPLETED",
+                "MISSION_ABORTED",
+                "OPERATION_RECONCILED_SUCCEEDED",
+                "OPERATION_RECONCILED_FAILED",
+                "OPERATION_RECONCILIATION_UNKNOWN",
+                "SYSTEM_FAULT_RECORDED",
+                "EMERGENCY_LATCHED"
+              ]
+            },
+            "actor_type": {
+              "enum": [
+                "AGENT",
+                "OPERATOR",
+                "COORDINATOR",
+                "WORKER",
+                "SYSTEM"
+              ]
+            },
+            "actor_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "causation_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "correlation_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "state_version": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "source_kind": {
+              "$ref": "#/$defs/source_kind"
+            },
+            "occurred_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "recorded_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "payload": {
+              "$ref": "#/$defs/event_payload"
+            }
+          }
+        },
+        {
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "RUN_CREATED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventRunCreatedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "USER_MESSAGE_RECEIVED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventUserMessageReceivedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "AGENT_STARTED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventAgentStartedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "AGENT_WAITING"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventAgentWaitingPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "AGENT_RESUMED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventAgentResumedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "AGENT_COMPLETED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventAgentCompletedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "AGENT_INTENT_PROPOSED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventAgentIntentProposedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "AGENT_INTENT_REJECTED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventAgentIntentRejectedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "MISSION_CREATED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventMissionCreatedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "MISSION_AUTHORISED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventMissionAuthorisedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "MISSION_COMPLETED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventMissionCompletedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "MISSION_ABORTED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventMissionAbortedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "DRONE_DISPATCH_REQUESTED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventDroneDispatchRequestedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "DRONE_COMMAND_COMPLETED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventDroneCommandCompletedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "OBSERVATION_CAPTURED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventObservationCapturedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "DETECTION_RECORDED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventDetectionRecordedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "TASK_CREATED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventTaskCreatedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "PATROLLER_ASSIGNMENT_PROPOSED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventPatrollerAssignmentProposedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "PATROLLER_ASSIGNMENT_CONFIRMED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventPatrollerAssignmentConfirmedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "OPERATOR_ASSIGNMENT_REJECTED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventOperatorAssignmentRejectedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "OPERATION_RECONCILED_SUCCEEDED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventOperationReconciledSucceededPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "OPERATION_RECONCILED_FAILED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventOperationReconciledFailedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "OPERATION_RECONCILIATION_UNKNOWN"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventOperationReconciliationUnknownPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "SYSTEM_FAULT_RECORDED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventSystemFaultRecordedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "EMERGENCY_LATCHED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventEmergencyLatchedPayload"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "PerceptionRequest": {
+      "$anchor": "PerceptionRequest",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "request_id",
+            "run_id",
+            "observation_id",
+            "artifact",
+            "artifact_sha256",
+            "target_class",
+            "judged_path",
+            "provider_profile_id"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "perception_request"
+            },
+            "request_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "run_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "observation_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "artifact": {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            "artifact_sha256": {
+              "$ref": "#/$defs/hash"
+            },
+            "target_class": {
+              "const": "rock"
+            },
+            "judged_path": {
+              "type": "boolean"
+            },
+            "provider_profile_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "image_width": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "image_height": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "judged_path": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "artifact": {
+                "properties": {
+                  "source_kind": {
+                    "const": "LIVE"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "PerceptionResult": {
+      "$anchor": "PerceptionResult",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "result_id",
+            "request_id",
+            "observation_id",
+            "artifact_id",
+            "artifact_sha256",
+            "artifact_source_kind",
+            "judged_path",
+            "provider_profile_id",
+            "canonical_class",
+            "source_class",
+            "raw_score",
+            "score_semantics",
+            "status",
+            "provider",
+            "model",
+            "model_revision",
+            "prompt_revision",
+            "transform_revision",
+            "class_mapping_revision",
+            "source_kind",
+            "created_at"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "perception_result"
+            },
+            "result_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "request_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "observation_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "artifact_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "artifact_sha256": {
+              "$ref": "#/$defs/hash"
+            },
+            "artifact_source_kind": {
+              "$ref": "#/$defs/source_kind"
+            },
+            "judged_path": {
+              "type": "boolean"
+            },
+            "provider_profile_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "canonical_class": {
+              "const": "rock"
+            },
+            "source_class": {
+              "enum": [
+                "rock",
+                "pebble_cluster",
+                "none",
+                "unknown"
+              ]
+            },
+            "raw_score": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "score_semantics": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "bbox_xyxy_normalized": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "minItems": 4,
+                  "maxItems": 4
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "enum": [
+                "DETECTED",
+                "NOT_DETECTED",
+                "UNSCORED",
+                "PROVIDER_ERROR"
+              ]
+            },
+            "provider": {
+              "type": "string",
+              "minLength": 1
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1
+            },
+            "model_revision": {
+              "type": "string",
+              "minLength": 1
+            },
+            "prompt_revision": {
+              "type": "string",
+              "minLength": 1
+            },
+            "transform_revision": {
+              "type": "string",
+              "minLength": 1
+            },
+            "class_mapping_revision": {
+              "const": "v0-rock-only"
+            },
+            "source_kind": {
+              "$ref": "#/$defs/source_kind"
+            },
+            "latency_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "diagnostic_artifact_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "created_at": {
+              "$ref": "#/$defs/timestamp"
+            }
+          }
+        },
+        {
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "status": {
+                    "const": "DETECTED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "source_class": {
+                    "enum": [
+                      "rock",
+                      "pebble_cluster"
+                    ]
+                  },
+                  "raw_score": {
+                    "type": "number"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "status": {
+                    "const": "NOT_DETECTED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "source_class": {
+                    "const": "none"
+                  },
+                  "raw_score": {
+                    "type": "number"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "status": {
+                    "const": "UNSCORED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "source_class": {
+                    "const": "unknown"
+                  },
+                  "raw_score": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "status": {
+                    "const": "PROVIDER_ERROR"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "source_class": {
+                    "const": "unknown"
+                  },
+                  "raw_score": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "judged_path": {
+                    "const": true
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "source_kind": {
+                    "const": "LIVE"
+                  },
+                  "artifact_source_kind": {
+                    "const": "LIVE"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "SectionState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "section_id",
+        "name",
+        "polygon",
+        "status",
+        "stale"
+      ],
+      "properties": {
+        "section_id": {
+          "$ref": "#/$defs/configured_id"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "polygon": {
+          "$ref": "#/$defs/Polygon"
+        },
+        "status": {
+          "enum": [
+            "UNSURVEYED",
+            "SURVEYING",
+            "SURVEYED",
+            "HAZARD_PENDING",
+            "BLOCKED"
+          ]
+        },
+        "coverage_percent": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_observation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stale": {
+          "type": "boolean"
+        }
+      }
+    },
+    "StateSnapshot": {
+      "$anchor": "StateSnapshot",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "run_id",
+            "state_version",
+            "run_status",
+            "agent_phase",
+            "legal_operator_actions",
+            "active_operation",
+            "latest_event_sequence",
+            "mountain_snapshot_version",
+            "updated_at"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "state_snapshot"
+            },
+            "run_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "state_version": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "run_status": {
+              "enum": [
+                "NEW",
+                "RUNNING",
+                "WAITING_FOR_OBSERVATION",
+                "WAITING_FOR_APPROVAL",
+                "NEEDS_REVIEW",
+                "COMPLETED",
+                "REJECTED",
+                "FAILED",
+                "EMERGENCY"
+              ]
+            },
+            "agent_phase": {
+              "type": "string"
+            },
+            "legal_operator_actions": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "CONFIRM",
+                  "REJECT"
+                ]
+              },
+              "uniqueItems": true
+            },
+            "active_operation": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OperationRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "latest_event_sequence": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "mountain_snapshot_version": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "updated_at": {
+              "$ref": "#/$defs/timestamp"
+            }
+          }
+        }
+      ]
+    },
+    "MountainStateSnapshot": {
+      "$anchor": "MountainStateSnapshot",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "run_id",
+            "snapshot_version",
+            "as_of",
+            "sections",
+            "source_kind",
+            "stale",
+            "drone_pose",
+            "flight_path",
+            "hazards",
+            "active_mission_id",
+            "active_task_id"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "mountain_snapshot"
+            },
+            "run_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "snapshot_version": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "as_of": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "sections": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SectionState"
+              },
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "source_kind": {
+              "$ref": "#/$defs/source_kind"
+            },
+            "stale": {
+              "type": "boolean"
+            },
+            "drone_pose": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LocalPose"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "flight_path": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/LocalPose"
+              },
+              "maxItems": 1024
+            },
+            "hazards": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/HazardMarker"
+              },
+              "maxItems": 1024
+            },
+            "active_mission_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "active_task_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ApprovalReadModel": {
+      "$anchor": "ApprovalReadModel",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "task_id",
+            "run_id",
+            "expected_state_version",
+            "eligible",
+            "evidence_artifact_id",
+            "perception_result_id",
+            "evidence",
+            "perception",
+            "decision_threshold",
+            "ranking",
+            "provenance"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "approval_read"
+            },
+            "task_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "run_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "expected_state_version": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "eligible": {
+              "type": "boolean"
+            },
+            "evidence_artifact_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "perception_result_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "evidence": {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            "perception": {
+              "$ref": "#/$defs/PerceptionResult"
+            },
+            "decision_threshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "ranking": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RankingEntry"
+              },
+              "minItems": 1,
+              "maxItems": 64
+            },
+            "provenance": {
+              "$ref": "#/$defs/EvidenceProvenance"
+            }
+          }
+        }
+      ]
+    },
+    "HazardReadModel": {
+      "$anchor": "HazardReadModel",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "target_id",
+            "run_id",
+            "section_id",
+            "perception_result_id",
+            "evidence_artifact_id",
+            "status",
+            "point",
+            "evidence",
+            "perception",
+            "decision_threshold",
+            "ranking",
+            "provenance"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "hazard_read"
+            },
+            "target_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "run_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "section_id": {
+              "$ref": "#/$defs/configured_id"
+            },
+            "perception_result_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "evidence_artifact_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "status": {
+              "enum": [
+                "PENDING_REVIEW",
+                "APPROVED",
+                "REJECTED",
+                "INELIGIBLE"
+              ]
+            },
+            "point": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LocalPoint"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "evidence": {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            "perception": {
+              "$ref": "#/$defs/PerceptionResult"
+            },
+            "decision_threshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "ranking": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RankingEntry"
+              },
+              "maxItems": 64
+            },
+            "provenance": {
+              "$ref": "#/$defs/EvidenceProvenance"
+            }
+          }
+        }
+      ]
+    },
+    "OperationRecord": {
+      "$anchor": "OperationRecord",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "operation_id",
+            "run_id",
+            "mission_id",
+            "command_id",
+            "worker_id",
+            "idempotency_key",
+            "status"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "operation_record"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "run_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "mission_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "command_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "worker_id": {
+              "$ref": "#/$defs/configured_id"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{8,128}$"
+            },
+            "status": {
+              "enum": [
+                "PENDING",
+                "DISPATCHED",
+                "SUCCEEDED",
+                "FAILED",
+                "IN_DOUBT"
+              ]
+            },
+            "dispatch_recorded_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reconciled_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ReconciliationResult": {
+      "$anchor": "ReconciliationResult",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "operation_id",
+            "outcome",
+            "observed_at"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "reconciliation_result"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "outcome": {
+              "enum": [
+                "SUCCEEDED",
+                "FAILED",
+                "UNKNOWN"
+              ]
+            },
+            "observed_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "detail": {
+              "type": "string",
+              "maxLength": 512
+            }
+          }
+        }
+      ]
+    },
+    "EmergencySignal": {
+      "$anchor": "EmergencySignal",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "signal_id",
+            "worker_id",
+            "latched_at",
+            "source_kind",
+            "reason_code"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "emergency_signal"
+            },
+            "signal_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "run_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mission_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "worker_id": {
+              "$ref": "#/$defs/configured_id"
+            },
+            "latched_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "source_kind": {
+              "$ref": "#/$defs/source_kind"
+            },
+            "reason_code": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+            }
+          }
+        }
+      ]
+    },
+    "AgentRequest": {
+      "$anchor": "AgentRequest",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "agent_run_id",
+            "run_id",
+            "state_version",
+            "allowed_intent_schema_id",
+            "deadline"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "agent_request"
+            },
+            "agent_run_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "run_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "state_version": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "allowed_intent_schema_id": {
+              "const": "https://sentinel.local/contracts/sentinel-v0-wire.schema.json#AgentModelResult"
+            },
+            "deadline": {
+              "$ref": "#/$defs/timestamp"
+            }
+          }
+        }
+      ]
+    },
+    "AgentModelResult": {
+      "$anchor": "AgentModelResult",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "agent_run_id",
+            "status"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "agent_result"
+            },
+            "agent_run_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "status": {
+              "enum": [
+                "INTENT",
+                "NO_ACTION",
+                "MALFORMED",
+                "UNAVAILABLE"
+              ]
+            },
+            "intent": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "INSPECT_SECTION",
+                    "REQUEST_OPERATOR_APPROVAL",
+                    "NO_ACTION_REQUIRED"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "diagnostic": {
+              "type": "string",
+              "maxLength": 512
+            }
+          }
+        },
+        {
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "status": {
+                    "const": "INTENT"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "intent"
+                ],
+                "properties": {
+                  "intent": {
+                    "enum": [
+                      "INSPECT_SECTION",
+                      "REQUEST_OPERATOR_APPROVAL"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "status": {
+                    "const": "NO_ACTION"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "intent"
+                ],
+                "properties": {
+                  "intent": {
+                    "const": "NO_ACTION_REQUIRED"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "MALFORMED",
+                      "UNAVAILABLE"
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "intent": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "WorkerDispatch": {
+      "$anchor": "WorkerDispatch",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "operation_id",
+            "run_id",
+            "mission_id",
+            "worker_id",
+            "idempotency_key",
+            "choreography_id"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "worker_dispatch"
+            },
+            "operation_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "run_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "mission_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "worker_id": {
+              "$ref": "#/$defs/configured_id"
+            },
+            "idempotency_key": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._:-]{8,128}$"
+            },
+            "choreography_id": {
+              "$ref": "#/$defs/configured_id"
+            }
+          }
+        }
+      ]
+    },
+    "LocalPose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "point",
+        "heading_deg",
+        "observed_at",
+        "source_kind"
+      ],
+      "properties": {
+        "point": {
+          "$ref": "#/$defs/LocalPoint"
+        },
+        "heading_deg": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0,
+              "exclusiveMaximum": 360
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "source_kind": {
+          "$ref": "#/$defs/source_kind"
+        }
+      }
+    },
+    "HazardMarker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_id",
+        "section_id",
+        "perception_result_id",
+        "point",
+        "status",
+        "evidence_artifact_id"
+      ],
+      "properties": {
+        "target_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "section_id": {
+          "$ref": "#/$defs/configured_id"
+        },
+        "perception_result_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "point": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalPoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "PENDING_REVIEW",
+            "APPROVED",
+            "REJECTED",
+            "INELIGIBLE"
+          ]
+        },
+        "evidence_artifact_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "RankingEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "patroller_id",
+        "rank",
+        "score"
+      ],
+      "properties": {
+        "patroller_id": {
+          "$ref": "#/$defs/configured_id"
+        },
+        "rank": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "score": {
+          "type": "number"
+        }
+      }
+    },
+    "EvidenceProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact",
+        "perception",
+        "provider_profile_id",
+        "decision_threshold"
+      ],
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "perception": {
+          "$ref": "#/$defs/PerceptionResult"
+        },
+        "provider_profile_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "decision_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "CommandRunCreatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_text"
+      ],
+      "properties": {
+        "request_text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        }
+      }
+    },
+    "CommandAgentIntentProposePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "intent"
+      ],
+      "properties": {
+        "intent": {
+          "enum": [
+            "INSPECT_SECTION",
+            "REQUEST_OPERATOR_APPROVAL",
+            "NO_ACTION_REQUIRED"
+          ]
+        }
+      }
+    },
+    "CommandInspectionDispatchPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "section_id",
+        "mission_id",
+        "worker_id"
+      ],
+      "properties": {
+        "section_id": {
+          "$ref": "#/$defs/configured_id"
+        },
+        "mission_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "worker_id": {
+          "$ref": "#/$defs/configured_id"
+        }
+      }
+    },
+    "CommandPerceptionIngestPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "perception_result"
+      ],
+      "properties": {
+        "perception_result": {
+          "$ref": "#/$defs/PerceptionResult"
+        }
+      }
+    },
+    "CommandTaskCreatePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "perception_result_id",
+        "section_id",
+        "evidence_artifact_id"
+      ],
+      "properties": {
+        "perception_result_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "section_id": {
+          "$ref": "#/$defs/configured_id"
+        },
+        "evidence_artifact_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "CommandTaskRankPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id"
+      ],
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "CommandOperatorDecidePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "decision"
+      ],
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "decision": {
+          "enum": [
+            "CONFIRM",
+            "REJECT"
+          ]
+        }
+      }
+    },
+    "CommandEmergencySignalPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signal_id"
+      ],
+      "properties": {
+        "signal_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "CommandOperationReconcilePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id"
+      ],
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "EventRunCreatedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_status"
+      ],
+      "properties": {
+        "run_status": {
+          "const": "RUNNING"
+        }
+      }
+    },
+    "EventUserMessageReceivedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_text"
+      ],
+      "properties": {
+        "request_text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        }
+      }
+    },
+    "EventAgentStartedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_run_id"
+      ],
+      "properties": {
+        "agent_run_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "EventAgentWaitingPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_run_id"
+      ],
+      "properties": {
+        "agent_run_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "EventAgentResumedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_run_id"
+      ],
+      "properties": {
+        "agent_run_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "EventAgentCompletedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_run_id"
+      ],
+      "properties": {
+        "agent_run_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "EventAgentIntentProposedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_run_id",
+        "intent"
+      ],
+      "properties": {
+        "agent_run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "intent": {
+          "enum": [
+            "INSPECT_SECTION",
+            "REQUEST_OPERATOR_APPROVAL",
+            "NO_ACTION_REQUIRED"
+          ]
+        }
+      }
+    },
+    "EventAgentIntentRejectedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_run_id",
+        "reason_code"
+      ],
+      "properties": {
+        "agent_run_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+        }
+      }
+    },
+    "EventMissionCreatedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mission_id"
+      ],
+      "properties": {
+        "mission_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "EventMissionAuthorisedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mission_id"
+      ],
+      "properties": {
+        "mission_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "EventMissionCompletedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mission_id"
+      ],
+      "properties": {
+        "mission_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "EventMissionAbortedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mission_id"
+      ],
+      "properties": {
+        "mission_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "EventDroneDispatchRequestedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "worker_id"
+      ],
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "worker_id": {
+          "$ref": "#/$defs/configured_id"
+        }
+      }
+    },
+    "EventDroneCommandCompletedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "outcome"
+      ],
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "outcome": {
+          "enum": [
+            "SUCCEEDED",
+            "FAILED",
+            "UNKNOWN"
+          ]
+        }
+      }
+    },
+    "EventObservationCapturedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observation_id",
+        "artifact_id"
+      ],
+      "properties": {
+        "observation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "EventDetectionRecordedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "perception_result_id",
+        "artifact_id"
+      ],
+      "properties": {
+        "perception_result_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "EventTaskCreatedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id"
+      ],
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "EventPatrollerAssignmentProposedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id"
+      ],
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "EventPatrollerAssignmentConfirmedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id"
+      ],
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "EventOperatorAssignmentRejectedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id"
+      ],
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    },
+    "EventOperationReconciledSucceededPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "outcome"
+      ],
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "outcome": {
+          "enum": [
+            "SUCCEEDED",
+            "FAILED",
+            "UNKNOWN"
+          ]
+        }
+      }
+    },
+    "EventOperationReconciledFailedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "outcome"
+      ],
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "outcome": {
+          "enum": [
+            "SUCCEEDED",
+            "FAILED",
+            "UNKNOWN"
+          ]
+        }
+      }
+    },
+    "EventOperationReconciliationUnknownPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "outcome"
+      ],
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "outcome": {
+          "const": "UNKNOWN"
+        }
+      }
+    },
+    "EventSystemFaultRecordedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "error_code"
+      ],
+      "properties": {
+        "error_code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+        }
+      }
+    },
+    "EventEmergencyLatchedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signal_id",
+        "reason_code"
+      ],
+      "properties": {
+        "signal_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+        }
+      }
+    },
+    "SafeServedUrl": {
+      "type": "string",
+      "pattern": "^/runs/[0-9a-f-]{36}/live-video/[0-9a-f-]{36}$"
+    },
+    "VideoStatus": {
+      "$anchor": "VideoStatus",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "run_id",
+            "stream_id",
+            "status",
+            "source_kind",
+            "judged_path",
+            "checked_at",
+            "last_frame_at",
+            "width",
+            "height",
+            "selected_frame_artifact_id",
+            "selected_frame_sha256",
+            "degradation_reason"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "video_status"
+            },
+            "run_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "stream_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "status": {
+              "enum": [
+                "STARTING",
+                "LIVE",
+                "DEGRADED",
+                "UNAVAILABLE",
+                "STOPPED"
+              ]
+            },
+            "source_kind": {
+              "$ref": "#/$defs/source_kind"
+            },
+            "judged_path": {
+              "type": "boolean"
+            },
+            "checked_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "last_frame_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "width": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "height": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "selected_frame_artifact_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "selected_frame_sha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/hash"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "degradation_reason": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "judged_path": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": "LIVE"
+              },
+              "source_kind": {
+                "const": "LIVE"
+              },
+              "selected_frame_artifact_id": {
+                "$ref": "#/$defs/uuid"
+              },
+              "selected_frame_sha256": {
+                "$ref": "#/$defs/hash"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "SafeVideoStreamHandle": {
+      "$anchor": "SafeVideoStreamHandle",
+      "allOf": [
+        {
+          "$ref": "#/$defs/wire_base"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "wire_type",
+            "handle_id",
+            "run_id",
+            "stream_id",
+            "status",
+            "read_only",
+            "stream_url",
+            "expires_at",
+            "selected_frame_artifact_id",
+            "selected_frame_sha256"
+          ],
+          "properties": {
+            "contract_version": {
+              "const": "sentinel.v0"
+            },
+            "wire_type": {
+              "const": "safe_video_stream_handle"
+            },
+            "handle_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "run_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "stream_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "status": {
+              "const": "LIVE"
+            },
+            "read_only": {
+              "const": true
+            },
+            "stream_url": {
+              "$ref": "#/$defs/SafeServedUrl"
+            },
+            "expires_at": {
+              "$ref": "#/$defs/timestamp"
+            },
+            "selected_frame_artifact_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "selected_frame_sha256": {
+              "$ref": "#/$defs/hash"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

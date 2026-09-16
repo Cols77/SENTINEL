@@ -1,0 +1,10 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://sentinel.local/contracts/llm-adapter-config-v1.schema.json",
+  "title":"SENTINEL LLM adapter configuration",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["config_version","provider","model","timeout_ms","prompt_revision","tool_policy_revision"],
+  "properties":{"config_version":{"const":"llm-adapter-config.v1"},"provider":{"type":"string","minLength":1,"maxLength":128},"model":{"type":"string","minLength":1,"maxLength":256},"timeout_ms":{"type":"integer","minimum":1,"maximum":300000},"prompt_revision":{"type":"string","minLength":1,"maxLength":128},"tool_policy_revision":{"type":"string","minLength":1,"maxLength":128},"api_key_env":{"type":"string","pattern":"^[A-Z][A-Z0-9_]{2,127}$"}},
+  "description":"Secrets are referenced only by environment-variable name, never embedded."
+}

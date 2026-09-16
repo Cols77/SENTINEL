@@ -1,0 +1,19 @@
+{
+  "profile_version":"provider-profile.v1",
+  "profile_id":"00000000-0000-4000-8000-000000000000",
+  "approval_status":"UNAPPROVED",
+  "selection_decision_id":null,
+  "provider":null,
+  "model":null,
+  "model_revision":null,
+  "prompt_revision":null,
+  "transform_revision":null,
+  "evaluation_pack_sha256":null,
+  "score_semantics":null,
+  "decision_threshold":null,
+  "max_p95_latency_ms":null,
+  "max_provider_failure_rate":null,
+  "replay_allowed_in_judged_path":false,
+  "box_required":false,
+  "redaction_policy_revision":null
+}
