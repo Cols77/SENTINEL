@@ -13,7 +13,9 @@ CREATE TABLE IF NOT EXISTS runs (
     latest_event_sequence INTEGER NOT NULL DEFAULT 0 CHECK (latest_event_sequence >= 0),
     mountain_snapshot_version INTEGER NOT NULL DEFAULT 0 CHECK (mountain_snapshot_version >= 0),
     updated_at TEXT NOT NULL,
-    emergency_latched INTEGER NOT NULL DEFAULT 0 CHECK (emergency_latched IN (0,1))
+    emergency_latched INTEGER NOT NULL DEFAULT 0 CHECK (emergency_latched IN (0,1)),
+    pending_approval_kind TEXT CHECK (pending_approval_kind IS NULL OR pending_approval_kind IN ('PLAN','TASK')),
+    pending_approval_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS events (

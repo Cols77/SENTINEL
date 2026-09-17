@@ -40,7 +40,7 @@ class PlanApprovalService:
                  plan.get("mode", "MARKER_VERIFIED"), json.dumps(list(plan["station_ids"])),
                  json.dumps(canonical, sort_keys=True, separators=(",", ":")), utc_now()),
             )
-        self.repository.set_pending_approval(run_id, "PLAN")
+        self.repository.set_pending_approval(run_id, "PLAN", plan["plan_id"])
         self.repository.append_event(run_id, "PLAN_CREATED", dict(plan))
         return dict(plan)
 

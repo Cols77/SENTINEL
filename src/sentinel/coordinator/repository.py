@@ -56,15 +56,15 @@ class CoordinatorRepository:
 
         return build_state_snapshot(self.connection, run_id)
 
-    def set_pending_approval(self, run_id: str, target: str) -> dict:
+    def set_pending_approval(self, run_id: str, target: str, target_id: str | None = None) -> dict:
         if target not in {"PLAN", "TASK"}:
             raise ValueError(f"unknown approval target: {target}")
         with self.connection:
             self.connection.execute(
-                "UPDATE runs SET status = ? WHERE run_id = ?",
-                ("WAITING_FOR_APPROVAL", run_id),
+                "UPDATE runs SET status = ?, pending_approval_kind = ?, pending_approval_id = ? WHERE run_id = ?",
+                ("WAITING_FOR_APPROVAL", target, target_id, run_id),
             )
-        return self.append_event(run_id, "PLAN_PROPOSED", {"approval_target": target})
+        return self.append_event(run_id, "PLAN_PROPOSED", {"approval_target": target, "approval_target_id": target_id})
 
     def close(self) -> None:
         self.connection.close()
