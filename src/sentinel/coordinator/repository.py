@@ -51,6 +51,21 @@ class CoordinatorRepository:
     def read_events(self, run_id: str, after_sequence: int, limit: int):
         return read_events(self.connection, run_id, after_sequence, limit)
 
+    def read_state(self, run_id: str):
+        from .state import build_state_snapshot
+
+        return build_state_snapshot(self.connection, run_id)
+
+    def set_pending_approval(self, run_id: str, target: str) -> dict:
+        if target not in {"PLAN", "TASK"}:
+            raise ValueError(f"unknown approval target: {target}")
+        with self.connection:
+            self.connection.execute(
+                "UPDATE runs SET status = ? WHERE run_id = ?",
+                ("WAITING_FOR_APPROVAL", run_id),
+            )
+        return self.append_event(run_id, "PLAN_PROPOSED", {"approval_target": target})
+
     def close(self) -> None:
         self.connection.close()
 
