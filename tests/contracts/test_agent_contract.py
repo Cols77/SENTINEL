@@ -329,3 +329,36 @@ def test_coordinator_ingress_commands_are_closed_and_typed():
         validate_document(
             _command("ASSIGNMENT_PROPOSE", {"task_id": UUID, "patroller_id": "PATROLLER_1"})
         )
+
+
+def _result_envelope(**overrides):
+    result = {
+        "contract_version": "sentinel.v0",
+        "wire_type": "result_envelope",
+        "command_id": UUID,
+        "run_id": UUID,
+        "status": "COMPLETED",
+        "state_version": 5,
+        "recorded_at": TS,
+        "payload": {},
+    }
+    result.update(overrides)
+    return result
+
+
+def test_result_envelope_accepts_shared_typed_fields_and_round_trips():
+    result = _result_envelope(
+        reason="assignment accepted",
+        correlation_id=UUID,
+    )
+
+    assert validate_document(result) == []
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("reason", 42), ("reason", "x" * 513), ("correlation_id", "not-a-uuid")],
+)
+def test_result_envelope_rejects_malformed_shared_typed_fields(field, value):
+    with pytest.raises(ContractValidationError):
+        validate_document(_result_envelope(**{field: value}))
