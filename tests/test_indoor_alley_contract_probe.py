@@ -30,7 +30,7 @@ def test_wire_contract_exposes_immutable_plan_preflight_and_capture_records():
         "SurveyPlanReference",
         "PreflightReport",
         "StationCaptureProvenance",
-        "ForceRunApproval",
+        "PlanApproval",
     ):
         assert definition in defs
 
@@ -56,6 +56,36 @@ def test_preflight_has_named_structured_checks():
     checks = defs["PreflightReport"]["properties"]["checks"]
     assert checks["minItems"] == 8
     assert set(checks["items"]["properties"]) >= {"name", "passed", "checked_at"}
+
+
+def test_review_rework_adds_plan_approval_catalogue_lifecycle_and_preflight_read():
+    schema = _load("sentinel-v0-wire.schema.json")
+    assert (CONTRACTS / "survey-catalogue-v1.schema.json").exists()
+    defs = schema["$defs"]
+    for definition in (
+        "PlanApproval",
+        "SurveyPlanReference",
+        "StationCaptureProvenance",
+        "CommandForceRunCreatePayload",
+        "PlanReadModel",
+    ):
+        assert definition in defs
+    approval = defs["PlanApproval"]
+    assert {"plan_id", "plan_sha256", "worker_id", "choreography_id", "expected_state_version", "expires_at"} <= set(
+        approval["properties"]
+    )
+    # rejection is event-only, never a terminal run_status
+    run_status = defs["StateSnapshot"]["allOf"][1]["properties"]["run_status"]["enum"]
+    assert "REJECTED" not in run_status
+    for outcome in ("COMPLETED", "FAILED", "EMERGENCY"):
+        assert outcome in run_status
+    # plan lifecycle + preflight events exist and are discriminated
+    event_types = defs["EventEnvelope"]["allOf"][1]["properties"]["event_type"]["enum"]
+    for ev in ("PLAN_PROPOSED", "PLAN_CREATED", "PLAN_APPROVED", "PLAN_REJECTED", "PREFLIGHT_REPORTED"):
+        assert ev in event_types
+    # run carries a layout mode chosen from the two catalogue modes
+    plan_read = defs["PlanReadModel"]["properties"]["mode"]["enum"]
+    assert set(plan_read) == {"MARKER_VERIFIED", "ROUTE_ONLY_2_ZONE"}
 
 
 def test_checked_in_live_perception_fixtures_validate():

@@ -1,0 +1,7 @@
+{
+  "contract_version":"sentinel.v0","wire_type":"event_envelope",
+  "event_id":"99999999-9999-4999-8999-999999999999","run_id":"22222222-2222-4222-8222-222222222222","sequence_no":7,"event_type":"PLAN_APPROVED",
+  "actor_type":"OPERATOR","actor_id":"operator-1","correlation_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","state_version":5,
+  "source_kind":"LIVE","occurred_at":"2026-09-16T00:00:00Z","recorded_at":"2026-09-16T00:00:00Z",
+  "payload":{"plan_id":"66666666-6666-4666-8666-666666666666","plan_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","approval_id":"77777777-7777-4777-8777-777777777777","approved_at":"2026-09-16T00:00:00Z"}
+}

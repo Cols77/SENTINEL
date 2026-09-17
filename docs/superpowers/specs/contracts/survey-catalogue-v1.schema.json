@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinel.local/contracts/survey-catalogue-v1.schema.json",
+  "title": "SENTINEL survey catalogue v1",
+  "description": "Normative catalogue of immutable survey plans. Each entry binds a configured plan id to an ordered set of station steps, capture heading/count policy, per-segment capture heights, route bounds, timeout and command budget. Layout mode MARKER_VERIFIED admits six marker-verified stations; ROUTE_ONLY_2_ZONE admits exactly the two middle zones (LEFT_ALLEY_MIDDLE, RIGHT_ALLEY_MIDDLE) and never claims visual marker verification.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract_version", "catalogue_id", "revision", "sha256", "entries"],
+  "properties": {
+    "contract_version": {"const": "sentinel.survey-catalogue.v1"},
+    "catalogue_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"},
+    "revision": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "entries": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/survey_plan_entry"}}
+  },
+  "$defs": {
+    "zone_id": {
+      "type": "string",
+      "enum": ["LEFT_ALLEY_FRONT", "LEFT_ALLEY_MIDDLE", "LEFT_ALLEY_BACK", "RIGHT_ALLEY_FRONT", "RIGHT_ALLEY_MIDDLE", "RIGHT_ALLEY_BACK"]
+    },
+    "route_bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min_x", "min_y", "max_x", "max_y"],
+      "properties": {
+        "min_x": {"type": "number", "minimum": 0, "maximum": 100},
+        "min_y": {"type": "number", "minimum": 0, "maximum": 100},
+        "max_x": {"type": "number", "minimum": 0, "maximum": 100},
+        "max_y": {"type": "number", "minimum": 0, "maximum": 100}
+      }
+    },
+    "survey_plan_entry": {
+      "allOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "revision", "sha256", "mode", "station_steps", "capture_headings_deg", "capture_count", "segment_heights_m", "route_bounds", "timeout", "command_budget"],
+          "properties": {
+            "id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"},
+            "revision": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"},
+            "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "mode": {"type": "string", "enum": ["MARKER_VERIFIED", "ROUTE_ONLY_2_ZONE"]},
+            "station_steps": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 6,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["index", "zone_id"],
+                "properties": {
+                  "index": {"type": "integer", "minimum": 1, "maximum": 6},
+                  "zone_id": {"$ref": "#/$defs/zone_id"},
+                  "marker_id": {"anyOf": [{"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"}, {"type": "null"}]}
+                }
+              }
+            },
+            "capture_headings_deg": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "number", "minimum": 0, "exclusiveMaximum": 360}},
+            "capture_count": {"type": "integer", "minimum": 1, "maximum": 3},
+            "segment_heights_m": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["zone_id", "height_m"], "properties": {"zone_id": {"$ref": "#/$defs/zone_id"}, "height_m": {"type": "number", "minimum": 0}}}},
+            "route_bounds": {"$ref": "#/$defs/route_bounds"},
+            "timeout": {"type": "integer", "minimum": 1},
+            "command_budget": {"type": "integer", "minimum": 1}
+          }
+        },
+        {
+          "if": {"properties": {"mode": {"const": "MARKER_VERIFIED"}}},
+          "then": {
+            "properties": {
+              "station_steps": {
+                "type": "array",
+                "minItems": 6,
+                "maxItems": 6,
+                "items": {
+                  "required": ["marker_id"],
+                  "properties": {
+                    "marker_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"}
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"mode": {"const": "ROUTE_ONLY_2_ZONE"}}},
+          "then": {
+            "properties": {
+              "station_steps": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "uniqueItems": true,
+                "items": {
+                  "properties": {
+                    "zone_id": {"type": "string", "enum": ["LEFT_ALLEY_MIDDLE", "RIGHT_ALLEY_MIDDLE"]},
+                    "marker_id": {"type": "null"}
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

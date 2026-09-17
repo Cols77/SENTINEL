@@ -57,6 +57,18 @@
     },
     {
       "$ref": "#/$defs/SafeVideoStreamHandle"
+    },
+    {
+      "$ref": "#/$defs/PreflightReport"
+    },
+    {
+      "$ref": "#/$defs/SurveyPlanReference"
+    },
+    {
+      "$ref": "#/$defs/StationCaptureProvenance"
+    },
+    {
+      "$ref": "#/$defs/PlanApproval"
     }
   ],
   "$defs": {
@@ -670,6 +682,21 @@
         },
         {
           "$ref": "#/$defs/EventEmergencyLatchedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventPlanProposedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventPlanCreatedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventPlanApprovedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventPlanRejectedPayload"
+        },
+        {
+          "$ref": "#/$defs/EventPreflightReportedPayload"
         }
       ]
     },
@@ -739,7 +766,12 @@
                 "OPERATION_RECONCILED_FAILED",
                 "OPERATION_RECONCILIATION_UNKNOWN",
                 "SYSTEM_FAULT_RECORDED",
-                "EMERGENCY_LATCHED"
+                "EMERGENCY_LATCHED",
+                "PLAN_PROPOSED",
+                "PLAN_CREATED",
+                "PLAN_APPROVED",
+                "PLAN_REJECTED",
+                "PREFLIGHT_REPORTED"
               ]
             },
             "actor_type": {
@@ -1185,6 +1217,86 @@
                 "properties": {
                   "payload": {
                     "$ref": "#/$defs/EventEmergencyLatchedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "PLAN_PROPOSED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventPlanProposedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "PLAN_CREATED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventPlanCreatedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "PLAN_APPROVED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventPlanApprovedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "PLAN_REJECTED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventPlanRejectedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "PREFLIGHT_REPORTED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventPreflightReportedPayload"
                   }
                 }
               }
@@ -1650,7 +1762,6 @@
                 "WAITING_FOR_APPROVAL",
                 "NEEDS_REVIEW",
                 "COMPLETED",
-                "REJECTED",
                 "FAILED",
                 "EMERGENCY"
               ]
@@ -2325,6 +2436,7 @@
     },
     "PreflightReport": {
       "$anchor": "PreflightReport",
+      "description": "Nested-only record embedded in WorkerDispatch.preflight_report. Aggregate `passed` is a semantic rule: passed == conjunction of every check.passed (implemented by the WP0 semantic validator, not JSON Schema).",
       "type": "object",
       "additionalProperties": false,
       "required": ["report_id", "run_id", "plan_id", "plan_sha256", "passed", "checks", "checked_at"],
@@ -2342,7 +2454,7 @@
       "$anchor": "StationCaptureProvenance",
       "type": "object",
       "additionalProperties": false,
-      "required": ["plan_id", "plan_sha256", "plan_step", "station_id", "zone_id", "height_m", "captured_at"],
+      "required": ["plan_id", "plan_sha256", "plan_step", "station_id", "zone_id", "height_m", "artifact_id", "artifact_sha256", "capture_index", "captured_at"],
       "properties": {
         "plan_id": {"$ref": "#/$defs/uuid"},
         "plan_sha256": {"$ref": "#/$defs/hash"},
@@ -2351,21 +2463,28 @@
         "zone_id": {"$ref": "#/$defs/configured_id"},
         "marker_id": {"anyOf": [{"$ref": "#/$defs/configured_id"}, {"type": "null"}]},
         "height_m": {"type": "number", "minimum": 0},
+        "artifact_id": {"$ref": "#/$defs/uuid"},
+        "artifact_sha256": {"$ref": "#/$defs/hash"},
+        "capture_index": {"type": "integer", "minimum": 1, "maximum": 3},
         "captured_at": {"$ref": "#/$defs/timestamp"}
       }
     },
-    "ForceRunApproval": {
-      "$anchor": "ForceRunApproval",
+    "PlanApproval": {
+      "$anchor": "PlanApproval",
+      "description": "Immutable typed record of an approved survey plan. WorkerDispatch.approval_reference and PlanReadModel.approval_id both resolve to the approval_id carried here. Rejecting a plan is a lifecycle event, never a run_status.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["approval_id", "failed_report_id", "operator_reason", "new_run_id", "new_plan_id", "approved_at"],
+      "required": ["approval_id", "plan_id", "plan_sha256", "worker_id", "choreography_id", "run_id", "expected_state_version", "approved_at", "expires_at"],
       "properties": {
         "approval_id": {"$ref": "#/$defs/uuid"},
-        "failed_report_id": {"$ref": "#/$defs/uuid"},
-        "operator_reason": {"type": "string", "minLength": 1, "maxLength": 1000},
-        "new_run_id": {"$ref": "#/$defs/uuid"},
-        "new_plan_id": {"$ref": "#/$defs/uuid"},
-        "approved_at": {"$ref": "#/$defs/timestamp"}
+        "plan_id": {"$ref": "#/$defs/uuid"},
+        "plan_sha256": {"$ref": "#/$defs/hash"},
+        "worker_id": {"$ref": "#/$defs/configured_id"},
+        "choreography_id": {"$ref": "#/$defs/configured_id"},
+        "run_id": {"$ref": "#/$defs/uuid"},
+        "expected_state_version": {"type": "integer", "minimum": 0},
+        "approved_at": {"$ref": "#/$defs/timestamp"},
+        "expires_at": {"$ref": "#/$defs/timestamp"}
       }
     },
     "WorkerDispatch": {
@@ -2419,7 +2538,8 @@
               "$ref": "#/$defs/SurveyPlanReference"
             },
             "approval_reference": {
-              "$ref": "#/$defs/uuid"
+              "description": "Immutable typed record of the approved survey plan (see PlanApproval anchor).",
+              "$ref": "#/$defs/PlanApproval"
             },
             "preflight_report": {
               "$ref": "#/$defs/PreflightReport"
@@ -2650,17 +2770,75 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "task_id",
-        "decision"
+        "decision",
+        "target"
       ],
       "properties": {
-        "task_id": {
-          "$ref": "#/$defs/uuid"
-        },
         "decision": {
           "enum": [
             "CONFIRM",
             "REJECT"
+          ]
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "PLAN",
+                "TASK"
+              ]
+            },
+            "plan_reference": {
+              "$ref": "#/$defs/SurveyPlanReference"
+            },
+            "task_id": {
+              "$ref": "#/$defs/uuid"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "PLAN"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "plan_reference"
+                ],
+                "properties": {
+                  "task_id": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "TASK"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "task_id"
+                ],
+                "properties": {
+                  "plan_reference": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
           ]
         }
       }
@@ -3072,6 +3250,124 @@
         "reason_code": {
           "type": "string",
           "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+        }
+      }
+    },
+    "EventPlanProposedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_id",
+        "mode",
+        "station_ids"
+      ],
+      "properties": {
+        "plan_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "mode": {
+          "enum": ["MARKER_VERIFIED", "ROUTE_ONLY_2_ZONE"]
+        },
+        "station_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "items": {
+            "$ref": "#/$defs/configured_id"
+          }
+        },
+        "proposed_by": {
+          "$ref": "#/$defs/configured_id"
+        }
+      }
+    },
+    "EventPlanCreatedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_id",
+        "plan_sha256",
+        "mode",
+        "station_ids"
+      ],
+      "properties": {
+        "plan_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "plan_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "mode": {
+          "enum": ["MARKER_VERIFIED", "ROUTE_ONLY_2_ZONE"]
+        },
+        "station_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "items": {
+            "$ref": "#/$defs/configured_id"
+          }
+        }
+      }
+    },
+    "EventPlanApprovedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_id",
+        "plan_sha256",
+        "approval_id",
+        "approved_at"
+      ],
+      "properties": {
+        "plan_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "plan_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "approval_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "approved_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "EventPlanRejectedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_id",
+        "reason_code"
+      ],
+      "properties": {
+        "plan_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+        }
+      }
+    },
+    "EventPreflightReportedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "report_id",
+        "plan_id",
+        "passed"
+      ],
+      "properties": {
+        "report_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "plan_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "passed": {
+          "type": "boolean"
         }
       }
     },
