@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from sentinel.contracts import AgentModelResult, AgentRequest, validate_document
+from sentinel.contracts import AgentModelResult, AgentRequest, AgentToolResult, validate_document
 
 
 _TOOLS = ["state.get_summary", "state.get_recent_events", "inspection.propose_plan", "task.create", "patroller.rank_for_task", "assignment.propose", "wait_for_event", "finish"]
@@ -35,21 +35,25 @@ class AgentLoop:
             if state.get("run_status") == "WAITING_FOR_APPROVAL":
                 events = self.port.read_events(run_id, cursor, 32)
                 cursor = max([cursor, *[int(event.get("sequence_no", cursor)) for event in events]])
-                return {"contract_version": "sentinel.v0", "wire_type": "agent_tool_result", "tool_name": "coordinator.wait",
-                        "status": "WAITING_FOR_APPROVAL", "error_code": "WAITING_FOR_APPROVAL",
-                        "state_version": state.get("state_version", 0), "event_cursor": cursor,
-                        "legal_tools": [], "safe_summary": "operator approval is required", "result": {},
-                        "previous_result": previous}
+                return AgentToolResult.from_dict({
+                    "contract_version": "sentinel.v0", "wire_type": "agent_tool_result", "tool_name": "wait_for_event",
+                    "status": "ACCEPTED", "error_code": "WAITING_FOR_APPROVAL",
+                    "state_version": state.get("state_version", 0), "event_cursor": cursor,
+                    "legal_tools": [], "safe_summary": "operator approval is required", "result": {"kind": "wait"},
+                }).to_dict()
             if state.get("run_status") in _TERMINAL:
                 return {"status": state["run_status"], "summary": "run reached a terminal state", "state_version": state.get("state_version", 0)}
             events = self.port.read_events(run_id, cursor, 32)
             cursor = max([cursor, *[int(event.get("sequence_no", cursor)) for event in events]])
             request = AgentRequest(agent_run_id=agent_run_id, run_id=run_id, state_version=int(state.get("state_version", 0)), allowed_intent_schema_id="https://sentinel.local/contracts/sentinel-v0-wire.schema.json#AgentModelResult", deadline=deadline, phase=str(state.get("agent_phase", "PLAN")), event_context=[self._event_summary(event) for event in events], evidence_context=[], legal_tools=_TOOLS, previous_result=previous, user_request=user_request).to_dict()
             try:
+                validate_document(request)
                 raw_result = self.model(request)
                 if raw_result.get("status") == "TOOL_CALLS" and len(raw_result.get("tool_calls", ())) > 1:
                     return {"status": "FAILED", "error_code": "MULTIPLE_TOOL_CALLS", "summary": "V0 accepts exactly one tool call per turn"}
                 model_result = AgentModelResult.from_dict(raw_result)
+                if model_result.agent_run_id != agent_run_id:
+                    raise ValueError("agent result belongs to a different agent run")
             except Exception:
                 return {"status": "FAILED", "error_code": "INVALID_AGENT_RESULT", "summary": "agent result failed contract validation"}
             if model_result.status == "INTENT":
@@ -95,9 +99,11 @@ class AgentLoop:
                 fingerprint = json.dumps(payload, sort_keys=True, separators=(",", ":"))
                 key = "agent-" + hashlib.sha256((agent_run_id + ":" + tool_name + ":" + fingerprint).encode()).hexdigest()
                 command = {"contract_version": "sentinel.v0", "wire_type": "command_envelope", "command_id": str(uuid.uuid5(uuid.NAMESPACE_URL, key)), "command_type": command_type, "run_id": run_id, "actor_type": "AGENT", "actor_id": agent_run_id, "correlation_id": agent_run_id, "idempotency_key": key, "issued_at": "2999-01-01T00:00:00Z", "payload": payload}
-                result = {"kind": "empty", "response": self.port.submit(command)}
+                result = {"kind": {"inspection.propose_plan": "plan", "task.create": "task", "patroller.rank_for_task": "ranking", "assignment.propose": "assignment"}.get(tool_name, "empty")}
+            self.port.submit(command)
         current = self.port.read_state(run_id)
         events = self.port.read_events(run_id, cursor, 32)
         next_cursor = max([cursor, *[int(event.get("sequence_no", cursor)) for event in events]])
         legal_tools = [] if current.get("run_status") == "WAITING_FOR_APPROVAL" else _TOOLS
-        return {"contract_version": "sentinel.v0", "wire_type": "agent_tool_result", "tool_name": tool_name, "status": "ACCEPTED", "error_code": None, "state_version": int(current.get("state_version", state.get("state_version", 0))), "event_cursor": next_cursor, "legal_tools": legal_tools, "safe_summary": "bounded coordinator result", "result": result}
+        typed = {"contract_version": "sentinel.v0", "wire_type": "agent_tool_result", "tool_name": tool_name, "status": "ACCEPTED", "error_code": None, "state_version": int(current.get("state_version", state.get("state_version", 0))), "event_cursor": next_cursor, "legal_tools": legal_tools, "safe_summary": "bounded coordinator result", "result": result}
+        return AgentToolResult.from_dict(typed).to_dict()
