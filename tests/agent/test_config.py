@@ -75,3 +75,21 @@ def test_no_credential_reference_is_allowed_for_local_compatible_provider():
     env = dict(BASE)
     env.pop("SENTINEL_LLM_API_KEY_ENV")
     assert load_config(env).resolve_api_key({}) is None
+
+
+@pytest.mark.parametrize(
+    ("variable", "limit"),
+    [
+        ("SENTINEL_LLM_PROVIDER", 128),
+        ("SENTINEL_LLM_MODEL", 256),
+        ("SENTINEL_LLM_PROMPT_REVISION", 128),
+        ("SENTINEL_LLM_TOOL_POLICY_REVISION", 128),
+    ],
+)
+def test_text_configuration_values_over_contract_max_length_are_invalid(variable, limit):
+    env = dict(BASE)
+    env[variable] = "x" * (limit + 1)
+    with pytest.raises(AdapterConfigError) as caught:
+        load_config(env)
+    assert caught.value.code == LLM_CONFIG_INVALID
+    assert variable in str(caught.value)

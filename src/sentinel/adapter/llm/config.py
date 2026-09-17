@@ -23,6 +23,12 @@ _REQUIRED_ENV = (
 _API_KEY_ENV = "SENTINEL_LLM_API_KEY_ENV"
 _API_KEY_NAME = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _DECIMAL = re.compile(r"^[0-9]+$")
+_FIELD_MAX_LENGTHS = {
+    "SENTINEL_LLM_PROVIDER": 128,
+    "SENTINEL_LLM_MODEL": 256,
+    "SENTINEL_LLM_PROMPT_REVISION": 128,
+    "SENTINEL_LLM_TOOL_POLICY_REVISION": 128,
+}
 
 
 class AdapterConfigError(ValueError):
@@ -85,7 +91,9 @@ def _invalid(variable: str, reason: str = "invalid value") -> AdapterConfigError
     return AdapterConfigError(LLM_CONFIG_INVALID, f"{variable}: {reason}")
 
 
-def _required_value(environ: Mapping[str, str], variable: str) -> str:
+def _required_value(
+    environ: Mapping[str, str], variable: str, *, max_length: int | None = None
+) -> str:
     if variable not in environ or environ[variable] is None:
         raise _missing(variable)
     value = environ[variable]
@@ -93,6 +101,8 @@ def _required_value(environ: Mapping[str, str], variable: str) -> str:
         raise _invalid(variable)
     if not value.strip():
         raise _invalid(variable, "must not be blank")
+    if max_length is not None and len(value) > max_length:
+        raise _invalid(variable, f"must be at most {max_length} characters")
     return value
 
 
@@ -103,7 +113,12 @@ def load_config(environ: Mapping[str, str] | None = None) -> LLMConfig:
     the API-key environment-variable *name*, never the value.
     """
     source = os.environ if environ is None else environ
-    values = {variable: _required_value(source, variable) for variable in _REQUIRED_ENV}
+    values = {
+        variable: _required_value(
+            source, variable, max_length=_FIELD_MAX_LENGTHS.get(variable)
+        )
+        for variable in _REQUIRED_ENV
+    }
 
     timeout_text = values["SENTINEL_LLM_TIMEOUT_MS"]
     if not _DECIMAL.fullmatch(timeout_text):
