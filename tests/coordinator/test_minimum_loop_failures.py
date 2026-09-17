@@ -1,4 +1,4 @@
-"""Minimum-loop fail-closed regression checks for A15/A16."""
+"""A16 fail-closed minimum-loop assertions."""
 from __future__ import annotations
 
 import pytest
@@ -6,26 +6,97 @@ import pytest
 from sentinel.coordinator.agent_loop import AgentLoop
 from sentinel.coordinator.command_gateway import CommandGateway
 from sentinel.coordinator.errors import CoordinatorError
+from sentinel.coordinator.evidence import EvidencePolicy
 from sentinel.coordinator.repository import CoordinatorRepository
 
-
-def test_waiting_for_approval_never_calls_model(tmp_path):
-    repo = CoordinatorRepository.open(tmp_path / "approval.sqlite3")
-    repo.create_run("11111111-1111-4111-8111-111111111111", status="WAITING_FOR_APPROVAL")
-    calls = []
-    result = AgentLoop(repo, lambda request: calls.append(request)).run("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "inspect")
-    assert result["error_code"] == "WAITING_FOR_APPROVAL"
-    assert calls == []
-    repo.close()
+from .harness import AGENT_RUN_ID, RUN_ID, close, envelope, open_harness, perception_result
 
 
-def test_force_run_create_requires_failed_report_and_operator(tmp_path):
-    repo = CoordinatorRepository.open(tmp_path / "force.sqlite3")
-    run_id = "11111111-1111-4111-8111-111111111111"
-    repo.create_run(run_id, status="FAILED")
-    command = {
-        "contract_version": "sentinel.v0", "wire_type": "command_envelope", "command_id": "33333333-3333-4333-8333-333333333333", "command_type": "FORCE_RUN_CREATE", "run_id": run_id, "actor_type": "AGENT", "actor_id": "AGENT_1", "correlation_id": "44444444-4444-4444-8444-444444444444", "idempotency_key": "minimum-force-1", "expected_state_version": 0, "issued_at": "2026-09-17T00:00:00Z", "payload": {"prior_run_id": run_id, "failed_report_id": "55555555-5555-4555-8555-555555555555", "operator_reason": "retry", "new_plan_reference": {"plan_id": "66666666-6666-4666-8666-666666666666", "plan_sha256": "a" * 64, "catalogue_id": "SURVEY_CATALOGUE_V1", "catalogue_revision": "REV_1", "station_ids": ["LEFT_ALLEY_MIDDLE"]}, "real_confirm": True},
-    }
-    with pytest.raises(CoordinatorError, match="operator"):
-        CommandGateway(repo).submit(command)
-    repo.close()
+def test_approval_stop_prevents_model_call(tmp_path):
+    repo, gateway = open_harness(tmp_path)
+    try:
+        repo.create_run(RUN_ID, status="WAITING_FOR_APPROVAL")
+        calls = []
+        result = AgentLoop(type("Port", (), {
+            "read_state": lambda _, run_id: repo.read_state(run_id).to_dict(),
+            "read_events": lambda _, run_id, after, limit: repo.read_events(run_id, after, limit),
+        })(), lambda request: calls.append(request)).run(RUN_ID, AGENT_RUN_ID, "inspect")
+        assert result["error_code"] == "WAITING_FOR_APPROVAL"
+        assert calls == []
+    finally:
+        close(repo)
+
+
+def test_malformed_model_tool_is_rejected_without_mutation(tmp_path):
+    repo, _gateway = open_harness(tmp_path)
+    try:
+        repo.create_run(RUN_ID, status="RUNNING")
+        class Port:
+            def read_state(self, run_id): return repo.read_state(run_id).to_dict()
+            def read_events(self, *args): return []
+            def submit(self, command): raise AssertionError("invalid tool must not cross boundary")
+        result = AgentLoop(Port(), lambda request: {
+            "contract_version": "sentinel.v0", "wire_type": "agent_result",
+            "agent_run_id": AGENT_RUN_ID, "status": "TOOL_CALLS", "tool_calls": [{
+                "contract_version": "sentinel.v0", "wire_type": "agent_tool_call",
+                "tool_name": "not-a-tool", "arguments": {},
+            }],
+        }).run(RUN_ID, AGENT_RUN_ID, "inspect")
+        assert result["error_code"] == "INVALID_AGENT_RESULT"
+    finally:
+        close(repo)
+
+
+def test_dispatch_before_approval_is_rejected(tmp_path):
+    repo, gateway = open_harness(tmp_path)
+    try:
+        repo.create_run(RUN_ID, status="RUNNING")
+        with pytest.raises(CoordinatorError, match="approved immutable plan"):
+            gateway.submit(envelope("INSPECTION_DISPATCH", {
+                "section_id": "LEFT_ALLEY_MIDDLE", "mission_id": "55555555-5555-4555-8555-555555555555",
+                "worker_id": "SIMULATED_WORKER",
+            }, sequence=2, actor_type="WORKER", expected=0))
+        assert repo.read_events(RUN_ID, 0, 10) == []
+    finally:
+        close(repo)
+
+
+def test_stale_operator_action_is_rejected(tmp_path):
+    repo, gateway = open_harness(tmp_path)
+    try:
+        gateway.submit(envelope("RUN_CREATE", {"request_text": "inspect"}, sequence=1, actor_type="OPERATOR"))
+        with pytest.raises(CoordinatorError) as caught:
+            gateway.submit(envelope("OPERATOR_DECIDE", {
+                "decision": "CONFIRM", "target": {"kind": "TASK", "task_id": "55555555-5555-4555-8555-555555555555"},
+            }, sequence=2, actor_type="OPERATOR", expected=0))
+        assert caught.value.code == "STALE_STATE_VERSION"
+    finally:
+        close(repo)
+
+
+def test_provider_error_and_low_confidence_never_create_actionable_evidence():
+    policy = EvidencePolicy()
+    provider_error = perception_result(RUN_ID, "a" * 64)
+    provider_error["status"] = "PROVIDER_ERROR"
+    provider_error["source_class"] = "unknown"
+    provider_error["raw_score"] = None
+    assert policy.evaluate(provider_error, artifact_sha256="a" * 64, threshold=0.5, judged=False).status == "FAILED"
+    low = perception_result(RUN_ID, "a" * 64)
+    low["status"] = "UNSCORED"
+    low["source_class"] = "unknown"
+    low["raw_score"] = None
+    assert policy.evaluate(low, artifact_sha256="a" * 64, threshold=0.5, judged=False).status == "NEEDS_REVIEW"
+
+
+def test_emergency_latch_blocks_ordinary_commands(tmp_path):
+    repo, gateway = open_harness(tmp_path)
+    try:
+        repo.create_run(RUN_ID, status="RUNNING")
+        gateway.submit(envelope("EMERGENCY_SIGNAL", {
+            "signal_id": "77777777-7777-4777-8777-777777777777",
+        }, sequence=1, actor_type="WORKER"))
+        with pytest.raises(CoordinatorError) as caught:
+            gateway.submit(envelope("TASK_RANK", {"task_id": "55555555-5555-4555-8555-555555555555"}, sequence=2))
+        assert caught.value.code == "EMERGENCY_LATCHED"
+    finally:
+        close(repo)

@@ -101,6 +101,8 @@ class AgentLoop:
                 fingerprint = json.dumps(payload, sort_keys=True, separators=(",", ":"))
                 key = "agent-" + hashlib.sha256((agent_run_id + ":" + tool_name + ":" + fingerprint).encode()).hexdigest()
                 command = {"contract_version": "sentinel.v0", "wire_type": "command_envelope", "command_id": str(uuid.uuid5(uuid.NAMESPACE_URL, key)), "command_type": command_type, "run_id": run_id, "actor_type": "AGENT", "actor_id": agent_run_id, "correlation_id": agent_run_id, "idempotency_key": key, "issued_at": "2999-01-01T00:00:00Z", "payload": payload}
+                if tool_name == "inspection.propose_plan":
+                    command["payload"] = {"intent": "REQUEST_OPERATOR_APPROVAL", **payload}
                 result = {"kind": {"inspection.propose_plan": "plan", "task.create": "task", "patroller.rank_for_task": "ranking", "assignment.propose": "assignment"}.get(tool_name, "empty")}
             self.port.submit(command)
         current = self.port.read_state(run_id)

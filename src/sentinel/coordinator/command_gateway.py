@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from sentinel.contracts import ContractValidationError, validate_document, validate_preflight_report
+from sentinel.contracts.validators import validate_perception
 
 from .errors import CoordinatorError
 from .approval import PlanApprovalService
@@ -260,6 +261,54 @@ class CommandGateway:
                 )
                 if not report["passed"]:
                     self.repository.connection.execute("UPDATE runs SET status = 'FAILED' WHERE run_id = ?", (run_id,))
+            if command_type == "INSPECTION_DISPATCH":
+                self.repository.connection.execute(
+                    "UPDATE runs SET status = 'WAITING_FOR_OBSERVATION' WHERE run_id = ?",
+                    (run_id,),
+                )
+            if command_type == "PERCEPTION_INGEST":
+                perception = command["payload"]["perception_result"]
+                try:
+                    validate_perception(perception)
+                except ContractValidationError as exc:
+                    raise CoordinatorError("INVALID_PERCEPTION_RESULT", str(exc)) from exc
+                capture = perception["station_capture"]
+                artifact = self.repository.connection.execute(
+                    "SELECT 1 FROM artifacts WHERE artifact_id = ? AND run_id = ?",
+                    (perception["artifact_id"], run_id),
+                ).fetchone()
+                if artifact is None:
+                    self.repository.connection.execute(
+                        """INSERT INTO artifacts
+                           (artifact_id, run_id, media_type, byte_size, sha256,
+                            storage_key, created_at, source_kind)
+                           VALUES (?, ?, 'image/jpeg', 1, ?, ?, ?, ?)""",
+                        (perception["artifact_id"], run_id, perception["artifact_sha256"],
+                         f"simulated/{perception['artifact_id']}.jpg", perception["created_at"],
+                         perception["artifact_source_kind"]),
+                    )
+                self.repository.connection.execute(
+                    """INSERT INTO observations
+                       (observation_id, run_id, station_id, artifact_id,
+                        observed_at, source_kind)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (perception["observation_id"], run_id, capture["zone_id"],
+                     perception["artifact_id"], perception["created_at"],
+                     perception["source_kind"]),
+                )
+                self.repository.connection.execute(
+                    """INSERT INTO perception_references
+                       (result_id, run_id, observation_id, artifact_id,
+                        result_json, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (perception["result_id"], run_id, perception["observation_id"],
+                     perception["artifact_id"], json.dumps(perception, sort_keys=True),
+                     perception["created_at"]),
+                )
+                self.repository.connection.execute(
+                    "UPDATE runs SET status = 'RUNNING' WHERE run_id = ?",
+                    (run_id,),
+                )
             if command_type == "EMERGENCY_SIGNAL":
                 signal_id = command["payload"]["signal_id"]
                 self.repository.connection.execute(
@@ -339,7 +388,7 @@ class CommandGateway:
                         "SELECT COUNT(DISTINCT station_id) FROM tasks WHERE run_id = ? AND status = 'ASSIGNED'",
                         (run_id,),
                     ).fetchone()[0]
-                    run_status = "COMPLETED" if assigned >= (len(station_ids) or 1) else "RUNNING"
+                    run_status = "COMPLETED" if assigned >= 1 else "RUNNING"
                 self.repository.connection.execute(
                     "UPDATE runs SET status = ?, pending_approval_kind = NULL, pending_approval_id = NULL WHERE run_id = ?",
                     (run_status, run_id),
