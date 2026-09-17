@@ -1,6 +1,6 @@
 # SENTINEL V0 Coherence Specification
 
-> **Status:** Revised after independent review; re-review pending
+> **Status:** Revised after independent review and V0 scope decision; re-review pending
 > **Authority:** Canonical V0 product/integration profile
 > **Parent baseline:** `SENTINEL Demo State Database Specification @ document version 0.8`, at historical path [`docs/SENTINEL_Demo_State_Database_Spec_v0.2.md`](../../SENTINEL_Demo_State_Database_Spec_v0.2.md)
 > **Contract revision:** `sentinel.v0`
@@ -12,7 +12,6 @@ This profile makes the smallest supervised physical-AI loop implementable by sep
 ```text
 operator request -> real LLM intent -> coordinator -> supervised Tello mission
 -> selected evidence frame -> perception -> event/state -> mountain projection
--> operator Confirm/Reject
 ```
 
 `V0` is the product release label. It is not the parent document version or a replacement filename.
@@ -31,6 +30,9 @@ operator request -> real LLM intent -> coordinator -> supervised Tello mission
 | D-008 | Judged path has one supervised real Tello | WP4 physical slice is a V0 release prerequisite, not an optional future capability |
 | D-009 | Canonical V0 class is `rock` | Parent `pebble_cluster` source output maps to canonical `rock` under the versioned mapping below |
 | D-010 | WP6 combines technical document and pitch material | It is non-normative and evidence-derived |
+| D-011 | V0 ends at a coordinator-persisted zone-level perception result | The UI renders each result as a coordinator-owned fact; operator approval is reserved for proposed plans and future agentic actions, while aggregation, assignment, DB-state review and automatic revisit are deferred |
+| D-012 | Live frame capture plus `VideoStatus` is sufficient for V0 | `SafeVideoStreamHandle`, browser-stream serving and richer video transport remain retained V0.1 contracts |
+| D-013 | Contract scope is staged without deletion | Existing schemas, command/event branches and fixtures remain retained; deferred means not required, instantiated or emitted by the V0 path |
 
 ## 3. Authority hierarchy and compatibility
 
@@ -38,7 +40,7 @@ operator request -> real LLM intent -> coordinator -> supervised Tello mission
 2. The approved [indoor-alley survey design](2026-09-16-sentinel-v0-indoor-alley-survey-design.md) is the V0 decision record: it resolves the V0 room-demo decisions (six-zone route, station capture, layout modes, preflight/force-run/emergency semantics) that the coherence profile and WP0–WP4 below must conform to. It ranks just below this document.
 3. [`WP0`](2026-09-16-sentinel-wp0-shared-coherence-contracts.md) and its machine-readable contract artifacts define executable shared semantics.
 4. WP1–WP3 define component behavior only within WP0.
-5. The parent database specification remains the persistence/safety source unless the table below explicitly defines the V0 profile mapping.
+5. The parent database specification remains historical persistence/safety context; this document and WP0 explicitly supersede its broader product/V0 behavior where the mapping below defines the current profile.
 6. Historical broad component drafts are supporting design history, not current V0 authority.
 
 | Parent concept | Parent value | Canonical V0 representation | Rule |
@@ -51,12 +53,12 @@ operator request -> real LLM intent -> coordinator -> supervised Tello mission
 | Agent wait phase | `WAIT_FOR_DETECTION` | `WAITING_FOR_OBSERVATION` run state / `WAIT_FOR_OBSERVATION` agent phase | explicit V0 lifecycle below |
 | Parent starting threshold | `0.90` | `provider_profile.decision_threshold` | Colin+Dzivha jointly approved a provider-profile threshold over a versioned test-image-set hash |
 | Evidence provenance | `OPERATOR_PROVIDED` | explicitly prohibited on the judged perception/evidence path | V0 accepts operator commands, not operator-supplied detection evidence; retain only as imported historical metadata outside judged eligibility |
-| Decision provenance | `INFERRED` | preserved as historical-only `decision_provenance` on imported parent task records | V0 decisions are operator Confirm/Reject; `INFERRED` cannot authorize an assignment or qualify evidence |
-| Target lifecycle | `TARGET_CREATED` | explicitly prohibited as a new V0 persisted event | V0 has no independent target aggregate; qualifying `DETECTION_RECORDED` plus `TASK_CREATED` creates the reviewable hazard projection |
-| Target lifecycle | `TARGET_CONFIRMED` | maps to versioned `OPERATOR_DECIDE` with `PATROLLER_ASSIGNMENT_CONFIRMED` | preserve parent event as imported history only; V0’s canonical persisted outcome is the assignment confirmation |
-| Assignment event | `PATROLLER_ASSIGNMENT_PROPOSED` | `PATROLLER_ASSIGNMENT_PROPOSED` | persisted unchanged |
-| Assignment event | `PATROLLER_ASSIGNMENT_CONFIRMED` | `PATROLLER_ASSIGNMENT_CONFIRMED` | persisted unchanged after operator Confirm |
-| Assignment event | `PATROLLER_ASSIGNED` | explicitly prohibited as a new V0 event | assignment is represented by `PATROLLER_ASSIGNMENT_CONFIRMED`; preserve imported parent event as historical-only |
+| Decision provenance | `INFERRED` | preserved as historical-only `decision_provenance` on imported parent task records | V0 operator decisions approve plans/future agentic actions; `INFERRED` cannot authorize an assignment or qualify evidence |
+| Target lifecycle | `TARGET_CREATED` | retained deferred V0.1 contract | V0 has no independent target aggregate; the coordinator persists a zone-level `PerceptionResult` as a read-only fact |
+| Target lifecycle | `TARGET_CONFIRMED` | retained deferred V0.1 contract | DB-state review is deferred; V0 does not emit `ZONE_RESULT_REVIEWED` |
+| Assignment event | `PATROLLER_ASSIGNMENT_PROPOSED` | retained deferred V0.1 contract | not emitted or required by the active V0 path |
+| Assignment event | `PATROLLER_ASSIGNMENT_CONFIRMED` | retained deferred V0.1 contract | not emitted or required by the active V0 path |
+| Assignment event | `PATROLLER_ASSIGNED` | retained deferred V0.1 contract | preserve imported parent event as historical-only; no V0 assignment |
 
 No component may use a parent value outside this table without a WP0 compatibility amendment.
 
@@ -70,22 +72,22 @@ Inspect the left and right table alleys for rocks
 
 1. NiceGUI submits `RUN_CREATE` through `CoordinatorPort`.
 2. The real LLM returns one schema-validated agent intent proposing a catalogue-bound plan reference.
-3. The coordinator records `MISSION_CREATED`, records `DRONE_DISPATCH_REQUESTED`, and creates the immutable plan record bound to that plan version/hash.
-4. The operator explicitly approves that exact plan version before any dispatch; the approval binds the plan hash, worker, choreography, run/state version and expiry.
+3. The coordinator records the active `RUN_CREATED`/plan lifecycle and creates the immutable plan record bound to that plan hash. Retained `MISSION_CREATED` is not emitted by the active V0 path.
+4. The operator explicitly approves that exact immutable plan (its plan hash is bound) before any dispatch; the approval binds the plan hash, worker, choreography, run/state version and expiry.
 5. WP4 executes the pre-authorised named choreography on one Tello.
 6. WP4 stores a selected live JPEG/PNG through the coordinator-managed artifact contract.
 7. WP3 calls the frozen provider profile and returns a hash-bound `PerceptionResult`.
 8. Coordinator ingests it as `DETECTION_RECORDED`, updates the mountain snapshot and applies the frozen threshold.
-9. A qualifying scored result enters `WAITING_FOR_APPROVAL`; lower, scoreless or provider-failed results enter `NEEDS_REVIEW` or `FAILED` by the transition matrix. `NEEDS_REVIEW` is a review-hold, not a terminal outcome; it is escaped only by an approved new/revisit plan.
-10. Confirm or Reject is a versioned, idempotent `OPERATOR_DECIDE` command — the separate assignment decision, distinct from the plan-approval in step 4. `REJECTED` is event-only; a rejected proposal is refined and re-proposed.
+9. A qualifying scored result is persisted as a coordinator-owned zone-level fact; lower or scoreless results enter `HELD_FOR_REVIEW` (a non-terminal review hold), while provider failures enter `FAILED`. No score is invented and no automatic revisit is triggered.
+10. Any future agentic operation or revisit proposal must resolve to a new immutable plan and the existing operator plan-approval path. V0 does not add an operator command for reviewing persisted database state.
 
-Live: LLM, one Tello, preflight/flight/video/still capture, selected detector provider, coordinator persistence and operator decision.
+Live: LLM, one Tello, preflight/flight, live frame capture, `VideoStatus`, selected detector provider, coordinator persistence and operator plan decision.
 
-Simulated: fixed six-zone geometry, nonvisited context, patrollers, travel time and external notifications.
+Simulated: fixed six-zone geometry and nonvisited context. Task/ranking/patroller assignment, target aggregation, automatic revisit and external notifications are deferred rather than simulated as active V0 behavior.
 
-The only terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`. `NEEDS_REVIEW` is a review-hold, not a terminal outcome. `REJECTED` is event-only and never terminal: reject → refine → re-propose.
+The only terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`. `HELD_FOR_REVIEW` is a non-terminal review hold, not a terminal outcome. `REJECTED` is event-only and never a terminal run status: `PLAN_REJECTED` returns to plan refinement/re-proposal. A future agentic action requires a new immutable plan and the existing operator plan-approval path; V0 does not add a database-state review command.
 
-Replay is rehearsal-only and is rejected in a judged run.
+Replay is rehearsal-only and is rejected in a judged run. Served browser video is not required; `VideoStatus` plus selected-frame provenance is the V0 video boundary.
 
 ## 5. Mountain-state fixture
 
@@ -112,6 +114,32 @@ All coordinates are local schematic `0..100`, not geographic. Each section polyg
 | SQLite DDL/constraint manifest | WP0 declaration, WP1 implementation | WP1, reviewers |
 | state/event fixtures | WP0 | all WPs |
 
+## 6.1 Active V0 contract subset and deferred retained surface
+
+The active runtime subset is the smallest coherent perception path:
+
+- `read_state`, `read_mountain`, and bounded `read_events` through the coordinator;
+- typed agent proposal resolving to a catalogue-bound immutable plan;
+- operator plan approval, fresh preflight, supervised deterministic dispatch, and fail-closed reconciliation;
+- live frame capture, `VideoStatus`, `StationCaptureProvenance`, `ArtifactRef`, and hash-bound `PerceptionResult`;
+- coordinator-persisted zone-level `PerceptionResult` and read-only evidence/provenance projection;
+- emergency latch, optimistic state-version checks, scoped idempotency, immutable plan/approval binding, and live/simulated/replayed provenance separation.
+
+The following remain in the registry and are explicitly deferred to V0.1: task
+creation/ranking (`CommandTaskCreatePayload`, `CommandTaskRankPayload`,
+`TASK_CREATE`, `TASK_RANK`), target aggregation, patroller selection/ranking/
+assignment and assignment approvals, automatic revisit, precise hazard
+coordinates, `flight_path`, detailed `drone_pose`, GIS/SLAM/location abstractions,
+`SafeVideoStreamHandle`, browser-stream serving, and generalized mission/task/
+video/evidence/diagnostic/storage projections not needed for the active zone-level
+perception result. Their presence in `sentinel-v0-wire.schema.json` does not make them V0
+requirements.
+
+Provider profile, unapproved-provider template, evaluation manifest, local LLM
+adapter configuration, and semantic validators are retained release/
+reproducibility artifacts. They gate reproducibility and judged-provider use but
+are not additional runtime agent tools or new wire commands.
+
 ## 7. Work-package critical path
 
 ```text
@@ -129,7 +157,7 @@ WP4 is deferred only as a detailed work-package specification, not from the V0 r
 
 This bounded release-prerequisite slice does not change the immediate WP0–WP3 documentation priority order. `WorkerPort.dispatch` consumes `https://sentinel.local/contracts/sentinel-v0-wire.schema.json#WorkerDispatch` bearing the immutable `SurveyPlanReference`, its `approval_reference` and the exact `PreflightReport`, and returns `#ResultEnvelope`; `WorkerPort.reconcile` consumes operation ID/idempotency key and returns `#ReconciliationResult`; emergency ingress uses `#EmergencySignal`. The worker must create no alternate wire format and must honor at-most-one coordinator dispatch before reconciliation.
 
-The only permitted physical rehearsal is a named, pre-authorised choreography on one supervised Tello with an operator present and emergency stop available. Real flight is DJITelloPy-only, each real run starts in a fresh process with a fresh preflight and `--real --confirm`, and dispatch binds the approved plan hash plus approval. Before takeoff exactly the 8 named preflight checks must pass — `WIFI_INTERFACE`, `DRONE_LINK`, `BATTERY_TELEMETRY`, `LIVE_VIDEO`, `LAYOUT_MARKERS`, `BOUNDED_AREA`, `HEIGHT_ENVELOPE`, `EMERGENCY_LATCH` — and `passed` is the conjunction of the eight. Operator authorization is not a ninth check: it is carried as the plan's `approval_reference` and evaluated by the coordinator at dispatch. During the run, `WorkerPort.read_video_status` must remain `LIVE` and `WorkerPort.open_live_video` must yield the read-only safe handle; it returns a `LIVE` selected JPEG/PNG `ArtifactRef` correlated by ID/SHA-256 to that live status. At each approved station WP4 captures one to three frames with full provenance. Perception may run asynchronously and has no worker/control port, so it can never mutate an in-flight route. The judged perception request/result must both be `LIVE`, hash-bound, and profile-bound. Landing is permitted only while no active latch is armed; the `EMERGENCY` latch is terminal, non-overridable, and permits no landing/cleanup/retry afterward. A failed preflight may be overridden only by an operator-only `FORCE_RUN_CREATE` naming a new run/plan (no resume of the prior operation, never under an active latch) with fresh preflight and `--real --confirm`. WP4 records operation lifecycle/reconciliation outcome, emergency behavior if invoked, and safe landing; it does not introduce autonomy, multi-drone work, or live patroller assignment.
+The only permitted physical rehearsal is a named, pre-authorised choreography on one supervised Tello with an operator present and emergency stop available. Real flight is DJITelloPy-only, each real run starts in a fresh process with a fresh preflight and `--real --confirm`, and dispatch binds the approved plan hash plus approval. Before takeoff exactly the 8 named preflight checks must pass — `WIFI_INTERFACE`, `DRONE_LINK`, `BATTERY_TELEMETRY`, `LIVE_VIDEO`, `LAYOUT_MARKERS`, `BOUNDED_AREA`, `HEIGHT_ENVELOPE`, `EMERGENCY_LATCH` — and `passed` is the conjunction of the eight. Operator authorization is not a ninth check: it is carried as the plan's `approval_reference` and evaluated by the coordinator at dispatch. During the run, `WorkerPort.read_video_status` must remain `LIVE` and it returns a `LIVE` selected JPEG/PNG `ArtifactRef` correlated by ID/SHA-256 to that live status. `WorkerPort.open_live_video` and the retained safe handle are V0.1 capabilities, not V0 rehearsal requirements. At each approved station WP4 captures one to three frames with full provenance. Perception may run asynchronously and has no worker/control port, so it can never mutate an in-flight route. The judged perception request/result must both be `LIVE`, hash-bound, and profile-bound. Landing is permitted only while no active latch is armed; the `EMERGENCY` latch is terminal, non-overridable, and permits no landing/cleanup/retry afterward. A failed preflight may be overridden only by an operator-only `FORCE_RUN_CREATE` naming a new run/plan (no resume of the prior operation, never under an active latch) with fresh preflight and `--real --confirm`. WP4 records operation lifecycle/reconciliation outcome, emergency behavior if invoked, and safe landing; it does not introduce autonomy, multi-drone work, or live patroller assignment.
 
 WP4 acceptance command (implementation work, not evidence fabricated by this spec): `uv run python -m pytest tests/worker tests/integration -q -k "tello_rehearsal"`. Acceptance additionally asserts persisted `RUN_CREATED`, operation transitions, a `LIVE` artifact/hash, `LIVE` perception result, event/snapshot correlation, operator decision path, and no simulated/replayed judged evidence. G4 remains required for V0 release.
 
@@ -139,7 +167,7 @@ WP4 acceptance command (implementation work, not evidence fabricated by this spe
 |---|---|---|
 | G0 Contract | Colin | schema/fixture validation, DDL constraint manifest, contract tests |
 | G1 Coordinator simulation | Colin + Alan | deterministic fake-agent replay, duplicate and `IN_DOUBT` tests |
-| G2 Human surface | Alan | NiceGUI smoke fixture, click-through evidence, Confirm/Reject stale-version test |
+| G2 Human surface | Alan | NiceGUI smoke fixture, click-through evidence, plan Confirm/Reject stale-version test |
 | G3 Perception | execution: Dzivha; approved/reviewed: Colin + Dzivha | reproducible evaluation-manifest evidence and a named joint approval over the versioned test-image-set hash |
 | G4 Physical | Colin | supervised one-Tello rehearsal using WP0 operation/evidence contracts |
 
@@ -149,4 +177,4 @@ V0 release requires G0–G4. G0–G3 can be completed without live hardware; G4 
 
 ## 9. Non-goals
 
-V0 excludes real GIS/terrain, GPS/localisation, multi-drone coordination, autonomous patroller dispatch, external notification, hidden chain-of-thought display, automatic provider failover and a broker.
+V0 excludes real GIS/terrain, GPS/localisation, multi-drone coordination, target aggregation, task/ranking/patroller assignment, automatic revisit, precise hazard coordinates, served browser video, external notification, hidden chain-of-thought display, automatic provider failover and a broker. These capabilities remain retained for V0.1 where represented by existing contracts.

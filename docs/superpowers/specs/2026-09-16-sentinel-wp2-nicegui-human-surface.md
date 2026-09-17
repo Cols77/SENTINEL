@@ -1,12 +1,12 @@
 # SENTINEL WP2 — NiceGUI Human Surface and Mountain State
 
-> **Status:** Revised after independent review; re-review pending
+> **Status:** Revised after independent review and V0 scope decision; re-review pending
 > **Owner:** Alan
 > **Prerequisite:** WP0 contract revision `sentinel.v0` and WP1 `CoordinatorPort`
 
 ## 1. Objective
 
-Build a local NiceGUI operator console: ChatGPT-like interaction plus a grown-up mission-control projection for the approved indoor-alley V0. It renders coordinator facts and submits typed commands; it owns no factual state, event sequence, policy or SQLite access. The visible V0 flow is catalogue-plan proposal, immutable operator approval, then coordinator dispatch.
+Build a local NiceGUI operator console: ChatGPT-like interaction plus a mission-control projection for the approved indoor-alley V0. It renders coordinator facts and submits typed commands; it owns no factual state, event sequence, policy or SQLite access. The visible V0 flow is catalogue-plan proposal, immutable operator approval, supervised dispatch, live frame capture and coordinator-persisted perception. Operators approve proposed plans and future agentic actions; persisted database state and perception results are read-only.
 
 ## 2. Required boundary
 
@@ -16,18 +16,18 @@ The UI consumes only:
 read_state(run_id) -> https://sentinel.local/contracts/sentinel-v0-wire.schema.json#StateSnapshot
 read_events(run_id, after_sequence, limit) -> #EventEnvelope[]
 read_mountain(run_id) -> #MountainStateSnapshot
-read_evidence(artifact_id) -> #ArtifactRef + #EvidenceContentHandle
-read_hazard(target_id) -> #HazardReadModel
-read_approval(task_id) -> #ApprovalReadModel
-read_plan(plan_id) -> #PlanReadModel
+read_evidence(run_id, artifact_id) -> EvidenceRead  # run-scoped ArtifactRef + Python-only capability
+read_hazard(target_id) -> #HazardReadModel  # retained, deferred V0.1
+read_approval(task_id) -> #ApprovalReadModel  # retained, deferred V0.1
+read_plan(plan_id) -> #PlanReadModel  # active plan projection
 read_preflight(run_id) -> #PreflightReport
 read_perception(result_id) -> #PerceptionResult
 read_video_status(run_id) -> #VideoStatus
-open_live_video(run_id) -> #SafeVideoStreamHandle
+open_live_video(run_id) -> #SafeVideoStreamHandle  # retained, deferred V0.1
 submit(https://sentinel.local/contracts/sentinel-v0-wire.schema.json#CommandEnvelope) -> #ResultEnvelope
 ```
 
-NiceGUI begins in-process behind a `CoordinatorClient` protocol. A future HTTP client must implement the same calls. No UI code opens SQLite, reads raw artifact paths, calls the Tello SDK, changes thresholds, resolves catalogue hashes, or dispatches directly.
+NiceGUI begins in-process behind the `CoordinatorClient` implementation in `sentinel.ui.coordinator_client`. That client implements the authoritative `CoordinatorPort` declared in WP0 §6.1 by delegation/injection; it does not redefine the protocol. A future HTTP client is not part of V0 and must not serialize or substitute the Python-only `EvidenceContentHandle`. Before any HTTP client claims full `CoordinatorPort` conformance, a later WP0 amendment must define a versioned transport mapping for `read_evidence(run_id, artifact_id)` with the same run/authorization scope, JPEG/PNG allowlist, 10 MiB/configured-timeout bounds, expiry/revocation and fail-closed errors; until then, HTTP evidence access is unsupported rather than downgraded to a path, `storage_key`, credential, unbounded URL or raw-video response. For wire-defined calls, a future HTTP client must return the same validated contract types. No UI code opens SQLite, reads raw artifact paths, calls the Tello SDK, changes thresholds, resolves catalogue hashes, or dispatches directly.
 
 ## 3. Required layout
 
@@ -35,7 +35,7 @@ NiceGUI begins in-process behind a `CoordinatorClient` protocol. A future HTTP c
 Header: run ID / state version / freshness / LIVE-SIMULATED-REPLAYED badge / configured marker-or-route-only mode
 Left:   operator chat and structured intent/tool activity
 Center: WP0 six-zone indoor-alley schematic and zone-level progress
-Right:  mission state, evidence/provenance, ranking and Confirm/Reject
+Right:  proposed plan/action approval, mission state, and evidence/provenance
 Bottom: event timeline plus failure/emergency banner
 ```
 
@@ -47,22 +47,22 @@ Use the WP0 indoor-alley six-zone fixture and its exact read-model/schema contra
 
 A snapshot is stale if the coordinator marks it stale, `now - as_of` exceeds fixture `snapshot_stale_after_ms`, or received `latest_event_sequence > snapshot_version`. The UI preserves the last snapshot with a `STALE` label, requests refresh, and never synthesizes missing transitions.
 
-Clicking a section resolves it to its linked hazards via `read_hazard(target_id)` and exposes the linked observation/artifact/provenance; a target with no linked hazard returns the stable `NOT_FOUND` error code, which the UI renders as an explicit "no linked hazard" state rather than synthesizing one. Evidence access is only through `read_evidence`, which returns the typed `ArtifactRef` plus an `EvidenceContentHandle`; a missing artifact likewise surfaces `NOT_FOUND`.
+Clicking a zone resolves its persisted perception result via `read_perception(result_id)` and exposes the linked observation/artifact/provenance. A missing or foreign-run result returns the stable `NOT_FOUND`/`FORBIDDEN` error code, which the UI renders explicitly rather than synthesizing a result. Evidence access is only through run-scoped `read_evidence(run_id, artifact_id)`, which returns `EvidenceRead`: the typed `ArtifactRef` plus the coordinator-created capability described in WP0 §6. The handle permits only re-authorized JPEG/PNG reads bounded to 10 MiB and the configured timeout, expires or revokes fail closed, and never exposes a filesystem path, `storage_key`, credentials, unbounded URL or raw video bytes. Task/hazard/assignment projections remain retained but deferred.
 
 ## 5. Approval and failure interaction
 
-Before plan or task decision buttons are enabled, UI reads and displays the immutable catalogue plan model via `read_plan(plan_id)` together with its `PLAN_*` lifecycle state (proposed → approved → dispatched; `REJECTED` is event-only and never terminal), the typed `PlanApproval` binding plan hash/worker/run-state/expiry, the approval read model, artifact hash/source, provider profile/model/prompt/transform revision, raw score/semantics, selected threshold, box if present, ranking and expected state version. It also displays the worker’s typed immutable `PreflightReport` and its exact eight-check list — `WIFI_INTERFACE`, `DRONE_LINK`, `BATTERY_TELEMETRY`, `LIVE_VIDEO`, `LAYOUT_MARKERS`, `BOUNDED_AREA`, `HEIGHT_ENVELOPE`, `EMERGENCY_LATCH` — plus whether the run is eligible to dispatch. The UI renders only the coordinator-declared `legal_operator_actions`; those always include the gated `FORCE_RUN_CREATE` (operator-only, from a failed preflight, unavailable under an active emergency latch) and `EMERGENCY_STOP`, and every gated action is disabled unless the coordinator lists it as legal for the current state. The UI cannot edit these facts and has no hardware or physical-correction path.
+Before plan decision buttons are enabled, the UI reads and displays the immutable catalogue plan model via `read_plan(plan_id)` together with its `PLAN_*` lifecycle state (proposed → approved → dispatched; `REJECTED` is event-only and never terminal), the typed `PlanApproval` binding plan hash/worker/run-state/expiry, and the read-only zone `PerceptionResult`, station capture hash/source, provider profile/model/prompt/transform revision, raw score/semantics when present, selected threshold, and expected state version. It also displays the worker’s typed immutable `PreflightReport` and its exact eight-check list — `WIFI_INTERFACE`, `DRONE_LINK`, `BATTERY_TELEMETRY`, `LIVE_VIDEO`, `LAYOUT_MARKERS`, `BOUNDED_AREA`, `HEIGHT_ENVELOPE`, `EMERGENCY_LATCH` — plus whether the run is eligible to dispatch. The UI renders only the coordinator-declared `legal_operator_actions`; these include plan `CONFIRM`/`REJECT`, the gated `FORCE_RUN_CREATE` (operator-only, from a failed preflight, unavailable under an active emergency latch), and `EMERGENCY_STOP` when legal for the current state. It never offers a database-state review action.
 
-Each Confirm/Reject action attempt creates one full `CommandEnvelope` with a fresh `command_id`, correlation ID and idempotency key. Until that attempt receives a terminal result or the UI refreshes after a state-version rejection, retries and duplicate clicks resend that same envelope/key and return the original result. A new user action after refresh creates a new envelope/key.
+Each plan Confirm/Reject action attempt creates one full `CommandEnvelope` with a fresh `command_id`, correlation ID and idempotency key. Until that attempt receives a terminal result or the UI refreshes after a state-version rejection, retries and duplicate clicks resend that same envelope/key and return the original result. A new user action after refresh creates a new envelope/key.
 
-Emergency has a permanently visible one-click `EMERGENCY STOP` control and keyboard fallback, disables ordinary controls immediately, and displays latch acknowledgement. `IN_DOUBT`, stale, simulated, replayed and failed evidence remain visibly labelled. Replay cannot be selected in a judged run. WP2 opens only `SafeVideoStreamHandle.stream_url`, renders typed `VideoStatus`, and visibly degrades on `DEGRADED` or `UNAVAILABLE`; it never receives raw frames, bytes, or storage paths. A judged run displays `LIVE` status and selected-frame artifact/hash correlation before perception/approval. A failed preflight exposes an operator-only `FORCE_RUN_CREATE` decision through the typed coordinator command: it records the failed report and operator reason, starts a new run, never resumes the old operation, and is unavailable while the emergency latch is active.
+Emergency has a permanently visible one-click `EMERGENCY STOP` control and keyboard fallback, disables ordinary controls immediately, and displays latch acknowledgement. `IN_DOUBT`, stale, simulated, replayed and failed evidence remain visibly labelled. Replay cannot be selected in a judged run. V0 renders typed `VideoStatus` and selected-frame artifact/hash correlation; it does not open or serve `SafeVideoStreamHandle`, which is retained for V0.1. A judged run displays `LIVE` status before perception/approval. A failed preflight exposes an operator-only `FORCE_RUN_CREATE` decision through the typed coordinator command: it records the failed report and operator reason, starts a new run, never resumes the old operation, and is unavailable while the emergency latch is active.
 
 ## 6. Acceptance criteria
 
 - Fixture-driven unit tests render every fixed zone state and click-through read path, including marker and route-only facts.
 - `uv run python -m sentinel.ui --smoke --fixture fixtures/sentinel/v0/run-approval.json` is the required smoke command. Its test harness is Playwright launched by `tests/ui/test_smoke.py` against the local NiceGUI process with the fake `CoordinatorClient`; it sets a 1440×900 viewport, asserts each named Header/Left/Center/Right/Bottom region has a visible bounding box within that viewport and asserts no document horizontal overflow. It writes the captured full-page screenshot to `artifacts/ui-smoke/1440x900.png` and emits `UI_SMOKE_OK` only after those assertions. Because this smoke screenshot is the G2 human-surface evidence artifact, it is always retained on a passing run (`artifacts/ui-smoke/1440x900.png`); it is not deleted on success. Teardown never removes a passing G2 artifact.
-- Confirm, Reject, stale version, duplicate idempotency (including identical transmitted key on duplicate click), evidence-missing, `IN_DOUBT` and emergency states have direct tests. The smoke test also uses a fake `VideoStatus`/`SafeVideoStreamHandle` to assert LIVE rendering, selected-frame correlation, and visible `DEGRADED` fallback without raw-frame access.
-- Direct client tests cover `read_plan(plan_id)`, `read_preflight(run_id)`, typed `PreflightReport` rendering, and operator-only `FORCE_RUN_CREATE` semantics (new run, failed-report/reason recorded, no resume, disabled under emergency).
+- Plan Confirm/Reject, read-only perception-result rendering, stale version, duplicate idempotency (including identical transmitted key on duplicate click), evidence-missing, `IN_DOUBT` and emergency states have direct tests. The smoke test uses a fake `VideoStatus` to assert LIVE rendering, selected-frame correlation, and visible `DEGRADED` fallback without requiring a served video handle.
+- Direct client tests cover `read_plan(plan_id)`, `read_preflight(run_id)`, `read_perception(result_id)`, typed `PreflightReport` rendering, and operator-only `FORCE_RUN_CREATE` semantics (new run, failed-report/reason recorded, no resume, disabled under emergency).
 - The smoke harness launches the local NiceGUI process on an OS-assigned port, waits at most 15 seconds for one machine-readable `UI_READY http://127.0.0.1:<port>` line, connects Playwright to that URL, and always terminates and reaps the process in teardown. The passing G2 screenshot `artifacts/ui-smoke/1440x900.png` is always retained. `SENTINEL_KEEP_UI_SMOKE_ARTIFACTS=1` additionally keeps the screenshot on an assertion failure; otherwise teardown removes a failed run's screenshot.
 - Tests use fake `CoordinatorClient`; Alan owns the fake-agent runtime/UI-client test seam, while coordinator persistence remains Colin’s WP1 responsibility. No network, drone or provider credential is required.
 

@@ -38,7 +38,7 @@ def test_wire_contract_exposes_immutable_plan_preflight_and_capture_records():
 def test_wire_contract_uses_indoor_outcome_vocabulary():
     wire = _load("sentinel-v0-wire.schema.json")
     serialized = json.dumps(wire)
-    for outcome in ("FAILED", "NEEDS_REVIEW", "COMPLETED", "EMERGENCY"):
+    for outcome in ("FAILED", "HELD_FOR_REVIEW", "COMPLETED", "EMERGENCY"):
         assert outcome in serialized
 
 
@@ -86,6 +86,34 @@ def test_review_rework_adds_plan_approval_catalogue_lifecycle_and_preflight_read
     # run carries a layout mode chosen from the two catalogue modes
     plan_read = defs["PlanReadModel"]["properties"]["mode"]["enum"]
     assert set(plan_read) == {"MARKER_VERIFIED", "ROUTE_ONLY_2_ZONE"}
+
+
+def test_scope_declaration_preserves_deferred_contracts():
+    wire = _load("sentinel-v0-wire.schema.json")
+    scope = wire["x-sentinel-v0-scope"]
+    assert scope["policy"] == "defer-not-remove"
+    assert {"VideoStatus", "PerceptionResult", "PlanApproval"} <= set(scope["active_root_anchors"])
+    assert {"RUN_CREATE", "OPERATOR_DECIDE", "EMERGENCY_SIGNAL"} <= set(scope["active_commands"])
+    assert "ZONE_RESULT_REVIEWED" not in scope["active_events"]
+    serialized = json.dumps(wire)
+    for retained in ("CommandTaskCreatePayload", "CommandTaskRankPayload", "TASK_CREATE", "TASK_RANK", "SafeVideoStreamHandle"):
+        assert retained in serialized
+    deferred = {item["id"]: item for item in scope["deferred_capabilities"]}
+    assert "task-assignment-lifecycle" in deferred
+    assert deferred["zone-result-review"]["retained_contracts"] == ["ZONE_RESULT", "ZONE_RESULT_REVIEWED"]
+    assert "served-video-transport" in deferred
+
+
+def test_deferred_zone_review_command_and_event_fixtures_validate():
+    schema = _load("sentinel-v0-wire.schema.json")
+    validator = Draft202012Validator(schema)
+    fixture_dir = CONTRACTS / "fixtures"
+    for name in (
+        "command-operator-decide-zone-result.valid.json",
+        "event-zone-result-reviewed.valid.json",
+    ):
+        errors = list(validator.iter_errors(json.loads((fixture_dir / name).read_text(encoding="utf-8"))))
+        assert not errors, [error.message for error in errors]
 
 
 def test_checked_in_live_perception_fixtures_validate():

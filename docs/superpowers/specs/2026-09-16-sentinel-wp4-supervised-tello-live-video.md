@@ -6,13 +6,13 @@
 
 ## 1. Boundary
 
-WP4 executes only the named, pre-authorised choreography on one supervised Tello across the bounded six-zone indoor-alley route in the operator-selected layout mode (marker mode by default, or the explicit `ROUTE_ONLY_2_ZONE` fallback limited to the two middle zones). It implements `WorkerPort.dispatch`, `WorkerPort.reconcile`, `WorkerPort.read_video_status(run_id) -> #VideoStatus`, and `WorkerPort.open_live_video(run_id) -> #SafeVideoStreamHandle`. It creates no alternate wire format.
+WP4 executes only the named, pre-authorised choreography on one supervised Tello across the bounded six-zone indoor-alley route in the operator-selected layout mode (marker mode by default, or the explicit `ROUTE_ONLY_2_ZONE` fallback limited to the two middle zones). It implements `WorkerPort.dispatch`, `WorkerPort.reconcile`, and `WorkerPort.read_video_status(run_id) -> #VideoStatus`. Live frame capture plus `VideoStatus` is sufficient for the active V0 path. `WorkerPort.open_live_video(run_id) -> #SafeVideoStreamHandle` remains a retained compatibility capability deferred to V0.1; it is not required for V0 acceptance. WP4 creates no alternate wire format.
 
 `WorkerPort.dispatch` consumes the immutable `SurveyPlanReference`, its `approval_reference` and the exact run-bound `PreflightReport`. Dispatch executes only when the plan reference, approval and preflight all match the coordinator's approved run and the approval binds the plan hash, worker, choreography, run/state version and expiry. The worker honors at-most-one coordinator dispatch before reconciliation.
 
-WP4 owns producing the live stream and status. `VideoStatus` is read-only and reports stream lifecycle, freshness, dimensions, degradation, and selected-frame artifact ID/SHA-256. `SafeVideoStreamHandle` is an expiring, read-only served endpoint; it contains neither a filesystem path nor video bytes. A judged run requires `LIVE` status and `LIVE` source kind throughout the judged observation, with a selected frame correlated to the `ArtifactRef` consumed by `PerceptionRequest` and returned by `PerceptionResult`.
+WP4 owns live frame capture and status. `VideoStatus` is read-only and reports video lifecycle, freshness, dimensions, degradation, and selected-frame artifact ID/SHA-256. `SafeVideoStreamHandle` remains an expiring, read-only served-endpoint contract with neither a filesystem path nor video bytes, but served browser video is deferred from V0. A judged run requires `LIVE` status and `LIVE` source kind throughout the judged observation, with a selected frame correlated to the `ArtifactRef` consumed by `PerceptionRequest` and returned by `PerceptionResult`.
 
-The coordinator may retain only run-associated status/reference and selected image evidence through the artifact contract. It must not persist video bytes or proxy raw frames. WP2 owns rendering the handle/status and the visible `DEGRADED`/`UNAVAILABLE` path.
+The coordinator may retain only run-associated status/reference and selected image evidence through the artifact contract. It must not persist video bytes or proxy raw frames. WP2 renders `VideoStatus` and the visible `DEGRADED`/`UNAVAILABLE` path; opening a served handle is deferred.
 
 Perception may run asynchronously while the worker follows its already-approved route. It has no worker/control port and can never change an in-flight route; no flight mutation comes from perception.
 
@@ -39,7 +39,7 @@ At each approved station WP4 captures one to three live JPEG/PNG frames using th
 
 Landing is permitted only while no active latch is armed. The `EMERGENCY` latch is terminal and non-overridable: after the emergency command SENTINEL sends no landing, cleanup or retry command. A future run requires a fresh manual preflight.
 
-The mandatory rehearsal's test evidence must show `VideoStatus.status: LIVE`, a successful safe-handle open, a selected live JPEG/PNG `ArtifactRef` whose SHA-256 equals `PerceptionRequest.artifact_sha256`, the correlated `PerceptionResult`, operation/reconciliation outcome, and safe landing.
+The mandatory rehearsal's test evidence must show `VideoStatus.status: LIVE`, a selected live JPEG/PNG `ArtifactRef` whose SHA-256 equals `PerceptionRequest.artifact_sha256`, the correlated `PerceptionResult`, operation/reconciliation outcome, and safe landing. A safe-handle open is not a V0 acceptance requirement; it is deferred evidence for V0.1.
 
 ## 4. Rehearsal and acceptance
 

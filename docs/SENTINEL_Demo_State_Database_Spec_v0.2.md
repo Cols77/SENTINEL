@@ -1,10 +1,12 @@
 # SENTINEL Demo State Database Specification
 
 **Document version:** 0.8  
-**Status:** Agreed starting point  
-**Scope:** One orchestrator agent, rock/pebble inspection, one or two standard Tello drones, section-level localisation
+**Status:** Historical parent baseline; non-authoritative for current V0
+**Scope:** Historical orchestrator/rock-inspection design retained for compatibility and future releases
 
 Document versions describe changes to this specification. Product/demo releases are labelled `V0`, `V0.1`, and so on in Section 14.
+
+> **Current V0 authority note (2026-09-17):** This document is retained historical support. Its older MVP/V0 assignment, task/ranking, patroller, closer-observation and served-video requirements are not current V0 acceptance requirements. The current supervised V0 profile is defined by [`docs/superpowers/specs/2026-09-16-sentinel-v0-coherence-spec.md`](superpowers/specs/2026-09-16-sentinel-v0-coherence-spec.md) and WP0; V0 ends when the coordinator persists the zone-level perception result, which the UI renders read-only. Operator approval is reserved for proposed plans and future agentic actions, not database state. Existing contracts remain retained and are deferred rather than deleted.
 
 ## 1. Objective
 
@@ -31,7 +33,7 @@ Agent resumes from detection event
 Agent creates task and assigns patroller
 ```
 
-The MVP succeeds when a user can request an inspection in text, the agent dispatches a real drone inside an authorised mission envelope, a live image produces a stored rock/pebble detection, the agent proposes a patroller assignment, and the operator confirms it.
+The historical MVP succeeds when a user can request an inspection in text, the agent dispatches a real drone inside an authorised mission envelope, a live image produces a stored rock/pebble detection, the agent proposes a patroller assignment, and the operator confirms it. This assignment completion criterion is superseded for current V0 by the coordinator-owned zone-result profile.
 
 Moving slightly closer to confirm or improve a detection is a **stretch capability**, not part of the minimum success condition.
 
@@ -386,6 +388,8 @@ Required event types:
 
 ## 7. Agent tools
 
+> **Current V0 scope:** The required tools listed in this historical section are retained as compatibility vocabulary only. The active V0 model-facing boundary is exactly coordinator-mediated `read_state`, `read_mountain`, and bounded `read_events`; the model cannot dispatch, create tasks, rank patrollers, propose assignments, or approve actions.
+
 ### Required
 
 ```text
@@ -437,6 +441,8 @@ The agent must not poll continuously while the drone is flying. It yields and re
 
 ## 9. Video experience
 
+> **Current V0 scope:** This historical section's served live-stream requirement is deferred. V0 requires live frame capture, selected-frame provenance, and `VideoStatus`; `SafeVideoStreamHandle` and browser-stream serving are retained for V0.1.
+
 The operator UI should show:
 
 - live video stream
@@ -465,6 +471,8 @@ The live stream is a UI transport concern and does not need to pass through SQLi
 11. The agent resumes after its last processed event and cannot reprocess old detections as new work.
 
 ## 11. Minimum acceptance test
+
+> **Current V0 scope:** The assignment-oriented acceptance sequence below is retained historical material and is not the current release gate. Current V0 acceptance ends after the coordinator persists each zone-level perception result; no operator database-state review is required.
 
 Given one ready drone, one pre-activated inspection envelope, one section, and at least one available simulated patroller:
 
@@ -607,6 +615,8 @@ The ratings are prioritisation aids rather than delivery estimates. Each release
 These are independently demonstrable releases. V0 must remain runnable while later increments are developed; no later release should require rewriting the event, provenance, tool or approval contracts.
 
 ### 14.2 V0 — one trustworthy agentic inspection loop
+
+> **Current V0 scope:** This historical release description is superseded by the coordinator-owned zone-result profile. The current V0 path does not require task creation, patroller assignment, automatic revisit, precise localization, served browser video, or operator database-state review; those capabilities remain retained for V0.1.
 
 **Purpose:** prove the smallest complete user-to-physical-action-to-operational-response loop.
 

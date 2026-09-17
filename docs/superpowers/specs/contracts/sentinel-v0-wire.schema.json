@@ -3,6 +3,100 @@
   "$id": "https://sentinel.local/contracts/sentinel-v0-wire.schema.json",
   "title": "SENTINEL V0 rooted wire schema registry",
   "description": "Validate a complete public wire document at this root. Every document is discriminated by wire_type; command, event, and agent-result discriminators bind to closed typed branches. Cross-field artifact hash equality is enforced by the WP0 semantic validator, not JSON Schema.",
+  "x-sentinel-v0-scope": {
+    "policy": "defer-not-remove",
+    "active_root_anchors": [
+      "CommandEnvelope",
+      "ResultEnvelope",
+      "EventEnvelope",
+      "StateSnapshot",
+      "MountainStateSnapshot",
+      "AgentRequest",
+      "AgentModelResult",
+      "SurveyPlanReference",
+      "PlanReadModel",
+      "PlanApproval",
+      "PreflightReport",
+      "WorkerDispatch",
+      "OperationRecord",
+      "ReconciliationResult",
+      "EmergencySignal",
+      "ArtifactRef",
+      "StationCaptureProvenance",
+      "PerceptionRequest",
+      "PerceptionResult",
+      "VideoStatus"
+    ],
+    "active_commands": [
+      "RUN_CREATE",
+      "OPERATOR_DECIDE",
+      "EMERGENCY_SIGNAL",
+      "FORCE_RUN_CREATE",
+      "INSPECTION_DISPATCH",
+      "PERCEPTION_INGEST",
+      "OPERATION_RECONCILE"
+    ],
+    "active_events": [
+      "RUN_CREATED",
+      "AGENT_STARTED",
+      "PLAN_PROPOSED",
+      "PLAN_CREATED",
+      "PLAN_APPROVED",
+      "PLAN_REJECTED",
+      "PREFLIGHT_REPORTED",
+      "DRONE_DISPATCH_REQUESTED",
+      "DRONE_COMMAND_COMPLETED",
+      "OBSERVATION_CAPTURED",
+      "DETECTION_RECORDED",
+      "OPERATION_RECONCILED_SUCCEEDED",
+      "OPERATION_RECONCILED_FAILED",
+      "OPERATION_RECONCILIATION_UNKNOWN",
+      "SYSTEM_FAULT_RECORDED",
+      "EMERGENCY_LATCHED"
+    ],
+    "deferred_capabilities": [
+      {
+        "id": "task-assignment-lifecycle",
+        "status": "DEFERRED_V0_1",
+        "retained_contracts": [
+          "CommandTaskCreatePayload",
+          "CommandTaskRankPayload",
+          "TASK_CREATE",
+          "TASK_RANK",
+          "TASK_CREATED",
+          "PATROLLER_ASSIGNMENT_PROPOSED",
+          "PATROLLER_ASSIGNMENT_CONFIRMED",
+          "OPERATOR_ASSIGNMENT_REJECTED"
+        ],
+        "reason": "V0 ends at coordinator-persisted zone-level perception results; task creation, ranking and patroller assignment are retained but not emitted or required by the active path."
+      },
+      {
+        "id": "zone-result-review",
+        "status": "DEFERRED_V0_1",
+        "retained_contracts": ["ZONE_RESULT", "ZONE_RESULT_REVIEWED"],
+        "reason": "V0 renders coordinator-persisted perception results read-only; operators approve proposed plans and future agentic actions, not database state."
+      },
+      {
+        "id": "served-video-transport",
+        "status": "DEFERRED_V0_1",
+        "retained_contracts": ["SafeVideoStreamHandle"],
+        "reason": "Live frame capture plus VideoStatus satisfies the V0 evidence and preflight boundary; a served browser stream is retained but not required."
+      },
+      {
+        "id": "generalized-spatial-projection",
+        "status": "DEFERRED_V0_1",
+        "retained_fields": ["MountainStateSnapshot.flight_path", "MountainStateSnapshot.hazards", "MountainStateSnapshot.active_mission_id", "MountainStateSnapshot.active_task_id"],
+        "reason": "The active V0 result is zone-level over six fixed indoor-alley zones; route overlays, precise hazard geometry and generalized mission/task projections are deferred."
+      },
+      {
+        "id": "aggregation-revisit-platform-expansion",
+        "status": "DEFERRED_V0_1",
+        "retained_concepts": ["target_aggregation", "automatic_revisit", "external_notifications", "generalized_mission_lifecycle", "richer_diagnostics_and_storage_projections"],
+        "reason": "V0 records each fixed zone result directly; aggregation, revisit and broader platform projections are retained for later promotion."
+      }
+    ],
+    "rule": "Deferred entries remain in this registry and may be validated for compatibility, but V0 implementations, fixtures and release gates must use only the active profile unless a later version explicitly promotes an entry."
+  },
   "oneOf": [
     {
       "$ref": "#/$defs/CommandEnvelope"
@@ -696,6 +790,9 @@
           "$ref": "#/$defs/EventPlanRejectedPayload"
         },
         {
+          "$ref": "#/$defs/EventZoneResultReviewedPayload"
+        },
+        {
           "$ref": "#/$defs/EventPreflightReportedPayload"
         }
       ]
@@ -745,8 +842,8 @@
                 "RUN_CREATED",
                 "USER_MESSAGE_RECEIVED",
                 "AGENT_STARTED",
-                "AGENT_INTENT_PROPOSED",
-                "AGENT_INTENT_REJECTED",
+                "AGENT_PLAN_PROPOSAL_PROPOSED",
+                "AGENT_PLAN_PROPOSAL_REJECTED",
                 "AGENT_WAITING",
                 "AGENT_RESUMED",
                 "AGENT_COMPLETED",
@@ -771,6 +868,7 @@
                 "PLAN_CREATED",
                 "PLAN_APPROVED",
                 "PLAN_REJECTED",
+                "ZONE_RESULT_REVIEWED",
                 "PREFLIGHT_REPORTED"
               ]
             },
@@ -921,7 +1019,7 @@
               "if": {
                 "properties": {
                   "event_type": {
-                    "const": "AGENT_INTENT_PROPOSED"
+                    "const": "AGENT_PLAN_PROPOSAL_PROPOSED"
                   }
                 }
               },
@@ -937,7 +1035,7 @@
               "if": {
                 "properties": {
                   "event_type": {
-                    "const": "AGENT_INTENT_REJECTED"
+                    "const": "AGENT_PLAN_PROPOSAL_REJECTED"
                   }
                 }
               },
@@ -1281,6 +1379,22 @@
                 "properties": {
                   "payload": {
                     "$ref": "#/$defs/EventPlanRejectedPayload"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "event_type": {
+                    "const": "ZONE_RESULT_REVIEWED"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {
+                    "$ref": "#/$defs/EventZoneResultReviewedPayload"
                   }
                 }
               }
@@ -1760,7 +1874,7 @@
                 "RUNNING",
                 "WAITING_FOR_OBSERVATION",
                 "WAITING_FOR_APPROVAL",
-                "NEEDS_REVIEW",
+                "HELD_FOR_REVIEW",
                 "COMPLETED",
                 "FAILED",
                 "EMERGENCY"
@@ -1774,7 +1888,9 @@
               "items": {
                 "enum": [
                   "CONFIRM",
-                  "REJECT"
+                  "REJECT",
+                  "FORCE_RUN_CREATE",
+                  "EMERGENCY_STOP"
                 ]
               },
               "uniqueItems": true
@@ -2325,7 +2441,7 @@
             },
             "status": {
               "enum": [
-                "INTENT",
+                "PROPOSE_PLAN",
                 "NO_ACTION",
                 "MALFORMED",
                 "UNAVAILABLE"
@@ -2360,7 +2476,7 @@
               "if": {
                 "properties": {
                   "status": {
-                    "const": "INTENT"
+                    "const": "PROPOSE_PLAN"
                   }
                 }
               },
@@ -2735,6 +2851,7 @@
       }
     },
     "CommandTaskCreatePayload": {
+      "description": "Retained compatibility contract for the deferred task-assignment lifecycle; not emitted by the active V0 path.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -2755,6 +2872,7 @@
       }
     },
     "CommandTaskRankPayload": {
+      "description": "Retained compatibility contract for deferred deterministic ranking; not emitted by the active V0 path.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -2767,6 +2885,7 @@
       }
     },
     "CommandOperatorDecidePayload": {
+      "description": "Operator confirmation or rejection of an immutable plan is active in V0. TASK and ZONE_RESULT targets remain retained for deferred compatibility lifecycles; persisted database state is not an active operator approval target.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -2790,13 +2909,20 @@
             "kind": {
               "enum": [
                 "PLAN",
-                "TASK"
+                "TASK",
+                "ZONE_RESULT"
               ]
             },
             "plan_reference": {
               "$ref": "#/$defs/SurveyPlanReference"
             },
             "task_id": {
+              "$ref": "#/$defs/uuid"
+            },
+            "zone_id": {
+              "$ref": "#/$defs/configured_id"
+            },
+            "perception_result_id": {
               "$ref": "#/$defs/uuid"
             }
           },
@@ -2834,6 +2960,29 @@
                 ],
                 "properties": {
                   "plan_reference": {
+                    "type": "null"
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "ZONE_RESULT"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "zone_id",
+                  "perception_result_id"
+                ],
+                "properties": {
+                  "plan_reference": {
+                    "type": "null"
+                  },
+                  "task_id": {
                     "type": "null"
                   }
                 }
@@ -3351,6 +3500,30 @@
         }
       }
     },
+    "EventZoneResultReviewedPayload": {
+      "description": "Retained compatibility event for a deferred operator review of one zone-level perception result. It is not emitted by the active V0 path.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "zone_id",
+        "perception_result_id",
+        "decision"
+      ],
+      "properties": {
+        "zone_id": {
+          "$ref": "#/$defs/configured_id"
+        },
+        "perception_result_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "decision": {
+          "enum": [
+            "CONFIRM",
+            "REJECT"
+          ]
+        }
+      }
+    },
     "EventPreflightReportedPayload": {
       "type": "object",
       "additionalProperties": false,
@@ -3525,6 +3698,7 @@
     },
     "SafeVideoStreamHandle": {
       "$anchor": "SafeVideoStreamHandle",
+      "description": "Retained compatibility contract for a served live-video endpoint. It is deferred from the active V0 path; V0 requires live frame capture plus VideoStatus instead.",
       "allOf": [
         {
           "$ref": "#/$defs/wire_base"
