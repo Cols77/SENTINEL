@@ -28,6 +28,8 @@ class AgentLoop:
         cursor = 0
         for _turn in range(self.max_turns):
             state = self.port.read_state(run_id)
+            if hasattr(state, "to_dict"):
+                state = state.to_dict()
             if self._deadline_expired(deadline):
                 return {"status": "FAILED", "error_code": "DEADLINE_EXPIRED", "summary": "agent deadline expired"}
             if state.get("emergency_latched") or state.get("run_status") == "EMERGENCY":
