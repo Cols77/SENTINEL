@@ -1,6 +1,10 @@
 """Public SENTINEL WP0 contract gate."""
 
 from .schemas import (
+    AgentModelResult,
+    AgentRequest,
+    AgentToolCall,
+    AgentToolResult,
     ArtifactRef,
     ContractValidationError,
     EmergencySignal,
@@ -19,6 +23,10 @@ from .schemas import (
 )
 
 __all__ = [
+    "AgentModelResult",
+    "AgentRequest",
+    "AgentToolCall",
+    "AgentToolResult",
     "ArtifactRef",
     "ContractValidationError",
     "EmergencySignal",
