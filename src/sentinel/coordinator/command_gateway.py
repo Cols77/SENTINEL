@@ -71,6 +71,33 @@ class CommandGateway:
             raise CoordinatorError("INVALID_CONTRACT", str(exc)) from exc
 
         run_id = command["run_id"]
+        payload_json = json.dumps(command["payload"], sort_keys=True, separators=(",", ":"))
+        payload_sha256 = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+        if command["command_type"] == "RUN_CREATE":
+            with self.repository.connection:
+                self.repository.create_run(run_id, status="RUNNING")
+                event = self.repository.append_event(
+                    run_id, "RUN_CREATED", {"run_status": "RUNNING"},
+                    actor_type=command["actor_type"], actor_id=command["actor_id"],
+                    correlation_id=command["correlation_id"], commit=False,
+                )
+                self.repository.append_event(
+                    run_id, "USER_MESSAGE_RECEIVED", command["payload"],
+                    actor_type=command["actor_type"], actor_id=command["actor_id"],
+                    correlation_id=command["correlation_id"], commit=False,
+                )
+                result = {
+                    "contract_version": "sentinel.v0", "wire_type": "result_envelope",
+                    "command_id": command["command_id"], "run_id": run_id, "status": "COMPLETED",
+                    "state_version": event["state_version"] + 1, "event_id": event["event_id"],
+                    "error_code": None, "payload": {"accepted_command_type": "RUN_CREATE"},
+                    "recorded_at": event["recorded_at"],
+                }
+                self.repository.connection.execute(
+                    "INSERT INTO idempotency_keys(run_id, actor_type, actor_id, idempotency_key, command_type, expected_state_version, payload_sha256, result_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (run_id, command["actor_type"], command["actor_id"], command["idempotency_key"], command["command_type"], command.get("expected_state_version"), payload_sha256, json.dumps(result, sort_keys=True, separators=(",", ":"))),
+                )
+                return result
         row = self.repository.connection.execute(
             "SELECT state_version, status, emergency_latched, pending_approval_kind, pending_approval_id FROM runs WHERE run_id = ?",
             (run_id,),
@@ -193,12 +220,12 @@ class CommandGateway:
                 payload = command["payload"]
                 reference = payload["new_plan_reference"]
                 new_run_id = reference["plan_id"]
-                self.repository.create_run(new_run_id, status="NEW")
+                self.repository.create_run(new_run_id, status="RUNNING")
                 self.repository.connection.execute(
                     "INSERT INTO plans(plan_id, run_id, catalogue_id, catalogue_revision, plan_sha256, mode, station_ids_json, canonical_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (new_run_id, new_run_id, reference["catalogue_id"], reference["catalogue_revision"], reference["plan_sha256"], "MARKER_VERIFIED", json.dumps(reference["station_ids"]), json.dumps(reference, sort_keys=True, separators=(",", ":")), command["issued_at"]),
+                    (new_run_id, new_run_id, reference["catalogue_id"], reference["catalogue_revision"], reference["plan_sha256"], "MARKER_VERIFIED", json.dumps(reference["station_ids"]), json.dumps({**reference, "prior_run_id": payload["prior_run_id"], "failed_report_id": payload["failed_report_id"], "operator_reason": payload["operator_reason"]}, sort_keys=True, separators=(",", ":")), command["issued_at"]),
                 )
-                event = self.repository.append_event(new_run_id, "RUN_CREATED", {**payload, "run_status": "NEW"}, actor_type="OPERATOR", actor_id=command["actor_id"], correlation_id=command["correlation_id"], commit=False)
+                event = self.repository.append_event(new_run_id, "RUN_CREATED", {"run_status": "RUNNING"}, actor_type="OPERATOR", actor_id=command["actor_id"], correlation_id=command["correlation_id"], commit=False)
                 result = {"contract_version": "sentinel.v0", "wire_type": "result_envelope", "command_id": command["command_id"], "run_id": new_run_id, "status": "COMPLETED", "state_version": event["state_version"], "event_id": event["event_id"], "error_code": None, "payload": {"reason": payload["operator_reason"]}, "recorded_at": event["recorded_at"]}
                 self.repository.connection.execute("INSERT INTO idempotency_keys(run_id, actor_type, actor_id, idempotency_key, command_type, expected_state_version, payload_sha256, result_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (run_id, command["actor_type"], command["actor_id"], command["idempotency_key"], command_type, expected, payload_sha256, json.dumps(result, sort_keys=True, separators=(",", ":"))))
                 return result

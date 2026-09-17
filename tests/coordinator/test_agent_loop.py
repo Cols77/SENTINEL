@@ -111,7 +111,46 @@ def test_agent_loop_stops_at_approval_without_model_call():
     result = AgentLoop(Port(), lambda request: calls.append(request)).run(
         RUN_ID, "66666666-6666-4666-8666-666666666666", "inspect"
     )
-    assert result["status"] == "WAITING_FOR_APPROVAL"
+    assert result["status"] == "ACCEPTED"
+    assert result["error_code"] == "WAITING_FOR_APPROVAL"
     assert result["event_cursor"] == 7
     assert result["state_version"] == 1
     assert calls == []
+
+
+def test_agent_loop_binds_typed_feedback_to_next_request():
+    class Port:
+        state_version = 0
+        submissions = []
+
+        def read_state(self, run_id):
+            return {"run_id": run_id, "state_version": self.state_version, "run_status": "RUNNING", "agent_phase": "PLAN"}
+
+        def read_events(self, run_id, after, limit):
+            return [{"sequence_no": 4, "event_type": "TASK_CREATED"}] if self.state_version else []
+
+        def submit(self, command):
+            self.submissions.append(command)
+            self.state_version = 1
+            return {"status": "COMPLETED"}
+
+    port = Port()
+    requests = []
+
+    def model(request):
+        requests.append(request)
+        if len(requests) == 1:
+            tool = "task.create"
+            arguments = {"perception_result_id": "22222222-2222-4222-8222-222222222222", "section_id": "LEFT_ALLEY_MIDDLE", "evidence_artifact_id": "33333333-3333-4333-8333-333333333333"}
+        else:
+            tool = "finish"
+            arguments = {"status": "DONE", "summary": "complete"}
+        return {"contract_version": "sentinel.v0", "wire_type": "agent_result", "agent_run_id": request["agent_run_id"], "status": "TOOL_CALLS", "tool_calls": [{"contract_version": "sentinel.v0", "wire_type": "agent_tool_call", "tool_name": tool, "arguments": arguments}]}
+
+    result = AgentLoop(port, model, max_turns=2).run(RUN_ID, "66666666-6666-4666-8666-666666666666", "inspect")
+
+    assert result["status"] == "DONE"
+    assert requests[1]["state_version"] == 1
+    assert requests[1]["event_context"] == [{"sequence_no": 4, "event_type": "TASK_CREATED", "summary": "TASK_CREATED"}]
+    assert requests[1]["previous_result"]["status"] == "ACCEPTED"
+    assert requests[1]["previous_result"]["result"] == {"kind": "task"}

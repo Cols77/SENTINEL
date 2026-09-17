@@ -239,7 +239,45 @@ def test_force_run_create_creates_new_run_bound_to_failed_report(tmp_path: Path)
     }
     result = CommandGateway(repo).submit(command)
     assert result["run_id"] == new_run_id
-    assert repo.connection.execute("SELECT status FROM runs WHERE run_id = ?", (new_run_id,)).fetchone()[0] == "NEW"
+    assert repo.connection.execute("SELECT status FROM runs WHERE run_id = ?", (new_run_id,)).fetchone()[0] == "RUNNING"
     assert repo.connection.execute("SELECT run_id FROM plans WHERE plan_id = ?", (new_run_id,)).fetchone()[0] == new_run_id
+    plan = repo.connection.execute("SELECT canonical_json FROM plans WHERE plan_id = ?", (new_run_id,)).fetchone()
+    canonical = json.loads(plan["canonical_json"])
+    assert canonical["failed_report_id"] == report_id
+    assert canonical["operator_reason"] == "retake"
     assert repo.connection.execute("SELECT status FROM runs WHERE run_id = ?", (RUN_ID,)).fetchone()[0] == "FAILED"
+    repo.close()
+
+
+def test_force_run_create_rejects_emergency_even_for_operator(tmp_path: Path):
+    repo = CoordinatorRepository.open(tmp_path / "force-emergency.sqlite3")
+    repo.create_run(RUN_ID, status="EMERGENCY")
+    repo.connection.execute("UPDATE runs SET emergency_latched = 1 WHERE run_id = ?", (RUN_ID,))
+    repo.connection.commit()
+    command = {
+        "contract_version": "sentinel.v0", "wire_type": "command_envelope", "command_id": "88888888-8888-4888-8888-888888888888", "command_type": "FORCE_RUN_CREATE", "run_id": RUN_ID, "actor_type": "OPERATOR", "actor_id": "OPERATOR_1", "correlation_id": "99999999-9999-4999-8999-999999999999", "idempotency_key": "force-emergency-1", "expected_state_version": 0, "issued_at": "2026-09-17T00:00:00Z",
+        "payload": {"prior_run_id": RUN_ID, "failed_report_id": "66666666-6666-4666-8666-666666666666", "operator_reason": "retake", "new_plan_reference": {"plan_id": "77777777-7777-4777-8777-777777777777", "plan_sha256": "b" * 64, "catalogue_id": "SURVEY_CATALOGUE_V1", "catalogue_revision": "REV_1", "station_ids": ["LEFT_ALLEY_MIDDLE"]}, "real_confirm": True},
+    }
+    with pytest.raises(CoordinatorError) as caught:
+        CommandGateway(repo).submit(command)
+    assert caught.value.code == "EMERGENCY_LATCHED"
+    assert repo.connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+    repo.close()
+
+
+def test_run_create_is_a_command_driven_start_of_flow(tmp_path: Path):
+    repo = CoordinatorRepository.open(tmp_path / "run-create.sqlite3")
+    run_id = "88888888-8888-4888-8888-888888888888"
+    command = {
+        "contract_version": "sentinel.v0", "wire_type": "command_envelope",
+        "command_id": "99999999-9999-4999-8999-999999999999", "command_type": "RUN_CREATE",
+        "run_id": run_id, "actor_type": "OPERATOR", "actor_id": "OPERATOR_1",
+        "correlation_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "idempotency_key": "run-create-1",
+        "issued_at": "2026-09-17T00:00:00Z", "payload": {"request_text": "inspect one station"},
+    }
+    result = CommandGateway(repo).submit(command)
+    assert result["status"] == "COMPLETED"
+    run = repo.connection.execute("SELECT status, state_version FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+    assert (run["status"], run["state_version"]) == ("RUNNING", 2)
+    assert [event["event_type"] for event in repo.read_events(run_id, 0, 10)] == ["RUN_CREATED", "USER_MESSAGE_RECEIVED"]
     repo.close()
