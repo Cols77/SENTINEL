@@ -30,6 +30,23 @@ CoordinatorPort.read_plan(plan_id) -> #PlanReadModel
 CoordinatorPort.read_preflight(run_id) -> #PreflightReport
 ```
 
+### 3.2 Canonical coordinator seam and tool mapping
+
+All adapter ingress uses `CoordinatorPort.submit(#CommandEnvelope) -> #ResultEnvelope`. The typed mapping is:
+
+| Agent operation | Coordinator command | Coordinator-owned result/event |
+|---|---|---|
+| `inspection.propose_plan` | `AGENT_INTENT_PROPOSE` (`intent` + conditional `catalogue_plan_id`) | persisted immutable plan identity; `PLAN_PROPOSED`/`PLAN_CREATED` |
+| `task.create` | `TASK_CREATE` (`perception_result_id`, `section_id`, `evidence_artifact_id`) | typed `ResultEnvelope`; `TASK_CREATED` |
+| `patroller.rank_for_task` | `TASK_RANK` (`task_id`) | deterministic typed ranking in `ResultEnvelope` |
+| `assignment.propose` | `ASSIGNMENT_PROPOSE` (`task_id`, `patroller_id`, bounded `reason`) | pending approval; `PATROLLER_ASSIGNMENT_PROPOSED` |
+| worker preflight ingress | `PREFLIGHT_INGEST` (`PreflightReport`) | immutable report persisted; `PREFLIGHT_REPORTED` |
+| operator plan/task approval | `OPERATOR_DECIDE` (typed target) | approval transition and lifecycle event |
+
+Only `state.get_summary`, `state.get_recent_events`, and `wait_for_event` are coordinator-mediated read/wait tools exposed to the model. The model may select among coordinator-returned facts but cannot create plan identity, perform preflight checks, calculate thresholds/rankings, persist events, dispatch a worker, or approve an assignment. `PREFLIGHT_REPORTED` is reached only by coordinator submission of the full immutable report, never by an adapter-local event.
+
+Every shared result uses the WP0 typed fields (`status`, `error_code`, `reason`, `operation_id`, `correlation_id`, and `state_version` where applicable). Shared coordinator errors use the WP0 registry. `LLM_CONFIG_MISSING`, `LLM_CONFIG_INVALID`, `LLM_DEPENDENCY_MISSING`, and `LLM_CREDENTIAL_MISSING` remain adapter-local and are not persisted as coordinator errors or event types.
+
 ### 3.1 Module layout and fake adapters
 
 Colin’s coordinator lives in `sentinel/coordinator/` (repository, transitions, idempotency, command gateway, read models); Alan’s runtime lives in `sentinel/adapter/llm/` (`AgentModelPort`, provider config, structured parser). The deterministic fake agent, fake worker and fake perception providers are mandatory before any provider or drone integration and import only `sentinel.contracts` and fixtures. Every fake adapter emits `source_kind: SIMULATED`; there is no "fake real-mode". A real-mode test must use a live-capable adapter or be rejected from the judged path.
