@@ -15,6 +15,7 @@ from sentinel.contracts.validators import (
     validate_bbox,
     validate_event_stream,
     validate_mountain_fixture,
+    validate_preflight_report,
 )
 
 
@@ -61,6 +62,19 @@ def test_event_stream_requires_monotonic_run_scoped_sequence():
     with pytest.raises(ContractViolation) as error:
         validate_event_stream([events[1], events[0]])
     assert error.value.code == "EVENT_SEQUENCE_INVALID"
+
+
+def test_preflight_report_requires_exact_eight_checks_and_conjunction():
+    report = load(CONTRACTS / "fixtures" / "preflight-report.valid.json")
+    assert validate_preflight_report(report) == report
+    invalid = copy.deepcopy(report)
+    invalid["checks"][0]["passed"] = False
+    with pytest.raises(ContractViolation, match="passed"):
+        validate_preflight_report(invalid)
+    invalid = copy.deepcopy(report)
+    invalid["checks"][0]["name"] = invalid["checks"][1]["name"]
+    with pytest.raises(ContractViolation, match="exactly"):
+        validate_preflight_report(invalid)
 
 
 def test_idempotency_registry_replays_same_scope_and_rejects_conflict():
