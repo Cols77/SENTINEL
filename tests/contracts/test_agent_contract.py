@@ -268,3 +268,99 @@ def test_non_tool_call_statuses_reject_tool_calls(status, extra):
 
     with pytest.raises(ContractValidationError):
         validate_document(result)
+
+
+
+def _command(command_type, payload, *, actor_type="AGENT"):
+    return {
+        "contract_version": "sentinel.v0",
+        "wire_type": "command_envelope",
+        "command_id": UUID,
+        "command_type": command_type,
+        "run_id": UUID,
+        "actor_type": actor_type,
+        "actor_id": "agent-1",
+        "correlation_id": UUID,
+        "idempotency_key": "command-123",
+        "issued_at": TS,
+        "payload": payload,
+    }
+
+
+def test_intent_command_persists_plan_identity_only_for_successful_inspection():
+    assert validate_document(
+        _command(
+            "AGENT_INTENT_PROPOSE",
+            {"intent": "INSPECT_SECTION", "catalogue_plan_id": "CAT_ALLEY"},
+        )
+    ) == []
+    with pytest.raises(ContractValidationError):
+        validate_document(_command("AGENT_INTENT_PROPOSE", {"intent": "INSPECT_SECTION"}))
+    assert validate_document(
+        _command("AGENT_INTENT_PROPOSE", {"intent": "NO_ACTION_REQUIRED"})
+    ) == []
+
+
+def test_coordinator_ingress_commands_are_closed_and_typed():
+    report = {
+        "report_id": UUID,
+        "run_id": UUID,
+        "plan_id": UUID,
+        "plan_sha256": "a" * 64,
+        "passed": True,
+        "checks": [
+            {"name": name, "passed": True, "checked_at": TS}
+            for name in (
+                "WIFI_INTERFACE", "DRONE_LINK", "BATTERY_TELEMETRY", "LIVE_VIDEO",
+                "LAYOUT_MARKERS", "BOUNDED_AREA", "HEIGHT_ENVELOPE", "EMERGENCY_LATCH",
+            )
+        ],
+        "checked_at": TS,
+    }
+    assert validate_document(
+        _command("PREFLIGHT_INGEST", {"preflight_report": report}, actor_type="WORKER")
+    ) == []
+    assert validate_document(
+        _command(
+            "ASSIGNMENT_PROPOSE",
+            {"task_id": UUID, "patroller_id": "PATROLLER_1", "reason": "rank-1 candidate"},
+        )
+    ) == []
+    with pytest.raises(ContractValidationError):
+        validate_document(
+            _command("ASSIGNMENT_PROPOSE", {"task_id": UUID, "patroller_id": "PATROLLER_1"})
+        )
+
+
+def _result_envelope(**overrides):
+    result = {
+        "contract_version": "sentinel.v0",
+        "wire_type": "result_envelope",
+        "command_id": UUID,
+        "run_id": UUID,
+        "status": "COMPLETED",
+        "state_version": 5,
+        "recorded_at": TS,
+        "payload": {},
+    }
+    result.update(overrides)
+    return result
+
+
+def test_result_envelope_accepts_shared_typed_fields_and_round_trips():
+    result = _result_envelope(
+        reason="assignment accepted",
+        correlation_id=UUID,
+    )
+
+    assert validate_document(result) == []
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("reason", 42), ("reason", "x" * 513), ("correlation_id", "not-a-uuid")],
+)
+def test_result_envelope_rejects_malformed_shared_typed_fields(field, value):
+    with pytest.raises(ContractValidationError):
+        validate_document(_result_envelope(**{field: value}))
+
