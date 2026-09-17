@@ -214,3 +214,32 @@ def test_schema_valid_provider_error_is_failed():
     fixture["status"] = "PROVIDER_ERROR"
     fixture["raw_score"] = None
     assert EvidencePolicy().evaluate(fixture, artifact_sha256=fixture["artifact_sha256"], threshold=0.99).status == "FAILED"
+
+
+def test_force_run_create_creates_new_run_bound_to_failed_report(tmp_path: Path):
+    repo = CoordinatorRepository.open(tmp_path / "force-run.sqlite3")
+    repo.create_run(RUN_ID, status="FAILED")
+    report_id = "66666666-6666-4666-8666-666666666666"
+    repo.connection.execute(
+        "INSERT INTO preflight_reports(report_id, run_id, plan_id, plan_sha256, passed, report_json, checked_at) VALUES (?, ?, ?, ?, 0, '{}', ?)",
+        (report_id, RUN_ID, PLAN_ID, PLAN_HASH, "2026-09-17T00:00:00Z"),
+    )
+    repo.connection.commit()
+    new_run_id = "77777777-7777-4777-8777-777777777777"
+    command = {
+        "contract_version": "sentinel.v0", "wire_type": "command_envelope",
+        "command_id": "88888888-8888-4888-8888-888888888888", "command_type": "FORCE_RUN_CREATE",
+        "run_id": RUN_ID, "actor_type": "OPERATOR", "actor_id": "OPERATOR_1",
+        "correlation_id": "99999999-9999-4999-8999-999999999999", "idempotency_key": "force-run-1",
+        "expected_state_version": 0, "issued_at": "2026-09-17T00:00:00Z",
+        "payload": {"prior_run_id": RUN_ID, "failed_report_id": report_id, "operator_reason": "retake",
+                    "new_plan_reference": {"plan_id": new_run_id, "plan_sha256": "b" * 64,
+                        "catalogue_id": "SURVEY_CATALOGUE_V1", "catalogue_revision": "REV_1",
+                        "station_ids": ["LEFT_ALLEY_MIDDLE"]}, "real_confirm": True},
+    }
+    result = CommandGateway(repo).submit(command)
+    assert result["run_id"] == new_run_id
+    assert repo.connection.execute("SELECT status FROM runs WHERE run_id = ?", (new_run_id,)).fetchone()[0] == "NEW"
+    assert repo.connection.execute("SELECT run_id FROM plans WHERE plan_id = ?", (new_run_id,)).fetchone()[0] == new_run_id
+    assert repo.connection.execute("SELECT status FROM runs WHERE run_id = ?", (RUN_ID,)).fetchone()[0] == "FAILED"
+    repo.close()

@@ -54,14 +54,14 @@ def test_one_station_simulated_slice_persists_evidence_task_and_assignment(tmp_p
     }, 0, 1)
     gateway.submit(create_command)
     task_id = str(uuid.uuid5(uuid.NAMESPACE_URL, create_command["command_id"]))
-    gateway.submit(envelope("TASK_RANK", {"task_id": task_id}, 1, 2))
+    rank_result = gateway.submit(envelope("TASK_RANK", {"task_id": task_id}, 1, 2))
     gateway.submit(envelope("ASSIGNMENT_PROPOSE", {
         "task_id": task_id, "patroller_id": "PATROLLER_1", "reason": "highest deterministic score",
-    }, 2, 3))
+    }, 1, 3))
     gateway.submit(envelope("OPERATOR_DECIDE", {
         "decision": "CONFIRM",
         "target": {"kind": "TASK", "task_id": task_id},
-    }, 3, 4))
+    }, 2, 4))
 
     task = repository.connection.execute(
         "SELECT status, proposed_patroller_id, perception_result_id FROM tasks WHERE task_id = ?", (task_id,)
@@ -70,8 +70,9 @@ def test_one_station_simulated_slice_persists_evidence_task_and_assignment(tmp_p
         "ASSIGNED", "PATROLLER_1", RESULT_ID
     )
     assert [event["event_type"] for event in repository.read_events(RUN_ID, 0, 10)] == [
-        "TASK_CREATED", "PATROLLER_ASSIGNMENT_PROPOSED", "PATROLLER_ASSIGNMENT_PROPOSED", "PATROLLER_ASSIGNMENT_CONFIRMED",
+        "TASK_CREATED", "PATROLLER_ASSIGNMENT_PROPOSED", "PATROLLER_ASSIGNMENT_CONFIRMED",
     ]
+    assert rank_result["payload"]["ranking"][0]["patroller_id"] == "PATROLLER_1"
     assert repository.connection.execute("SELECT status FROM runs WHERE run_id = ?", (RUN_ID,)).fetchone()[0] == "COMPLETED"
-    assert repository.connection.execute("SELECT state_version FROM runs WHERE run_id = ?", (RUN_ID,)).fetchone()[0] == 4
+    assert repository.connection.execute("SELECT state_version FROM runs WHERE run_id = ?", (RUN_ID,)).fetchone()[0] == 3
     repository.close()

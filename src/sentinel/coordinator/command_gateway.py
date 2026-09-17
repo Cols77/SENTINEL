@@ -24,7 +24,7 @@ _EVENT_TYPES = {
     "INSPECTION_DISPATCH": "DRONE_DISPATCH_REQUESTED",
     "PERCEPTION_INGEST": "DETECTION_RECORDED",
     "TASK_CREATE": "TASK_CREATED",
-    "TASK_RANK": "PATROLLER_ASSIGNMENT_PROPOSED",
+    "TASK_RANK": None,
     "OPERATOR_DECIDE": "PLAN_APPROVED",
     "EMERGENCY_SIGNAL": "EMERGENCY_LATCHED",
     "OPERATION_RECONCILE": "OPERATION_RECONCILED_SUCCEEDED",
@@ -102,9 +102,9 @@ class CommandGateway:
             )
         if row["status"] in _TERMINAL_RUN_STATES and command_type == "EMERGENCY_SIGNAL":
             raise CoordinatorError("INVALID_STATE_TRANSITION", "terminal runs cannot be overwritten")
-        if row["status"] in {"FAILED", "COMPLETED"} or (
+        if ((row["status"] in {"FAILED", "COMPLETED"} and command_type != "FORCE_RUN_CREATE") or (
             row["status"] == "EMERGENCY" and not row["emergency_latched"]
-        ):
+        )):
             raise CoordinatorError("INVALID_STATE_TRANSITION", "terminal runs reject ordinary commands")
         if row["emergency_latched"] and command_type != "EMERGENCY_SIGNAL":
             raise CoordinatorError("EMERGENCY_LATCHED", "ordinary commands are disabled")
@@ -112,6 +112,18 @@ class CommandGateway:
             raise CoordinatorError("UNAUTHORIZED_ACTOR", "operator decisions require an operator actor")
         if command_type == "PREFLIGHT_INGEST" and command["actor_type"] != "WORKER":
             raise CoordinatorError("UNAUTHORIZED_ACTOR", "preflight ingress requires a worker actor")
+        if command_type == "FORCE_RUN_CREATE":
+            if command["actor_type"] != "OPERATOR":
+                raise CoordinatorError("UNAUTHORIZED_ACTOR", "force-run creation requires an operator actor")
+            payload = command["payload"]
+            if payload["prior_run_id"] != run_id or row["status"] != "FAILED":
+                raise CoordinatorError("INVALID_STATE_TRANSITION", "force-run requires the failed prior run")
+            failed = self.repository.connection.execute(
+                "SELECT 1 FROM preflight_reports WHERE report_id = ? AND run_id = ? AND passed = 0",
+                (payload["failed_report_id"], run_id),
+            ).fetchone()
+            if failed is None:
+                raise CoordinatorError("INVALID_STATE_TRANSITION", "force-run must bind a failed preflight report")
         if command_type == "OPERATOR_DECIDE":
             target = command["payload"]["target"]
             if row["status"] != "WAITING_FOR_APPROVAL":
@@ -177,6 +189,19 @@ class CommandGateway:
             if approved is None:
                 raise CoordinatorError("INVALID_PREFLIGHT_REPORT", "preflight plan is not the approved immutable plan")
         with self.repository.connection:
+            if command_type == "FORCE_RUN_CREATE":
+                payload = command["payload"]
+                reference = payload["new_plan_reference"]
+                new_run_id = reference["plan_id"]
+                self.repository.create_run(new_run_id, status="NEW")
+                self.repository.connection.execute(
+                    "INSERT INTO plans(plan_id, run_id, catalogue_id, catalogue_revision, plan_sha256, mode, station_ids_json, canonical_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (new_run_id, new_run_id, reference["catalogue_id"], reference["catalogue_revision"], reference["plan_sha256"], "MARKER_VERIFIED", json.dumps(reference["station_ids"]), json.dumps(reference, sort_keys=True, separators=(",", ":")), command["issued_at"]),
+                )
+                event = self.repository.append_event(new_run_id, "RUN_CREATED", {**payload, "run_status": "NEW"}, actor_type="OPERATOR", actor_id=command["actor_id"], correlation_id=command["correlation_id"], commit=False)
+                result = {"contract_version": "sentinel.v0", "wire_type": "result_envelope", "command_id": command["command_id"], "run_id": new_run_id, "status": "COMPLETED", "state_version": event["state_version"], "event_id": event["event_id"], "error_code": None, "payload": {"reason": payload["operator_reason"]}, "recorded_at": event["recorded_at"]}
+                self.repository.connection.execute("INSERT INTO idempotency_keys(run_id, actor_type, actor_id, idempotency_key, command_type, expected_state_version, payload_sha256, result_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (run_id, command["actor_type"], command["actor_id"], command["idempotency_key"], command_type, expected, payload_sha256, json.dumps(result, sort_keys=True, separators=(",", ":"))))
+                return result
             if command_type == "AGENT_INTENT_PROPOSE" and command["payload"]["intent"] in {"INSPECT_SECTION", "REQUEST_OPERATOR_APPROVAL"}:
                 entry_id = command["payload"]["catalogue_plan_id"]
                 plan_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{run_id}:{entry_id}"))
@@ -229,7 +254,7 @@ class CommandGateway:
                 )
             if command_type == "TASK_RANK":
                 payload = command["payload"]
-                SimulatedPatroller(self.repository).rank_for_task(payload["task_id"], payload.get("scores", {"PATROLLER_1": 0.0}), commit=False)
+                ranking = SimulatedPatroller(self.repository).rank_for_task(payload["task_id"], payload.get("scores", {"PATROLLER_1": 0.0}), commit=False)
             if command_type == "ASSIGNMENT_PROPOSE":
                 payload = command["payload"]
                 AssignmentService(self.repository).propose(payload["task_id"], payload["patroller_id"], payload["reason"], commit=False)
@@ -299,7 +324,7 @@ class CommandGateway:
                     event_type = "PATROLLER_ASSIGNMENT_CONFIRMED" if command["payload"]["decision"] == "CONFIRM" else "OPERATOR_ASSIGNMENT_REJECTED"
                 elif command["payload"]["decision"] == "REJECT":
                     event_type = "PLAN_REJECTED"
-            event = self.repository.append_event(
+            event = None if event_type is None else self.repository.append_event(
                 run_id,
                 event_type,
                 dict(command["payload"]),
@@ -314,11 +339,11 @@ class CommandGateway:
                 "command_id": command["command_id"],
                 "run_id": run_id,
                 "status": "COMPLETED",
-                "state_version": event["state_version"],
-                "event_id": event["event_id"],
+                "state_version": event["state_version"] if event else row["state_version"],
+                "event_id": event["event_id"] if event else None,
                 "error_code": None,
-                "payload": {"accepted_command_type": command_type},
-                "recorded_at": event["recorded_at"],
+                "payload": {"accepted_command_type": command_type, **({"ranking": ranking} if command_type == "TASK_RANK" else {})},
+                "recorded_at": event["recorded_at"] if event else command["issued_at"],
             }
             self.repository.connection.execute(
                 """INSERT INTO idempotency_keys(
