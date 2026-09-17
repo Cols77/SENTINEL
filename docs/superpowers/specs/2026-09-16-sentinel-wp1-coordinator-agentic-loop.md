@@ -47,8 +47,6 @@ Only `state.get_summary`, `state.get_recent_events`, and `wait_for_event` are co
 
 Every shared result uses the WP0 typed fields (`status`, `error_code`, `reason`, `operation_id`, `correlation_id`, and `state_version` where applicable). Shared coordinator errors use the WP0 registry. `LLM_CONFIG_MISSING`, `LLM_CONFIG_INVALID`, `LLM_DEPENDENCY_MISSING`, and `LLM_CREDENTIAL_MISSING` remain adapter-local and are not persisted as coordinator errors or event types.
 
-`CoordinatorPort.submit()` is the only command entry point. `AgentReadToolPort` is the only V0 tool surface visible to the model loop; it delegates the three named reads to the coordinator and cannot submit commands. `read_events()` uses an exclusive `after_sequence` cursor and returns committed events in ascending sequence order. `WorkerPort.reconcile()` is the only legal resolver for an `IN_DOUBT` operation; an `UNKNOWN` result fails closed and never causes redispatch. The UI, agent and adapters must not add convenience methods that bypass these boundaries.
-
 ### 3.1 Module layout and fake adapters
 
 Colin’s coordinator lives in `sentinel/coordinator/` (repository, transitions, idempotency, command gateway, read models); Alan’s runtime lives in `sentinel/adapter/llm/` (`AgentModelPort`, provider config, structured parser). The deterministic fake agent, fake worker and fake perception providers are mandatory before any provider or drone integration and import only `sentinel.contracts` and fixtures. Every fake adapter emits `source_kind: SIMULATED`; there is no "fake real-mode". A real-mode test must use a live-capable adapter or be rejected from the judged path.
