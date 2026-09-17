@@ -2,7 +2,7 @@
 
 ## State
 
-- This isolated worktree applies the reviewed-zone/defer-only update on top of the existing V0 specification branch. The original shared checkout remains untouched; no push or merge is claimed.
+- This isolated worktree applies the reviewed-zone/defer-only update on top of the existing V0 specification branch. The original shared checkout remains untouched; the branch is pushed as `docs/sentinel-v0-defer-only` and tracked by GitHub PR #6.
 - This branch defines the reworked V0 specification set under `docs/superpowers/specs/` for the six-zone indoor-alley survey: the canonical V0 coherence spec, an approved indoor-alley survey design (the V0 decision record), WP0 shared contracts, and WP1–WP4 component specs, plus `docs/safety.md`.
 - No push to `main` was performed. No real-drone or USB-adapter validation was claimed.
 
@@ -11,7 +11,7 @@
 - Fixed six-zone alley route (`LEFT_ALLEY_FRONT/MIDDLE/BACK`, `RIGHT_ALLEY_FRONT/MIDDLE/BACK`) in an indoor room safety envelope, with an operator-selected layout mode (marker mode default; `ROUTE_ONLY_2_ZONE` explicit fallback). A missing expected marker in marker mode is a failure.
 - Immutable `SurveyPlanReference` + `approval_reference` + exact `PreflightReport` bound to dispatch; operator approves the exact plan version before `DRONE_DISPATCH_REQUESTED`.
 - Provider gate: named joint Colin+Dzivha approval over a versioned, reproducible test-image-set hash (approval/review shared; execution of provider work is Dzivha's). No candidate list, no fixed 0.90 threshold.
-- Terminal run outcomes: `COMPLETED`, `FAILED`, `EMERGENCY`; `NEEDS_REVIEW` is a review-hold resolved by operator review of the current zone result; no automatic revisit occurs in V0. `REJECTED` is event-only.
+- Terminal run outcomes: `COMPLETED`, `FAILED`, `EMERGENCY`; `NEEDS_REVIEW` is a review-hold resolved by operator review of the current zone result; no automatic revisit occurs in V0. `PLAN_REJECTED` is event-only and returns to plan refinement/re-proposal; a zone-result `REJECT` is recorded by `ZONE_RESULT_REVIEWED` and advances to the next fixed zone or completes the run without revisit.
 - Preflight is exactly the 8 named checks (`WIFI_INTERFACE`, `DRONE_LINK`, `BATTERY_TELEMETRY`, `LIVE_VIDEO`, `LAYOUT_MARKERS`, `BOUNDED_AREA`, `HEIGHT_ENVELOPE`, `EMERGENCY_LATCH`); operator authorization is the plan's `approval_reference` evaluated at dispatch, not a preflight check.
 - Real execution is DJITelloPy-only, fresh-process with fresh preflight and `--real --confirm`. V0 uses live frame capture plus `VideoStatus`; `SafeVideoStreamHandle` and served browser video are retained but deferred to V0.1. The `EMERGENCY` latch is terminal and non-overridable; force-run after a failed preflight is operator-only `FORCE_RUN_CREATE` naming a new run/plan, never a resume, never under an active latch, always with fresh preflight and `--real --confirm`.
 
