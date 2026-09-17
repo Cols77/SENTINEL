@@ -2484,6 +2484,25 @@
             {
               "if": {
                 "properties": {
+                  "status": {
+                    "enum": [
+                      "INTENT",
+                      "NO_ACTION",
+                      "MALFORMED",
+                      "UNAVAILABLE"
+                    ]
+                  }
+                }
+              },
+              "then": {
+                "not": {
+                  "required": ["tool_calls"]
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
                   "status": {"const": "TOOL_CALLS"}
                 }
               },
@@ -2535,6 +2554,106 @@
                           "$ref": "#/$defs/AgentToolArguments"
                       }
                   }
+              },
+              {
+                  "allOf": [
+                      {
+                          "if": {
+                              "properties": {
+                                  "tool_name": {"const": "state.get_summary"}
+                              }
+                          },
+                          "then": {
+                              "properties": {
+                                  "arguments": {"$ref": "#/$defs/AgentStateSummaryArguments"}
+                              }
+                          }
+                      },
+                      {
+                          "if": {
+                              "properties": {
+                                  "tool_name": {"const": "state.get_recent_events"}
+                              }
+                          },
+                          "then": {
+                              "properties": {
+                                  "arguments": {"$ref": "#/$defs/AgentRecentEventsArguments"}
+                              }
+                          }
+                      },
+                      {
+                          "if": {
+                              "properties": {
+                                  "tool_name": {"const": "inspection.propose_plan"}
+                              }
+                          },
+                          "then": {
+                              "properties": {
+                                  "arguments": {"$ref": "#/$defs/AgentPlanProposalArguments"}
+                              }
+                          }
+                      },
+                      {
+                          "if": {
+                              "properties": {
+                                  "tool_name": {"const": "task.create"}
+                              }
+                          },
+                          "then": {
+                              "properties": {
+                                  "arguments": {"$ref": "#/$defs/AgentTaskCreateArguments"}
+                              }
+                          }
+                      },
+                      {
+                          "if": {
+                              "properties": {
+                                  "tool_name": {"const": "patroller.rank_for_task"}
+                              }
+                          },
+                          "then": {
+                              "properties": {
+                                  "arguments": {"$ref": "#/$defs/AgentTaskRankArguments"}
+                              }
+                          }
+                      },
+                      {
+                          "if": {
+                              "properties": {
+                                  "tool_name": {"const": "assignment.propose"}
+                              }
+                          },
+                          "then": {
+                              "properties": {
+                                  "arguments": {"$ref": "#/$defs/AgentAssignmentProposalArguments"}
+                              }
+                          }
+                      },
+                      {
+                          "if": {
+                              "properties": {
+                                  "tool_name": {"const": "wait_for_event"}
+                              }
+                          },
+                          "then": {
+                              "properties": {
+                                  "arguments": {"$ref": "#/$defs/AgentWaitArguments"}
+                              }
+                          }
+                      },
+                      {
+                          "if": {
+                              "properties": {
+                                  "tool_name": {"const": "finish"}
+                              }
+                          },
+                          "then": {
+                              "properties": {
+                                  "arguments": {"$ref": "#/$defs/AgentFinishArguments"}
+                              }
+                          }
+                      }
+                  ]
               }
           ]
       },
