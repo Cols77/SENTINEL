@@ -114,3 +114,51 @@ def test_task_rank_gateway_persists_ranking_and_event(tmp_path: Path):
     assert result["status"] == "COMPLETED"
     assert [row["patroller_id"] for row in repository.connection.execute("SELECT * FROM task_rankings ORDER BY rank_no").fetchall()] == ["PATROLLER_1"]
     assert repository.read_events(RUN_ID, 0, 10)[0]["event_type"] == "PATROLLER_ASSIGNMENT_PROPOSED"
+
+
+def test_emergency_signal_persistently_latches_and_blocks_ordinary_commands(tmp_path: Path):
+    repository = CoordinatorRepository.open(tmp_path / "emergency.sqlite3")
+    repository.create_run(RUN_ID, status="RUNNING")
+    gateway = CommandGateway(repository)
+    signal = command(
+        "EMERGENCY_SIGNAL",
+        actor_type="OPERATOR",
+        payload={"signal_id": "88888888-8888-4888-8888-888888888888"},
+    )
+
+    result = gateway.submit(signal)
+
+    assert result["status"] == "COMPLETED"
+    row = repository.connection.execute(
+        "SELECT status, emergency_latched FROM runs WHERE run_id = ?", (RUN_ID,)
+    ).fetchone()
+    assert (row["status"], row["emergency_latched"]) == ("EMERGENCY", 1)
+    record = repository.connection.execute(
+        "SELECT signal_id, worker_id FROM emergency_records WHERE run_id = ?", (RUN_ID,)
+    ).fetchone()
+    assert (record["signal_id"], record["worker_id"]) == (signal["payload"]["signal_id"], "OPERATOR_1")
+    assert repository.read_events(RUN_ID, 0, 10)[0]["event_type"] == "EMERGENCY_LATCHED"
+
+    with pytest.raises(CoordinatorError) as caught:
+        gateway.submit(command("AGENT_INTENT_PROPOSE", actor_type="AGENT", expected_state_version=1, payload={"intent": "NO_ACTION_REQUIRED"}))
+    assert caught.value.code == "EMERGENCY_LATCHED"
+    repository.close()
+
+
+def test_emergency_latch_survives_repository_reopen(tmp_path: Path):
+    database = tmp_path / "reopen-emergency.sqlite3"
+    repository = CoordinatorRepository.open(database)
+    repository.create_run(RUN_ID, status="RUNNING")
+    gateway = CommandGateway(repository)
+    gateway.submit(command("EMERGENCY_SIGNAL", payload={"signal_id": "88888888-8888-4888-8888-888888888888"}))
+    repository.close()
+
+    reopened = CoordinatorRepository.open(database)
+    row = reopened.connection.execute(
+        "SELECT status, emergency_latched FROM runs WHERE run_id = ?", (RUN_ID,)
+    ).fetchone()
+    assert (row["status"], row["emergency_latched"]) == ("EMERGENCY", 1)
+    with pytest.raises(CoordinatorError) as caught:
+        CommandGateway(reopened).submit(command("TASK_RANK", actor_type="AGENT", expected_state_version=1, payload={"task_id": PLAN_ID}))
+    assert caught.value.code == "EMERGENCY_LATCHED"
+    reopened.close()
