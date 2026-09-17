@@ -114,6 +114,8 @@ def _result(
     status: str,
     *,
     tool_calls: list[AgentToolCall] | None = None,
+    intent: str | None = None,
+    catalogue_plan_id: str | None = None,
     diagnostic: str | None = None,
 ) -> AgentModelResult:
     if diagnostic is not None:
@@ -123,10 +125,15 @@ def _result(
         "wire_type": "agent_result",
         "agent_run_id": agent_run_id,
         "status": status,
-        "tool_calls": [call.to_dict() for call in (tool_calls or [])],
     }
+    if intent is not None:
+        document["intent"] = intent
+    if catalogue_plan_id is not None:
+        document["catalogue_plan_id"] = catalogue_plan_id
     if diagnostic is not None:
         document["diagnostic"] = diagnostic
+    if status == "TOOL_CALLS":
+        document["tool_calls"] = [call.to_dict() for call in (tool_calls or [])]
     return AgentModelResult.from_dict(document)
 
 

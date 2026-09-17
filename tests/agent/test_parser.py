@@ -65,6 +65,32 @@ def test_refusal_and_empty_response_are_unavailable():
         assert result.tool_calls == []
 
 
+@pytest.mark.parametrize(
+    ("raw", "status"),
+    [
+        (completion(content="do the thing"), "MALFORMED"),
+        (completion(refusal="I cannot help with that"), "UNAVAILABLE"),
+    ],
+)
+def test_non_tool_call_results_omit_tool_calls_before_schema_validation(
+    monkeypatch, raw, status
+):
+    documents = []
+    original_from_dict = AgentModelResult.from_dict
+
+    def validating_from_dict(document):
+        documents.append(document)
+        return original_from_dict(document)
+
+    monkeypatch.setattr(AgentModelResult, "from_dict", validating_from_dict)
+
+    result = parse_chat_completion(raw, agent_run_id=AGENT_RUN_ID)
+
+    assert result.status == status
+    assert len(documents) == 1
+    assert "tool_calls" not in documents[0]
+
+
 def test_multiple_calls_are_preserved_in_order_without_execution():
     raw = completion(
         tool("state.get_summary", "{}"),
