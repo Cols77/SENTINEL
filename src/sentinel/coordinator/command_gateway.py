@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any, Mapping
 
-from sentinel.contracts import ContractValidationError, validate_document
+from sentinel.contracts import ContractValidationError, validate_document, validate_preflight_report
 
 from .errors import CoordinatorError
 from .approval import PlanApprovalService
@@ -97,30 +97,33 @@ class CommandGateway:
             raise CoordinatorError("UNAUTHORIZED_ACTOR", "preflight ingress requires a worker actor")
         if command_type == "INSPECTION_DISPATCH":
             payload = command["payload"]
-            if {"plan_id", "plan_sha256"} <= payload.keys():
-                PlanApprovalService(self.repository).require_dispatch_approval(
-                    run_id, payload["plan_id"], payload["plan_sha256"]
-                )
             approved = self.repository.connection.execute(
-                """SELECT 1 FROM plan_approvals pa JOIN plans p ON p.plan_id = pa.plan_id
-                   WHERE pa.run_id = ? AND pa.action = 'CONFIRM' AND pa.plan_sha256 = p.plan_sha256
-                   LIMIT 1""",
-                (run_id,),
-            ).fetchone()
-            if approved is None and not ({"plan_id", "plan_sha256"} <= payload.keys()):
+                """SELECT p.plan_id, p.plan_sha256, p.station_ids_json
+                   FROM plan_approvals pa JOIN plans p ON p.plan_id = pa.plan_id
+                   WHERE pa.run_id = ? AND pa.action = 'CONFIRM'
+                     AND pa.plan_sha256 = p.plan_sha256""", (run_id,)
+            ).fetchall()
+            if not any(payload["section_id"] in json.loads(row["station_ids_json"]) for row in approved):
                 raise CoordinatorError(
                     "INVALID_STATE_TRANSITION",
-                    "inspection dispatch requires an approved immutable plan",
+                    "inspection dispatch section is not bound to an approved immutable plan",
                 )
         if command_type == "PREFLIGHT_INGEST":
             report = command["payload"]["preflight_report"]
-            expected_names = {"WIFI_INTERFACE", "DRONE_LINK", "BATTERY_TELEMETRY", "LIVE_VIDEO", "LAYOUT_MARKERS", "BOUNDED_AREA", "HEIGHT_ENVELOPE", "EMERGENCY_LATCH"}
-            checks = report.get("checks", [])
-            names = {item.get("name") for item in checks if isinstance(item, Mapping)}
-            if len(checks) != 8 or names != expected_names:
-                raise CoordinatorError("INVALID_PREFLIGHT_REPORT", "preflight must contain exactly eight canonical checks")
+            try:
+                validate_preflight_report(report)
+            except ContractValidationError as exc:
+                raise CoordinatorError("INVALID_PREFLIGHT_REPORT", str(exc)) from exc
             if report["run_id"] != run_id:
                 raise CoordinatorError("INVALID_PREFLIGHT_REPORT", "preflight run binding mismatch")
+            approved = self.repository.connection.execute(
+                """SELECT 1 FROM plan_approvals pa JOIN plans p ON p.plan_id = pa.plan_id
+                   WHERE pa.run_id = ? AND pa.plan_id = ? AND pa.plan_sha256 = ?
+                     AND p.plan_sha256 = pa.plan_sha256 AND pa.action = 'CONFIRM'""",
+                (run_id, report["plan_id"], report["plan_sha256"]),
+            ).fetchone()
+            if approved is None:
+                raise CoordinatorError("INVALID_PREFLIGHT_REPORT", "preflight plan is not the approved immutable plan")
         event_type = _EVENT_TYPES[command_type]
         event = self.repository.append_event(
             run_id,
