@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Mapping
 
 from sentinel.contracts import ContractValidationError, validate_document
@@ -45,12 +47,28 @@ class CommandGateway:
         if row is None:
             raise CoordinatorError("INVALID_STATE_TRANSITION", "run does not exist")
         expected = command.get("expected_state_version")
+        command_type = command["command_type"]
+        payload_json = json.dumps(command["payload"], sort_keys=True, separators=(",", ":"))
+        payload_sha256 = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+        prior = self.repository.connection.execute(
+            """SELECT command_type, expected_state_version, payload_sha256, result_json
+               FROM idempotency_keys
+               WHERE run_id = ? AND actor_type = ? AND actor_id = ? AND idempotency_key = ?""",
+            (run_id, command["actor_type"], command["actor_id"], command["idempotency_key"]),
+        ).fetchone()
+        if prior is not None:
+            fingerprint = (command_type, expected, payload_sha256)
+            if fingerprint != (prior["command_type"], prior["expected_state_version"], prior["payload_sha256"]):
+                raise CoordinatorError(
+                    "IDEMPOTENCY_KEY_CONFLICT",
+                    "scope was reused with a different command fingerprint",
+                )
+            return json.loads(prior["result_json"])
         if expected is not None and expected != row["state_version"]:
             raise CoordinatorError(
                 "STALE_STATE_VERSION",
                 f"expected {expected}, current {row['state_version']}",
             )
-        command_type = command["command_type"]
         if row["emergency_latched"] and command_type != "EMERGENCY_SIGNAL":
             raise CoordinatorError("EMERGENCY_LATCHED", "ordinary commands are disabled")
         if command_type == "OPERATOR_DECIDE" and command["actor_type"] != "OPERATOR":
@@ -76,7 +94,7 @@ class CommandGateway:
             actor_id=command["actor_id"],
             correlation_id=command["correlation_id"],
         )
-        return {
+        result = {
             "contract_version": "sentinel.v0",
             "wire_type": "result_envelope",
             "command_id": command["command_id"],
@@ -88,3 +106,21 @@ class CommandGateway:
             "payload": {"accepted_command_type": command_type},
             "recorded_at": event["recorded_at"],
         }
+        with self.repository.connection:
+            self.repository.connection.execute(
+                """INSERT INTO idempotency_keys(
+                   run_id, actor_type, actor_id, idempotency_key, command_type,
+                   expected_state_version, payload_sha256, result_json
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    run_id,
+                    command["actor_type"],
+                    command["actor_id"],
+                    command["idempotency_key"],
+                    command_type,
+                    expected,
+                    payload_sha256,
+                    json.dumps(result, sort_keys=True, separators=(",", ":")),
+                ),
+            )
+        return result
