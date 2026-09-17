@@ -27,6 +27,66 @@ def test_operator_approval_binds_dispatch_to_exact_plan_hash(tmp_path: Path):
     repo.close()
 
 
+def _passed_preflight(report_id: str):
+    checks = [{"name": name, "passed": True, "checked_at": "2026-09-17T00:00:00Z"} for name in (
+        "WIFI_INTERFACE", "DRONE_LINK", "BATTERY_TELEMETRY", "LIVE_VIDEO",
+        "LAYOUT_MARKERS", "BOUNDED_AREA", "HEIGHT_ENVELOPE", "EMERGENCY_LATCH")]
+    return {"report_id": report_id, "run_id": RUN_ID, "plan_id": PLAN_ID,
+            "plan_sha256": PLAN_HASH, "passed": True, "checks": checks,
+            "checked_at": "2026-09-17T00:00:00Z"}
+
+
+def test_dispatch_requires_passed_preflight_bound_to_approved_plan(tmp_path: Path):
+    repo = CoordinatorRepository.open(tmp_path / "dispatch-preflight.sqlite3")
+    repo.create_run(RUN_ID, status="WAITING_FOR_APPROVAL")
+    repo.connection.execute(
+        "INSERT INTO plans(plan_id, run_id, catalogue_id, catalogue_revision, plan_sha256, mode, station_ids_json, canonical_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (PLAN_ID, RUN_ID, "SURVEY_CATALOGUE_V1", "REV_1", PLAN_HASH, "MARKER_VERIFIED", '["LEFT_ALLEY_MIDDLE"]', "{}", "2026-09-17T00:00:00Z"),
+    )
+    PlanApprovalService(repo).approve(RUN_ID, PLAN_ID, PLAN_HASH, actor_id="OPERATOR_1", expected_state_version=0)
+    command = {"contract_version": "sentinel.v0", "wire_type": "command_envelope",
+               "command_id": "88888888-8888-4888-8888-888888888888", "command_type": "INSPECTION_DISPATCH",
+               "run_id": RUN_ID, "actor_type": "WORKER", "actor_id": "SIMULATED_WORKER",
+               "correlation_id": "99999999-9999-4999-8999-999999999999", "idempotency_key": "dispatch-preflight-1",
+               "issued_at": "2026-09-17T00:00:00Z",
+               "payload": {"section_id": "LEFT_ALLEY_MIDDLE", "mission_id": PLAN_ID, "worker_id": "WORKER_1"}}
+
+    with pytest.raises(CoordinatorError) as caught:
+        CommandGateway(repo).submit(command)
+
+    assert caught.value.code == "INVALID_STATE_TRANSITION"
+    assert not any(event["event_type"] == "DRONE_DISPATCH_REQUESTED" for event in repo.read_events(RUN_ID, 0, 10))
+    repo.close()
+
+
+def test_dispatch_accepts_matching_passed_preflight(tmp_path: Path):
+    repo = CoordinatorRepository.open(tmp_path / "dispatch-approved.sqlite3")
+    repo.create_run(RUN_ID, status="WAITING_FOR_APPROVAL")
+    repo.connection.execute(
+        "INSERT INTO plans(plan_id, run_id, catalogue_id, catalogue_revision, plan_sha256, mode, station_ids_json, canonical_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (PLAN_ID, RUN_ID, "SURVEY_CATALOGUE_V1", "REV_1", PLAN_HASH, "MARKER_VERIFIED", '["LEFT_ALLEY_MIDDLE"]', "{}", "2026-09-17T00:00:00Z"),
+    )
+    PlanApprovalService(repo).approve(RUN_ID, PLAN_ID, PLAN_HASH, actor_id="OPERATOR_1", expected_state_version=0)
+    report = _passed_preflight("66666666-6666-4666-8666-666666666666")
+    repo.connection.execute(
+        "INSERT INTO preflight_reports(report_id, run_id, plan_id, plan_sha256, passed, report_json, checked_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
+        (report["report_id"], RUN_ID, PLAN_ID, PLAN_HASH, json.dumps(report, sort_keys=True), report["checked_at"]),
+    )
+    repo.connection.commit()
+    command = {"contract_version": "sentinel.v0", "wire_type": "command_envelope",
+               "command_id": "88888888-8888-4888-8888-888888888888", "command_type": "INSPECTION_DISPATCH",
+               "run_id": RUN_ID, "actor_type": "WORKER", "actor_id": "WORKER_1",
+               "correlation_id": "99999999-9999-4999-8999-999999999999", "idempotency_key": "dispatch-approved-1",
+               "issued_at": "2026-09-17T00:00:00Z",
+               "payload": {"section_id": "LEFT_ALLEY_MIDDLE", "mission_id": PLAN_ID, "worker_id": "WORKER_1"}}
+
+    result = CommandGateway(repo).submit(command)
+
+    assert result["status"] == "COMPLETED"
+    assert repo.read_events(RUN_ID, 0, 10)[-1]["event_type"] == "DRONE_DISPATCH_REQUESTED"
+    repo.close()
+
+
 def test_propose_persists_plan_and_can_be_approved(tmp_path: Path):
     repo = CoordinatorRepository.open(tmp_path / "proposal.sqlite3")
     repo.create_run(RUN_ID)
