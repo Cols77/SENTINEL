@@ -79,3 +79,21 @@ def test_agent_loop_stops_on_emergency_latch_between_turns():
     assert result["status"] == "EMERGENCY"
     assert result["error_code"] == "EMERGENCY_LATCHED"
     assert len(calls) == 1
+
+
+def test_agent_loop_rejects_unknown_tool_without_submitting_mutation():
+    class Port:
+        submissions = []
+        def read_state(self, run_id):
+            return {"run_id": run_id, "state_version": 0, "run_status": "RUNNING", "agent_phase": "PLAN"}
+        def read_events(self, *args): return []
+        def submit(self, command): self.submissions.append(command); return {}
+
+    port = Port()
+    def model(request):
+        return {"contract_version": "sentinel.v0", "wire_type": "agent_result", "agent_run_id": request["agent_run_id"], "status": "TOOL_CALLS", "tool_calls": [{"contract_version": "sentinel.v0", "wire_type": "agent_tool_call", "tool_name": "unknown.mutation", "arguments": {}}]}
+
+    result = AgentLoop(port, model).run(RUN_ID, "66666666-6666-4666-8666-666666666666", "inspect")
+    assert result["status"] == "FAILED"
+    assert result["error_code"] == "INVALID_AGENT_RESULT"
+    assert port.submissions == []
