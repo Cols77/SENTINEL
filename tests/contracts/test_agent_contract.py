@@ -74,6 +74,26 @@ def test_typed_agent_request_and_tool_result_round_trip_through_public_root():
     assert validate_document(result.to_dict()) == []
 
 
+def test_non_tool_call_agent_result_round_trips_without_tool_calls():
+    result = {
+        "contract_version": "sentinel.v0",
+        "wire_type": "agent_result",
+        "agent_run_id": UUID,
+        "status": "INTENT",
+        "intent": "INSPECT_SECTION",
+        "catalogue_plan_id": "CAT_ALLEY",
+    }
+
+    assert validate_document(result) == []
+
+    wrapped = AgentModelResult.from_dict(result)
+    round_tripped = wrapped.to_dict()
+
+    assert round_tripped == result
+    assert "tool_calls" not in round_tripped
+    assert validate_document(round_tripped) == []
+
+
 def test_ordered_tool_calls_are_closed_and_v0_limited_to_one():
     call = {
         "contract_version": "sentinel.v0",
