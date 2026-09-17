@@ -72,8 +72,8 @@ Inspect the left and right table alleys for rocks
 
 1. NiceGUI submits `RUN_CREATE` through `CoordinatorPort`.
 2. The real LLM returns one schema-validated agent intent proposing a catalogue-bound plan reference.
-3. The coordinator records the active `RUN_CREATED`/plan lifecycle and creates the immutable plan record bound to that plan version/hash. Retained `MISSION_CREATED` is not emitted by the active V0 path.
-4. The operator explicitly approves that exact plan version before any dispatch; the approval binds the plan hash, worker, choreography, run/state version and expiry.
+3. The coordinator records the active `RUN_CREATED`/plan lifecycle and creates the immutable plan record bound to that plan hash. Retained `MISSION_CREATED` is not emitted by the active V0 path.
+4. The operator explicitly approves that exact immutable plan (its plan hash is bound) before any dispatch; the approval binds the plan hash, worker, choreography, run/state version and expiry.
 5. WP4 executes the pre-authorised named choreography on one Tello.
 6. WP4 stores a selected live JPEG/PNG through the coordinator-managed artifact contract.
 7. WP3 calls the frozen provider profile and returns a hash-bound `PerceptionResult`.
