@@ -60,8 +60,9 @@ stations. The coordinator creates an immutable plan record.
 The operator reviews and approves that exact plan version. The approval binds
 the plan hash, worker, choreography, run/state version and expiry. Dispatch
 accepts only the matching immutable plan and makes at most one physical attempt.
-The agent may later propose a new bounded revisit; it never dispatches one. A
-revisit always requires a fresh approval and a new dispatch.
+V0 ends each selected station at a reviewed zone result. Revisit proposals and
+new physical dispatches are retained as V0.1 capability, not implemented in the
+V0 execution path.
 
 ## 3. Preflight, force-run and emergency
 
@@ -115,10 +116,10 @@ route. It has no worker/control port and can never change the in-flight route.
   missing marker in marker mode, worker/video/provider fault, invalid capture,
   integrity mismatch, or unresolved operation.
 - `NEEDS_REVIEW`: the route and evidence are valid, but perception is
-  inconclusive or below its configured confidence threshold. The agent may
-  propose a separately approved revisit.
+  inconclusive or below its configured confidence threshold. V0 holds the zone
+  for operator review and does not invent a score or automatically revisit.
 - `COMPLETED`: every approved station and valid perception result is processed,
-  including a valid no-rock result.
+  including a valid no-rock result, and the operator's zone decision is recorded.
 - `EMERGENCY`: emergency latch is active. It is terminal and cannot be forced.
 
 No dynamic correction, perception-driven motion, automatic revisit, automatic
@@ -141,6 +142,38 @@ revision, score threshold, owner approval record and a small versioned test-imag
 set. It is sufficient to reproduce the demo configuration. Cost targets,
 latency targets, formal benchmark governance and provider failover are deferred.
 
+## 7.1 Contract disposition: active V0 versus retained V0.1
+
+The contract registry is deliberately broader than the V0 runtime path. This is a
+staging decision, not a deletion decision: every existing schema, command/event
+branch, artifact, and fixture remains available and continues to be validated
+where applicable.
+
+**Active V0 runtime subset**
+
+- coordinator-mediated, read-only, run-scoped agent reads: `read_state`, `read_mountain`, and bounded `read_events`;
+- typed agent proposal resolving to one immutable, survey-catalogue-bound plan;
+- operator approval/rejection of the exact plan;
+- fresh preflight for every real run, deterministic supervised dispatch, at-most-one dispatch attempt, and fail-closed reconciliation;
+- live frame capture with `VideoStatus` and station capture provenance;
+- perception result for each fixed indoor-alley zone;
+- operator confirmation/rejection of a `ZONE_RESULT`, persisted as `ZONE_RESULT_REVIEWED`;
+- evidence/artifact integrity, provider provenance, version checks, idempotency, emergency handling, and recovery.
+
+**Retained but deferred to V0.1**
+
+- `CommandTaskCreatePayload`, `CommandTaskRankPayload`, `TASK_CREATE`, `TASK_RANK`, and task/ranking/patroller assignment lifecycles;
+- target aggregation, mission/task ranking, patroller selection, assignment approval loops, automatic revisit, and external notifications;
+- precise hazard coordinates, `flight_path`, detailed `drone_pose`, GIS/SLAM/location abstractions, and route-geometry semantics;
+- `SafeVideoStreamHandle`, browser-stream serving, and richer served-video lifecycle/transport;
+- generalized mission/task/event families and richer evidence, diagnostic, storage, and provenance projections not needed to produce a reviewed-zone result.
+
+The central `sentinel-v0-wire.schema.json` remains intact apart from additive
+scope metadata and the additive reviewed-zone target/event. No existing branch
+is removed or narrowed. A V0 implementation/profile must not instantiate,
+require, or emit a deferred branch merely because that branch remains in the
+registry.
+
 ## 8. Required artifact migration
 
 - Update the root coherence specification to name this indoor-alley V0 profile
@@ -149,8 +182,9 @@ latency targets, formal benchmark governance and provider failover are deferred.
   reference, preflight report, capture provenance and force-run approval.
 - Update WP1's agent intent/transition policy, immutable approval/dispatch
   binding and outcome matrix.
-- Update WP2 for preflight facts, force-run decision and emergency UI state;
-  defer route overlay to V0.1.
+- Update WP2 for preflight facts, force-run decision, emergency UI state,
+  `VideoStatus`, and reviewed-zone Confirm/Reject; defer route overlay, served
+  video, and richer video transport to V0.1.
 - Update WP3 to consume/return hash-bound station and zone provenance while
   retaining no route/control authority.
 - Update WP4 for DJITelloPy-only real execution, plan-bound worker behavior,
@@ -159,12 +193,9 @@ latency targets, formal benchmark governance and provider failover are deferred.
   `docs/superpowers/specs/superseded/`, with a replacement header and links.
   The direct-UDP command-test design is superseded. The historical broad worker
   specification is retained as non-authoritative support unless a focused review
-  shows a whole file has no remaining live content.
-  **Retained open task (not executed in this rework):** the physical move of the
-  superseded files into `superseded/`, the replacement headers and the links are
-  a separate follow-up and are explicitly out of scope for the indoor-alley V0
-  spec rework. No spec file is moved or rewritten as part of approving this
-  design.
+  shows a whole file has no remaining live content. This archival follow-up is
+  complete in the current working tree; see
+  [`superseded/README.md`](superseded/README.md).
 
 ## 9. Acceptance evidence
 
@@ -172,8 +203,10 @@ Automated tests validate catalogue-only agent proposals; plan-hash/approval/
 dispatch equality; preflight persistence and force-new-run behavior; both layout
 modes; height-envelope rejection; one-to-three frame station correlation;
 hash/provenance integrity; concurrent perception with no flight mutation;
+reviewed-zone `ZONE_RESULT` approval/rejection and `ZONE_RESULT_REVIEWED` event;
 `FAILED`/`NEEDS_REVIEW`/`COMPLETED`/`EMERGENCY` outcomes; and no post-latch
-ordinary command.
+ordinary command. Retained deferred branches continue to validate through their
+existing compatibility fixtures but are not required by the V0 vertical slice.
 
 One supervised hardware rehearsal verifies the selected Wi-Fi route, battery,
 video, selected layout, approved route, captured live evidence, perception UI,

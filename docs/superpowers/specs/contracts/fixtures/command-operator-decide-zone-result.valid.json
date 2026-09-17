@@ -1,0 +1,21 @@
+{
+  "contract_version": "sentinel.v0",
+  "wire_type": "command_envelope",
+  "command_id": "77777777-7777-4777-8777-777777777777",
+  "correlation_id": "77777777-7777-4777-8777-777777777778",
+  "command_type": "OPERATOR_DECIDE",
+  "run_id": "66666666-6666-4666-8666-666666666666",
+  "actor_type": "OPERATOR",
+  "actor_id": "colin",
+  "issued_at": "2026-09-16T00:00:00Z",
+  "idempotency_key": "zone-review-0001",
+  "expected_state_version": 8,
+  "payload": {
+    "decision": "CONFIRM",
+    "target": {
+      "kind": "ZONE_RESULT",
+      "zone_id": "LEFT_ALLEY_MIDDLE",
+      "perception_result_id": "88888888-8888-4888-8888-888888888888"
+    }
+  }
+}
