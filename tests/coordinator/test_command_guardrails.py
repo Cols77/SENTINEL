@@ -145,6 +145,29 @@ def test_emergency_signal_persistently_latches_and_blocks_ordinary_commands(tmp_
     repository.close()
 
 
+def test_operator_rejection_leaves_run_refinement_eligible(tmp_path: Path):
+    repository = CoordinatorRepository.open(tmp_path / "reject.sqlite3")
+    repository.create_run(RUN_ID, status="RUNNING")
+    repository.connection.execute(
+        """INSERT INTO tasks(task_id, run_id, station_id, status, proposed_patroller_id, created_at)
+           VALUES (?, ?, ?, 'ASSIGNMENT_PROPOSED', ?, ?)""",
+        (PLAN_ID, RUN_ID, "LEFT_ALLEY_MIDDLE", "PATROLLER_1", "2026-09-17T00:00:00Z"),
+    )
+    repository.connection.commit()
+
+    CommandGateway(repository).submit(command("OPERATOR_DECIDE", payload={
+        "decision": "REJECT", "target": {"kind": "TASK", "task_id": PLAN_ID},
+    }))
+
+    assert repository.connection.execute(
+        "SELECT status FROM tasks WHERE task_id = ?", (PLAN_ID,)
+    ).fetchone()[0] == "PROPOSED"
+    assert repository.connection.execute(
+        "SELECT status FROM runs WHERE run_id = ?", (RUN_ID,)
+    ).fetchone()[0] == "RUNNING"
+    repository.close()
+
+
 def test_emergency_latch_survives_repository_reopen(tmp_path: Path):
     database = tmp_path / "reopen-emergency.sqlite3"
     repository = CoordinatorRepository.open(database)
@@ -162,3 +185,36 @@ def test_emergency_latch_survives_repository_reopen(tmp_path: Path):
         CommandGateway(reopened).submit(command("TASK_RANK", actor_type="AGENT", expected_state_version=1, payload={"task_id": PLAN_ID}))
     assert caught.value.code == "EMERGENCY_LATCHED"
     reopened.close()
+
+
+@pytest.mark.parametrize("status", ["FAILED", "COMPLETED"])
+def test_terminal_run_rejects_ordinary_mutation(tmp_path: Path, status: str):
+    repository = CoordinatorRepository.open(tmp_path / f"terminal-{status}.sqlite3")
+    repository.create_run(RUN_ID, status=status)
+
+    with pytest.raises(CoordinatorError) as caught:
+        CommandGateway(repository).submit(command(
+            "TASK_RANK", actor_type="AGENT", payload={"task_id": PLAN_ID},
+        ))
+
+    assert caught.value.code == "INVALID_STATE_TRANSITION"
+    assert repository.read_events(RUN_ID, 0, 10) == []
+    repository.close()
+
+
+def test_terminal_run_rejects_new_emergency_signal_without_overwrite(tmp_path: Path):
+    repository = CoordinatorRepository.open(tmp_path / "terminal-emergency.sqlite3")
+    repository.create_run(RUN_ID, status="COMPLETED")
+
+    with pytest.raises(CoordinatorError) as caught:
+        CommandGateway(repository).submit(command(
+            "EMERGENCY_SIGNAL", payload={"signal_id": "88888888-8888-4888-8888-888888888888"},
+        ))
+
+    assert caught.value.code == "INVALID_STATE_TRANSITION"
+    row = repository.connection.execute(
+        "SELECT status, emergency_latched FROM runs WHERE run_id = ?", (RUN_ID,)
+    ).fetchone()
+    assert (row["status"], row["emergency_latched"]) == ("COMPLETED", 0)
+    assert repository.connection.execute("SELECT COUNT(*) FROM emergency_records").fetchone()[0] == 0
+    repository.close()

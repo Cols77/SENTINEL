@@ -32,6 +32,7 @@ _EVENT_TYPES = {
     "PREFLIGHT_INGEST": "PREFLIGHT_REPORTED",
     "ASSIGNMENT_PROPOSE": "PATROLLER_ASSIGNMENT_PROPOSED",
 }
+_TERMINAL_RUN_STATES = {"FAILED", "COMPLETED", "EMERGENCY"}
 
 
 class CommandGateway:
@@ -99,6 +100,10 @@ class CommandGateway:
                 "STALE_STATE_VERSION",
                 f"expected {expected}, current {row['state_version']}",
             )
+        if row["status"] in _TERMINAL_RUN_STATES and command_type == "EMERGENCY_SIGNAL":
+            raise CoordinatorError("INVALID_STATE_TRANSITION", "terminal runs cannot be overwritten")
+        if row["status"] in {"FAILED", "COMPLETED"}:
+            raise CoordinatorError("INVALID_STATE_TRANSITION", "terminal runs reject ordinary commands")
         if row["emergency_latched"] and command_type != "EMERGENCY_SIGNAL":
             raise CoordinatorError("EMERGENCY_LATCHED", "ordinary commands are disabled")
         if command_type == "OPERATOR_DECIDE" and command["actor_type"] != "OPERATOR":
@@ -140,6 +145,16 @@ class CommandGateway:
                 plan_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{run_id}:{entry_id}"))
                 PlanResolver(self.repository, CatalogueResolver.from_fixture(self._catalogue_fixture())).resolve(
                     run_id, plan_id, "SURVEY_CATALOGUE_V1", entry_id
+                )
+                self.repository.append_event(
+                    run_id, "PLAN_PROPOSED", {"plan_id": plan_id, "catalogue_plan_id": entry_id},
+                    actor_type=command["actor_type"], actor_id=command["actor_id"],
+                    correlation_id=command["correlation_id"], commit=False,
+                )
+                self.repository.append_event(
+                    run_id, "PLAN_CREATED", {"plan_id": plan_id, "catalogue_plan_id": entry_id},
+                    actor_type=command["actor_type"], actor_id=command["actor_id"],
+                    correlation_id=command["correlation_id"], commit=False,
                 )
                 self.repository.connection.execute(
                     "UPDATE runs SET status = 'WAITING_FOR_APPROVAL' WHERE run_id = ?", (run_id,)
@@ -205,6 +220,31 @@ class CommandGateway:
                 AssignmentService(self.repository).decide(
                     run_id, payload["target"]["task_id"], payload["decision"],
                     actor_id=command["actor_id"], expected_state_version=expected, commit=False,
+                )
+                task = self.repository.connection.execute(
+                    "SELECT station_id FROM tasks WHERE task_id = ? AND run_id = ?",
+                    (payload["target"]["task_id"], run_id),
+                ).fetchone()
+                if payload["decision"] == "REJECT":
+                    run_status = "RUNNING"
+                else:
+                    approved = self.repository.connection.execute(
+                        """SELECT p.station_ids_json FROM plans p
+                           JOIN plan_approvals pa ON pa.plan_id = p.plan_id AND pa.plan_sha256 = p.plan_sha256
+                           WHERE pa.run_id = ? AND pa.action = 'CONFIRM'""", (run_id,)
+                    ).fetchall()
+                    station_ids = set()
+                    for plan_row in approved:
+                        station_ids.update(json.loads(plan_row["station_ids_json"]))
+                    if station_ids and task["station_id"] not in station_ids:
+                        raise CoordinatorError("INVALID_STATE_TRANSITION", "task is not part of the approved plan")
+                    assigned = self.repository.connection.execute(
+                        "SELECT COUNT(DISTINCT station_id) FROM tasks WHERE run_id = ? AND status = 'ASSIGNED'",
+                        (run_id,),
+                    ).fetchone()[0]
+                    run_status = "COMPLETED" if assigned >= (len(station_ids) or 1) else "RUNNING"
+                self.repository.connection.execute(
+                    "UPDATE runs SET status = ? WHERE run_id = ?", (run_status, run_id)
                 )
             event_type = _EVENT_TYPES[command_type]
             if command_type == "OPERATOR_DECIDE":
