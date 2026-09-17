@@ -127,6 +127,24 @@ CREATE TABLE IF NOT EXISTS plan_approvals (
     expected_state_version INTEGER NOT NULL CHECK (expected_state_version >= 0),
     created_at TEXT NOT NULL
 );
+CREATE TRIGGER IF NOT EXISTS plan_approvals_immutable_update
+BEFORE UPDATE ON plan_approvals BEGIN SELECT RAISE(ABORT, 'plan approvals are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS plan_approvals_immutable_delete
+BEFORE DELETE ON plan_approvals BEGIN SELECT RAISE(ABORT, 'plan approvals are immutable'); END;
+
+CREATE TABLE IF NOT EXISTS preflight_reports (
+    report_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(run_id),
+    plan_id TEXT NOT NULL,
+    plan_sha256 TEXT NOT NULL,
+    passed INTEGER NOT NULL CHECK (passed IN (0,1)),
+    report_json TEXT NOT NULL,
+    checked_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS preflight_reports_immutable_update
+BEFORE UPDATE ON preflight_reports BEGIN SELECT RAISE(ABORT, 'preflight reports are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS preflight_reports_immutable_delete
+BEFORE DELETE ON preflight_reports BEGIN SELECT RAISE(ABORT, 'preflight reports are immutable'); END;
 
 CREATE TABLE IF NOT EXISTS observations (
     observation_id TEXT PRIMARY KEY,

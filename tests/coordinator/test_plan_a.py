@@ -62,6 +62,60 @@ def test_preflight_rejects_false_aggregate_and_wrong_plan_binding(tmp_path: Path
     assert caught.value.code == "INVALID_PREFLIGHT_REPORT"
 
 
+def test_gateway_persists_agent_plan_and_operator_approval(tmp_path: Path):
+    repo = CoordinatorRepository.open(tmp_path / "gateway-plan.sqlite3")
+    repo.create_run(RUN_ID, status="RUNNING")
+    gateway = CommandGateway(repo)
+    gateway.submit({
+        "contract_version": "sentinel.v0", "wire_type": "command_envelope",
+        "command_id": "88888888-8888-4888-8888-888888888888", "command_type": "AGENT_INTENT_PROPOSE",
+        "run_id": RUN_ID, "actor_type": "AGENT", "actor_id": "AGENT_1",
+        "correlation_id": "99999999-9999-4999-8999-999999999999", "idempotency_key": "plan-propose-1",
+        "issued_at": "2026-09-17T00:00:00Z",
+        "payload": {"intent": "REQUEST_OPERATOR_APPROVAL", "catalogue_plan_id": "PLAN_ROUTE_ONLY_2_ZONE"},
+    })
+    plan = repo.connection.execute("SELECT * FROM plans WHERE run_id = ?", (RUN_ID,)).fetchone()
+    assert plan is not None
+    plan_reference = {"plan_id": plan["plan_id"], "catalogue_id": plan["catalogue_id"],
+                      "catalogue_revision": plan["catalogue_revision"], "plan_sha256": plan["plan_sha256"],
+                      "station_ids": json.loads(plan["station_ids_json"])}
+    gateway.submit({
+        "contract_version": "sentinel.v0", "wire_type": "command_envelope",
+        "command_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "command_type": "OPERATOR_DECIDE",
+        "run_id": RUN_ID, "actor_type": "OPERATOR", "actor_id": "OPERATOR_1",
+        "correlation_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "idempotency_key": "plan-approve-1",
+        "expected_state_version": 1, "issued_at": "2026-09-17T00:00:00Z",
+        "payload": {"decision": "CONFIRM", "target": {"kind": "PLAN", "plan_reference": plan_reference}},
+    })
+    approval = repo.connection.execute("SELECT actor_id, plan_id, plan_sha256 FROM plan_approvals").fetchone()
+    assert (approval["actor_id"], approval["plan_id"], approval["plan_sha256"]) == (
+        "OPERATOR_1", plan["plan_id"], plan["plan_sha256"]
+    )
+
+
+def test_gateway_persists_failed_preflight_and_terminalizes_run(tmp_path: Path):
+    repo = CoordinatorRepository.open(tmp_path / "gateway-preflight.sqlite3")
+    repo.create_run(RUN_ID, status="WAITING_FOR_APPROVAL")
+    repo.connection.execute(
+        "INSERT INTO plans(plan_id, run_id, catalogue_id, catalogue_revision, plan_sha256, mode, station_ids_json, canonical_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (PLAN_ID, RUN_ID, "SURVEY_CATALOGUE_V1", "REV_1", PLAN_HASH, "MARKER_VERIFIED", '["LEFT_ALLEY_MIDDLE"]', "{}", "2026-09-17T00:00:00Z"),
+    )
+    PlanApprovalService(repo).approve(RUN_ID, PLAN_ID, PLAN_HASH, actor_id="OPERATOR_1", expected_state_version=0)
+    checks = [{"name": name, "passed": name != "DRONE_LINK", "checked_at": "2026-09-17T00:00:00Z"} for name in (
+        "WIFI_INTERFACE", "DRONE_LINK", "BATTERY_TELEMETRY", "LIVE_VIDEO", "LAYOUT_MARKERS", "BOUNDED_AREA", "HEIGHT_ENVELOPE", "EMERGENCY_LATCH")]
+    report = {"report_id": "66666666-6666-4666-8666-666666666666", "run_id": RUN_ID,
+              "plan_id": PLAN_ID, "plan_sha256": PLAN_HASH, "passed": False,
+              "checks": checks, "checked_at": "2026-09-17T00:00:00Z"}
+    command = {"contract_version": "sentinel.v0", "wire_type": "command_envelope",
+               "command_id": "77777777-7777-4777-8777-777777777777", "command_type": "PREFLIGHT_INGEST",
+               "run_id": RUN_ID, "actor_type": "WORKER", "actor_id": "SIMULATED_WORKER",
+               "correlation_id": report["report_id"], "idempotency_key": "preflight-failed-1",
+               "issued_at": "2026-09-17T00:00:00Z", "payload": {"preflight_report": report}}
+    CommandGateway(repo).submit(command)
+    assert repo.connection.execute("SELECT status FROM runs WHERE run_id = ?", (RUN_ID,)).fetchone()[0] == "FAILED"
+    assert repo.connection.execute("SELECT report_id FROM preflight_reports WHERE report_id = ?", (report["report_id"],)).fetchone()
+
+
 def test_simulated_worker_submits_canonical_preflight_event():
     received = []
     worker = SimulatedWorker(type("Port", (), {"submit": lambda _, command: received.append(command) or {"status": "ACCEPTED"}})())

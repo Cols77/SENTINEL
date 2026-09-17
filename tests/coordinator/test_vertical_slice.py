@@ -70,7 +70,7 @@ def test_one_station_simulated_slice_persists_evidence_task_and_assignment(tmp_p
         "ASSIGNED", "PATROLLER_1", RESULT_ID
     )
     assert [event["event_type"] for event in repository.read_events(RUN_ID, 0, 10)] == [
-        "TASK_CREATED", "PATROLLER_ASSIGNMENT_PROPOSED", "PATROLLER_ASSIGNMENT_PROPOSED", "PLAN_APPROVED",
+        "TASK_CREATED", "PATROLLER_ASSIGNMENT_PROPOSED", "PATROLLER_ASSIGNMENT_PROPOSED", "PATROLLER_ASSIGNMENT_CONFIRMED",
     ]
     assert repository.connection.execute("SELECT state_version FROM runs WHERE run_id = ?", (RUN_ID,)).fetchone()[0] == 4
     repository.close()
