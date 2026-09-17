@@ -41,7 +41,7 @@ operator request -> real LLM intent -> coordinator -> supervised Tello mission
 2. The approved [indoor-alley survey design](2026-09-16-sentinel-v0-indoor-alley-survey-design.md) is the V0 decision record: it resolves the V0 room-demo decisions (six-zone route, station capture, layout modes, preflight/force-run/emergency semantics) that the coherence profile and WP0–WP4 below must conform to. It ranks just below this document.
 3. [`WP0`](2026-09-16-sentinel-wp0-shared-coherence-contracts.md) and its machine-readable contract artifacts define executable shared semantics.
 4. WP1–WP3 define component behavior only within WP0.
-5. The parent database specification remains the persistence/safety source unless the table below explicitly defines the V0 profile mapping.
+5. The parent database specification remains historical persistence/safety context; this document and WP0 explicitly supersede its broader product/V0 behavior where the mapping below defines the current profile.
 6. Historical broad component drafts are supporting design history, not current V0 authority.
 
 | Parent concept | Parent value | Canonical V0 representation | Rule |
@@ -86,7 +86,7 @@ Live: LLM, one Tello, preflight/flight, live frame capture, `VideoStatus`, selec
 
 Simulated: fixed six-zone geometry and nonvisited context. Task/ranking/patroller assignment, target aggregation, automatic revisit and external notifications are deferred rather than simulated as active V0 behavior.
 
-The only terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`. `NEEDS_REVIEW` is a review-hold, not a terminal outcome. `REJECTED` is event-only and never terminal: reject → refine → re-propose.
+The only terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`. `NEEDS_REVIEW` is a review-hold, not a terminal outcome. `REJECTED` is event-only and never a terminal run status: `PLAN_REJECTED` returns to plan refinement/re-proposal, while a zone-result `REJECT` is recorded by `ZONE_RESULT_REVIEWED` and advances to the next fixed zone or completes the run without revisit.
 
 Replay is rehearsal-only and is rejected in a judged run. Served browser video is not required; `VideoStatus` plus selected-frame provenance is the V0 video boundary.
 

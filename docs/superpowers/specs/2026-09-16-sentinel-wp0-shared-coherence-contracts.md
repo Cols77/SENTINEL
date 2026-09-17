@@ -144,7 +144,7 @@ The worker runs preflight before flight and emits the immutable run/plan-bound `
 
 #### 3.3.2 Run outcomes and approval vocabulary
 
-The only V0 terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`; an active emergency latch is terminal and cannot be forced. `REJECTED` is event-only: a rejected plan (`PLAN_REJECTED`) or reviewed-zone decision (`ZONE_RESULT_REVIEWED` with `decision: REJECT`) leaves the run in its coordinator-defined review/refinement state; `REJECTED` is never a terminal run status. The retained task rejection event (`OPERATOR_ASSIGNMENT_REJECTED`) remains compatibility-valid but is deferred. `NEEDS_REVIEW` is a review-hold state, not terminal; V0 records the zone result for operator review and does not automatically revisit or redispatch. `APPROVED` is not a run state.
+The only V0 terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`; an active emergency latch is terminal and cannot be forced. `REJECTED` is event-only and never a terminal run status: `PLAN_REJECTED` returns to plan refinement/re-proposal, while `ZONE_RESULT_REVIEWED` with `decision: REJECT` records the current zone review and advances to the next fixed zone or completes the run without revisit. The retained task rejection event (`OPERATOR_ASSIGNMENT_REJECTED`) remains compatibility-valid but is deferred. `NEEDS_REVIEW` is a review-hold state, not terminal; V0 resolves it through operator review of the current zone result and does not automatically revisit or redispatch. `APPROVED` is not a run state.
 
 ### 3.4 Snapshot/version rule
 
