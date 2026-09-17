@@ -221,6 +221,12 @@
           "$ref": "#/$defs/CommandTaskRankPayload"
         },
         {
+          "$ref": "#/$defs/CommandAssignmentProposePayload"
+        },
+        {
+          "$ref": "#/$defs/CommandPreflightIngestPayload"
+        },
+        {
           "$ref": "#/$defs/CommandOperatorDecidePayload"
         },
         {
@@ -273,6 +279,8 @@
                 "PERCEPTION_INGEST",
                 "TASK_CREATE",
                 "TASK_RANK",
+                "ASSIGNMENT_PROPOSE",
+                "PREFLIGHT_INGEST",
                 "OPERATOR_DECIDE",
                 "EMERGENCY_SIGNAL",
                 "OPERATION_RECONCILE",
@@ -427,6 +435,30 @@
                   "payload": {
                     "$ref": "#/$defs/CommandTaskRankPayload"
                   }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "command_type": {"const": "ASSIGNMENT_PROPOSE"}
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {"$ref": "#/$defs/CommandAssignmentProposePayload"}
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "command_type": {"const": "PREFLIGHT_INGEST"}
+                }
+              },
+              "then": {
+                "properties": {
+                  "payload": {"$ref": "#/$defs/CommandPreflightIngestPayload"}
                 }
               }
             },
@@ -3284,9 +3316,7 @@
     "CommandAgentIntentProposePayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "intent"
-      ],
+      "required": ["intent"],
       "properties": {
         "intent": {
           "enum": [
@@ -3294,8 +3324,25 @@
             "REQUEST_OPERATOR_APPROVAL",
             "NO_ACTION_REQUIRED"
           ]
+        },
+        "catalogue_plan_id": {
+          "$ref": "#/$defs/configured_id"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"intent": {"const": "INSPECT_SECTION"}}},
+          "then": {"required": ["catalogue_plan_id"]}
+        },
+        {
+          "if": {"properties": {"intent": {"const": "REQUEST_OPERATOR_APPROVAL"}}},
+          "then": {"required": ["catalogue_plan_id"]}
+        },
+        {
+          "if": {"properties": {"intent": {"const": "NO_ACTION_REQUIRED"}}},
+          "then": {"not": {"required": ["catalogue_plan_id"]}}
+        }
+      ]
     },
     "CommandInspectionDispatchPayload": {
       "type": "object",
@@ -3359,6 +3406,24 @@
         "task_id": {
           "$ref": "#/$defs/uuid"
         }
+      }
+    },
+    "CommandAssignmentProposePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "patroller_id", "reason"],
+      "properties": {
+        "task_id": {"$ref": "#/$defs/uuid"},
+        "patroller_id": {"$ref": "#/$defs/configured_id"},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    "CommandPreflightIngestPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preflight_report"],
+      "properties": {
+        "preflight_report": {"$ref": "#/$defs/PreflightReport"}
       }
     },
     "CommandOperatorDecidePayload": {

@@ -286,6 +286,16 @@ The concrete provider profile and evaluation manifest are prepared and executed 
 
 No UI, worker, perception adapter or LLM adapter opens SQLite directly.
 
+### 6.1 WP0/WP1 coordinator seam
+
+The canonical ingress is `CoordinatorPort.submit(#CommandEnvelope) -> #ResultEnvelope`; adapters do not append events directly. `AGENT_INTENT_PROPOSE` carries the catalogue `catalogue_plan_id` when its intent is `INSPECT_SECTION` or `REQUEST_OPERATOR_APPROVAL`; `NO_ACTION_REQUIRED` carries no plan identity. The coordinator resolves the catalogue revision/hash and persists that immutable plan identity before approval or dispatch.
+
+The worker submits `PREFLIGHT_INGEST` with the immutable, run/plan-bound full `#PreflightReport` (exactly eight checks). The coordinator validates and persists the report, then emits `PREFLIGHT_REPORTED`; the worker and agent cannot emit that event themselves. `ASSIGNMENT_PROPOSE` is likewise a coordinator command carrying `task_id`, `patroller_id`, and a bounded `reason`; it creates a pending approval and cannot confirm the assignment.
+
+The agent-facing gateway preserves exactly three coordinator-mediated read/wait tools: `state.get_summary`, `state.get_recent_events`, and `wait_for_event`. All proposal, task, ranking, assignment and approval operations are typed commands through `submit`; the model has no authority over facts, thresholds, ranking arithmetic, plan identity, preflight checks, persistence, physical dispatch, or operator approval.
+
+Shared `ResultEnvelope` fields are `status`, `error_code`, `reason`, `operation_id`, `correlation_id`, and `state_version` where applicable. Shared coordinator errors remain in the WP0 registry; adapter-local configuration/provider failures (`LLM_CONFIG_MISSING`, `LLM_CONFIG_INVALID`, `LLM_DEPENDENCY_MISSING`, `LLM_CREDENTIAL_MISSING`) are returned by the adapter boundary and are never promoted into persisted coordinator error codes or event names.
+
 ## 7. Acceptance criteria
 
 WP0 passes only when all are true:

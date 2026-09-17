@@ -270,7 +270,6 @@ def test_non_tool_call_statuses_reject_tool_calls(status, extra):
         validate_document(result)
 
 
-
 def _command(command_type, payload, *, actor_type="AGENT"):
     return {
         "contract_version": "sentinel.v0",
@@ -363,4 +362,3 @@ def test_result_envelope_accepts_shared_typed_fields_and_round_trips():
 def test_result_envelope_rejects_malformed_shared_typed_fields(field, value):
     with pytest.raises(ContractValidationError):
         validate_document(_result_envelope(**{field: value}))
-
