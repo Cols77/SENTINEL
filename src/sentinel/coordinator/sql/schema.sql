@@ -160,7 +160,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     station_id TEXT NOT NULL,
     status TEXT NOT NULL,
     perception_result_id TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    proposed_patroller_id TEXT,
+    proposal_reason TEXT
 );
 CREATE TABLE IF NOT EXISTS task_rankings (
     task_id TEXT NOT NULL REFERENCES tasks(task_id),
