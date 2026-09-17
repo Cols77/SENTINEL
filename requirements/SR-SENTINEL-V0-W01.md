@@ -1,0 +1,25 @@
+---
+id: SR-SENTINEL-V0-W01
+title: Worker command surface and wire contract
+statement: "the worker implements `WorkerPort.dispatch`, `WorkerPort.reconcile`, `WorkerPort.read_video_status`, `WorkerPort.open_live_video` under `#WorkerDispatch`, `#ReconciliationResult`, `#VideoStatus`, `#SafeVideoStreamHandle`; dispatch consumes the immutable `SurveyPlanReference`, its `approval_reference` and the exact run-bound `PreflightReport`, executing only when all match the approved run; it creates no alternate wire format and honors at-most-one dispatch before reconciliation."
+domain: behavioral
+status: accepted-pending-registration
+feature: FEAT-SENTINEL-V0-BOOTSTRAP
+consent:
+  decided_by: Colin Aube
+  decided_at: 2026-09-17
+  decision: accepted
+  session: "native-coherence-bootstrap parent chat (round 1: A01, C01-C05, W04-W06; round 2: all remaining)"
+  artifact: .hermes/plans/2026-09-17_135641-sentinel-native-coherence-bootstrap.md
+---
+
+# SR-SENTINEL-V0-W01
+
+**Status:** Accepted by human consent (2026-09-17). Normative statement, anchors,
+acceptance criteria and proof shape are as recorded in the atomic SR matrix of
+`.hermes/plans/2026-09-17_135641-sentinel-native-coherence-bootstrap.md` (the
+consent artifact). This file is the registration stub created by the bootstrap;
+canonical text is the plan section — do not restate or paraphrase it here.
+
+A02 (catalogue-bound proposals) is deferred pending the artifact-naming review
+(see HANDOFF-artifact-naming-semantics.md) and has no stub by design.
