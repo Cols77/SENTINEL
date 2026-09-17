@@ -74,6 +74,14 @@ def test_malformed_provider_output_is_malformed_without_submission():
     assert adapter.propose(REQUEST).status == "MALFORMED"
 
 
+def test_non_mapping_provider_output_is_malformed_without_submission():
+    completions = Completions(object())
+    adapter = OpenAICompatibleAgentModel(
+        load_config(ENV), client_factory=lambda **_: Client(completions), environ=ENV
+    )
+    assert adapter.propose(REQUEST).status == "MALFORMED"
+
+
 def test_provider_failure_is_unavailable_with_bounded_non_secret_diagnostic():
     completions = Completions(error=RuntimeError("request failed with super-secret"))
     adapter = OpenAICompatibleAgentModel(load_config(ENV), client_factory=lambda **_: Client(completions), environ=ENV)

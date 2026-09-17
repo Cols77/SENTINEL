@@ -94,7 +94,6 @@ class OpenAICompatibleAgentModel:
                 "wire_type": "agent_result",
                 "agent_run_id": agent_run_id,
                 "status": "UNAVAILABLE",
-                "tool_calls": [],
                 "diagnostic": f"PROVIDER_ERROR:{name}"[:512],
             }
         )
@@ -141,7 +140,6 @@ class OpenAICompatibleAgentModel:
                     "wire_type": "agent_result",
                     "agent_run_id": request.agent_run_id,
                     "status": "MALFORMED",
-                    "tool_calls": [],
                     "diagnostic": "MALFORMED_RESPONSE",
                 }
             )
