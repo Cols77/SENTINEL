@@ -602,6 +602,27 @@
                 }
               ]
             },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 512
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "correlation_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "payload": {
               "$ref": "#/$defs/result_payload"
             },
