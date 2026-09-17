@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from typing import Any, Mapping
 
 from sentinel.contracts import ContractValidationError, validate_document, validate_preflight_report
 
 from .errors import CoordinatorError
 from .approval import PlanApprovalService
+from .tasks import AssignmentService, EvidenceTaskService
 
 
 _EVENT_TYPES = {
@@ -124,6 +126,22 @@ class CommandGateway:
             ).fetchone()
             if approved is None:
                 raise CoordinatorError("INVALID_PREFLIGHT_REPORT", "preflight plan is not the approved immutable plan")
+        if command_type == "TASK_CREATE":
+            payload = command["payload"]
+            EvidenceTaskService(self.repository).create_task(
+                run_id, payload["perception_result_id"], payload["section_id"],
+                payload["evidence_artifact_id"],
+                task_id=str(uuid.uuid5(uuid.NAMESPACE_URL, command["command_id"])),
+            )
+        if command_type == "ASSIGNMENT_PROPOSE":
+            payload = command["payload"]
+            AssignmentService(self.repository).propose(payload["task_id"], payload["patroller_id"], payload["reason"])
+        if command_type == "OPERATOR_DECIDE" and command["payload"]["target"]["kind"] == "TASK":
+            payload = command["payload"]
+            AssignmentService(self.repository).decide(
+                run_id, payload["target"]["task_id"], payload["decision"],
+                actor_id=command["actor_id"], expected_state_version=expected,
+            )
         event_type = _EVENT_TYPES[command_type]
         event = self.repository.append_event(
             run_id,
