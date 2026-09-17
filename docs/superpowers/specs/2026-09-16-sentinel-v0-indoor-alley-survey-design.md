@@ -9,7 +9,8 @@
 Demonstrate a supervised Tello survey of rocks on the floor of a lecture room's
 two table alleys. An agent proposes a fixed survey assembled from a registered
 catalogue; a human approves it; the worker executes it; live frames are sent to
-perception while the route continues; the UI reports verified zone results.
+perception while the route continues; the UI reports coordinator-validated
+zone-level perception results.
 
 The demo is safe and observable without claiming autonomous navigation, SLAM,
 GPS, or precise rock coordinates.
@@ -60,9 +61,10 @@ stations. The coordinator creates an immutable plan record.
 The operator reviews and approves that exact plan version. The approval binds
 the plan hash, worker, choreography, run/state version and expiry. Dispatch
 accepts only the matching immutable plan and makes at most one physical attempt.
-V0 ends each selected station at a reviewed zone result. Revisit proposals and
-new physical dispatches are retained as V0.1 capability, not implemented in the
-V0 execution path.
+V0 records each selected station's coordinator-validated zone-level perception
+result. Revisit proposals and new physical dispatches are retained as V0.1
+capability; any future agentic action still requires a new immutable plan and
+operator approval, and is not implemented in the V0 execution path.
 
 ## 3. Preflight, force-run and emergency
 
@@ -116,10 +118,12 @@ route. It has no worker/control port and can never change the in-flight route.
   missing marker in marker mode, worker/video/provider fault, invalid capture,
   integrity mismatch, or unresolved operation.
 - `NEEDS_REVIEW`: the route and evidence are valid, but perception is
-  inconclusive or below its configured confidence threshold. V0 holds the zone
-  for operator review and does not invent a score or automatically revisit.
+  inconclusive or below its configured confidence threshold. V0 records the
+  hold for future coordinator/agent planning; the operator does not review
+  database state, and no score or automatic revisit is invented.
 - `COMPLETED`: every approved station and valid perception result is processed,
-  including a valid no-rock result, and the operator's zone decision is recorded.
+  including a valid no-rock result; no separate operator result decision is
+  required.
 - `EMERGENCY`: emergency latch is active. It is terminal and cannot be forced.
 
 No dynamic correction, perception-driven motion, automatic revisit, automatic
@@ -157,7 +161,7 @@ where applicable.
 - fresh preflight for every real run, deterministic supervised dispatch, at-most-one dispatch attempt, and fail-closed reconciliation;
 - live frame capture with `VideoStatus` and station capture provenance;
 - perception result for each fixed indoor-alley zone;
-- operator confirmation/rejection of a `ZONE_RESULT`, persisted as `ZONE_RESULT_REVIEWED`;
+- coordinator-persisted perception result for each fixed zone, rendered read-only by the UI;
 - evidence/artifact integrity, provider provenance, version checks, idempotency, emergency handling, and recovery.
 
 **Retained but deferred to V0.1**
@@ -166,13 +170,13 @@ where applicable.
 - target aggregation, mission/task ranking, patroller selection, assignment approval loops, automatic revisit, and external notifications;
 - precise hazard coordinates, `flight_path`, detailed `drone_pose`, GIS/SLAM/location abstractions, and route-geometry semantics;
 - `SafeVideoStreamHandle`, browser-stream serving, and richer served-video lifecycle/transport;
-- generalized mission/task/event families and richer evidence, diagnostic, storage, and provenance projections not needed to produce a reviewed-zone result.
+- generalized mission/task/event families and richer evidence, diagnostic, storage, and provenance projections not needed to produce the active zone-level perception result;
+- `ZONE_RESULT` operator targets and `ZONE_RESULT_REVIEWED` events, retained as compatibility contracts for a future DB-state review flow;
 
 The central `sentinel-v0-wire.schema.json` remains intact apart from additive
-scope metadata and the additive reviewed-zone target/event. No existing branch
-is removed or narrowed. A V0 implementation/profile must not instantiate,
-require, or emit a deferred branch merely because that branch remains in the
-registry.
+scope metadata and retained compatibility definitions. No existing branch is
+removed or narrowed. A V0 implementation/profile must not instantiate, require,
+or emit a deferred branch merely because that branch remains in the registry.
 
 ## 8. Required artifact migration
 
@@ -182,9 +186,9 @@ registry.
   reference, preflight report, capture provenance and force-run approval.
 - Update WP1's agent intent/transition policy, immutable approval/dispatch
   binding and outcome matrix.
-- Update WP2 for preflight facts, force-run decision, emergency UI state,
-  `VideoStatus`, and reviewed-zone Confirm/Reject; defer route overlay, served
-  video, and richer video transport to V0.1.
+- Update WP2 for preflight facts, force-run decision, emergency UI state and
+  `VideoStatus`; render perception results read-only and defer route overlay,
+  served video, richer video transport and DB-state review to V0.1.
 - Update WP3 to consume/return hash-bound station and zone provenance while
   retaining no route/control authority.
 - Update WP4 for DJITelloPy-only real execution, plan-bound worker behavior,
@@ -203,10 +207,10 @@ Automated tests validate catalogue-only agent proposals; plan-hash/approval/
 dispatch equality; preflight persistence and force-new-run behavior; both layout
 modes; height-envelope rejection; one-to-three frame station correlation;
 hash/provenance integrity; concurrent perception with no flight mutation;
-reviewed-zone `ZONE_RESULT` approval/rejection and `ZONE_RESULT_REVIEWED` event;
 `FAILED`/`NEEDS_REVIEW`/`COMPLETED`/`EMERGENCY` outcomes; and no post-latch
-ordinary command. Retained deferred branches continue to validate through their
-existing compatibility fixtures but are not required by the V0 vertical slice.
+ordinary command. Retained deferred branches, including the zone-review
+fixtures, continue to validate for compatibility but are not required by the V0
+vertical slice.
 
 One supervised hardware rehearsal verifies the selected Wi-Fi route, battery,
 video, selected layout, approved route, captured live evidence, perception UI,

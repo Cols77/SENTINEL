@@ -49,7 +49,7 @@ WP0 must provide a versioned SQLite DDL/constraint manifest: tables/foreign keys
 
 The current wire registry is intentionally preserved as a compatibility surface. **Defer means do not use or implement in the active V0 path; it does not mean delete the schema, branch, event vocabulary or fixture.** The machine-readable `x-sentinel-v0-scope` block in `sentinel-v0-wire.schema.json` is the canonical active/deferred declaration.
 
-The active V0 path is the supervised reviewed-zone loop:
+The active V0 path is the supervised perception loop:
 
 ```text
 RUN_CREATE
@@ -60,7 +60,7 @@ RUN_CREATE
   -> one bounded WorkerDispatch
   -> live frame ArtifactRef + StationCaptureProvenance + VideoStatus
   -> hash/profile-bound PerceptionResult
-  -> operator OPERATOR_DECIDE(target.kind = ZONE_RESULT)
+  -> coordinator-persisted zone-level result (read-only UI fact)
   -> next approved zone or COMPLETED
 ```
 
@@ -69,6 +69,7 @@ The following remain valid retained contracts but are deferred from this path:
 - `TASK_CREATE`, `TASK_RANK`, task read models, ranking records and the `PATROLLER_ASSIGNMENT_*` lifecycle;
 - generalized mission/task projections, precise hazard points and `MountainStateSnapshot` route/flight-path overlays;
 - `SafeVideoStreamHandle` and served browser-video transport;
+- `ZONE_RESULT` operator targets and `ZONE_RESULT_REVIEWED` events for deferred database-state review;
 - revisit/automatic reinspection, target aggregation, provider failover and formal benchmark governance.
 
 The active profile may carry compatibility fields required by the retained wire shape, but V0 must not derive new behavior from them, expose them as agent tools, or make them release-gate requirements. Compatibility validation remains available so future migration work does not require reconstructing the old contract surface.
@@ -120,7 +121,7 @@ MountainStateSnapshot(run_id, snapshot_version, as_of, sections[6],
 
 # `drone_pose`, `flight_path`, `hazards`, `active_mission_id` and
 # `active_task_id` remain compatibility fields. Active V0 semantics are the six
-# zone states and reviewed-zone evidence; these generalized projections are
+# zone states and coordinator-persisted perception evidence; these generalized projections are
 # deferred and must remain null/empty or compatibility-derived, never a source
 # of autonomous routing or precise localization.
 
@@ -144,7 +145,7 @@ The worker runs preflight before flight and emits the immutable run/plan-bound `
 
 #### 3.3.2 Run outcomes and approval vocabulary
 
-The only V0 terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`; an active emergency latch is terminal and cannot be forced. `REJECTED` is event-only and never a terminal run status: `PLAN_REJECTED` returns to plan refinement/re-proposal, while `ZONE_RESULT_REVIEWED` with `decision: REJECT` records the current zone review and advances to the next fixed zone or completes the run without revisit. The retained task rejection event (`OPERATOR_ASSIGNMENT_REJECTED`) remains compatibility-valid but is deferred. `NEEDS_REVIEW` is a review-hold state, not terminal; V0 resolves it through operator review of the current zone result and does not automatically revisit or redispatch. `APPROVED` is not a run state.
+The only V0 terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`; an active emergency latch is terminal and cannot be forced. `REJECTED` is event-only and never a terminal run status: `PLAN_REJECTED` returns to plan refinement/re-proposal. The retained task and zone-result review events remain compatibility-valid but are deferred. `NEEDS_REVIEW` is a review-hold state, not terminal; V0 does not resolve it through an operator review of persisted database state and does not automatically revisit or redispatch. A future agentic action must use a new immutable plan and the existing operator plan-approval path. `APPROVED` is not a run state.
 
 ### 3.4 Snapshot/version rule
 
@@ -154,7 +155,9 @@ The only V0 terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`; an 
 
 ### 3.5 Controlled vocabularies
 
-Persisted active V0 events use the schema enum, including `RUN_CREATED`, `DRONE_DISPATCH_REQUESTED`, `DRONE_COMMAND_COMPLETED`, `OBSERVATION_CAPTURED`, `DETECTION_RECORDED`, `ZONE_RESULT_REVIEWED`, the plan lifecycle `PLAN_PROPOSED`/`PLAN_CREATED`/`PLAN_APPROVED`/`PLAN_REJECTED`, `PREFLIGHT_REPORTED`, and the reconciliation/emergency events. The retained parent-compatible mission/task/patroller events (`MISSION_CREATED`, `MISSION_AUTHORISED`, `TASK_CREATED`, `PATROLLER_ASSIGNMENT_PROPOSED`, `PATROLLER_ASSIGNMENT_CONFIRMED`, `OPERATOR_ASSIGNMENT_REJECTED`, `MISSION_COMPLETED`, `MISSION_ABORTED`) remain schema-valid for compatibility but are deferred and must not be emitted by the active V0 reviewed-zone path. Adapter-local activities are not persisted as substitute event names. Reconciliation has exactly `OPERATION_RECONCILED_SUCCEEDED`, `OPERATION_RECONCILED_FAILED`, or `OPERATION_RECONCILIATION_UNKNOWN`.
+Persisted active V0 events use the schema enum, including `RUN_CREATED`, `DRONE_DISPATCH_REQUESTED`, `DRONE_COMMAND_COMPLETED`, `OBSERVATION_CAPTURED`, `DETECTION_RECORDED`, the plan lifecycle `PLAN_PROPOSED`/`PLAN_CREATED`/`PLAN_APPROVED`/`PLAN_REJECTED`, `PREFLIGHT_REPORTED`, and the reconciliation/emergency events. The retained parent-compatible mission/task/patroller events plus `ZONE_RESULT_REVIEWED` remain schema-valid for compatibility but are deferred and must not be emitted by the active V0 path. Adapter-local activities are not persisted as substitute event names. Reconciliation has exactly `OPERATION_RECONCILED_SUCCEEDED`, `OPERATION_RECONCILED_FAILED`, or `OPERATION_RECONCILIATION_UNKNOWN`.
+
+
 
 Stable error codes include `INVALID_CONTRACT`, `FORBIDDEN_ACTOR_COMMAND`, `NOT_FOUND`, `FORBIDDEN`, `IDEMPOTENCY_KEY_CONFLICT`, `STALE_STATE_VERSION`, `INVALID_STATE_TRANSITION`, `ARTIFACT_HASH_MISMATCH`, `MISSING_EVIDENCE`, `EVIDENCE_HANDLE_EXPIRED`, `EVIDENCE_HANDLE_REVOKED`, `UNSUPPORTED_MEDIA`, `EVIDENCE_TOO_LARGE`, `UNSCORED_PERCEPTION`, `PERCEPTION_PROVIDER_UNAVAILABLE`, `AGENT_PROVIDER_UNAVAILABLE`, `WORKER_UNAVAILABLE`, `OPERATION_IN_DOUBT`, `REPLAY_NOT_ALLOWED` and `EMERGENCY_LATCHED`. The LLM adapter codes `LLM_CONFIG_MISSING`, `LLM_CONFIG_INVALID`, `LLM_DEPENDENCY_MISSING` and `LLM_CREDENTIAL_MISSING` are adapter-local (WP1 §3.1); they are not part of the shared coordinator registry.
 
@@ -325,7 +328,7 @@ No UI, worker, perception adapter or LLM adapter opens SQLite directly.
 WP0 passes only when all are true:
 
 - `uv run python -m pytest tests/contracts -q` passes.
-- Schema validation accepts valid and rejects malformed command/result/event/perception fixtures. It directly rejects all five discriminator negatives: `RUN_CREATE` + approval payload, `OPERATOR_DECIDE` + request text, `RUN_CREATED` + operation payload, `INTENT` without intent, and `NO_ACTION` + `INSPECT_SECTION`; it accepts the active `ZONE_RESULT` operator target and `ZONE_RESULT_REVIEWED` event while retaining the TASK branches.
+- Schema validation accepts valid and rejects malformed command/result/event/perception fixtures. It directly rejects all five discriminator negatives: `RUN_CREATE` + approval payload, `OPERATOR_DECIDE` + request text, `RUN_CREATED` + operation payload, `INTENT` without intent, and `NO_ACTION` + `INSPECT_SECTION`; it retains the deferred `ZONE_RESULT` operator target and `ZONE_RESULT_REVIEWED` event while retaining the TASK branches.
 - WP0 semantic validator tests load `perception-request-artifact-hash-mismatch.invalid.json` and reject it with `ARTIFACT_HASH_MISMATCH`; they compare `PerceptionRequest.artifact_sha256` exactly to nested `ArtifactRef.sha256` rather than relying on JSON Schema.
 - WP0 semantic validator tests reject inverted and zero-area normalized `bbox_xyxy` fixture values.
 - Fixtures cover success, rejection, scoreless result, provider error, stale version, duplicate key conflict, `IN_DOUBT`, emergency and restart cursor replay.

@@ -1,6 +1,6 @@
 # SENTINEL V0 Coherence Specification
 
-> **Status:** Revised after independent review and reviewed-zone V0 scope decision; re-review pending
+> **Status:** Revised after independent review and V0 scope decision; re-review pending
 > **Authority:** Canonical V0 product/integration profile
 > **Parent baseline:** `SENTINEL Demo State Database Specification @ document version 0.8`, at historical path [`docs/SENTINEL_Demo_State_Database_Spec_v0.2.md`](../../SENTINEL_Demo_State_Database_Spec_v0.2.md)
 > **Contract revision:** `sentinel.v0`
@@ -12,7 +12,6 @@ This profile makes the smallest supervised physical-AI loop implementable by sep
 ```text
 operator request -> real LLM intent -> coordinator -> supervised Tello mission
 -> selected evidence frame -> perception -> event/state -> mountain projection
--> operator Confirm/Reject
 ```
 
 `V0` is the product release label. It is not the parent document version or a replacement filename.
@@ -31,7 +30,7 @@ operator request -> real LLM intent -> coordinator -> supervised Tello mission
 | D-008 | Judged path has one supervised real Tello | WP4 physical slice is a V0 release prerequisite, not an optional future capability |
 | D-009 | Canonical V0 class is `rock` | Parent `pebble_cluster` source output maps to canonical `rock` under the versioned mapping below |
 | D-010 | WP6 combines technical document and pitch material | It is non-normative and evidence-derived |
-| D-011 | V0 ends at an operator-reviewed zone result | Each selected station receives a persisted `ZONE_RESULT_REVIEWED` Confirm/Reject decision; aggregation, assignment and automatic revisit are deferred |
+| D-011 | V0 ends at a coordinator-persisted zone-level perception result | The UI renders each result as a coordinator-owned fact; operator approval is reserved for proposed plans and future agentic actions, while aggregation, assignment, DB-state review and automatic revisit are deferred |
 | D-012 | Live frame capture plus `VideoStatus` is sufficient for V0 | `SafeVideoStreamHandle`, browser-stream serving and richer video transport remain retained V0.1 contracts |
 | D-013 | Contract scope is staged without deletion | Existing schemas, command/event branches and fixtures remain retained; deferred means not required, instantiated or emitted by the V0 path |
 
@@ -54,11 +53,11 @@ operator request -> real LLM intent -> coordinator -> supervised Tello mission
 | Agent wait phase | `WAIT_FOR_DETECTION` | `WAITING_FOR_OBSERVATION` run state / `WAIT_FOR_OBSERVATION` agent phase | explicit V0 lifecycle below |
 | Parent starting threshold | `0.90` | `provider_profile.decision_threshold` | Colin+Dzivha jointly approved a provider-profile threshold over a versioned test-image-set hash |
 | Evidence provenance | `OPERATOR_PROVIDED` | explicitly prohibited on the judged perception/evidence path | V0 accepts operator commands, not operator-supplied detection evidence; retain only as imported historical metadata outside judged eligibility |
-| Decision provenance | `INFERRED` | preserved as historical-only `decision_provenance` on imported parent task records | V0 decisions are operator Confirm/Reject; `INFERRED` cannot authorize an assignment or qualify evidence |
-| Target lifecycle | `TARGET_CREATED` | retained deferred V0.1 contract | V0 has no independent target aggregate; a zone-level `PerceptionResult` is reviewed directly |
-| Target lifecycle | `TARGET_CONFIRMED` | retained deferred V0.1 contract | V0 uses typed `OPERATOR_DECIDE` with `kind: ZONE_RESULT` and persists `ZONE_RESULT_REVIEWED` |
-| Assignment event | `PATROLLER_ASSIGNMENT_PROPOSED` | retained deferred V0.1 contract | not emitted or required by the reviewed-zone V0 path |
-| Assignment event | `PATROLLER_ASSIGNMENT_CONFIRMED` | retained deferred V0.1 contract | not emitted or required by the reviewed-zone V0 path |
+| Decision provenance | `INFERRED` | preserved as historical-only `decision_provenance` on imported parent task records | V0 operator decisions approve plans/future agentic actions; `INFERRED` cannot authorize an assignment or qualify evidence |
+| Target lifecycle | `TARGET_CREATED` | retained deferred V0.1 contract | V0 has no independent target aggregate; the coordinator persists a zone-level `PerceptionResult` as a read-only fact |
+| Target lifecycle | `TARGET_CONFIRMED` | retained deferred V0.1 contract | DB-state review is deferred; V0 does not emit `ZONE_RESULT_REVIEWED` |
+| Assignment event | `PATROLLER_ASSIGNMENT_PROPOSED` | retained deferred V0.1 contract | not emitted or required by the active V0 path |
+| Assignment event | `PATROLLER_ASSIGNMENT_CONFIRMED` | retained deferred V0.1 contract | not emitted or required by the active V0 path |
 | Assignment event | `PATROLLER_ASSIGNED` | retained deferred V0.1 contract | preserve imported parent event as historical-only; no V0 assignment |
 
 No component may use a parent value outside this table without a WP0 compatibility amendment.
@@ -79,14 +78,14 @@ Inspect the left and right table alleys for rocks
 6. WP4 stores a selected live JPEG/PNG through the coordinator-managed artifact contract.
 7. WP3 calls the frozen provider profile and returns a hash-bound `PerceptionResult`.
 8. Coordinator ingests it as `DETECTION_RECORDED`, updates the mountain snapshot and applies the frozen threshold.
-9. A qualifying scored result enters `WAITING_FOR_APPROVAL` with a typed `ZONE_RESULT` target; lower or scoreless results enter `NEEDS_REVIEW`, while provider failures enter `FAILED`. No score is invented and no automatic revisit is triggered.
-10. Confirm or Reject is a versioned, idempotent `OPERATOR_DECIDE` command for that zone result, distinct from plan approval in step 4. The coordinator persists `ZONE_RESULT_REVIEWED` and advances to the next fixed station or completes the run.
+9. A qualifying scored result is persisted as a coordinator-owned zone-level fact; lower or scoreless results enter `NEEDS_REVIEW`, while provider failures enter `FAILED`. No score is invented and no automatic revisit is triggered.
+10. Any future agentic operation or revisit proposal must resolve to a new immutable plan and the existing operator plan-approval path. V0 does not add an operator command for reviewing persisted database state.
 
-Live: LLM, one Tello, preflight/flight, live frame capture, `VideoStatus`, selected detector provider, coordinator persistence and operator zone decision.
+Live: LLM, one Tello, preflight/flight, live frame capture, `VideoStatus`, selected detector provider, coordinator persistence and operator plan decision.
 
 Simulated: fixed six-zone geometry and nonvisited context. Task/ranking/patroller assignment, target aggregation, automatic revisit and external notifications are deferred rather than simulated as active V0 behavior.
 
-The only terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`. `NEEDS_REVIEW` is a review-hold, not a terminal outcome. `REJECTED` is event-only and never a terminal run status: `PLAN_REJECTED` returns to plan refinement/re-proposal, while a zone-result `REJECT` is recorded by `ZONE_RESULT_REVIEWED` and advances to the next fixed zone or completes the run without revisit.
+The only terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`. `NEEDS_REVIEW` is a review-hold, not a terminal outcome. `REJECTED` is event-only and never a terminal run status: `PLAN_REJECTED` returns to plan refinement/re-proposal. A future agentic action requires a new immutable plan and the existing operator plan-approval path; V0 does not add a database-state review command.
 
 Replay is rehearsal-only and is rejected in a judged run. Served browser video is not required; `VideoStatus` plus selected-frame provenance is the V0 video boundary.
 
@@ -117,13 +116,13 @@ All coordinates are local schematic `0..100`, not geographic. Each section polyg
 
 ## 6.1 Active V0 contract subset and deferred retained surface
 
-The active runtime subset is the smallest coherent reviewed-zone path:
+The active runtime subset is the smallest coherent perception path:
 
 - `read_state`, `read_mountain`, and bounded `read_events` through the coordinator;
 - typed agent proposal resolving to a catalogue-bound immutable plan;
 - operator plan approval, fresh preflight, supervised deterministic dispatch, and fail-closed reconciliation;
 - live frame capture, `VideoStatus`, `StationCaptureProvenance`, `ArtifactRef`, and hash-bound `PerceptionResult`;
-- typed `ZONE_RESULT` operator Confirm/Reject and persisted `ZONE_RESULT_REVIEWED`;
+- coordinator-persisted zone-level `PerceptionResult` and read-only evidence/provenance projection;
 - emergency latch, optimistic state-version checks, scoped idempotency, immutable plan/approval binding, and live/simulated/replayed provenance separation.
 
 The following remain in the registry and are explicitly deferred to V0.1: task
@@ -132,8 +131,8 @@ creation/ranking (`CommandTaskCreatePayload`, `CommandTaskRankPayload`,
 assignment and assignment approvals, automatic revisit, precise hazard
 coordinates, `flight_path`, detailed `drone_pose`, GIS/SLAM/location abstractions,
 `SafeVideoStreamHandle`, browser-stream serving, and generalized mission/task/
-video/evidence/diagnostic/storage projections not needed for a reviewed-zone
-result. Their presence in `sentinel-v0-wire.schema.json` does not make them V0
+video/evidence/diagnostic/storage projections not needed for the active zone-level
+perception result. Their presence in `sentinel-v0-wire.schema.json` does not make them V0
 requirements.
 
 Provider profile, unapproved-provider template, evaluation manifest, local LLM
@@ -168,7 +167,7 @@ WP4 acceptance command (implementation work, not evidence fabricated by this spe
 |---|---|---|
 | G0 Contract | Colin | schema/fixture validation, DDL constraint manifest, contract tests |
 | G1 Coordinator simulation | Colin + Alan | deterministic fake-agent replay, duplicate and `IN_DOUBT` tests |
-| G2 Human surface | Alan | NiceGUI smoke fixture, click-through evidence, Confirm/Reject stale-version test |
+| G2 Human surface | Alan | NiceGUI smoke fixture, click-through evidence, plan Confirm/Reject stale-version test |
 | G3 Perception | execution: Dzivha; approved/reviewed: Colin + Dzivha | reproducible evaluation-manifest evidence and a named joint approval over the versioned test-image-set hash |
 | G4 Physical | Colin | supervised one-Tello rehearsal using WP0 operation/evidence contracts |
 

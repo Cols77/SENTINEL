@@ -1,4 +1,4 @@
-# SENTINEL V0 reviewed-zone contract-scope update
+# SENTINEL V0 contract-scope update
 
 > **Status:** Active scope amendment; implementation follows the existing V0 specification branch
 > **Decision:** Defer, do not remove
@@ -6,7 +6,7 @@
 
 ## Purpose
 
-Stage the existing SENTINEL contract surface for the supervised six-zone indoor-alley demo without deleting compatibility material. V0 ends at an operator-reviewed zone result. The central wire registry remains broad; the active profile determines what the V0 implementation may instantiate, require, or emit.
+Stage the existing SENTINEL contract surface for the supervised six-zone indoor-alley demo without deleting compatibility material. V0 ends at a coordinator-persisted zone-level perception result; the UI renders that result read-only. Operators approve proposed plans and future agentic actions, not database state. The central wire registry remains broad; the active profile determines what the V0 implementation may instantiate, require, or emit.
 
 ## Active V0 path
 
@@ -18,7 +18,7 @@ Stage the existing SENTINEL contract surface for the supervised six-zone indoor-
 6. The coordinator makes at most one physical dispatch attempt; `IN_DOUBT` is reconciled by original operation ID/idempotency key and `UNKNOWN` fails closed without redispatch.
 7. The worker captures live JPEG/PNG evidence and publishes `VideoStatus`; a served browser stream is not required.
 8. Perception consumes the hash/profile-bound capture and returns a `PerceptionResult` for the fixed zone.
-9. The operator confirms or rejects a typed `ZONE_RESULT` target. The coordinator persists `ZONE_RESULT_REVIEWED` and advances to the next fixed zone or completes the run.
+9. The coordinator persists a typed zone-level `PerceptionResult` and advances through the fixed plan; no operator database-state review command is emitted.
 
 ## Retained but deferred to V0.1
 
@@ -28,7 +28,8 @@ These remain in the repository and in the wire registry. They are not removed, b
 - target aggregation, assignment approval loops, automatic revisit, external notifications, and generalized mission/task workflows;
 - precise hazard coordinates, `flight_path`, detailed `drone_pose`, GIS/SLAM/location abstractions, and route-geometry semantics;
 - `SafeVideoStreamHandle`, browser-stream serving, and richer served-video transport/lifecycle;
-- generalized evidence, diagnostic, storage, provenance, and evaluation projections not needed for the reviewed-zone result.
+- `ZONE_RESULT` operator targets and `ZONE_RESULT_REVIEWED` events for a future database-state review flow;
+- generalized evidence, diagnostic, storage, provenance, and evaluation projections not needed for the active zone-level perception result.
 
 Existing compatibility schemas, command/event branches, and fixtures remain valid where applicable. The presence of a retained branch does not promote it into V0 runtime scope.
 
@@ -39,9 +40,9 @@ Keep the provider profile schema, unapproved provider template, evaluation manif
 ## Planned edits
 
 - Add the machine-readable `x-sentinel-v0-scope` declaration to the wire registry.
-- Add the minimal `ZONE_RESULT` operator target and `ZONE_RESULT_REVIEWED` persisted event without changing or deleting TASK/patroller branches.
-- Align the coherence profile, design record, WP0–WP2, WP4, and `HANDOFF.md` with the active/deferred boundary.
-- Keep the compatibility wrapper and existing fixtures; add focused valid coverage for the zone-review target/event.
+- Retain the `ZONE_RESULT` operator target and `ZONE_RESULT_REVIEWED` event as deferred compatibility contracts without making them active V0 behavior.
+- Align the coherence profile, design record, and WP0–WP4 with the active/deferred boundary.
+- Keep the compatibility wrapper and existing fixtures; validate the deferred zone-review target/event without making it active.
 
 ## Verification gates
 
@@ -49,8 +50,8 @@ Keep the provider profile schema, unapproved provider template, evaluation manif
 - `uv run python tests/test_indoor_alley_contract_probe.py -q`
 - `git diff --check`
 - Parse the wire schema and assert retained deferred symbols remain present.
-- Validate the active zone-review fixture against the wire schema.
-- Confirm no active document describes TASK/patroller assignment or served browser video as a V0 acceptance requirement.
+- Validate the deferred zone-review fixture against the wire schema.
+- Confirm no active document describes TASK/patroller assignment, served browser video, or operator review of persisted database state as a V0 acceptance requirement.
 
 ## Remaining release gates
 

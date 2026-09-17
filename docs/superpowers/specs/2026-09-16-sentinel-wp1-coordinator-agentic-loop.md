@@ -1,16 +1,16 @@
 # SENTINEL WP1 — Coordinator and Agentic Loop
 
-> **Status:** Revised after independent review and reviewed-zone V0 scope decision; re-review pending
+> **Status:** Revised after independent review and V0 scope decision; re-review pending
 > **Owners:** Colin — coordinator semantics/repository; Alan — LLM runtime adapter
 > **Prerequisite:** WP0 `sentinel.v0` contracts and fixtures
 
 ## 1. Objective
 
-Implement the coordinator and real-LLM adapter against WP0. The deterministic fake agent/worker/perception adapters are mandatory before any provider or drone integration. The active V0 flow is catalogue-plan proposal, immutable operator approval, supervised dispatch, live frame capture, perception, and operator review of one zone-level result; an agent never dispatches a plan.
+Implement the coordinator and real-LLM adapter against WP0. The deterministic fake agent/worker/perception adapters are mandatory before any provider or drone integration. The active V0 flow is catalogue-plan proposal, immutable operator approval, supervised dispatch, live frame capture and coordinator-persisted perception; an agent never dispatches a plan and the operator does not review database state.
 
 ## 2. Ownership and prohibited access
 
-**Colin owns:** SQLite repository/migrations, event order, command gateway, state transitions, idempotency, operation reconciliation, threshold and zone-review policy, worker/perception ingress and coordinator read models. Task/ranking/patroller policy remains retained compatibility work deferred to V0.1.
+**Colin owns:** SQLite repository/migrations, event order, command gateway, state transitions, idempotency, operation reconciliation, threshold policy, worker/perception ingress and coordinator read models. Task/ranking/patroller and database-state review policy remain retained compatibility work deferred to V0.1.
 
 **Alan owns:** `AgentModelPort`, provider configuration, prompt/tool-policy revisions, structured response parser, bounded catalogue-plan proposal and agent-facing status summaries, plus the fake-agent runtime and UI-client tests. Revisit behavior is retained as V0.1 work and is not implemented by this V0 loop. Colin owns coordinator persistence and transition/recovery tests; Alan does not own or implement that persistence.
 
@@ -52,15 +52,16 @@ WP0 supplies the closed, directly-validatable `AgentRequest` and `AgentModelResu
 
 Runtime configuration validates against [`contracts/llm-adapter-config-v1.schema.json`](contracts/llm-adapter-config-v1.schema.json). It is built from `SENTINEL_LLM_PROVIDER`, `SENTINEL_LLM_MODEL`, `SENTINEL_LLM_TIMEOUT_MS`, `SENTINEL_LLM_PROMPT_REVISION`, `SENTINEL_LLM_TOOL_POLICY_REVISION`, and optional `SENTINEL_LLM_API_KEY_ENV`; artifacts contain only the environment-variable name, never a secret. Missing required input fails before provider construction with `LLM_CONFIG_MISSING` naming the missing variable. Non-integer/out-of-range timeout, invalid schema, blank required values, or an invalid API-key environment variable name fails with `LLM_CONFIG_INVALID`; no fallback is attempted. Missing the named optional dependency at real-adapter construction fails `LLM_DEPENDENCY_MISSING`; absent referenced credential at invocation fails `LLM_CREDENTIAL_MISSING`. `LLM_CONFIG_MISSING`, `LLM_CONFIG_INVALID`, `LLM_DEPENDENCY_MISSING` and `LLM_CREDENTIAL_MISSING` are adapter-local codes, not shared coordinator registry codes. The optional dependency name is `llm` (installation as an optional `llm` extra is WP1 implementation work; this spec does not modify `pyproject.toml`). Tests use the deterministic fake adapter and require no credential.
 
-## 4. Active V0 run transition matrix: reviewed-zone path
+## 4. Active V0 run transition matrix: perception path
 
 The run surveys an approved catalogue plan over the fixed six-zone catalogue
-(1–6 stations). V0 has two approval points: the exact immutable plan before
-dispatch and each resulting zone-level perception result after capture.
-`WAITING_FOR_APPROVAL` is disambiguated by the typed target (`PLAN` or
-`ZONE_RESULT`) in `OPERATOR_DECIDE`; `TASK` remains a retained deferred target.
-The run does not end until every selected station has a valid capture, a
-persisted perception result, and a recorded operator Confirm/Reject decision.
+(1–6 stations). V0 has one approval point: the exact immutable plan before
+dispatch. Perception results are coordinator-owned read models, not operator
+approval targets. `WAITING_FOR_APPROVAL` is the plan target in the active path;
+`TASK` and `ZONE_RESULT` remain retained deferred targets.
+The run does not end until every selected station has a valid capture and a
+persisted perception result. Perception results remain coordinator-owned facts;
+future agentic actions require a new plan and operator approval.
 
 | From | Event/guard | To | Result |
 |---|---|---|---|
@@ -69,11 +70,10 @@ persisted perception result, and a recorded operator Confirm/Reject decision.
 | `WAITING_FOR_APPROVAL` (plan) | `OPERATOR_DECIDE` target `PLAN`, `CONFIRM` | `WAITING_FOR_OBSERVATION` | `PLAN_APPROVED`; fresh preflight, durable `PENDING` operation, then one coordinator dispatch attempt |
 | `WAITING_FOR_APPROVAL` (plan) | `OPERATOR_DECIDE` target `PLAN`, `REJECT` | `RUNNING` | `PLAN_REJECTED`; no dispatch; proposal may be refined |
 | `WAITING_FOR_OBSERVATION` | `OBSERVATION_CAPTURED` | `RUNNING` | perception request is eligible and remains hash/provenance bound |
-| `RUNNING` | qualifying `DETECTION_RECORDED` under the frozen provider profile | `WAITING_FOR_APPROVAL` (zone result) | result is persisted for the station; no task, ranking, or assignment is created |
+| `RUNNING` | qualifying `DETECTION_RECORDED` under the frozen provider profile | `RUNNING` or `COMPLETED` after the final station | result is persisted for the station; no task, ranking, assignment or database-state review is created |
 | `RUNNING` or `WAITING_FOR_OBSERVATION` | perception/`DETECTION_RECORDED` with `status == PROVIDER_ERROR` (provider failure/error or worker/video fault) | `FAILED` | `PROVIDER_ERROR` precedes score interpretation; no physical retry |
 | `RUNNING` or `WAITING_FOR_OBSERVATION` | perception/`DETECTION_RECORDED` with `status` `UNSCORED`/`NOT_DETECTED` (scoreless or below-threshold) | `NEEDS_REVIEW` | scoreless review-hold; disjoint from `PROVIDER_ERROR` by status; no invented score |
-| `WAITING_FOR_APPROVAL` (zone result) | `OPERATOR_DECIDE` target `ZONE_RESULT`, `CONFIRM` or `REJECT` | `RUNNING` or `COMPLETED` | `ZONE_RESULT_REVIEWED`; advance to the next catalogue station or complete after the last station; no automatic revisit |
-| `NEEDS_REVIEW` | `OPERATOR_DECIDE` target `ZONE_RESULT`, `CONFIRM` or `REJECT` | `RUNNING` or `COMPLETED` | operator resolves the held zone result with `ZONE_RESULT_REVIEWED`; no new dispatch is implied |
+
 | `WAITING_FOR_APPROVAL` (TASK) | `OPERATOR_DECIDE` target `TASK`, `CONFIRM` or `REJECT` | unchanged/deferred | retained compatibility lifecycle; not an active V0 transition |
 | nonterminal with `IN_DOUBT` operation | `OPERATION_RECONCILED_SUCCEEDED` | prior safe waiting state | result envelope correlates `operation_id`; no redispatch |
 | nonterminal with `IN_DOUBT` operation | `OPERATION_RECONCILED_FAILED` | `FAILED` or `NEEDS_REVIEW` by evidence policy | result envelope correlates `operation_id` |
@@ -84,14 +84,15 @@ persisted perception result, and a recorded operator Confirm/Reject decision.
 
 The only V0 terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`;
 `APPROVED`/`REJECTED` are not terminal run states. `PLAN_REJECTED` returns the
-run to proposal/refinement without dispatch. `ZONE_RESULT_REVIEWED` records
-either operator decision for the current zone and advances to the next selected
-station or completes the run. `NEEDS_REVIEW` is a review-hold state, not an
-automatic revisit trigger. An active emergency latch cannot be overridden.
+run to proposal/refinement without dispatch. `NEEDS_REVIEW` is a review-hold
+state, not an automatic revisit trigger; it has no operator database-state
+review transition in V0. A future agentic action requires a new immutable plan
+and the existing operator plan-approval path. An active emergency latch cannot
+be overridden.
 
-The retained `OPERATOR_ASSIGNMENT_REJECTED` and related TASK lifecycle remain
-available for compatibility but are not emitted or required by the V0
-reviewed-zone path.
+The retained `OPERATOR_ASSIGNMENT_REJECTED`, `ZONE_RESULT_REVIEWED` and related
+TASK lifecycle remain available for compatibility but are not emitted or
+required by the V0 perception path.
 
 ### 4.2 Worker preflight
 
@@ -124,7 +125,7 @@ dispatch.
 
 Active V0 agent phases are `RECEIVE_REQUEST`, `PLAN`, `WAIT_FOR_APPROVAL`
 (plan proposal only), and `FINALIZE`. Coordinator-owned phases
-`WAIT_FOR_OBSERVATION`, perception, zone review, and recovery surround the model
+`WAIT_FOR_OBSERVATION`, perception, coordinator persistence and recovery surround the model
 call. The legacy `REQUEST_MISSION`, `INTERPRET_EVIDENCE`, and TASK approval
 labels remain retained documentation/compatibility vocabulary and are deferred
 from V0. The replay cursor is the last committed `sequence_no`.
@@ -145,12 +146,12 @@ No requirement claims physical exactly-once execution; the requirement is at-mos
 - Canonical target class is `rock`; parent `pebble_cluster` is preserved as source evidence and maps to it.
 - Approval eligibility is `raw_score >= provider_profile.decision_threshold` with matching provider/model/prompt/transform revisions and non-null score.
 - No score, stale/mismatched artifact, non-LIVE artifact/result in judged mode, replay in judged mode, or unapproved/missing owner-approved provider profile blocks approval.
-- One approved catalogue plan per run covering 1–6 catalogue-bound zones, no physical dispatch before operator confirmation, and a `ZONE_RESULT` operator decision after each capture/result. Task creation, ranking, patroller selection and assignment are retained compatibility contracts deferred to V0.1.
+- One approved catalogue plan per run covering 1–6 catalogue-bound zones, no physical dispatch before operator confirmation, and a coordinator-persisted perception result after each capture. Task creation, ranking, patroller selection, assignment and DB-state review are retained compatibility contracts deferred to V0.1.
 - Provider approval/review is a named joint approval record shared Colin + Dzivha over the versioned demo test-image-set hash; WP3 execution is Dzivha-only; there is no release-benchmark ceremony.
 
-## 7. Simulated acceptance flow: active reviewed-zone path
+## 7. Simulated acceptance flow: active perception path
 
-The fixture path persists the active events `RUN_CREATED`, `AGENT_STARTED`, `PLAN_PROPOSED`/`PLAN_CREATED`/`PLAN_APPROVED`/`PLAN_REJECTED`, `PREFLIGHT_REPORTED`, `DRONE_DISPATCH_REQUESTED`, `DRONE_COMMAND_COMPLETED`, `OBSERVATION_CAPTURED`, `DETECTION_RECORDED`, and `ZONE_RESULT_REVIEWED`. Existing `MISSION_*`, `TASK_*`, `PATROLLER_*`, and assignment events remain retained compatibility fixtures; they are not part of this V0 flow.
+The fixture path persists the active events `RUN_CREATED`, `AGENT_STARTED`, `PLAN_PROPOSED`/`PLAN_CREATED`/`PLAN_APPROVED`/`PLAN_REJECTED`, `PREFLIGHT_REPORTED`, `DRONE_DISPATCH_REQUESTED`, `DRONE_COMMAND_COMPLETED`, `OBSERVATION_CAPTURED`, and `DETECTION_RECORDED`. Existing `MISSION_*`, `TASK_*`, `PATROLLER_*`, assignment events and `ZONE_RESULT_REVIEWED` remain retained compatibility fixtures; they are not part of this V0 flow.
 
 Tests must restart the coordinator after every transition, replay by sequence, assert legal next actions, assert duplicate command behavior and exercise `IN_DOUBT`/unknown reconciliation.
 
@@ -162,7 +163,7 @@ WP1 uses a fake worker initially. The real worker belongs to the later detailed 
 
 - `uv run python -m pytest tests/coordinator tests/agent -q` passes after implementation.
 - V0 agent-tool tests prove that the model may choose only `read_state`, `read_mountain` and bounded `read_events`; foreign run IDs, invalid cursors, over-limit reads, expired deadlines and stale final proposals fail closed, and no tool call can submit a command or invoke worker/perception code.
-- Every active transition-matrix row has an explicit test, including catalogue-plan resolution, immutable approval-before-dispatch, typed zone-result review, preflight failure, and operator-only `FORCE_RUN_CREATE`; retained deferred branches remain covered by compatibility tests where already present.
+- Every active transition-matrix row has an explicit test, including catalogue-plan resolution, immutable approval-before-dispatch, coordinator-owned perception results, preflight failure, and operator-only `FORCE_RUN_CREATE`; retained deferred branches remain covered by compatibility tests where already present.
 - Deterministic fake provenance is `SIMULATED`, never "fake real-mode"; a real-mode test must use a live-capable adapter or be rejected from the judged path.
 - Configuration tests prove each exact `LLM_CONFIG_MISSING`, `LLM_CONFIG_INVALID`, `LLM_DEPENDENCY_MISSING`, and `LLM_CREDENTIAL_MISSING` failure, and a fake-adapter test proves no optional dependency or credential is needed.
 - Alan’s fake-agent runtime and UI-client tests cover provider/parser outcomes without credentials; Colin’s coordinator tests cover persistence. Restart, key conflict, stale operator action, provider error, scoreless result, rejection, emergency and `IN_DOUBT` are tested without hardware/network.

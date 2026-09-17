@@ -81,7 +81,7 @@ def test_review_rework_adds_plan_approval_catalogue_lifecycle_and_preflight_read
         assert outcome in run_status
     # plan lifecycle + preflight events exist and are discriminated
     event_types = defs["EventEnvelope"]["allOf"][1]["properties"]["event_type"]["enum"]
-    for ev in ("PLAN_PROPOSED", "PLAN_CREATED", "PLAN_APPROVED", "PLAN_REJECTED", "ZONE_RESULT_REVIEWED", "PREFLIGHT_REPORTED"):
+    for ev in ("PLAN_PROPOSED", "PLAN_CREATED", "PLAN_APPROVED", "PLAN_REJECTED", "PREFLIGHT_REPORTED"):
         assert ev in event_types
     # run carries a layout mode chosen from the two catalogue modes
     plan_read = defs["PlanReadModel"]["properties"]["mode"]["enum"]
@@ -94,16 +94,17 @@ def test_scope_declaration_preserves_deferred_contracts():
     assert scope["policy"] == "defer-not-remove"
     assert {"VideoStatus", "PerceptionResult", "PlanApproval"} <= set(scope["active_root_anchors"])
     assert {"RUN_CREATE", "OPERATOR_DECIDE", "EMERGENCY_SIGNAL"} <= set(scope["active_commands"])
-    assert "ZONE_RESULT_REVIEWED" in scope["active_events"]
+    assert "ZONE_RESULT_REVIEWED" not in scope["active_events"]
     serialized = json.dumps(wire)
     for retained in ("CommandTaskCreatePayload", "CommandTaskRankPayload", "TASK_CREATE", "TASK_RANK", "SafeVideoStreamHandle"):
         assert retained in serialized
     deferred = {item["id"]: item for item in scope["deferred_capabilities"]}
     assert "task-assignment-lifecycle" in deferred
+    assert deferred["zone-result-review"]["retained_contracts"] == ["ZONE_RESULT", "ZONE_RESULT_REVIEWED"]
     assert "served-video-transport" in deferred
 
 
-def test_zone_review_command_and_event_fixtures_validate():
+def test_deferred_zone_review_command_and_event_fixtures_validate():
     schema = _load("sentinel-v0-wire.schema.json")
     validator = Draft202012Validator(schema)
     fixture_dir = CONTRACTS / "fixtures"

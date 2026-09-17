@@ -1,6 +1,6 @@
 # SENTINEL WP3 — Rock Perception Adapter
 
-> **Status:** Revised after independent review and reviewed-zone V0 scope decision; re-review pending
+> **Status:** Revised after independent review and V0 scope decision; re-review pending
 > **Owner:** Dzivha
 > **Prerequisite:** WP0 contract revision `sentinel.v0`
 
@@ -8,7 +8,7 @@ The authoritative `PerceptionPort` signature is in WP0 §6.1 and is declared for
 
 ## 1. Objective
 
-Turn one selected, hash-bound image into a provider-neutral `PerceptionResult`. Each station capture (one to three per approved station) is a separate request and produces a separate result; request IDs are not reused across captures. The coordinator maps the result directly to the station's zone-level `ZONE_RESULT` review; WP3 produces evidence only and does not aggregate targets, create tasks, alter mountain/run state, write SQLite or command a drone.
+Turn one selected, hash-bound image into a provider-neutral `PerceptionResult`. Each station capture (one to three per approved station) is a separate request and produces a separate result; request IDs are not reused across captures. The coordinator persists the result as a zone-level read model; WP3 produces evidence only and does not aggregate targets, create tasks, alter mountain/run state, write SQLite or command a drone.
 
 ## 2. Contract
 

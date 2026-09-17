@@ -48,7 +48,6 @@
       "DRONE_COMMAND_COMPLETED",
       "OBSERVATION_CAPTURED",
       "DETECTION_RECORDED",
-      "ZONE_RESULT_REVIEWED",
       "OPERATION_RECONCILED_SUCCEEDED",
       "OPERATION_RECONCILED_FAILED",
       "OPERATION_RECONCILIATION_UNKNOWN",
@@ -69,7 +68,13 @@
           "PATROLLER_ASSIGNMENT_CONFIRMED",
           "OPERATOR_ASSIGNMENT_REJECTED"
         ],
-        "reason": "V0 ends at an operator-reviewed zone result; task creation, ranking and patroller assignment are retained but not emitted or required by the active path."
+        "reason": "V0 ends at coordinator-persisted zone-level perception results; task creation, ranking and patroller assignment are retained but not emitted or required by the active path."
+      },
+      {
+        "id": "zone-result-review",
+        "status": "DEFERRED_V0_1",
+        "retained_contracts": ["ZONE_RESULT", "ZONE_RESULT_REVIEWED"],
+        "reason": "V0 renders coordinator-persisted perception results read-only; operators approve proposed plans and future agentic actions, not database state."
       },
       {
         "id": "served-video-transport",
@@ -87,7 +92,7 @@
         "id": "aggregation-revisit-platform-expansion",
         "status": "DEFERRED_V0_1",
         "retained_concepts": ["target_aggregation", "automatic_revisit", "external_notifications", "generalized_mission_lifecycle", "richer_diagnostics_and_storage_projections"],
-        "reason": "V0 records and reviews each fixed zone result directly; aggregation, revisit and broader platform projections are retained for later promotion."
+        "reason": "V0 records each fixed zone result directly; aggregation, revisit and broader platform projections are retained for later promotion."
       }
     ],
     "rule": "Deferred entries remain in this registry and may be validated for compatibility, but V0 implementations, fixtures and release gates must use only the active profile unless a later version explicitly promotes an entry."
@@ -2846,7 +2851,7 @@
       }
     },
     "CommandTaskCreatePayload": {
-      "description": "Retained compatibility contract for the deferred task-assignment lifecycle; not emitted by the active V0 reviewed-zone path.",
+      "description": "Retained compatibility contract for the deferred task-assignment lifecycle; not emitted by the active V0 path.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -2867,7 +2872,7 @@
       }
     },
     "CommandTaskRankPayload": {
-      "description": "Retained compatibility contract for deferred deterministic ranking; not emitted by the active V0 reviewed-zone path.",
+      "description": "Retained compatibility contract for deferred deterministic ranking; not emitted by the active V0 path.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -2880,7 +2885,7 @@
       }
     },
     "CommandOperatorDecidePayload": {
-      "description": "Operator confirmation or rejection of a plan or reviewed zone result is active in V0. TASK targets remain retained for the deferred task-assignment lifecycle.",
+      "description": "Operator confirmation or rejection of an immutable plan is active in V0. TASK and ZONE_RESULT targets remain retained for deferred compatibility lifecycles; persisted database state is not an active operator approval target.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -3496,7 +3501,7 @@
       }
     },
     "EventZoneResultReviewedPayload": {
-      "description": "Active V0 operator review of one zone-level perception result. It replaces the deferred task/patroller assignment decision in the reviewed-zone path.",
+      "description": "Retained compatibility event for a deferred operator review of one zone-level perception result. It is not emitted by the active V0 path.",
       "type": "object",
       "additionalProperties": false,
       "required": [
