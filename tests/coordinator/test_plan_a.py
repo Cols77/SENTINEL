@@ -84,13 +84,16 @@ def test_gateway_persists_agent_plan_and_operator_approval(tmp_path: Path):
         "command_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "command_type": "OPERATOR_DECIDE",
         "run_id": RUN_ID, "actor_type": "OPERATOR", "actor_id": "OPERATOR_1",
         "correlation_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "idempotency_key": "plan-approve-1",
-        "expected_state_version": 1, "issued_at": "2026-09-17T00:00:00Z",
+        "expected_state_version": 3, "issued_at": "2026-09-17T00:00:00Z",
         "payload": {"decision": "CONFIRM", "target": {"kind": "PLAN", "plan_reference": plan_reference}},
     })
     approval = repo.connection.execute("SELECT actor_id, plan_id, plan_sha256 FROM plan_approvals").fetchone()
     assert (approval["actor_id"], approval["plan_id"], approval["plan_sha256"]) == (
         "OPERATOR_1", plan["plan_id"], plan["plan_sha256"]
     )
+    assert [event["event_type"] for event in repo.read_events(RUN_ID, 0, 10)] == [
+        "PLAN_PROPOSED", "PLAN_CREATED", "AGENT_INTENT_PROPOSED", "PLAN_APPROVED",
+    ]
 
 
 def test_gateway_persists_failed_preflight_and_terminalizes_run(tmp_path: Path):
@@ -114,6 +117,16 @@ def test_gateway_persists_failed_preflight_and_terminalizes_run(tmp_path: Path):
     CommandGateway(repo).submit(command)
     assert repo.connection.execute("SELECT status FROM runs WHERE run_id = ?", (RUN_ID,)).fetchone()[0] == "FAILED"
     assert repo.connection.execute("SELECT report_id FROM preflight_reports WHERE report_id = ?", (report["report_id"],)).fetchone()
+    with pytest.raises(CoordinatorError) as caught:
+        CommandGateway(repo).submit({
+            "contract_version": "sentinel.v0", "wire_type": "command_envelope",
+            "command_id": "88888888-8888-4888-8888-888888888888", "command_type": "TASK_RANK",
+            "run_id": RUN_ID, "actor_type": "AGENT", "actor_id": "AGENT_1",
+            "correlation_id": "99999999-9999-4999-8999-999999999999", "idempotency_key": "after-failed-1",
+            "expected_state_version": 2, "issued_at": "2026-09-17T00:00:00Z",
+            "payload": {"task_id": PLAN_ID},
+        })
+    assert caught.value.code == "INVALID_STATE_TRANSITION"
 
 
 def test_simulated_worker_submits_canonical_preflight_event():
