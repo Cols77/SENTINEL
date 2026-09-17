@@ -26,7 +26,7 @@ The parent→V0 compatibility mapping table in the coherence spec §3 is binding
 
 | Label | Meaning (repository evidence) | Where defined |
 |---|---|---|
-| `sentinel.v0` | contract revision of the product baseline; `contract_version` on wire documents and the DDL manifest | coherence spec §1/§6; `sentinel-v0-wire.schema.json`; `ddl_manifest.json` |
+| `sentinel.v0` | contract revision of the product baseline; `contract_version` on wire documents and `manifest_version` on the DDL manifest | coherence spec §1/§6; `sentinel-v0-wire.schema.json`; `ddl_manifest.json` |
 | `sentinel.survey-catalogue.v1` | `contract_version` of catalogue instances | `survey-catalogue-v1.fixture.json` / `survey-catalogue-v1.schema.json` |
 | `source_kind: LIVE / SIMULATED / REPLAYED` | provenance of any artifact, snapshot, perception record or video | wire schema `#/$defs/source_kind`; WP0 §3.4–§6; WP4 spec |
 | `approval_status: UNAPPROVED` | provider-profile template; present, valid, **not selectable** in the judged path | `provider-profile-unapproved.template.json`; WP0 §5 |
