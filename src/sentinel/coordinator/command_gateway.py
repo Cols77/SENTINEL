@@ -128,6 +128,18 @@ class CommandGateway:
             if approved is None:
                 raise CoordinatorError("INVALID_PREFLIGHT_REPORT", "preflight plan is not the approved immutable plan")
         with self.repository.connection:
+            if command_type == "EMERGENCY_SIGNAL":
+                signal_id = command["payload"]["signal_id"]
+                self.repository.connection.execute(
+                    """INSERT INTO emergency_records(
+                       signal_id, run_id, worker_id, latched_at, source_kind, reason_code
+                       ) VALUES (?, ?, ?, ?, 'SIMULATED', 'EMERGENCY_SIGNAL')""",
+                    (signal_id, run_id, command["actor_id"], command["issued_at"]),
+                )
+                self.repository.connection.execute(
+                    "UPDATE runs SET status = 'EMERGENCY', emergency_latched = 1 WHERE run_id = ?",
+                    (run_id,),
+                )
             if command_type == "TASK_CREATE":
                 payload = command["payload"]
                 EvidenceTaskService(self.repository).create_task(
