@@ -33,7 +33,7 @@ class EvidenceTaskService:
             result = json.loads(row["result_json"])
         except json.JSONDecodeError as exc:
             raise CoordinatorError("INVALID_CONTRACT", "stored perception result is not JSON") from exc
-        if result.get("status") != "COMPLETED":
+        if result.get("status") not in {"COMPLETED", "DETECTED"}:
             raise CoordinatorError("INVALID_STATE_TRANSITION", "only completed evidence can create a task")
         task_id = task_id or str(uuid.uuid4())
         existing = self.repository.connection.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
