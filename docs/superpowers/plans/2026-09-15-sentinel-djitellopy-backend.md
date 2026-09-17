@@ -2,6 +2,14 @@
 
 > Use the subagent-driven-development workflow. Each task has a disjoint write set; review and verification happen before integration claims.
 
+## Status: retained historical plan (deferred; non-authoritative)
+
+This plan is **retained, deferred, and non-authoritative**, and is kept in place rather than archived:
+
+- **Retained** — it documents the pre-V0 clean-setup backend design history and remains recoverable as a record (the earlier direct-UDP worktree also remains recoverable but unmerged, per "Expected final history").
+- **Deferred** — Tasks 1–6 are not current execution instructions. They are not scheduled work under the V0 coherence baseline.
+- **Non-authoritative** — it is **not** the current authority for supervised real-drone behavior. The authoritative guidance for physical Tello work is the [V0 WP4 supervised Tello/live-video spec](../specs/2026-09-16-sentinel-wp4-supervised-tello-live-video.md), which consumes the WP0 worker/operation contracts (bounded `WorkerPort.dispatch`/`reconcile` interface, eight named preflight checks, operator-only `FORCE_RUN_CREATE`, terminal non-overridable `EMERGENCY` latch) and is the V0 release prerequisite (coherence spec §7.1). Where this plan's Task 3–6 details (dual-adapter routing, dry-run, emergency sender) conflict with the WP0 contracts, the WP0 contracts and WP4 spec govern; any retained ideas here survive only as implemented inside those contract constraints, never as standalone authority.
+
 ## Goal
 
 Build SENTINEL from the clean setup baseline with a DJITelloPy-derived real backend, deterministic dry-run mode, conservative flight-envelope validation, dual-adapter routing protection, video validation, and emergency controls.

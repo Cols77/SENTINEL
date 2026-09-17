@@ -1,3 +1,9 @@
+---
+id: sentinel-wp0-shared-coherence-contracts
+title: "SENTINEL WP0 — Shared Coherence Contracts"
+status: review-pending
+---
+
 # SENTINEL WP0 — Shared Coherence Contracts
 
 > **Status:** Revised after independent review; re-review pending

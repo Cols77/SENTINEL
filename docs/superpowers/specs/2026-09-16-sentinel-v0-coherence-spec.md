@@ -1,3 +1,9 @@
+---
+id: sentinel-v0-coherence-spec
+title: "SENTINEL V0 Coherence Specification"
+status: review-pending
+---
+
 # SENTINEL V0 Coherence Specification
 
 > **Status:** Revised after independent review; re-review pending
