@@ -99,3 +99,18 @@ def test_dispatch_requires_approved_plan_binding(tmp_path: Path):
     assert caught.value.code == "INVALID_STATE_TRANSITION"
     assert repository.read_events(RUN_ID, 0, 10) == []
     repository.close()
+
+
+def test_task_rank_gateway_persists_ranking_and_event(tmp_path: Path):
+    repository = CoordinatorRepository.open(tmp_path / "gateway.sqlite3")
+    repository.create_run(RUN_ID, status="RUNNING")
+    repository.connection.execute("INSERT INTO tasks(task_id, run_id, station_id, status, created_at) VALUES (?, ?, ?, 'PROPOSED', ?)", (PLAN_ID, RUN_ID, "LEFT_ALLEY_MIDDLE", "2026-09-17T00:00:00Z"))
+    repository.connection.commit()
+    gateway = CommandGateway(repository)
+    ranked = command("TASK_RANK", actor_type="AGENT", payload={"task_id": PLAN_ID})
+
+    result = gateway.submit(ranked)
+
+    assert result["status"] == "COMPLETED"
+    assert [row["patroller_id"] for row in repository.connection.execute("SELECT * FROM task_rankings ORDER BY rank_no").fetchall()] == ["PATROLLER_1"]
+    assert repository.read_events(RUN_ID, 0, 10)[0]["event_type"] == "PATROLLER_ASSIGNMENT_PROPOSED"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from sentinel.contracts import AgentModelResult, AgentRequest, validate_document
@@ -27,6 +28,10 @@ class AgentLoop:
         cursor = 0
         for _turn in range(self.max_turns):
             state = self.port.read_state(run_id)
+            if self._deadline_expired(deadline):
+                return {"status": "FAILED", "error_code": "DEADLINE_EXPIRED", "summary": "agent deadline expired"}
+            if state.get("emergency_latched") or state.get("run_status") == "EMERGENCY":
+                return {"status": "EMERGENCY", "error_code": "EMERGENCY_LATCHED", "summary": "emergency stop is latched"}
             if state.get("run_status") in _TERMINAL:
                 return {"status": state["run_status"], "summary": "run reached a terminal state", "state_version": state.get("state_version", 0)}
             events = self.port.read_events(run_id, cursor, 32)
@@ -51,6 +56,14 @@ class AgentLoop:
             outcome = self._execute(call.tool_name, call.arguments, run_id, agent_run_id, model_result.agent_run_id, state)
             previous = outcome
         return {"status": "NEEDS_REVIEW", "error_code": "MAX_TURNS", "summary": "agent turn budget exhausted"}
+
+    @staticmethod
+    def _deadline_expired(deadline: str) -> bool:
+        try:
+            expiry = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return True
+        return datetime.now(timezone.utc) >= expiry.astimezone(timezone.utc)
 
     @staticmethod
     def _event_summary(event):

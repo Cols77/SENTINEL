@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -23,12 +24,14 @@ def append_event(
     actor_id: str = "coordinator",
     correlation_id: str | None = None,
     source_kind: str = "SIMULATED",
+    commit: bool = True,
 ) -> dict[str, Any]:
     """Atomically append one event and advance its run cursor and state version."""
     event_id = str(uuid.uuid4())
     correlation_id = correlation_id or event_id
     occurred_at = utc_now()
-    with connection:
+    transaction = connection if commit else nullcontext(connection)
+    with transaction:
         row = connection.execute(
             "SELECT state_version, latest_event_sequence FROM runs WHERE run_id = ?",
             (run_id,),
