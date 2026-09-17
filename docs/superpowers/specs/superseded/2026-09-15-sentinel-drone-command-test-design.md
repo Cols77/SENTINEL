@@ -1,3 +1,9 @@
+> **Status:** Superseded historical material; non-authoritative for V0.
+> **Replacement:** [V0 Indoor Alley Survey Design](../2026-09-16-sentinel-v0-indoor-alley-survey-design.md), [V0 Coherence Specification](../2026-09-16-sentinel-v0-coherence-spec.md), and [WP4 Supervised Tello/Live Video](../2026-09-16-sentinel-wp4-supervised-tello-live-video.md).
+> **Safety reference:** [Current supervised-flight checklist](../../../safety.md).
+>
+> Retained for historical context only. Do not use this document to derive the current route, preflight, approval, evidence, or execution contract.
+
 # SENTINEL Drone Command and Flight-Envelope Test Design
 
 **Date:** 2026-09-15  
