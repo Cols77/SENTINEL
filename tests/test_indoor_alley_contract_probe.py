@@ -38,7 +38,7 @@ def test_wire_contract_exposes_immutable_plan_preflight_and_capture_records():
 def test_wire_contract_uses_indoor_outcome_vocabulary():
     wire = _load("sentinel-v0-wire.schema.json")
     serialized = json.dumps(wire)
-    for outcome in ("FAILED", "NEEDS_REVIEW", "COMPLETED", "EMERGENCY"):
+    for outcome in ("FAILED", "HELD_FOR_REVIEW", "COMPLETED", "EMERGENCY"):
         assert outcome in serialized
 
 

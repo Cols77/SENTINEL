@@ -145,9 +145,66 @@ The worker runs preflight before flight and emits the immutable run/plan-bound `
 
 #### 3.3.2 Run outcomes and approval vocabulary
 
-The only V0 terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`; an active emergency latch is terminal and cannot be forced. `REJECTED` is event-only and never a terminal run status: `PLAN_REJECTED` returns to plan refinement/re-proposal. The retained task and zone-result review events remain compatibility-valid but are deferred. `NEEDS_REVIEW` is a review-hold state, not terminal; V0 does not resolve it through an operator review of persisted database state and does not automatically revisit or redispatch. A future agentic action must use a new immutable plan and the existing operator plan-approval path. `APPROVED` is not a run state.
+The only V0 terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`; an active emergency latch is terminal and cannot be forced. `REJECTED` is event-only and never a terminal run status: `PLAN_REJECTED` returns to plan refinement/re-proposal. The retained task and zone-result review events remain compatibility-valid but are deferred. `HELD_FOR_REVIEW` is a non-terminal review hold; V0 does not resolve it through an operator review of persisted database state and does not automatically revisit or redispatch. A future agentic action must use a new immutable plan and the existing operator plan-approval path. `APPROVED` is not a run state.
 
 ### 3.4 Snapshot/version rule
+
+#### 3.3.3 Normative naming semantics
+
+These rules are WP0 contract vocabulary. Prose and code must use the composed
+name that carries the concept; a bare overloaded word is ambiguous and invalid
+in active-path text.
+
+**Three plan layers — never bare "plan" in active prose:**
+
+| Layer | Wire name | Composed prose name | Meaning |
+|---|---|---|---|
+| Catalogue entry | `catalogue_plan_id` (in `survey-catalogue-v1.schema.json`) | **plan template** | A fixed template in the six-zone survey catalogue that the agent may select |
+| Agent output | `PROPOSE_PLAN` status in `AgentModelResult` | **plan proposal** | The agent's structured proposal naming exactly one plan template |
+| Persisted plan | `SurveyPlanReference` (`plan_id`, `catalogue_id`, `catalogue_revision`, `plan_sha256`, ordered `station_ids`) | **immutable plan** | The concrete plan resolved from the template, persisted at `PLAN_CREATED` and hashed into `plan_sha256`; the only object that can be approved, dispatched or bound to preflight |
+
+`SurveyPlanReference` is the immutable concrete plan record — the composed name
+"immutable plan" is its prose form. It is never a pointer or template. "Plan
+proposal" always refers to the agent output; "plan template" always refers to
+the catalogue entry.
+
+**Revision vs version — always name the object:**
+
+| Composed term | Field | Object versioned |
+|---|---|---|
+| **catalogue revision** | `catalogue_revision` | The survey catalogue a plan was resolved against |
+| **plan hash** | `plan_sha256` | The immutable plan content itself |
+| **state version** | `state_version` | The coordinator run state |
+| **prompt revision / policy revision** | `SENTINEL_LLM_PROMPT_REVISION` / `SENTINEL_LLM_TOOL_POLICY_REVISION` | Adapter configuration |
+
+Bare "revision" or "version" in prose is ambiguous and must be written with its
+object (catalogue revision, state version, plan hash). The word "revision" is
+reserved for configured content lines (catalogue, prompts, policy); "version"
+is reserved for runtime state counters; a content hash is always "hash".
+
+**Run-state and outcome names:**
+
+- `HELD_FOR_REVIEW` is the non-terminal scoreless hold. The composed reading is
+  "held for review", i.e. retained for future coordinator/agent planning. It is
+  not terminal and no operator resolves it in V0.
+- `WAITING_FOR_APPROVAL` is always written with its target:
+  "`WAITING_FOR_APPROVAL` (plan)" in the active path; "(task)" only for the
+  retained deferred lifecycle.
+- `PROPOSE_PLAN` is the agent result status that proposes exactly one plan
+  template. `NO_ACTION`, `MALFORMED` and `UNAVAILABLE` are the non-proposing
+  outcomes and carry no plan proposal.
+- `OPERATOR_DECIDE` always appears with its target in prose: "operator plan
+  decision" for the active path; `TASK` targets are retained deferred
+  vocabulary.
+
+**Mission vs run:** `RUN_CREATE`/`RUN_*` is the active V0 vocabulary. The
+parent-compatible `MISSION_*` event names are retained deferred compatibility
+contracts and must not be used in active-path prose or emitted by the active
+path.
+
+The active `AGENT_PLAN_PROPOSAL_PROPOSED` / `AGENT_PLAN_PROPOSAL_REJECTED`
+events persist the plan-proposal outcome; the event names name their object
+(the plan proposal), not the bare agent intent.
 
 `STALE` is never a persisted `SectionState.status`. It is a read-time boolean derived as `now - MountainStateSnapshot.as_of > mountain.fixture.snapshot_stale_after_ms OR MountainStateSnapshot.snapshot_version < StateSnapshot.latest_event_sequence`. On every committed event that changes any mountain projection field, the coordinator atomically increments `state_version`, assigns the next `sequence_no`, and writes a mountain snapshot with `snapshot_version == sequence_no` and `as_of == recorded_at`. Events that do not alter mountain projection still increment `state_version` and `latest_event_sequence`, but retain the prior mountain snapshot version; that relationship makes its freshness derivation explicit. `StateSnapshot.latest_event_sequence` always equals the highest committed event sequence for the run.
 
@@ -280,7 +337,7 @@ The wire schema permits the full `actor_type` vocabulary on `CommandEnvelope` fo
 
 | `actor_type` | Commands accepted through `CoordinatorPort.submit` |
 |---|---|
-| `AGENT` | `AGENT_INTENT_PROPOSE` only; the payload is proposal-only and cannot contain dispatch, worker, perception or emergency instructions |
+| `AGENT` | `AGENT_INTENT_PROPOSE` only; the payload carries the plan proposal and is otherwise proposal-only — it cannot contain dispatch, worker, perception or emergency instructions |
 | `OPERATOR` | `RUN_CREATE`, `OPERATOR_DECIDE`, `EMERGENCY_SIGNAL`, `FORCE_RUN_CREATE` |
 | `COORDINATOR` | `INSPECTION_DISPATCH`, `PERCEPTION_INGEST`, `OPERATION_RECONCILE` in active V0; `TASK_CREATE` and `TASK_RANK` remain retained but deferred |
 | `WORKER` | none; worker facts, command outcomes and reconciliation observations enter through the typed `WorkerPort`, not a caller-selected command envelope |
@@ -328,7 +385,7 @@ No UI, worker, perception adapter or LLM adapter opens SQLite directly.
 WP0 passes only when all are true:
 
 - `uv run python -m pytest tests/contracts -q` passes.
-- Schema validation accepts valid and rejects malformed command/result/event/perception fixtures. It directly rejects all five discriminator negatives: `RUN_CREATE` + approval payload, `OPERATOR_DECIDE` + request text, `RUN_CREATED` + operation payload, `INTENT` without intent, and `NO_ACTION` + `INSPECT_SECTION`; it retains the deferred `ZONE_RESULT` operator target and `ZONE_RESULT_REVIEWED` event while retaining the TASK branches.
+- Schema validation accepts valid and rejects malformed command/result/event/perception fixtures. It directly rejects all five discriminator negatives: `RUN_CREATE` + approval payload, `OPERATOR_DECIDE` + request text, `RUN_CREATED` + operation payload, `PROPOSE_PLAN` without a plan proposal, and `NO_ACTION` + `INSPECT_SECTION`; it retains the deferred `ZONE_RESULT` operator target and `ZONE_RESULT_REVIEWED` event while retaining the TASK branches.
 - WP0 semantic validator tests load `perception-request-artifact-hash-mismatch.invalid.json` and reject it with `ARTIFACT_HASH_MISMATCH`; they compare `PerceptionRequest.artifact_sha256` exactly to nested `ArtifactRef.sha256` rather than relying on JSON Schema.
 - WP0 semantic validator tests reject inverted and zero-area normalized `bbox_xyxy` fixture values.
 - Fixtures cover success, rejection, scoreless result, provider error, stale version, duplicate key conflict, `IN_DOUBT`, emergency and restart cursor replay.

@@ -117,7 +117,7 @@ route. It has no worker/control port and can never change the in-flight route.
 - `FAILED`: any failed preflight (unless a force-new-run override is approved),
   missing marker in marker mode, worker/video/provider fault, invalid capture,
   integrity mismatch, or unresolved operation.
-- `NEEDS_REVIEW`: the route and evidence are valid, but perception is
+- `HELD_FOR_REVIEW`: the route and evidence are valid, but perception is
   inconclusive or below its configured confidence threshold. V0 records the
   hold for future coordinator/agent planning; the operator does not review
   database state, and no score or automatic revisit is invented.
@@ -207,7 +207,7 @@ Automated tests validate catalogue-only agent proposals; plan-hash/approval/
 dispatch equality; preflight persistence and force-new-run behavior; both layout
 modes; height-envelope rejection; one-to-three frame station correlation;
 hash/provenance integrity; concurrent perception with no flight mutation;
-`FAILED`/`NEEDS_REVIEW`/`COMPLETED`/`EMERGENCY` outcomes; and no post-latch
+`FAILED`/`HELD_FOR_REVIEW`/`COMPLETED`/`EMERGENCY` outcomes; and no post-latch
 ordinary command. Retained deferred branches, including the zone-review
 fixtures, continue to validate for compatibility but are not required by the V0
 vertical slice.

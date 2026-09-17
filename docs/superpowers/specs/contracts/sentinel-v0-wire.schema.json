@@ -842,8 +842,8 @@
                 "RUN_CREATED",
                 "USER_MESSAGE_RECEIVED",
                 "AGENT_STARTED",
-                "AGENT_INTENT_PROPOSED",
-                "AGENT_INTENT_REJECTED",
+                "AGENT_PLAN_PROPOSAL_PROPOSED",
+                "AGENT_PLAN_PROPOSAL_REJECTED",
                 "AGENT_WAITING",
                 "AGENT_RESUMED",
                 "AGENT_COMPLETED",
@@ -1019,7 +1019,7 @@
               "if": {
                 "properties": {
                   "event_type": {
-                    "const": "AGENT_INTENT_PROPOSED"
+                    "const": "AGENT_PLAN_PROPOSAL_PROPOSED"
                   }
                 }
               },
@@ -1035,7 +1035,7 @@
               "if": {
                 "properties": {
                   "event_type": {
-                    "const": "AGENT_INTENT_REJECTED"
+                    "const": "AGENT_PLAN_PROPOSAL_REJECTED"
                   }
                 }
               },
@@ -1874,7 +1874,7 @@
                 "RUNNING",
                 "WAITING_FOR_OBSERVATION",
                 "WAITING_FOR_APPROVAL",
-                "NEEDS_REVIEW",
+                "HELD_FOR_REVIEW",
                 "COMPLETED",
                 "FAILED",
                 "EMERGENCY"
@@ -2441,7 +2441,7 @@
             },
             "status": {
               "enum": [
-                "INTENT",
+                "PROPOSE_PLAN",
                 "NO_ACTION",
                 "MALFORMED",
                 "UNAVAILABLE"
@@ -2476,7 +2476,7 @@
               "if": {
                 "properties": {
                   "status": {
-                    "const": "INTENT"
+                    "const": "PROPOSE_PLAN"
                   }
                 }
               },

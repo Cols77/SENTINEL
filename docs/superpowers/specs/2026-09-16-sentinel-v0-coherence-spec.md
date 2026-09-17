@@ -78,14 +78,14 @@ Inspect the left and right table alleys for rocks
 6. WP4 stores a selected live JPEG/PNG through the coordinator-managed artifact contract.
 7. WP3 calls the frozen provider profile and returns a hash-bound `PerceptionResult`.
 8. Coordinator ingests it as `DETECTION_RECORDED`, updates the mountain snapshot and applies the frozen threshold.
-9. A qualifying scored result is persisted as a coordinator-owned zone-level fact; lower or scoreless results enter `NEEDS_REVIEW`, while provider failures enter `FAILED`. No score is invented and no automatic revisit is triggered.
+9. A qualifying scored result is persisted as a coordinator-owned zone-level fact; lower or scoreless results enter `HELD_FOR_REVIEW` (a non-terminal review hold), while provider failures enter `FAILED`. No score is invented and no automatic revisit is triggered.
 10. Any future agentic operation or revisit proposal must resolve to a new immutable plan and the existing operator plan-approval path. V0 does not add an operator command for reviewing persisted database state.
 
 Live: LLM, one Tello, preflight/flight, live frame capture, `VideoStatus`, selected detector provider, coordinator persistence and operator plan decision.
 
 Simulated: fixed six-zone geometry and nonvisited context. Task/ranking/patroller assignment, target aggregation, automatic revisit and external notifications are deferred rather than simulated as active V0 behavior.
 
-The only terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`. `NEEDS_REVIEW` is a review-hold, not a terminal outcome. `REJECTED` is event-only and never a terminal run status: `PLAN_REJECTED` returns to plan refinement/re-proposal. A future agentic action requires a new immutable plan and the existing operator plan-approval path; V0 does not add a database-state review command.
+The only terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`. `HELD_FOR_REVIEW` is a non-terminal review hold, not a terminal outcome. `REJECTED` is event-only and never a terminal run status: `PLAN_REJECTED` returns to plan refinement/re-proposal. A future agentic action requires a new immutable plan and the existing operator plan-approval path; V0 does not add a database-state review command.
 
 Replay is rehearsal-only and is rejected in a judged run. Served browser video is not required; `VideoStatus` plus selected-frame provenance is the V0 video boundary.
 
