@@ -101,6 +101,8 @@ class _WireRecord:
         def convert(value: Any) -> Any:
             if isinstance(value, LocalPoint):
                 return [value.x, value.y]
+            if isinstance(value, _WireRecord) and value is not self:
+                return value.to_dict()
             if is_dataclass(value):
                 return {field.name: convert(getattr(value, field.name)) for field in fields(value)}
             if isinstance(value, tuple):
@@ -329,17 +331,14 @@ class AgentModelResult(_WireRecord):
         )
 
     def to_dict(self) -> dict[str, Any]:
-        result = {
-            "contract_version": self.contract_version,
-            "wire_type": self.wire_type,
-            "agent_run_id": self.agent_run_id,
-            "status": self.status,
-            "tool_calls": [call.to_dict() for call in self.tool_calls],
-        }
+        result = super().to_dict()
+        if self.status != "TOOL_CALLS":
+            result.pop("tool_calls", None)
+
+
         for name in ("intent", "catalogue_plan_id", "diagnostic"):
-            value = getattr(self, name)
-            if value is not None:
-                result[name] = value
+            if result.get(name) is None:
+                result.pop(name, None)
         return result
 
 
