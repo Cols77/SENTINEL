@@ -1,5 +1,7 @@
+import pytest
+
 from sentinel.adapter.llm.fake import DEFAULT_SCRIPT, ScriptedFakeAgentModel
-from sentinel.contracts import AgentRequest
+from sentinel.contracts import AgentModelResult, AgentRequest
 
 
 UUID = "11111111-1111-4111-8111-111111111111"
@@ -39,3 +41,28 @@ def test_rejection_feedback_selects_wait_branch_instead_of_repeating_action():
     result = ScriptedFakeAgentModel().propose(request(rejected))
     assert result.tool_calls[0].tool_name == "wait_for_event"
     assert result.tool_calls[0].arguments["event_types"] == ["PLAN_REJECTED"]
+
+
+@pytest.mark.parametrize(
+    ("script", "expected_status"),
+    [
+        ([], "NO_ACTION"),
+        ([{"tool_name": "not-a-legal-tool", "arguments": {}}], "MALFORMED"),
+    ],
+)
+def test_non_tool_call_results_omit_tool_calls_before_schema_validation(
+    monkeypatch, script, expected_status
+):
+    documents = []
+    original_from_dict = AgentModelResult.from_dict
+
+    def validating_from_dict(document):
+        documents.append(document)
+        return original_from_dict(document)
+
+    monkeypatch.setattr(AgentModelResult, "from_dict", validating_from_dict)
+    result = ScriptedFakeAgentModel(script=script).propose(request())
+
+    assert result.status == expected_status
+    assert len(documents) == 1
+    assert "tool_calls" not in documents[0]

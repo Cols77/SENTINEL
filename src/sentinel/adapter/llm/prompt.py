@@ -54,7 +54,8 @@ APPROVED_TOOL_NAMES = tuple(APPROVED_TOOL_NAMES)
 
 
 def _text(value: Any, limit: int = PROMPT_MAX_TEXT) -> str:
-    return value if isinstance(value, str) else str(value)[:limit]
+    text = value if isinstance(value, str) else str(value)
+    return text[:limit]
 
 
 def _bounded_events(events: Any) -> list[dict[str, Any]]:
