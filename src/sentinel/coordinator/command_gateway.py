@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from pathlib import Path
 from typing import Any, Mapping
 
 from sentinel.contracts import ContractValidationError, validate_document, validate_preflight_report
@@ -13,6 +14,8 @@ from .errors import CoordinatorError
 from .approval import PlanApprovalService
 from .tasks import AssignmentService, EvidenceTaskService
 from .tasks import SimulatedPatroller
+from .catalogue import CatalogueResolver
+from .plans import PlanResolver
 
 
 _EVENT_TYPES = {
@@ -36,6 +39,10 @@ class CommandGateway:
 
     def __init__(self, repository):
         self.repository = repository
+
+    @staticmethod
+    def _catalogue_fixture() -> Path:
+        return Path(__file__).resolve().parents[3] / "docs" / "superpowers" / "specs" / "contracts" / "fixtures" / "survey-catalogue-v1.fixture.json"
 
     def submit(self, command: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(command, Mapping):
@@ -128,6 +135,26 @@ class CommandGateway:
             if approved is None:
                 raise CoordinatorError("INVALID_PREFLIGHT_REPORT", "preflight plan is not the approved immutable plan")
         with self.repository.connection:
+            if command_type == "AGENT_INTENT_PROPOSE" and command["payload"]["intent"] in {"INSPECT_SECTION", "REQUEST_OPERATOR_APPROVAL"}:
+                entry_id = command["payload"]["catalogue_plan_id"]
+                plan_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{run_id}:{entry_id}"))
+                PlanResolver(self.repository, CatalogueResolver.from_fixture(self._catalogue_fixture())).resolve(
+                    run_id, plan_id, "SURVEY_CATALOGUE_V1", entry_id
+                )
+                self.repository.connection.execute(
+                    "UPDATE runs SET status = 'WAITING_FOR_APPROVAL' WHERE run_id = ?", (run_id,)
+                )
+            if command_type == "PREFLIGHT_INGEST":
+                report = command["payload"]["preflight_report"]
+                self.repository.connection.execute(
+                    """INSERT INTO preflight_reports
+                       (report_id, run_id, plan_id, plan_sha256, passed, report_json, checked_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (report["report_id"], run_id, report["plan_id"], report["plan_sha256"],
+                     int(report["passed"]), json.dumps(report, sort_keys=True, separators=(",", ":")), report["checked_at"]),
+                )
+                if not report["passed"]:
+                    self.repository.connection.execute("UPDATE runs SET status = 'FAILED' WHERE run_id = ?", (run_id,))
             if command_type == "EMERGENCY_SIGNAL":
                 signal_id = command["payload"]["signal_id"]
                 self.repository.connection.execute(
@@ -153,6 +180,26 @@ class CommandGateway:
             if command_type == "ASSIGNMENT_PROPOSE":
                 payload = command["payload"]
                 AssignmentService(self.repository).propose(payload["task_id"], payload["patroller_id"], payload["reason"], commit=False)
+            if command_type == "OPERATOR_DECIDE" and command["payload"]["target"]["kind"] == "PLAN":
+                target = command["payload"]["target"]["plan_reference"]
+                plan = self.repository.connection.execute(
+                    "SELECT plan_id, plan_sha256, catalogue_id, catalogue_revision, station_ids_json FROM plans WHERE run_id = ? AND plan_id = ?",
+                    (run_id, target["plan_id"]),
+                ).fetchone()
+                if plan is None or plan["plan_sha256"] != target["plan_sha256"] or plan["catalogue_id"] != target["catalogue_id"] or plan["catalogue_revision"] != target["catalogue_revision"] or json.loads(plan["station_ids_json"]) != target["station_ids"]:
+                    raise CoordinatorError("PLAN_HASH_MISMATCH", "approval does not bind the persisted plan")
+                approval_id = str(uuid.uuid4())
+                self.repository.connection.execute(
+                    """INSERT INTO plan_approvals
+                       (approval_id, run_id, plan_id, plan_sha256, actor_id, action, expected_state_version, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (approval_id, run_id, target["plan_id"], target["plan_sha256"], command["actor_id"],
+                     command["payload"]["decision"], expected, command["issued_at"]),
+                )
+                self.repository.connection.execute(
+                    "UPDATE runs SET status = ? WHERE run_id = ?",
+                    ("WAITING_FOR_OBSERVATION" if command["payload"]["decision"] == "CONFIRM" else "RUNNING", run_id),
+                )
             if command_type == "OPERATOR_DECIDE" and command["payload"]["target"]["kind"] == "TASK":
                 payload = command["payload"]
                 AssignmentService(self.repository).decide(
@@ -160,6 +207,12 @@ class CommandGateway:
                     actor_id=command["actor_id"], expected_state_version=expected, commit=False,
                 )
             event_type = _EVENT_TYPES[command_type]
+            if command_type == "OPERATOR_DECIDE":
+                target_kind = command["payload"]["target"]["kind"]
+                if target_kind == "TASK":
+                    event_type = "PATROLLER_ASSIGNMENT_CONFIRMED" if command["payload"]["decision"] == "CONFIRM" else "OPERATOR_ASSIGNMENT_REJECTED"
+                elif command["payload"]["decision"] == "REJECT":
+                    event_type = "PLAN_REJECTED"
             event = self.repository.append_event(
                 run_id,
                 event_type,
