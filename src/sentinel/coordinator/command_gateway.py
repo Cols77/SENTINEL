@@ -102,7 +102,9 @@ class CommandGateway:
             )
         if row["status"] in _TERMINAL_RUN_STATES and command_type == "EMERGENCY_SIGNAL":
             raise CoordinatorError("INVALID_STATE_TRANSITION", "terminal runs cannot be overwritten")
-        if row["status"] in {"FAILED", "COMPLETED"}:
+        if row["status"] in {"FAILED", "COMPLETED"} or (
+            row["status"] == "EMERGENCY" and not row["emergency_latched"]
+        ):
             raise CoordinatorError("INVALID_STATE_TRANSITION", "terminal runs reject ordinary commands")
         if row["emergency_latched"] and command_type != "EMERGENCY_SIGNAL":
             raise CoordinatorError("EMERGENCY_LATCHED", "ordinary commands are disabled")

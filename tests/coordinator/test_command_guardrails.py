@@ -187,10 +187,19 @@ def test_emergency_latch_survives_repository_reopen(tmp_path: Path):
     reopened.close()
 
 
-@pytest.mark.parametrize("status", ["FAILED", "COMPLETED"])
+@pytest.mark.parametrize("status", ["FAILED", "COMPLETED", "EMERGENCY"])
 def test_terminal_run_rejects_ordinary_mutation(tmp_path: Path, status: str):
     repository = CoordinatorRepository.open(tmp_path / f"terminal-{status}.sqlite3")
     repository.create_run(RUN_ID, status=status)
+    if status == "EMERGENCY":
+        repository.connection.execute(
+            "UPDATE runs SET emergency_latched = 0 WHERE run_id = ?", (RUN_ID,)
+        )
+        repository.connection.execute(
+            "INSERT INTO tasks(task_id, run_id, station_id, status, created_at) VALUES (?, ?, ?, 'PROPOSED', ?)",
+            (PLAN_ID, RUN_ID, "LEFT_ALLEY_MIDDLE", "2026-09-17T00:00:00Z"),
+        )
+        repository.connection.commit()
 
     with pytest.raises(CoordinatorError) as caught:
         CommandGateway(repository).submit(command(
@@ -216,5 +225,27 @@ def test_terminal_run_rejects_new_emergency_signal_without_overwrite(tmp_path: P
         "SELECT status, emergency_latched FROM runs WHERE run_id = ?", (RUN_ID,)
     ).fetchone()
     assert (row["status"], row["emergency_latched"]) == ("COMPLETED", 0)
+    assert repository.connection.execute("SELECT COUNT(*) FROM emergency_records").fetchone()[0] == 0
+    repository.close()
+
+
+def test_emergency_status_rejects_new_emergency_signal_without_overwrite(tmp_path: Path):
+    repository = CoordinatorRepository.open(tmp_path / "terminal-emergency-status.sqlite3")
+    repository.create_run(RUN_ID, status="EMERGENCY")
+    repository.connection.execute(
+        "UPDATE runs SET emergency_latched = 0 WHERE run_id = ?", (RUN_ID,)
+    )
+    repository.connection.commit()
+
+    with pytest.raises(CoordinatorError) as caught:
+        CommandGateway(repository).submit(command(
+            "EMERGENCY_SIGNAL", payload={"signal_id": "88888888-8888-4888-8888-888888888888"},
+        ))
+
+    assert caught.value.code == "INVALID_STATE_TRANSITION"
+    row = repository.connection.execute(
+        "SELECT status, emergency_latched FROM runs WHERE run_id = ?", (RUN_ID,)
+    ).fetchone()
+    assert (row["status"], row["emergency_latched"]) == ("EMERGENCY", 0)
     assert repository.connection.execute("SELECT COUNT(*) FROM emergency_records").fetchone()[0] == 0
     repository.close()
