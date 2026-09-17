@@ -2,7 +2,7 @@
 
 ## State
 
-- Branch: `docs/indoor-alley-v0-spec-rework` at `10bbe73` (`docs: close round-2 review residuals on the V0 contract set`), on top of `6aa8f84` (`docs: close the V0 wire-contract gaps found by peer review`), `8a90c5f` (`fix: bind V0 wire contract to six-zone snapshot and force-run discriminator`) and the base spec-rework commit `8ffa751`.
+- Branch: `docs/indoor-alley-v0-spec-rework` at `2081e1d` (`docs: complete V0 handoff archival cleanup`), on top of `99a9334` (`docs: pin HANDOFF State to the current branch HEAD (10bbe73)`), `10bbe73` (`docs: close round-2 review residuals on the V0 contract set`), `6aa8f84` (`docs: close the V0 wire-contract gaps found by peer review`), `8a90c5f` (`fix: bind V0 wire contract to six-zone snapshot and force-run discriminator`) and the base spec-rework commit `8ffa751`. The current working tree has seven modified tracked paths with no staged changes: `.gitignore` plus the six Python-handoff clarification paths (`HANDOFF.md`, `docs/superpowers/specs/2026-09-16-sentinel-v0-indoor-alley-survey-design.md`, `docs/superpowers/specs/2026-09-16-sentinel-wp0-shared-coherence-contracts.md`, `docs/superpowers/specs/2026-09-16-sentinel-wp1-coordinator-agentic-loop.md`, `docs/superpowers/specs/2026-09-16-sentinel-wp2-nicegui-human-surface.md`, and `docs/superpowers/specs/2026-09-16-sentinel-wp3-rock-perception.md`). Two additional untracked documents (`docs/JEV_SENTINEL_EXPERIMENT.md` and `docs/superpowers/plans/2026-09-17_130508-sentinel-wp1-coordinator-agent-loop.md`) are not part of the reviewed diff and remain untouched; `docs/.obsidian/` is ignored.
 - This branch defines the reworked V0 specification set under `docs/superpowers/specs/` for the six-zone indoor-alley survey: the canonical V0 coherence spec, an approved indoor-alley survey design (the V0 decision record), WP0 shared contracts, and WP1–WP4 component specs, plus `docs/safety.md`.
 - No push to `main` was performed. No real-drone or USB-adapter validation was claimed.
 
@@ -14,6 +14,21 @@
 - Terminal run outcomes: `COMPLETED`, `FAILED`, `EMERGENCY`; `NEEDS_REVIEW` is a review-hold escaped only by an approved new/revisit plan; `REJECTED` is event-only (reject → refine → re-propose).
 - Preflight is exactly the 8 named checks (`WIFI_INTERFACE`, `DRONE_LINK`, `BATTERY_TELEMETRY`, `LIVE_VIDEO`, `LAYOUT_MARKERS`, `BOUNDED_AREA`, `HEIGHT_ENVELOPE`, `EMERGENCY_LATCH`); operator authorization is the plan's `approval_reference` evaluated at dispatch, not a preflight check.
 - Real execution is DJITelloPy-only, fresh-process with fresh preflight and `--real --confirm`. The `EMERGENCY` latch is terminal and non-overridable; force-run after a failed preflight is operator-only `FORCE_RUN_CREATE` naming a new run/plan, never a resume, never under an active latch, always with fresh preflight and `--real --confirm`.
+
+## Python implementation handoff
+
+The authoritative Python package boundaries and protocol signatures are in [`WP0 §6.1`](docs/superpowers/specs/2026-09-16-sentinel-wp0-shared-coherence-contracts.md#61-python-implementation-handoff). This section is the routing summary; it does not add a second contract.
+
+- **Colin / WP0–WP1–WP4:** owns `sentinel.contracts`, canonical fixtures, `sentinel.coordinator`, the `CoordinatorPort`/`AgentReadToolPort`/`WorkerPort`/`PerceptionPort` declarations, SQLite/state semantics, the deterministic fake worker, replay/restart harness and the physical worker.
+- **Alan / WP1–WP2:** owns `sentinel.adapter.llm` and `sentinel.ui`. He implements `AgentModelPort`, the parser/config/fake agent, and an injected `CoordinatorClient` test double. The UI sends complete `CommandEnvelope` values and consumes read models; it does not define a second coordinator protocol or access SQLite.
+- **Dzivha / WP3:** owns `sentinel.perception`, `PerceptionPort` implementation, provider-neutral normalization, fake perception responses and `fixtures/perception/`. The adapter returns only `PerceptionResult`; it does not mutate coordinator state or control the worker.
+- **Composition:** the coordinator receives the three ports by injection. Fakes are `SIMULATED`, require no credentials/network, and are rejected from judged use; replay fixtures are `REPLAYED` and are also rejected. All shared wire payloads are validated through `sentinel.contracts` against the named WP0 schema anchor; the only explicit Python-only exceptions are the `AgentToolContext` capability context and `EvidenceRead`/`EvidenceContentHandle` defined in WP0 §6.
+- `EvidenceRead` is the Python-only result of run-scoped `read_evidence(run_id, artifact_id)`: a typed `ArtifactRef` plus an opaque coordinator-created capability. It permits only re-authorized JPEG/PNG reads bounded to 10 MiB and the configured timeout, expires/revokes fail closed, and never exposes a filesystem path, `storage_key`, credentials, unbounded URL or raw video bytes.
+- **Agent tools:** V0 remains proposal-only for state mutation and physical action, but the agent may choose exactly three coordinator-mediated, read-only tools: `read_state`, `read_mountain` and bounded `read_events`, each receiving an immutable coordinator-created `AgentToolContext` bound to `agent_run_id`, `run_id`, state version, request identity, allowed references and deadline. Direct SQLite, SQL, filesystem, provider, perception or worker access remains prohibited; evidence/file reads, perception requests and operation proposals require a later contract amendment.
+- **Deferred capability guard:** a later operation proposal is non-executing and must resolve to the canonical immutable catalogue plan → operator `PlanApproval` → fresh preflight → `PENDING` → at-most-one dispatch → reconciliation flow; a later perception tool must construct/validate the canonical `PerceptionRequest`, enforce hash/source/profile/threshold provenance, and persist only validated `PerceptionResult` data through coordinator ingress. The agent never receives `WorkerPort`, emergency, force-run, operator-decision or redispatch authority.
+- Actor authorization — the coordinator rejects every actor/command pair outside the WP0 matrix with `FORBIDDEN_ACTOR_COMMAND`; operator decisions/force-run are operator-only, worker facts/results use typed ports, and system commands are limited to low-level emergency-latch ingress.
+
+A contributor may change code only inside the owned boundary unless the change is a WP0 contract amendment agreed before implementation. The package checks are `uv run python -m pytest tests/contracts -q`, `uv run python -m pytest tests/coordinator tests/agent -q`, `uv run python -m pytest tests/ui -q`, and `uv run python -m pytest tests/perception -q`; passing one package does not accept another package.
 
 ## Gate status (G0–G4)
 
@@ -29,8 +44,10 @@ From this branch:
 
 ```text
 uv run python -m pytest -q
-103 passed in 1.60s
+103 passed
 ```
+
+The completed independent specification review found six Important contract gaps; the current working tree contains their repairs. The post-fix independent reviewer was interrupted while waiting for its model response and returned no verdict, so this handoff does not claim independent post-fix approval. Local schema, cross-document consistency and diff checks pass.
 
 The V0 contract root is `docs/superpowers/specs/contracts/sentinel-v0-contract.schema.json`, with the `oneOf` port registry at `sentinel-v0-wire.schema.json`. The live yaw-scan fixture is `fixtures/perception/live/yaw-scan-20260916.h264` (plus `.manifest.json`/`.mp4`).
 

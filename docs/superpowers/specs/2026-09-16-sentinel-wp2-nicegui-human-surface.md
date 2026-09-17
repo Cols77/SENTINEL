@@ -16,7 +16,7 @@ The UI consumes only:
 read_state(run_id) -> https://sentinel.local/contracts/sentinel-v0-wire.schema.json#StateSnapshot
 read_events(run_id, after_sequence, limit) -> #EventEnvelope[]
 read_mountain(run_id) -> #MountainStateSnapshot
-read_evidence(artifact_id) -> #ArtifactRef + #EvidenceContentHandle
+read_evidence(run_id, artifact_id) -> EvidenceRead  # run-scoped ArtifactRef + Python-only capability
 read_hazard(target_id) -> #HazardReadModel
 read_approval(task_id) -> #ApprovalReadModel
 read_plan(plan_id) -> #PlanReadModel
@@ -27,7 +27,7 @@ open_live_video(run_id) -> #SafeVideoStreamHandle
 submit(https://sentinel.local/contracts/sentinel-v0-wire.schema.json#CommandEnvelope) -> #ResultEnvelope
 ```
 
-NiceGUI begins in-process behind a `CoordinatorClient` protocol. A future HTTP client must implement the same calls. No UI code opens SQLite, reads raw artifact paths, calls the Tello SDK, changes thresholds, resolves catalogue hashes, or dispatches directly.
+NiceGUI begins in-process behind the `CoordinatorClient` implementation in `sentinel.ui.coordinator_client`. That client implements the authoritative `CoordinatorPort` declared in WP0 §6.1 by delegation/injection; it does not redefine the protocol. A future HTTP client is not part of V0 and must not serialize or substitute the Python-only `EvidenceContentHandle`. Before any HTTP client claims full `CoordinatorPort` conformance, a later WP0 amendment must define a versioned transport mapping for `read_evidence(run_id, artifact_id)` with the same run/authorization scope, JPEG/PNG allowlist, 10 MiB/configured-timeout bounds, expiry/revocation and fail-closed errors; until then, HTTP evidence access is unsupported rather than downgraded to a path, `storage_key`, credential, unbounded URL or raw-video response. For wire-defined calls, a future HTTP client must return the same validated contract types. No UI code opens SQLite, reads raw artifact paths, calls the Tello SDK, changes thresholds, resolves catalogue hashes, or dispatches directly.
 
 ## 3. Required layout
 
@@ -47,7 +47,7 @@ Use the WP0 indoor-alley six-zone fixture and its exact read-model/schema contra
 
 A snapshot is stale if the coordinator marks it stale, `now - as_of` exceeds fixture `snapshot_stale_after_ms`, or received `latest_event_sequence > snapshot_version`. The UI preserves the last snapshot with a `STALE` label, requests refresh, and never synthesizes missing transitions.
 
-Clicking a section resolves it to its linked hazards via `read_hazard(target_id)` and exposes the linked observation/artifact/provenance; a target with no linked hazard returns the stable `NOT_FOUND` error code, which the UI renders as an explicit "no linked hazard" state rather than synthesizing one. Evidence access is only through `read_evidence`, which returns the typed `ArtifactRef` plus an `EvidenceContentHandle`; a missing artifact likewise surfaces `NOT_FOUND`.
+Clicking a section resolves it to its linked hazards via `read_hazard(target_id)` and exposes the linked observation/artifact/provenance; a target with no linked hazard returns the stable `NOT_FOUND` error code, which the UI renders as an explicit "no linked hazard" state rather than synthesizing one. Evidence access is only through run-scoped `read_evidence(run_id, artifact_id)`, which returns `EvidenceRead`: the typed `ArtifactRef` plus the coordinator-created capability described in WP0 §6. The handle permits only re-authorized JPEG/PNG reads bounded to 10 MiB and the configured timeout, expires or revokes fail closed, and never exposes a filesystem path, `storage_key`, credentials, unbounded URL or raw video bytes. A missing or foreign-run artifact surfaces `NOT_FOUND`/`FORBIDDEN`; the UI never synthesizes evidence.
 
 ## 5. Approval and failure interaction
 
