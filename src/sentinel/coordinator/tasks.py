@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextlib import nullcontext
 from typing import Any, Mapping
 
 from .errors import CoordinatorError
@@ -18,7 +19,7 @@ class EvidenceTaskService:
 
     def create_task(
         self, run_id: str, perception_result_id: str, section_id: str,
-        evidence_artifact_id: str, *, task_id: str | None = None,
+        evidence_artifact_id: str, *, task_id: str | None = None, commit: bool = True,
     ) -> dict[str, Any]:
         row = self.repository.connection.execute(
             """SELECT p.run_id, p.artifact_id, p.result_json, o.station_id
@@ -40,7 +41,7 @@ class EvidenceTaskService:
             if (existing["run_id"], existing["perception_result_id"], existing["station_id"]) != (run_id, perception_result_id, section_id):
                 raise CoordinatorError("IDEMPOTENCY_KEY_CONFLICT", "task ID is bound to different evidence")
             return dict(existing)
-        with self.repository.connection:
+        with (self.repository.connection if commit else nullcontext()):
             self.repository.connection.execute(
                 "INSERT INTO tasks(task_id, run_id, station_id, status, perception_result_id, created_at) VALUES (?, ?, ?, 'PROPOSED', ?, ?)",
                 (task_id, run_id, section_id, perception_result_id, utc_now()),
@@ -54,11 +55,11 @@ class SimulatedPatroller:
     def __init__(self, repository):
         self.repository = repository
 
-    def rank_for_task(self, task_id: str, scores: Mapping[str, float]) -> list[dict[str, Any]]:
+    def rank_for_task(self, task_id: str, scores: Mapping[str, float], *, commit: bool = True) -> list[dict[str, Any]]:
         if self.repository.connection.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)).fetchone() is None:
             raise CoordinatorError("INVALID_STATE_TRANSITION", "unknown task")
         ranking = sorted(((str(pid), float(score)) for pid, score in scores.items()), key=lambda item: (-item[1], item[0]))
-        with self.repository.connection:
+        with (self.repository.connection if commit else nullcontext()):
             self.repository.connection.execute("DELETE FROM task_rankings WHERE task_id = ?", (task_id,))
             for rank_no, (patroller_id, score) in enumerate(ranking, 1):
                 self.repository.connection.execute(
@@ -74,19 +75,21 @@ class AssignmentService:
     def __init__(self, repository):
         self.repository = repository
 
-    def propose(self, task_id: str, patroller_id: str, reason: str) -> dict[str, Any]:
+    def propose(self, task_id: str, patroller_id: str, reason: str, *, commit: bool = True) -> dict[str, Any]:
         row = self.repository.connection.execute(
             "SELECT patroller_id FROM task_rankings WHERE task_id = ? AND rank_no = 1", (task_id,)
         ).fetchone()
         if row is None or row["patroller_id"] != patroller_id:
             raise CoordinatorError("INVALID_STATE_TRANSITION", "assignment must bind to the persisted rank-1 proposal")
-        with self.repository.connection:
+        with (self.repository.connection if commit else nullcontext()):
             self.repository.connection.execute("UPDATE tasks SET status = 'ASSIGNMENT_PROPOSED', proposed_patroller_id = ?, proposal_reason = ? WHERE task_id = ?", (patroller_id, reason, task_id))
         return {"task_id": task_id, "patroller_id": patroller_id, "reason": reason, "status": "PROPOSED"}
 
-    def decide(self, run_id: str, task_id: str, decision: str, *, actor_id: str, expected_state_version: int) -> dict[str, Any]:
-        if not actor_id:
+    def decide(self, run_id: str, task_id: str, decision: str, *, actor_id: str, expected_state_version: int, commit: bool = True) -> dict[str, Any]:
+        if not actor_id or not actor_id.startswith("OPERATOR_"):
             raise CoordinatorError("UNAUTHORIZED_ACTOR", "operator identity is required")
+        if decision not in {"CONFIRM", "REJECT"}:
+            raise CoordinatorError("INVALID_CONTRACT", "decision must be CONFIRM or REJECT")
         run = self.repository.connection.execute("SELECT state_version FROM runs WHERE run_id = ?", (run_id,)).fetchone()
         task = self.repository.connection.execute("SELECT * FROM tasks WHERE task_id = ? AND run_id = ?", (task_id, run_id)).fetchone()
         if run is None or task is None or run["state_version"] != expected_state_version:
@@ -94,6 +97,6 @@ class AssignmentService:
         if task["status"] != "ASSIGNMENT_PROPOSED" or not task["proposed_patroller_id"]:
             raise CoordinatorError("INVALID_STATE_TRANSITION", "task has no pending assignment proposal")
         status = "ASSIGNED" if decision == "CONFIRM" else "PROPOSED"
-        with self.repository.connection:
+        with (self.repository.connection if commit else nullcontext()):
             self.repository.connection.execute("UPDATE tasks SET status = ? WHERE task_id = ?", (status, task_id))
         return {"task_id": task_id, "decision": decision, "status": status}

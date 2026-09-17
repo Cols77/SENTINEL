@@ -12,6 +12,7 @@ from sentinel.contracts import ContractValidationError, validate_document, valid
 from .errors import CoordinatorError
 from .approval import PlanApprovalService
 from .tasks import AssignmentService, EvidenceTaskService
+from .tasks import SimulatedPatroller
 
 
 _EVENT_TYPES = {
@@ -126,44 +127,48 @@ class CommandGateway:
             ).fetchone()
             if approved is None:
                 raise CoordinatorError("INVALID_PREFLIGHT_REPORT", "preflight plan is not the approved immutable plan")
-        if command_type == "TASK_CREATE":
-            payload = command["payload"]
-            EvidenceTaskService(self.repository).create_task(
-                run_id, payload["perception_result_id"], payload["section_id"],
-                payload["evidence_artifact_id"],
-                task_id=str(uuid.uuid5(uuid.NAMESPACE_URL, command["command_id"])),
-            )
-        if command_type == "ASSIGNMENT_PROPOSE":
-            payload = command["payload"]
-            AssignmentService(self.repository).propose(payload["task_id"], payload["patroller_id"], payload["reason"])
-        if command_type == "OPERATOR_DECIDE" and command["payload"]["target"]["kind"] == "TASK":
-            payload = command["payload"]
-            AssignmentService(self.repository).decide(
-                run_id, payload["target"]["task_id"], payload["decision"],
-                actor_id=command["actor_id"], expected_state_version=expected,
-            )
-        event_type = _EVENT_TYPES[command_type]
-        event = self.repository.append_event(
-            run_id,
-            event_type,
-            dict(command["payload"]),
-            actor_type=command["actor_type"],
-            actor_id=command["actor_id"],
-            correlation_id=command["correlation_id"],
-        )
-        result = {
-            "contract_version": "sentinel.v0",
-            "wire_type": "result_envelope",
-            "command_id": command["command_id"],
-            "run_id": run_id,
-            "status": "COMPLETED",
-            "state_version": event["state_version"],
-            "event_id": event["event_id"],
-            "error_code": None,
-            "payload": {"accepted_command_type": command_type},
-            "recorded_at": event["recorded_at"],
-        }
         with self.repository.connection:
+            if command_type == "TASK_CREATE":
+                payload = command["payload"]
+                EvidenceTaskService(self.repository).create_task(
+                    run_id, payload["perception_result_id"], payload["section_id"],
+                    payload["evidence_artifact_id"],
+                    task_id=str(uuid.uuid5(uuid.NAMESPACE_URL, command["command_id"])), commit=False,
+                )
+            if command_type == "TASK_RANK":
+                payload = command["payload"]
+                SimulatedPatroller(self.repository).rank_for_task(payload["task_id"], payload.get("scores", {"PATROLLER_1": 0.0}), commit=False)
+            if command_type == "ASSIGNMENT_PROPOSE":
+                payload = command["payload"]
+                AssignmentService(self.repository).propose(payload["task_id"], payload["patroller_id"], payload["reason"], commit=False)
+            if command_type == "OPERATOR_DECIDE" and command["payload"]["target"]["kind"] == "TASK":
+                payload = command["payload"]
+                AssignmentService(self.repository).decide(
+                    run_id, payload["target"]["task_id"], payload["decision"],
+                    actor_id=command["actor_id"], expected_state_version=expected, commit=False,
+                )
+            event_type = _EVENT_TYPES[command_type]
+            event = self.repository.append_event(
+                run_id,
+                event_type,
+                dict(command["payload"]),
+                actor_type=command["actor_type"],
+                actor_id=command["actor_id"],
+                correlation_id=command["correlation_id"],
+                commit=False,
+            )
+            result = {
+                "contract_version": "sentinel.v0",
+                "wire_type": "result_envelope",
+                "command_id": command["command_id"],
+                "run_id": run_id,
+                "status": "COMPLETED",
+                "state_version": event["state_version"],
+                "event_id": event["event_id"],
+                "error_code": None,
+                "payload": {"accepted_command_type": command_type},
+                "recorded_at": event["recorded_at"],
+            }
             self.repository.connection.execute(
                 """INSERT INTO idempotency_keys(
                    run_id, actor_type, actor_id, idempotency_key, command_type,
