@@ -97,3 +97,21 @@ def test_agent_loop_rejects_unknown_tool_without_submitting_mutation():
     assert result["status"] == "FAILED"
     assert result["error_code"] == "INVALID_AGENT_RESULT"
     assert port.submissions == []
+
+
+def test_agent_loop_stops_at_approval_without_model_call():
+    class Port:
+        def read_state(self, run_id):
+            return {"run_id": run_id, "state_version": 1, "run_status": "WAITING_FOR_APPROVAL", "agent_phase": "PLAN"}
+        def read_events(self, run_id, after, limit):
+            assert after == 0
+            return [{"sequence_no": 7, "event_type": "PLAN_PROPOSED"}]
+
+    calls = []
+    result = AgentLoop(Port(), lambda request: calls.append(request)).run(
+        RUN_ID, "66666666-6666-4666-8666-666666666666", "inspect"
+    )
+    assert result["status"] == "WAITING_FOR_APPROVAL"
+    assert result["event_cursor"] == 7
+    assert result["state_version"] == 1
+    assert calls == []

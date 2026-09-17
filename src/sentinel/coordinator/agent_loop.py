@@ -32,6 +32,14 @@ class AgentLoop:
                 return {"status": "FAILED", "error_code": "DEADLINE_EXPIRED", "summary": "agent deadline expired"}
             if state.get("emergency_latched") or state.get("run_status") == "EMERGENCY":
                 return {"status": "EMERGENCY", "error_code": "EMERGENCY_LATCHED", "summary": "emergency stop is latched"}
+            if state.get("run_status") == "WAITING_FOR_APPROVAL":
+                events = self.port.read_events(run_id, cursor, 32)
+                cursor = max([cursor, *[int(event.get("sequence_no", cursor)) for event in events]])
+                return {"contract_version": "sentinel.v0", "wire_type": "agent_tool_result", "tool_name": "coordinator.wait",
+                        "status": "WAITING_FOR_APPROVAL", "error_code": "WAITING_FOR_APPROVAL",
+                        "state_version": state.get("state_version", 0), "event_cursor": cursor,
+                        "legal_tools": [], "safe_summary": "operator approval is required", "result": {},
+                        "previous_result": previous}
             if state.get("run_status") in _TERMINAL:
                 return {"status": state["run_status"], "summary": "run reached a terminal state", "state_version": state.get("state_version", 0)}
             events = self.port.read_events(run_id, cursor, 32)
@@ -53,7 +61,7 @@ class AgentLoop:
             call = model_result.tool_calls[0]
             if call.tool_name == "finish":
                 return {"status": call.arguments["status"], "summary": call.arguments["summary"]}
-            outcome = self._execute(call.tool_name, call.arguments, run_id, agent_run_id, model_result.agent_run_id, state)
+            outcome = self._execute(call.tool_name, call.arguments, run_id, agent_run_id, model_result.agent_run_id, state, cursor)
             previous = outcome
         return {"status": "NEEDS_REVIEW", "error_code": "MAX_TURNS", "summary": "agent turn budget exhausted"}
 
@@ -69,7 +77,7 @@ class AgentLoop:
     def _event_summary(event):
         return {"sequence_no": event.get("sequence_no", 0), "event_type": event.get("event_type", ""), "summary": str(event.get("event_type", ""))[:128]}
 
-    def _execute(self, tool_name, arguments, run_id, agent_run_id, result_agent_run_id, state):
+    def _execute(self, tool_name, arguments, run_id, agent_run_id, result_agent_run_id, state, cursor):
         if tool_name == "state.get_summary":
             value = self.port.read_state(run_id)
             result = {"kind": "state_summary", "run_status": str(value.get("run_status", "UNKNOWN")), "phase": str(value.get("agent_phase", "UNKNOWN")), "state_version": int(value.get("state_version", 0))}
@@ -88,4 +96,8 @@ class AgentLoop:
                 key = "agent-" + hashlib.sha256((agent_run_id + ":" + tool_name + ":" + fingerprint).encode()).hexdigest()
                 command = {"contract_version": "sentinel.v0", "wire_type": "command_envelope", "command_id": str(uuid.uuid5(uuid.NAMESPACE_URL, key)), "command_type": command_type, "run_id": run_id, "actor_type": "AGENT", "actor_id": agent_run_id, "correlation_id": agent_run_id, "idempotency_key": key, "issued_at": "2999-01-01T00:00:00Z", "payload": payload}
                 result = {"kind": "empty", "response": self.port.submit(command)}
-        return {"contract_version": "sentinel.v0", "wire_type": "agent_tool_result", "tool_name": tool_name, "status": "ACCEPTED", "error_code": None, "state_version": int(state.get("state_version", 0)), "event_cursor": 0, "legal_tools": _TOOLS, "safe_summary": "bounded coordinator result", "result": result}
+        current = self.port.read_state(run_id)
+        events = self.port.read_events(run_id, cursor, 32)
+        next_cursor = max([cursor, *[int(event.get("sequence_no", cursor)) for event in events]])
+        legal_tools = [] if current.get("run_status") == "WAITING_FOR_APPROVAL" else _TOOLS
+        return {"contract_version": "sentinel.v0", "wire_type": "agent_tool_result", "tool_name": tool_name, "status": "ACCEPTED", "error_code": None, "state_version": int(current.get("state_version", state.get("state_version", 0))), "event_cursor": next_cursor, "legal_tools": legal_tools, "safe_summary": "bounded coordinator result", "result": result}
