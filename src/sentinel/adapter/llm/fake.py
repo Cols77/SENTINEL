@@ -70,8 +70,9 @@ class ScriptedFakeAgentModel:
             "wire_type": "agent_result",
             "agent_run_id": request.agent_run_id,
             "status": status,
-            "tool_calls": [] if call is None else [call.to_dict()],
         }
+        if status == "TOOL_CALLS":
+            document["tool_calls"] = [] if call is None else [call.to_dict()]
         if intent is not None:
             document["intent"] = intent
         if diagnostic is not None:

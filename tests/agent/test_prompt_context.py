@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 from sentinel.adapter.llm.prompt import APPROVED_TOOL_NAMES, build_chat_request
 from sentinel.contracts import AgentRequest
@@ -58,3 +59,25 @@ def test_prompt_build_is_deterministic_and_does_not_mutate_request():
     second = build_chat_request(REQUEST, prompt_revision="prompt-v1", tool_policy_revision="tools-v1")
     assert first == second
     assert first["tool_choice"] == "auto"
+
+
+def test_prompt_context_text_fields_are_bounded_to_default_limit():
+    oversized = "x" * 513
+    request = replace(
+        REQUEST,
+        event_context=[{"sequence_no": 8, "event_type": "RUN_CREATED", "summary": oversized}],
+        evidence_context=[
+            {
+                "artifact_id": UUID,
+                "source_kind": "SIMULATED",
+                "status": "AVAILABLE",
+                "summary": oversized,
+            }
+        ],
+    )
+
+    payload = build_chat_request(request, prompt_revision="prompt-v1", tool_policy_revision="tools-v1")
+    context = json.loads(payload["messages"][1]["content"])
+
+    assert context["event_context"][0]["summary"] == oversized[:512]
+    assert context["evidence_context"][0]["summary"] == oversized[:512]
