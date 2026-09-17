@@ -167,3 +167,84 @@ def test_public_wrappers_are_typed_and_reject_unknown_tool_names():
                 "arguments": {},
             }
         )
+
+
+_TYPED_TOOL_ARGUMENTS = {
+    "state.get_summary": {},
+    "state.get_recent_events": {"after_sequence": 4, "limit": 8},
+    "inspection.propose_plan": {
+        "catalogue_plan_id": "CAT_ALLEY",
+        "reason": "bounded route",
+    },
+    "task.create": {
+        "perception_result_id": UUID,
+        "section_id": "LEFT_ALLEY_MIDDLE",
+        "evidence_artifact_id": UUID,
+    },
+    "patroller.rank_for_task": {"task_id": UUID},
+    "assignment.propose": {
+        "task_id": UUID,
+        "patroller_id": "PATROLLER_1",
+        "reason": "rank-1 candidate",
+    },
+    "wait_for_event": {
+        "event_types": ["PLAN_APPROVED"],
+        "reason": "operator approval",
+    },
+    "finish": {"status": "DONE", "summary": "complete"},
+}
+
+
+def _tool_call(tool_name, arguments):
+    return {
+        "contract_version": "sentinel.v0",
+        "wire_type": "agent_tool_call",
+        "tool_name": tool_name,
+        "arguments": arguments,
+    }
+
+
+@pytest.mark.parametrize(("tool_name", "arguments"), _TYPED_TOOL_ARGUMENTS.items())
+def test_each_allowed_tool_name_accepts_only_its_typed_arguments(tool_name, arguments):
+    assert validate_document(_tool_call(tool_name, arguments)) == []
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        (tool_name, next_arguments)
+        for tool_name, next_arguments in zip(
+            _TYPED_TOOL_ARGUMENTS,
+            [*_TYPED_TOOL_ARGUMENTS.values()][1:] + [next(iter(_TYPED_TOOL_ARGUMENTS.values()))],
+        )
+    ],
+)
+def test_each_allowed_tool_name_rejects_another_tool_arguments(tool_name, arguments):
+    with pytest.raises(ContractValidationError):
+        validate_document(_tool_call(tool_name, arguments))
+
+
+@pytest.mark.parametrize(
+    ("status", "extra"),
+    [
+        (
+            "INTENT",
+            {"intent": "INSPECT_SECTION", "catalogue_plan_id": "CAT_ALLEY"},
+        ),
+        ("NO_ACTION", {"intent": "NO_ACTION_REQUIRED"}),
+        ("MALFORMED", {"intent": None}),
+        ("UNAVAILABLE", {"intent": None}),
+    ],
+)
+def test_non_tool_call_statuses_reject_tool_calls(status, extra):
+    result = {
+        "contract_version": "sentinel.v0",
+        "wire_type": "agent_result",
+        "agent_run_id": UUID,
+        "status": status,
+        "tool_calls": [_tool_call("state.get_summary", {})],
+        **extra,
+    }
+
+    with pytest.raises(ContractValidationError):
+        validate_document(result)
