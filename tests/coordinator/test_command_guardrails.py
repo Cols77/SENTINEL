@@ -149,6 +149,54 @@ def test_task_operator_decision_requires_pending_target_while_waiting(tmp_path: 
     repository.close()
 
 
+def test_plan_operator_decision_rejects_cross_target_when_task_is_pending(tmp_path: Path):
+    repository = CoordinatorRepository.open(tmp_path / "cross-target-plan.sqlite3")
+    repository.create_run(RUN_ID, status="RUNNING")
+    repository.connection.execute(
+        """INSERT INTO plans(plan_id, run_id, catalogue_id, catalogue_revision, plan_sha256,
+           mode, station_ids_json, canonical_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (PLAN_ID, RUN_ID, "SURVEY_CATALOGUE_V1", "REV_1", "a" * 64,
+         "MARKER_VERIFIED", '["LEFT_ALLEY_MIDDLE"]', "{}", "2026-09-17T00:00:00Z"),
+    )
+    task_id = "55555555-5555-4555-8555-555555555555"
+    repository.connection.execute(
+        "INSERT INTO tasks(task_id, run_id, station_id, status, proposed_patroller_id, created_at) VALUES (?, ?, ?, 'ASSIGNMENT_PROPOSED', ?, ?)",
+        (task_id, RUN_ID, "LEFT_ALLEY_MIDDLE", "PATROLLER_1", "2026-09-17T00:00:00Z"),
+    )
+    repository.connection.commit()
+    repository.set_pending_approval(RUN_ID, "TASK", task_id)
+
+    with pytest.raises(CoordinatorError) as caught:
+        CommandGateway(repository).submit(command("OPERATOR_DECIDE", expected_state_version=1, payload=operator_payload()))
+
+    assert caught.value.code == "INVALID_STATE_TRANSITION"
+    assert repository.connection.execute("SELECT COUNT(*) FROM plan_approvals").fetchone()[0] == 0
+    assert len(repository.read_events(RUN_ID, 0, 10)) == 1
+    repository.close()
+
+
+def test_task_operator_decision_rejects_cross_target_when_plan_is_pending(tmp_path: Path):
+    repository = CoordinatorRepository.open(tmp_path / "cross-target-task.sqlite3")
+    repository.create_run(RUN_ID, status="RUNNING")
+    repository.connection.execute(
+        "INSERT INTO tasks(task_id, run_id, station_id, status, proposed_patroller_id, created_at) VALUES (?, ?, ?, 'ASSIGNMENT_PROPOSED', ?, ?)",
+        (PLAN_ID, RUN_ID, "LEFT_ALLEY_MIDDLE", "PATROLLER_1", "2026-09-17T00:00:00Z"),
+    )
+    repository.connection.commit()
+    repository.set_pending_approval(RUN_ID, "PLAN", PLAN_ID)
+
+    with pytest.raises(CoordinatorError) as caught:
+        CommandGateway(repository).submit(command("OPERATOR_DECIDE", expected_state_version=1, payload={
+            "decision": "CONFIRM", "target": {"kind": "TASK", "task_id": PLAN_ID},
+        }))
+
+    assert caught.value.code == "INVALID_STATE_TRANSITION"
+    assert repository.connection.execute("SELECT status FROM tasks WHERE task_id = ?", (PLAN_ID,)).fetchone()[0] == "ASSIGNMENT_PROPOSED"
+    assert len(repository.read_events(RUN_ID, 0, 10)) == 1
+    repository.close()
+
+
 def test_task_rank_gateway_persists_ranking_and_event(tmp_path: Path):
     repository = CoordinatorRepository.open(tmp_path / "gateway.sqlite3")
     repository.create_run(RUN_ID, status="RUNNING")
@@ -202,8 +250,9 @@ def test_operator_rejection_leaves_run_refinement_eligible(tmp_path: Path):
         (PLAN_ID, RUN_ID, "LEFT_ALLEY_MIDDLE", "PATROLLER_1", "2026-09-17T00:00:00Z"),
     )
     repository.connection.commit()
+    repository.set_pending_approval(RUN_ID, "TASK", PLAN_ID)
 
-    CommandGateway(repository).submit(command("OPERATOR_DECIDE", payload={
+    CommandGateway(repository).submit(command("OPERATOR_DECIDE", expected_state_version=1, payload={
         "decision": "REJECT", "target": {"kind": "TASK", "task_id": PLAN_ID},
     }))
 

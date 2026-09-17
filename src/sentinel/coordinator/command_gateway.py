@@ -72,7 +72,7 @@ class CommandGateway:
 
         run_id = command["run_id"]
         row = self.repository.connection.execute(
-            "SELECT state_version, status, emergency_latched FROM runs WHERE run_id = ?",
+            "SELECT state_version, status, emergency_latched, pending_approval_kind, pending_approval_id FROM runs WHERE run_id = ?",
             (run_id,),
         ).fetchone()
         if row is None:
@@ -116,8 +116,13 @@ class CommandGateway:
             target = command["payload"]["target"]
             if row["status"] != "WAITING_FOR_APPROVAL":
                 raise CoordinatorError("INVALID_STATE_TRANSITION", "operator decisions require a waiting-for-approval run")
+            pending_target = (row["pending_approval_kind"], row["pending_approval_id"])
+            if pending_target != (target["kind"], target.get("plan_reference", {}).get("plan_id", target.get("task_id"))):
+                raise CoordinatorError("INVALID_STATE_TRANSITION", "operator decision is not the pending approval target")
             if target["kind"] == "PLAN":
                 reference = target["plan_reference"]
+                if row["pending_approval_kind"] != "PLAN" or row["pending_approval_id"] != reference["plan_id"]:
+                    raise CoordinatorError("INVALID_STATE_TRANSITION", "plan is not the pending approval target")
                 pending = self.repository.connection.execute(
                     """SELECT station_ids_json FROM plans
                        WHERE run_id = ? AND plan_id = ? AND plan_sha256 = ?
@@ -128,6 +133,8 @@ class CommandGateway:
                 if pending is None or json.loads(pending["station_ids_json"]) != reference["station_ids"]:
                     raise CoordinatorError("INVALID_STATE_TRANSITION", "plan is not the pending approval target")
             else:
+                if row["pending_approval_kind"] != "TASK" or row["pending_approval_id"] != target["task_id"]:
+                    raise CoordinatorError("INVALID_STATE_TRANSITION", "task is not the pending approval target")
                 pending = self.repository.connection.execute(
                     """SELECT 1 FROM tasks
                        WHERE run_id = ? AND task_id = ? AND status = 'ASSIGNMENT_PROPOSED'
@@ -187,7 +194,8 @@ class CommandGateway:
                     correlation_id=command["correlation_id"], commit=False,
                 )
                 self.repository.connection.execute(
-                    "UPDATE runs SET status = 'WAITING_FOR_APPROVAL' WHERE run_id = ?", (run_id,)
+                    "UPDATE runs SET status = 'WAITING_FOR_APPROVAL', pending_approval_kind = 'PLAN', pending_approval_id = ? WHERE run_id = ?",
+                    (plan_id, run_id),
                 )
             if command_type == "PREFLIGHT_INGEST":
                 report = command["payload"]["preflight_report"]
@@ -226,7 +234,8 @@ class CommandGateway:
                 payload = command["payload"]
                 AssignmentService(self.repository).propose(payload["task_id"], payload["patroller_id"], payload["reason"], commit=False)
                 self.repository.connection.execute(
-                    "UPDATE runs SET status = 'WAITING_FOR_APPROVAL' WHERE run_id = ?", (run_id,)
+                    "UPDATE runs SET status = 'WAITING_FOR_APPROVAL', pending_approval_kind = 'TASK', pending_approval_id = ? WHERE run_id = ?",
+                    (payload["task_id"], run_id),
                 )
             if command_type == "OPERATOR_DECIDE" and command["payload"]["target"]["kind"] == "PLAN":
                 target = command["payload"]["target"]["plan_reference"]
@@ -247,6 +256,9 @@ class CommandGateway:
                 self.repository.connection.execute(
                     "UPDATE runs SET status = ? WHERE run_id = ?",
                     ("WAITING_FOR_OBSERVATION" if command["payload"]["decision"] == "CONFIRM" else "RUNNING", run_id),
+                )
+                self.repository.connection.execute(
+                    "UPDATE runs SET pending_approval_kind = NULL, pending_approval_id = NULL WHERE run_id = ?", (run_id,)
                 )
             if command_type == "OPERATOR_DECIDE" and command["payload"]["target"]["kind"] == "TASK":
                 payload = command["payload"]
@@ -277,7 +289,8 @@ class CommandGateway:
                     ).fetchone()[0]
                     run_status = "COMPLETED" if assigned >= (len(station_ids) or 1) else "RUNNING"
                 self.repository.connection.execute(
-                    "UPDATE runs SET status = ? WHERE run_id = ?", (run_status, run_id)
+                    "UPDATE runs SET status = ?, pending_approval_kind = NULL, pending_approval_id = NULL WHERE run_id = ?",
+                    (run_status, run_id),
                 )
             event_type = _EVENT_TYPES[command_type]
             if command_type == "OPERATOR_DECIDE":
