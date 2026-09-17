@@ -112,13 +112,41 @@ class CommandGateway:
             raise CoordinatorError("UNAUTHORIZED_ACTOR", "operator decisions require an operator actor")
         if command_type == "PREFLIGHT_INGEST" and command["actor_type"] != "WORKER":
             raise CoordinatorError("UNAUTHORIZED_ACTOR", "preflight ingress requires a worker actor")
+        if command_type == "OPERATOR_DECIDE":
+            target = command["payload"]["target"]
+            if row["status"] != "WAITING_FOR_APPROVAL":
+                raise CoordinatorError("INVALID_STATE_TRANSITION", "operator decisions require a waiting-for-approval run")
+            if target["kind"] == "PLAN":
+                reference = target["plan_reference"]
+                pending = self.repository.connection.execute(
+                    """SELECT station_ids_json FROM plans
+                       WHERE run_id = ? AND plan_id = ? AND plan_sha256 = ?
+                         AND catalogue_id = ? AND catalogue_revision = ?""",
+                    (run_id, reference["plan_id"], reference["plan_sha256"], reference["catalogue_id"],
+                     reference["catalogue_revision"]),
+                ).fetchone()
+                if pending is None or json.loads(pending["station_ids_json"]) != reference["station_ids"]:
+                    raise CoordinatorError("INVALID_STATE_TRANSITION", "plan is not the pending approval target")
+            else:
+                pending = self.repository.connection.execute(
+                    """SELECT 1 FROM tasks
+                       WHERE run_id = ? AND task_id = ? AND status = 'ASSIGNMENT_PROPOSED'
+                         AND proposed_patroller_id IS NOT NULL""",
+                    (run_id, target["task_id"]),
+                ).fetchone()
+                if pending is None:
+                    raise CoordinatorError("INVALID_STATE_TRANSITION", "task is not the pending approval target")
         if command_type == "INSPECTION_DISPATCH":
             payload = command["payload"]
             approved = self.repository.connection.execute(
-                """SELECT p.plan_id, p.plan_sha256, p.station_ids_json
-                   FROM plan_approvals pa JOIN plans p ON p.plan_id = pa.plan_id
-                   WHERE pa.run_id = ? AND pa.action = 'CONFIRM'
-                     AND pa.plan_sha256 = p.plan_sha256""", (run_id,)
+                """SELECT p.station_ids_json
+                   FROM plan_approvals pa
+                   JOIN plans p ON p.plan_id = pa.plan_id AND p.run_id = pa.run_id
+                                AND p.plan_sha256 = pa.plan_sha256
+                   JOIN preflight_reports f ON f.run_id = pa.run_id AND f.plan_id = pa.plan_id
+                                            AND f.plan_sha256 = pa.plan_sha256 AND f.passed = 1
+                   WHERE pa.run_id = ? AND pa.plan_id = ? AND pa.action = 'CONFIRM'""",
+                (run_id, payload["mission_id"]),
             ).fetchall()
             if not any(payload["section_id"] in json.loads(row["station_ids_json"]) for row in approved):
                 raise CoordinatorError(
@@ -197,6 +225,9 @@ class CommandGateway:
             if command_type == "ASSIGNMENT_PROPOSE":
                 payload = command["payload"]
                 AssignmentService(self.repository).propose(payload["task_id"], payload["patroller_id"], payload["reason"], commit=False)
+                self.repository.connection.execute(
+                    "UPDATE runs SET status = 'WAITING_FOR_APPROVAL' WHERE run_id = ?", (run_id,)
+                )
             if command_type == "OPERATOR_DECIDE" and command["payload"]["target"]["kind"] == "PLAN":
                 target = command["payload"]["target"]["plan_reference"]
                 plan = self.repository.connection.execute(
