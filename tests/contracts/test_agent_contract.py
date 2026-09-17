@@ -329,7 +329,7 @@ def test_coordinator_ingress_commands_are_closed_and_typed():
         validate_document(
             _command("ASSIGNMENT_PROPOSE", {"task_id": UUID, "patroller_id": "PATROLLER_1"})
         )
- 
+
 def _result_envelope(**overrides):
     result = {
         "contract_version": "sentinel.v0",
@@ -361,6 +361,4 @@ def test_result_envelope_accepts_shared_typed_fields_and_round_trips():
 def test_result_envelope_rejects_malformed_shared_typed_fields(field, value):
     with pytest.raises(ContractValidationError):
         validate_document(_result_envelope(**{field: value}))
-
-
 
