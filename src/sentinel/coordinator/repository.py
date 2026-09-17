@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 
 from . import migrations
+from .events import append_event, read_events
 
 
 class CoordinatorRepository:
@@ -25,6 +26,30 @@ class CoordinatorRepository:
         connection.execute("PRAGMA foreign_keys = ON")
         migrations.apply(connection)
         return cls(connection)
+
+    def create_run(
+        self,
+        run_id: str,
+        *,
+        status: str = "NEW",
+        agent_phase: str = "RECEIVE_REQUEST",
+        updated_at: str | None = None,
+    ) -> None:
+        from .events import utc_now
+
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO runs(run_id, state_version, status, agent_phase,
+                   latest_event_sequence, mountain_snapshot_version, updated_at)
+                   VALUES (?, 0, ?, ?, 0, 0, ?)""",
+                (run_id, status, agent_phase, updated_at or utc_now()),
+            )
+
+    def append_event(self, run_id: str, event_type: str, payload: dict, **kwargs):
+        return append_event(self.connection, run_id, event_type, payload, **kwargs)
+
+    def read_events(self, run_id: str, after_sequence: int, limit: int):
+        return read_events(self.connection, run_id, after_sequence, limit)
 
     def close(self) -> None:
         self.connection.close()
