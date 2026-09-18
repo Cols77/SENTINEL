@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from sentinel.judgment import BoundedJudge, StaticJudge
@@ -267,3 +269,164 @@ def test_state_snapshot_detects_duplicate():
                 "patrollers": [], "trail_status": "open", "workflow": "daily_opening_inspection"}
     ctx = state_snapshot(mountain, {"detection_id": "h1", "source": "drone_1"})
     assert ctx["observation"]["duplicate_of_existing_detection"] is True
+
+
+# ---------------------------------------------------------------------------
+# LlmJudge: general LLM baseline behind the SAME bounded-judge port
+# ---------------------------------------------------------------------------
+
+def _llm_questions():
+    return [
+        {"name": "hazard_relevant", "type": "noul", "instruction": "Is this a hazard?",
+         "criteria": {"true": "operational hazard", "false": "not relevant"}},
+        {"name": "priority", "type": "choice", "instruction": "Pick priority.",
+         "criteria": {"ignore": None, "low": None, "medium": None, "high": None}},
+        {"name": "priority_scored", "type": "score", "instruction": "Score urgency.",
+         "criteria": ["not a hazard", "minor", "needs inspection", "urgent"]},
+    ]
+
+
+def _llm_content_answers(**answers):
+    import json
+    return json.dumps({"answers": answers})
+
+
+def _llm_response(content):
+    return {"choices": [{"message": {"role": "assistant", "content": content}}]}
+
+
+def _good_llm_content():
+    return _llm_content_answers(
+        hazard_relevant={"probability": 0.8, "confidence": 0.7},
+        priority={"choice": "high", "probabilities": {"ignore": 0.05, "low": 0.1, "medium": 0.25, "high": 0.6},
+                  "confidence": 0.7},
+        priority_scored={"score": 2.5, "probabilities": {"2": 0.4, "3": 0.5}, "confidence": 0.6},
+    )
+
+
+def test_llm_judge_requires_env_var_name():
+    from sentinel.judgment import LlmJudge
+    with pytest.raises(ValueError):
+        LlmJudge(api_key_env="", base_url="https://x", model="m")
+
+
+def test_llm_judge_missing_api_key_env_fails_closed(monkeypatch):
+    from sentinel.judgment import LlmJudge, JudgeUnavailable
+
+    monkeypatch.delenv("SENTINEL_TEST_LLM_KEY", raising=False)
+    judge = LlmJudge(api_key_env="SENTINEL_TEST_LLM_KEY", base_url="https://x", model="m",
+                     transport=lambda url, headers, payload: _llm_response("{}"))
+    with pytest.raises(JudgeUnavailable):
+        judge.evaluate({}, _llm_questions())
+
+
+def test_llm_judge_posts_openai_chat_completions_json_mode(monkeypatch):
+    from sentinel.judgment import LlmJudge
+
+    monkeypatch.setenv("SENTINEL_TEST_LLM_KEY", "fake-not-a-real-key")
+    seen = {}
+
+    def transport(url, headers, payload):
+        seen["url"], seen["headers"], seen["payload"] = url, headers, payload
+        return _llm_response(_good_llm_content())
+
+    judge = LlmJudge(api_key_env="SENTINEL_TEST_LLM_KEY", base_url="https://llm.example/",
+                     model="test-model", transport=transport)
+    answers = judge.evaluate({"detection": "rock"}, _llm_questions())
+
+    assert seen["url"] == "https://llm.example/v1/chat/completions"
+    assert seen["headers"]["Authorization"] == "Bearer fake-not-a-real-key"
+    payload = seen["payload"]
+    assert payload["model"] == "test-model"
+    assert payload["temperature"] == 0
+    assert payload["response_format"] == {"type": "json_object"}
+    assert [m["role"] for m in payload["messages"]] == ["system", "user"]
+    assert "answers" in payload["messages"][0]["content"]  # fixed system instructions
+    user = json.loads(payload["messages"][1]["content"])
+    assert user["state"] == {"detection": "rock"}
+    assert [q["name"] for q in user["questions"]] == ["hazard_relevant", "priority", "priority_scored"]
+
+    # SAME answer shapes as JevJudge
+    assert answers["hazard_relevant"] == {"value": True, "probability": 0.8}
+    assert answers["priority"]["value"] == "high"
+    assert answers["priority"]["probabilities"]["high"] == 0.6
+    assert answers["priority"]["confidence"] == 0.7
+    assert answers["priority_scored"]["value"] == 2.5
+    assert answers["priority_scored"]["confidence"] == 0.6
+
+
+def test_llm_judge_boolean_threshold_is_policy(monkeypatch):
+    from sentinel.judgment import LlmJudge
+
+    monkeypatch.setenv("SENTINEL_TEST_LLM_KEY", "fake-not-a-real-key")
+    judge = LlmJudge(api_key_env="SENTINEL_TEST_LLM_KEY", base_url="https://x", model="m",
+                     boolean_threshold=0.7,
+                     transport=lambda u, h, p: _llm_response(_llm_content_answers(**{"q": {"probability": 0.65}})))
+    r = judge.evaluate({}, [{"name": "q", "type": "noul", "instruction": "q?", "criteria": None}])
+    assert r["q"] == {"value": False, "probability": 0.65}
+
+
+def test_llm_judge_choice_outside_criteria_fails_closed(monkeypatch):
+    from sentinel.judgment import LlmJudge, JudgeUnavailable
+
+    monkeypatch.setenv("SENTINEL_TEST_LLM_KEY", "fake-not-a-real-key")
+    judge = LlmJudge(api_key_env="SENTINEL_TEST_LLM_KEY", base_url="https://x", model="m",
+                     transport=lambda u, h, p: _llm_response(_llm_content_answers(
+                         **{"priority": {"choice": "medium", "probabilities": {"low": 1.0}, "confidence": 0.5}})))
+    with pytest.raises(JudgeUnavailable):
+        judge.evaluate({}, [{"name": "priority", "type": "choice", "instruction": "Pick.",
+                             "criteria": {"low": None, "high": None}}])
+
+
+def test_llm_judge_probability_out_of_range_fails_closed(monkeypatch):
+    from sentinel.judgment import LlmJudge, JudgeUnavailable
+
+    monkeypatch.setenv("SENTINEL_TEST_LLM_KEY", "fake-not-a-real-key")
+    judge = LlmJudge(api_key_env="SENTINEL_TEST_LLM_KEY", base_url="https://x", model="m",
+                     transport=lambda u, h, p: _llm_response(_llm_content_answers(**{"q": {"probability": 1.4}})))
+    with pytest.raises(JudgeUnavailable):
+        judge.evaluate({}, [{"name": "q", "type": "noul", "instruction": "q?", "criteria": None}])
+
+
+def test_llm_judge_non_json_content_fails_closed(monkeypatch):
+    from sentinel.judgment import LlmJudge, JudgeUnavailable
+
+    monkeypatch.setenv("SENTINEL_TEST_LLM_KEY", "fake-not-a-real-key")
+    judge = LlmJudge(api_key_env="SENTINEL_TEST_LLM_KEY", base_url="https://x", model="m",
+                     transport=lambda u, h, p: _llm_response("not json at all"))
+    with pytest.raises(JudgeUnavailable):
+        judge.evaluate({}, _llm_questions())
+
+
+def test_llm_judge_missing_or_extra_question_names_fail_closed(monkeypatch):
+    from sentinel.judgment import LlmJudge, JudgeUnavailable
+
+    monkeypatch.setenv("SENTINEL_TEST_LLM_KEY", "fake-not-a-real-key")
+    # missing 'priority_scored'
+    partial = _llm_content_answers(hazard_relevant={"probability": 0.8},
+                                   priority={"choice": "low", "probabilities": {"low": 1.0}, "confidence": 0.5})
+    judge = LlmJudge(api_key_env="SENTINEL_TEST_LLM_KEY", base_url="https://x", model="m",
+                     transport=lambda u, h, p: _llm_response(partial))
+    with pytest.raises(JudgeUnavailable):
+        judge.evaluate({}, _llm_questions())
+
+    # extra question name the caller never asked about
+    extra = json.loads(_good_llm_content())
+    extra["answers"]["bogus"] = {"probability": 0.5}
+    judge2 = LlmJudge(api_key_env="SENTINEL_TEST_LLM_KEY", base_url="https://x", model="m",
+                      transport=lambda u, h, p: _llm_response(json.dumps(extra)))
+    with pytest.raises(JudgeUnavailable):
+        judge2.evaluate({}, _llm_questions())
+
+
+def test_llm_judge_http_error_fails_closed(monkeypatch):
+    from sentinel.judgment import LlmJudge, JudgeUnavailable
+
+    monkeypatch.setenv("SENTINEL_TEST_LLM_KEY", "fake-not-a-real-key")
+
+    def transport(url, headers, payload):
+        raise RuntimeError("HTTP 500")
+
+    judge = LlmJudge(api_key_env="SENTINEL_TEST_LLM_KEY", base_url="https://x", model="m", transport=transport)
+    with pytest.raises(JudgeUnavailable):
+        judge.evaluate({}, _llm_questions())

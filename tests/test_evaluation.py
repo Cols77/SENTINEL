@@ -113,3 +113,73 @@ def test_run_cases_records_unavailable(tmp_path):
         [{"case_id": "c1", "state": {}, "reference": {"hazard_relevant": True}}],
         DownJudge(), log_path=tmp_path / "log.jsonl")
     assert metrics["unavailable"] == 1
+
+
+# ---------------------------------------------------------------------------
+# compare_runs: cross-run comparison metrics
+# ---------------------------------------------------------------------------
+
+def _write_run(tmp_path, name, records):
+    path = tmp_path / name
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    return path
+
+
+def _rec(case_id, value, latency=100, reference=None):
+    ref = reference if reference is not None else {"hazard_relevant": value}
+    return {"case_id": case_id, "state": {}, "reference": ref, "judge": {"model": "m"},
+            "latency_ms": latency,
+            "answers": {"hazard_relevant": {"value": value, "probability": 0.9}}}
+
+
+def test_compare_runs_agreement_and_deltas(tmp_path):
+    from sentinel.evaluation import compare_runs
+
+    a = _write_run(tmp_path, "a.jsonl", [
+        _rec("c1", True, latency=100), _rec("c2", False, latency=200)])
+    b = _write_run(tmp_path, "b.jsonl", [
+        _rec("c1", True, latency=150), _rec("c2", True, latency=300, reference={"hazard_relevant": False})])
+    s = compare_runs(a, b)
+    assert s["case_count"] == 2
+    assert s["per_case_agreement"] == {"c1": True, "c2": False}
+    assert s["agreement_rate"] == 0.5
+    assert s["per_question_agreement"] == {"hazard_relevant": 0.5}
+    # deltas: b minus a. a: ref c1 True judged True (ok), c2 False judged False (ok) -> 0/0.
+    # b: c1 True True ok; c2 ref False judged True -> false_escalation.
+    assert s["false_safe"] == {"a": 0, "b": 0, "delta": 0}
+    assert s["false_escalation"] == {"a": 0, "b": 1, "delta": 1}
+    assert s["mean_latency_ms"] == {"a": 150.0, "b": 225.0, "delta": 75.0}
+
+
+def test_compare_runs_missing_reference_label_skips_scoring(tmp_path):
+    from sentinel.evaluation import compare_runs
+
+    a = _write_run(tmp_path, "a.jsonl", [_rec("c1", True, reference={})])
+    b = _write_run(tmp_path, "b.jsonl", [_rec("c1", False, reference={})])
+    s = compare_runs(a, b)
+    assert s["agreement_rate"] == 0.0  # answers differ even without a reference label
+    assert s["false_safe"] == {"a": 0, "b": 0, "delta": 0}
+    assert s["false_escalation"] == {"a": 0, "b": 0, "delta": 0}
+
+
+def test_compare_runs_mismatched_case_sets_fail(tmp_path):
+    from sentinel.evaluation import compare_runs
+    import pytest
+
+    a = _write_run(tmp_path, "a.jsonl", [_rec("c1", True)])
+    b = _write_run(tmp_path, "b.jsonl", [_rec("other", True)])
+    with pytest.raises(ValueError):
+        compare_runs(a, b)
+
+
+def test_compare_runs_cost_totals_when_usage_present(tmp_path):
+    from sentinel.evaluation import compare_runs
+
+    ra = _rec("c1", True)
+    rb = _rec("c1", True)
+    ra["judge"]["usage"] = {"cost": 0.01}
+    rb["judge"]["usage"] = {"cost": 0.03}
+    a = _write_run(tmp_path, "a.jsonl", [ra])
+    b = _write_run(tmp_path, "b.jsonl", [rb])
+    s = compare_runs(a, b)
+    assert s["cost"] == {"a": 0.01, "b": 0.03}
