@@ -44,6 +44,47 @@ def _load_scenarios() -> list[dict[str, Any]]:
     return scenarios
 
 
+def _catalogue_events(scenario: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Encode a scenario's catalogue block as schema-legal event_context items.
+
+    The AgentRequest wire schema has no catalogue field, so the catalogue plan
+    list rides in event_context summaries (event_type <= 64 chars, summary
+    <= 512 chars, additionalProperties false). The model cannot reliably name
+    a catalogue_plan_id it has never seen, so every plan - including the
+    excluded decoy with its exclusion reason - is embedded here.
+    """
+    catalogue = scenario.get("catalogue")
+    if not isinstance(catalogue, Mapping):
+        return []
+    start = max(
+        (int(event.get("sequence_no", 0)) for event in scenario.get("event_context", [])),
+        default=0,
+    )
+    events: list[dict[str, Any]] = []
+    for offset, plan in enumerate(catalogue.get("plans", []), start=1):
+        reason = ""
+        if plan.get("excluded"):
+            reason = (
+                " requires marker verification which is unavailable for this run"
+                if plan.get("requires_marker_verification")
+                else " excluded by catalogue"
+            )
+        summary = (
+            f"Catalogue {catalogue.get('catalogue_id', '')} plan {plan.get('id', '')} "
+            f"mode {plan.get('mode', '')} stations {plan.get('station_count', 0)} "
+            f"requires_marker_verification {str(bool(plan.get('requires_marker_verification'))).lower()}"
+            f"{reason}"
+        )
+        events.append(
+            {
+                "sequence_no": start + offset,
+                "event_type": "RUN_CATALOGUE",
+                "summary": summary[:512],
+            }
+        )
+    return events
+
+
 def _build_request(scenario: Mapping[str, Any], agent_run_id: str) -> AgentRequest:
     previous = scenario.get("previous_result")
     return AgentRequest.from_dict(
@@ -56,7 +97,7 @@ def _build_request(scenario: Mapping[str, Any], agent_run_id: str) -> AgentReque
             "allowed_intent_schema_id": "https://sentinel.local/contracts/sentinel-v0-wire.schema.json#AgentModelResult",
             "deadline": "2099-09-17T00:00:00Z",
             "phase": scenario["phase"],
-            "event_context": list(scenario.get("event_context", [])),
+            "event_context": list(scenario.get("event_context", [])) + _catalogue_events(scenario),
             "evidence_context": list(scenario.get("evidence_context", [])),
             "legal_tools": list(scenario["legal_tools"]),
             "previous_result": previous,
@@ -257,6 +298,54 @@ def test_coordinator_feedback_is_schema_valid_for_all_scenarios():
         validate_document(feedback)
         # And it must round-trip as the next turn's previous_result.
         _AR.from_dict({**request.to_dict(), "previous_result": feedback})
+
+
+def test_catalogue_plan_ids_reach_request_event_context():
+    """Every scenario defining a catalogue must expose each plan id - including
+    the excluded decoy with its exclusion reason - via schema-legal
+    event_context summaries, and the whole request must validate."""
+    from sentinel.contracts import validate_document as _vd
+
+    for scenario in _load_scenarios():
+        catalogue = scenario.get("catalogue")
+        if not isinstance(catalogue, Mapping):
+            continue
+        request = _build_request(scenario, AGENT_RUN_ID)
+        summaries = [event["summary"] for event in request.event_context]
+        for plan in catalogue["plans"]:
+            plan_id = plan["id"]
+            matching = [s for s in summaries if plan_id in s]
+            assert matching, f"{scenario['name']}: plan {plan_id} absent from event_context"
+            if plan.get("excluded"):
+                assert any("requires marker verification" in s for s in matching), (
+                    f"{scenario['name']}: excluded decoy {plan_id} lacks exclusion reason"
+                )
+        for event in request.event_context:
+            assert len(event["event_type"]) <= 64
+            assert len(event["summary"]) <= 512
+        _vd(request.to_dict())
+
+
+def test_catalogue_plan_ids_reach_adapter_payload():
+    """build_chat_request output (what the model actually sees) must contain
+    every catalogue plan id in the serialized context messages."""
+    from sentinel.adapter.llm.prompt import build_chat_request as _bcr
+
+    for scenario in _load_scenarios():
+        catalogue = scenario.get("catalogue")
+        if not isinstance(catalogue, Mapping):
+            continue
+        request = _build_request(scenario, AGENT_RUN_ID)
+        payload = _bcr(
+            request,
+            prompt_revision="test-prompt-rev",
+            tool_policy_revision="test-tool-policy-rev",
+        )
+        blob = json.dumps(payload["messages"], sort_keys=True)
+        for plan in catalogue["plans"]:
+            assert plan["id"] in blob, (
+                f"{scenario['name']}: plan {plan['id']} not visible in adapter messages"
+            )
 
 
 def test_gate_flag_missing_skips_explicitly():
