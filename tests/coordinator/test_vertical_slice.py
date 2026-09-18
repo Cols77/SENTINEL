@@ -42,7 +42,7 @@ def test_one_station_simulated_slice_persists_evidence_task_and_assignment(tmp_p
     )
     repository.connection.execute(
         "INSERT INTO perception_references(result_id, run_id, observation_id, artifact_id, result_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (RESULT_ID, RUN_ID, OBSERVATION_ID, ARTIFACT_ID, json.dumps({"status": "COMPLETED"}), "2026-09-17T13:00:00Z"),
+        (RESULT_ID, RUN_ID, OBSERVATION_ID, ARTIFACT_ID, json.dumps({"contract_version": "sentinel.v0", "wire_type": "perception_result", "result_id": RESULT_ID, "request_id": "12121212-1212-4212-8212-121212121212", "observation_id": OBSERVATION_ID, "artifact_id": ARTIFACT_ID, "artifact_sha256": "a" * 64, "artifact_source_kind": "SIMULATED", "judged_path": False, "provider_profile_id": "66666666-6666-4666-8666-666666666666", "canonical_class": "rock", "source_class": "rock", "raw_score": 0.99, "score_semantics": "provider-defined", "status": "DETECTED", "provider": "simulated", "model": "simulated-detector", "model_revision": "v1", "prompt_revision": "v1", "transform_revision": "v1", "class_mapping_revision": "v0-rock-only", "source_kind": "SIMULATED", "latency_ms": 1, "diagnostic_artifact_id": None, "created_at": "2026-09-17T13:00:00Z", "station_capture": {"plan_id": "88888888-8888-4888-8888-888888888888", "plan_sha256": "b" * 64, "plan_step": 1, "station_id": "LEFT_ALLEY_MIDDLE", "zone_id": "LEFT_ALLEY_MIDDLE", "marker_id": "TAG_LEFT_MIDDLE", "height_m": 1.2, "artifact_id": ARTIFACT_ID, "artifact_sha256": "a" * 64, "capture_index": 1, "captured_at": "2026-09-17T13:00:00Z"}}), "2026-09-17T13:00:00Z"),
     )
     repository.connection.commit()
     gateway = CommandGateway(repository)
