@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import re
+from pathlib import Path
 from typing import Mapping
 
 
@@ -111,8 +112,22 @@ def load_config(environ: Mapping[str, str] | None = None) -> LLMConfig:
 
     The supplied mapping is used only while loading.  The returned object keeps
     the API-key environment-variable *name*, never the value.
+
+    When ``environ`` is None the in-process path auto-populates ``os.environ``
+    from the nearest ``.env`` file first (existing variables win); when a
+    mapping is injected, the file overlays only that private copy and
+    ``os.environ`` is never touched.
     """
-    source = os.environ if environ is None else environ
+    if environ is None:
+        from sentinel.env_file import load_env_file
+
+        load_env_file()
+        source: Mapping[str, str] = os.environ
+    else:
+        from sentinel.env_file import load_env_file
+
+        merged = load_env_file(search_dir=Path.cwd(), environ=dict(environ))
+        source = {**merged, **dict(environ)}
     values = {
         variable: _required_value(
             source, variable, max_length=_FIELD_MAX_LENGTHS.get(variable)
