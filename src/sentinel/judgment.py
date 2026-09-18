@@ -5,35 +5,72 @@ authority over mission-state transitions or flight actions.
 """
 from __future__ import annotations
 
-import json
 import os
 import time
-from dataclasses import dataclass, field
 from typing import Any, Protocol, Sequence
 
 
 class BoundedJudge(Protocol):
     def boolean(self, state: dict, instruction: str, *, name: str) -> dict[str, Any]: ...
     def choice(self, state: dict, instruction: str, *, options: Sequence[str], name: str) -> dict[str, Any]: ...
+    def evaluate(self, state: dict, questions: list[dict]) -> dict[str, dict[str, Any]]: ...
 
 
 class StaticJudge:
-    """Deterministic test double; also the safe default judge."""
+    """Deterministic test double; also the safe default judge.
 
-    def __init__(self, booleans: dict[str, tuple[bool, float]] | None = None,
-                 choices: dict[str, tuple[str, dict[str, float]]] | None = None) -> None:
+    Pre-computed ``answers`` take precedence over the per-primitive rule
+    tables (booleans/choices/scores) so a scenario can pin a full batched
+    response verbatim.
+    """
+
+    def __init__(self,
+                 booleans: dict[str, tuple[bool, float]] | None = None,
+                 choices: dict[str, tuple[str, dict[str, float]]] | None = None,
+                 scores: dict[str, float] | None = None,
+                 answers: dict[str, dict[str, Any]] | None = None,
+                 boolean_threshold: float = 0.5) -> None:
         self._booleans = booleans or {}
         self._choices = choices or {}
+        self._scores = scores or {}
+        self._answers = answers or {}
+        self.boolean_threshold = boolean_threshold
+
+    def evaluate(self, state: dict, questions: list[dict]) -> dict[str, dict[str, Any]]:
+        answers: dict[str, dict[str, Any]] = {}
+        for q in questions:
+            name, kind = q["name"], q["type"]
+            if name in self._answers:
+                answers[name] = self._answers[name]
+                continue
+            if kind == "noul":
+                if name not in self._booleans:
+                    continue  # deterministic double answers only what is configured
+                value, probability = self._booleans[name]
+                answers[name] = {"value": value, "probability": probability}
+            elif kind == "choice":
+                if name not in self._choices:
+                    continue
+                value, probabilities = self._choices[name]
+                if set(probabilities) != set(q["criteria"] or {}):
+                    raise ValueError(f"choice '{name}' probabilities {sorted(probabilities)} != criteria {sorted(q['criteria'] or {})}")
+                answers[name] = {"value": value, "probabilities": probabilities, "confidence": None}
+            elif kind == "score":
+                if name not in self._scores:
+                    continue
+                value = self._scores[name]
+                legend = {str(i): desc for i, desc in enumerate(q["criteria"])}
+                answers[name] = {"value": value, "legend": legend, "confidence": None}
+            else:
+                raise ValueError(f"unknown question type: {kind!r}")
+        return answers
 
     def boolean(self, state: dict, instruction: str, *, name: str) -> dict[str, Any]:
-        value, probability = self._booleans[name]
-        return {"value": value, "probability": probability}
+        return self.evaluate(state, [{"name": name, "type": "noul", "instruction": instruction, "criteria": None}])[name]
 
     def choice(self, state: dict, instruction: str, *, options: Sequence[str], name: str) -> dict[str, Any]:
-        value, probabilities = self._choices[name]
-        if set(probabilities) != set(options):
-            raise ValueError(f"choice '{name}' probabilities {sorted(probabilities)} != options {sorted(options)}")
-        return {"value": value, "probabilities": probabilities}
+        return self.evaluate(state, [{"name": name, "type": "choice", "instruction": instruction,
+                                      "criteria": {opt: None for opt in options}}])[name]
 
 
 class JudgeUnavailable(RuntimeError):
@@ -41,35 +78,47 @@ class JudgeUnavailable(RuntimeError):
 
 
 class JevJudge:
-    """Adapter for typesafe-ai/jev via the Vercel AI Gateway (OpenAI-compatible).
+    """Adapter for typesafe-ai/jev decisions API (batched, parallel questions).
 
-    Fail-closed: any transport/validation failure raises JudgeUnavailable and the
-    caller records it; the demo path never depends on this adapter.
+    One evaluate() call sends ALL questions in a single request to
+    POST {base_url}/api/alpha/decisions. Fail-closed: any transport or
+    validation failure raises JudgeUnavailable and the caller records it;
+    the demo path never depends on this adapter.
+
+    boolean_threshold is POLICY, not model output: P(noul) and
+    1-P(negated noul) are NOT complementary, and thresholds must not be
+    reused across primitives.
     """
 
     DEFAULT_MODEL = "typesafe-ai/jev"
     MODEL_ENV = "SENTINEL_SYSTEM_ONE_MODEL"
+    ENDPOINT_PATH = "/api/alpha/decisions"
 
     def __init__(self, api_key_env: str, base_url: str = "https://ai-gateway.vercel.sh",
-                 model: str | None = None,
-                 timeout_s: float = 5.0, transport=None) -> None:
+                 model: str | None = None, timeout_s: float = 5.0,
+                 boolean_threshold: float = 0.5, transport=None) -> None:
         if not api_key_env:
             raise ValueError("api_key_env must name an environment variable (never embed the key)")
         self._api_key_env = api_key_env
         self._base_url = base_url.rstrip("/")
         self._model = model or os.environ.get(self.MODEL_ENV, self.DEFAULT_MODEL)
         self._timeout_s = timeout_s
+        self.boolean_threshold = boolean_threshold
         self._transport = transport  # injected callable for tests; real one built lazily
 
+    @property
+    def endpoint_path(self) -> str:
+        return self.ENDPOINT_PATH
+
     def _post(self, payload: dict) -> dict:
-        import httpx
         key = os.environ.get(self._api_key_env)
         if not key:
             raise JudgeUnavailable(f"env var {self._api_key_env} not set")
         transport = self._transport
         if transport is None:
+            import httpx
             resp = httpx.post(
-                f"{self._base_url}/v1/chat/completions",
+                f"{self._base_url}{self.ENDPOINT_PATH}",
                 headers={"Authorization": f"Bearer {key}"},
                 json=payload, timeout=self._timeout_s,
             )
@@ -77,55 +126,53 @@ class JevJudge:
             return resp.json()
         return transport(payload)
 
+    def evaluate(self, state: dict, questions: list[dict]) -> dict[str, dict[str, Any]]:
+        wire = {}
+        for q in questions:
+            wire[q["name"]] = {"type": q["type"], "instructions": q["instruction"], "criteria": q["criteria"]}
+        raw = self._post({"model": self._model, "state": state, "questions": wire})
+        try:
+            responses = raw["answers"]
+        except (KeyError, TypeError) as exc:
+            raise JudgeUnavailable(f"unparseable judge response: {exc}") from exc
+        answers: dict[str, dict[str, Any]] = {}
+        for q in questions:
+            name, kind = q["name"], q["type"]
+            if name not in responses:
+                raise JudgeUnavailable(f"missing answer for {name!r}")
+            try:
+                answer = responses[name]
+                if kind == "noul":
+                    prob = float(answer["noul"])
+                    if not 0.0 <= prob <= 1.0:
+                        raise JudgeUnavailable(f"{name}: noul probability out of range: {prob}")
+                    answers[name] = {"value": prob >= self.boolean_threshold, "probability": prob}
+                elif kind == "choice":
+                    value = answer["choice"]
+                    criteria = q["criteria"] or {}
+                    if value not in criteria:
+                        raise JudgeUnavailable(f"{name}: choice {value!r} not in criteria")
+                    answers[name] = {"value": value, "probabilities": {k: float(v) for k, v in answer["probabilities"].items()},
+                                     "confidence": answer.get("confidence")}
+                elif kind == "score":
+                    answers[name] = {"value": float(answer["score"]),
+                                     "legend": dict(answer.get("legend", {})),
+                                     "probabilities": {k: float(v) for k, v in answer.get("probabilities", {}).items()},
+                                     "confidence": answer.get("confidence")}
+                else:
+                    raise JudgeUnavailable(f"unknown question type: {kind!r}")
+            except JudgeUnavailable:
+                raise
+            except Exception as exc:  # untrusted upstream -> one exception class
+                raise JudgeUnavailable(f"invalid answer for {name}: {exc}") from exc
+        return answers
+
     def boolean(self, state: dict, instruction: str, *, name: str) -> dict[str, Any]:
-        raw = self._post(_chat_payload(self._model, state, [
-            {"name": name, "type": "boolean", "instructions": instruction}]))
-        answer = _extract(raw, name, kind="boolean")
-        prob = float(answer["probability"])
-        if not 0.0 <= prob <= 1.0:
-            raise JudgeUnavailable(f"{name}: probability out of range: {prob}")
-        return {"value": bool(answer["value"]), "probability": prob}
+        return self.evaluate(state, [{"name": name, "type": "noul", "instruction": instruction, "criteria": None}])[name]
 
     def choice(self, state: dict, instruction: str, *, options: Sequence[str], name: str) -> dict[str, Any]:
-        raw = self._post(_chat_payload(self._model, state, [
-            {"name": name, "type": "choice", "options": list(options), "instructions": instruction}]))
-        answer = _extract(raw, name, kind="choice")
-        value = answer["value"]
-        probs = {k: float(v) for k, v in answer["probabilities"].items()}
-        if value not in options:
-            raise JudgeUnavailable(f"{name}: value {value!r} not in options")
-        if set(probs) != set(options):
-            raise JudgeUnavailable(f"{name}: probability keys != options")
-        return {"value": value, "probabilities": probs}
-
-
-def _chat_payload(model: str, state: dict, questions: list[dict]) -> dict:
-    import json
-    system = (
-        "You are a bounded judgment model. Answer ONLY with a JSON object "
-        "mapping each question name to {value, probability(s)}. No prose."
-    )
-    return {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps({"state": state, "questions": questions})},
-        ],
-        "temperature": 0,
-        "response_format": {"type": "json_object"},
-    }
-
-
-def _extract(raw: dict, name: str, kind: str) -> dict:
-    try:
-        content = raw["choices"][0]["message"]["content"]
-        parsed = json.loads(content)  # type: ignore[name-defined]
-        answer = parsed[name]
-    except Exception as exc:  # untrusted upstream -> one exception class
-        raise JudgeUnavailable(f"unparseable judge response for {name}: {exc}") from exc
-    if kind == "choice" and "probabilities" not in answer:
-        raise JudgeUnavailable(f"{name}: missing probabilities")
-    return answer
+        return self.evaluate(state, [{"name": name, "type": "choice", "instruction": instruction,
+                                      "criteria": {opt: None for opt in options}}])[name]
 
 
 def timed(judge_call) -> tuple[dict, int]:

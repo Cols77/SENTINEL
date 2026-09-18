@@ -9,22 +9,60 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable
 
 from sentinel.judgment import BoundedJudge, JudgeUnavailable
+
+
+QUESTION_SET = [
+    {
+        "name": "hazard_relevant",
+        "type": "noul",
+        "instruction": "Is the observed object an operational trail-opening hazard requiring action?",
+        "criteria": {"true": "operational trail-opening hazard requiring action",
+                     "false": "not operationally relevant"},
+    },
+    {
+        "name": "priority",
+        "type": "choice",
+        "instruction": "What priority applies to this observation?",
+        "criteria": {"ignore": "no action warranted", "low": "minor, monitor",
+                     "medium": "should be inspected soon", "high": "blocks trail or immediate risk"},
+    },
+    {
+        "name": "priority_scored",
+        "type": "score",
+        "instruction": "Score the urgency of acting on this observation.",
+        "criteria": ["not a hazard", "minor", "needs inspection", "urgent"],
+    },
+    {
+        "name": "human_review_needed",
+        "type": "noul",
+        "instruction": "Should a human review this observation before action?",
+        "criteria": None,
+    },
+    {
+        "name": "more_evidence_needed",
+        "type": "noul",
+        "instruction": "Is more evidence needed before acting on this observation?",
+        "criteria": None,
+    },
+]
 
 
 def run_cases(
     cases: Iterable[dict],
     judge: BoundedJudge,
     *,
-    boolean_names: Sequence[str],
     log_path: Path,
 ) -> tuple[dict[str, int], Path]:
     """Replay reference-labeled cases through the judge (shadow-only).
 
-    Returns (metrics, log_path). Appends one JSONL record per case with
-    case_id/state/reference/judge.model/latency_ms/answers.
+    All QUESTION_SET questions go to the judge in ONE batched evaluate() call
+    per case (the API evaluates them in parallel). Appends one JSONL record
+    per case with case_id/state/reference/judge.model/latency_ms/answers —
+    latency_ms is measured once per batch. Every answer is logged, including
+    confidence where the judge provides it.
     """
     metrics = {"total": 0, "false_safe": 0, "false_escalation": 0, "unavailable": 0}
     model = getattr(judge, "model", "static")
@@ -34,29 +72,35 @@ def run_cases(
     with log_path.open("a", encoding="utf-8") as log:
         for case in cases:
             metrics["total"] += 1
-            answers: dict[str, dict[str, Any]] = {}
-            for name in boolean_names:
-                start = time.perf_counter()
-                latency_ms = 0
-                try:
-                    result = judge.boolean(case["state"], f"Answer {name}.", name=name)
-                except JudgeUnavailable:
-                    metrics["unavailable"] += 1
-                    answers[name] = {"error": "unavailable"}
-                    continue
-                latency_ms = int((time.perf_counter() - start) * 1000)
-                answers[name] = result
-                reference = case["reference"].get(name)
-                if isinstance(reference, bool) and reference != result["value"]:
+            start = time.perf_counter()
+            try:
+                answers: dict[str, dict[str, Any]] = judge.evaluate(case["state"], QUESTION_SET)
+            except JudgeUnavailable:
+                metrics["unavailable"] += 1
+                answers = {"error": {"unavailable": True}}
+                log.write(json.dumps({
+                    "case_id": case["case_id"],
+                    "state": case["state"],
+                    "reference": case["reference"],
+                    "judge": {"model": model},
+                    "latency_ms": int((time.perf_counter() - start) * 1000),
+                    "answers": answers,
+                }) + "\n")
+                continue
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            reference = case["reference"]
+            if isinstance(reference.get("hazard_relevant"), bool):
+                result = answers["hazard_relevant"]["value"]
+                if reference["hazard_relevant"] != result:
                     # reference True judged False is a false safe -> most serious.
-                    if reference:
+                    if reference["hazard_relevant"]:
                         metrics["false_safe"] += 1
                     else:
                         metrics["false_escalation"] += 1
             log.write(json.dumps({
                 "case_id": case["case_id"],
                 "state": case["state"],
-                "reference": case["reference"],
+                "reference": reference,
                 "judge": {"model": model},
                 "latency_ms": latency_ms,
                 "answers": answers,
