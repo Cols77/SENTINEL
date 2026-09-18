@@ -677,7 +677,7 @@ Recorded as of 18 September 2026, before demo freeze (25 September 2026).
   served on a dedicated decisions endpoint with noul/choice/score types
   (`/api/alpha/decisions`). The adapter's response parsing still assumes a
   chat-completions shape, so the happy path does not yet match the real endpoint.
-  A fix card (t_576859d4) is open. No adapter code has touched any production or
+  A fix card (t_807e8b3f) is open. No adapter code has touched any production or
   demo path.
 
 ### Static-baseline replay (21 cases, section-7 fixtures)
@@ -722,8 +722,38 @@ endpoint fix.
   enforced by contract, and a provider/network failure degrades cleanly to the
   existing SENTINEL path (section 10 satisfied).
 - Go/no-go on live replay vs. baseline is deferred until the adapter fix
-  (t_576859d4) lands and a consented full replay can run.
+  (t_807e8b3f) lands and a consented full replay can run.
 - The experiment already yields value independently of Jev adoption: the
   `BoundedJudge` port, versioned judgment context, and false-safe/false-escalation
   harness make the boundary between deterministic facts, bounded judgments, and
   policy authority explicit and testable (section 15).
+
+### Adapter update: batched evaluate() landed (2026-09-18, later)
+
+The fix card (t_807e8b3f) has landed: the adapter now implements the
+research-verified batched design. `BoundedJudge.evaluate(state, questions)` sends
+ONE POST to `/api/alpha/decisions` per judgment batch, instead of one request per
+question:
+
+- booleans with criteria are mapped to noul; the priority question uses a
+  Choice+Score pair (operator decision); `human_review_needed` and
+  `more_evidence_needed` also map to noul;
+- boolean values are threshold policy: the boolean threshold comes from the
+  `boolean_threshold` config (default 0.5), not embedded in prompts;
+- confidence is logged alongside the probabilities, so the go/no-go can weigh
+  TypeSafe's three-band routing against plain thresholds;
+- `QUESTION_SET` is a module-level configuration constant in the evaluation
+  module.
+
+TypeSafe documentation facts underpinning this design: questions in a batch are
+evaluated in parallel (near-zero marginal latency per extra question); Jev has no
+boolean primitive (hence noul); P(noul) and 1-P(negated noul) are not
+complementary, so each direction must be judged on its own noul probability; and
+state should be kept minimal per call to avoid context rot.
+
+Final offline verification: 129 tests passed (`uv run pytest`), and the static
+replay with the batched evaluate per case returned:
+
+```text
+total: 21   false_safe: 0   false_escalation: 5   unavailable: 0
+```
