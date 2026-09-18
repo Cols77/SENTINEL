@@ -1,7 +1,8 @@
 import json
 from dataclasses import replace
 
-from sentinel.adapter.llm.prompt import APPROVED_TOOL_NAMES, build_chat_request
+from sentinel.adapter.llm.parser import APPROVED_TOOL_NAMES, wire_tool_name
+from sentinel.adapter.llm.prompt import build_chat_request
 from sentinel.contracts import AgentRequest
 
 
@@ -38,7 +39,7 @@ REQUEST = AgentRequest.from_dict(
 
 def test_prompt_request_has_exact_static_tools_and_bounded_dynamic_feedback():
     payload = build_chat_request(REQUEST, prompt_revision="prompt-v1", tool_policy_revision="tools-v1")
-    assert [item["function"]["name"] for item in payload["tools"]] == list(APPROVED_TOOL_NAMES)
+    assert [item["function"]["name"] for item in payload["tools"]] == [wire_tool_name(name) for name in APPROVED_TOOL_NAMES]
     exported = json.dumps(payload["tools"], sort_keys=True)
     for forbidden in ("dispatch_drone", "raw_sdk", "sqlite", "filesystem", "credential", "emergency_clear", "operator_decision"):
         assert forbidden not in exported.lower()

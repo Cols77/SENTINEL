@@ -20,6 +20,24 @@ APPROVED_TOOL_NAMES = (
     "finish",
 )
 
+# Transport-only tool-name mapping. Some OpenAI-compatible providers reject
+# dotted function names, so dotted canonical names are replaced with '_' on
+# the provider wire and restored to the canonical form on parse. Canonical
+# names remain the WP0 enum everywhere internally. The mapping is a bijection
+# over APPROVED_TOOL_NAMES (asserted by tests/agent/test_tool_name_transport.py).
+TOOL_NAME_TO_WIRE = {name: name.replace(".", "_") for name in APPROVED_TOOL_NAMES}
+WIRE_TO_TOOL_NAME = {wire: name for name, wire in TOOL_NAME_TO_WIRE.items()}
+
+
+def wire_tool_name(name: str) -> str:
+    """Return the provider-safe transport form of a canonical tool name."""
+    return TOOL_NAME_TO_WIRE[name]
+
+
+def canonical_tool_name(name: str) -> str:
+    """Return the canonical dotted form for a wire name (pass-through otherwise)."""
+    return WIRE_TO_TOOL_NAME.get(name, name)
+
 
 class ChatCompletionParseError(ValueError):
     """Raised internally when a provider response is not a typed tool call."""
@@ -67,7 +85,10 @@ def _parse_one(raw_call: Any) -> AgentToolCall:
     if not isinstance(function, Mapping):
         raise ChatCompletionParseError("MALFORMED_TOOL_CALL")
     name = function.get("name")
-    if not isinstance(name, str) or name not in APPROVED_TOOL_NAMES:
+    if not isinstance(name, str):
+        raise ChatCompletionParseError("UNKNOWN_TOOL")
+    name = canonical_tool_name(name)
+    if name not in APPROVED_TOOL_NAMES:
         raise ChatCompletionParseError("UNKNOWN_TOOL")
     raw_arguments = function.get("arguments")
     if isinstance(raw_arguments, str):
@@ -165,7 +186,9 @@ def parse_chat_completion(response: Mapping[str, Any], *, agent_run_id: str) -> 
 
 __all__ = [
     "APPROVED_TOOL_NAMES",
+    "canonical_tool_name",
     "ChatCompletionParseError",
     "parse_chat_completion",
     "parse_tool_calls",
+    "wire_tool_name",
 ]

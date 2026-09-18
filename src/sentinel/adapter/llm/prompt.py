@@ -9,7 +9,7 @@ from typing import Any
 
 from sentinel.contracts import AgentRequest
 
-from .parser import APPROVED_TOOL_NAMES
+from .parser import APPROVED_TOOL_NAMES, wire_tool_name
 
 PROMPT_MAX_TEXT = 512
 
@@ -19,33 +19,33 @@ def _function(name: str, description: str, parameters: dict[str, Any]) -> dict[s
 
 
 _TOOL_DEFINITIONS = (
-    _function("state.get_summary", "Read the current run state summary.", {"type": "object", "additionalProperties": False, "properties": {}}),
+    _function(wire_tool_name("state.get_summary"), "Read the current run state summary.", {"type": "object", "additionalProperties": False, "properties": {}}),
     _function(
-        "state.get_recent_events", "Read a bounded page of recent lifecycle events.",
+        wire_tool_name("state.get_recent_events"), "Read a bounded page of recent lifecycle events.",
         {"type": "object", "additionalProperties": False, "required": ["after_sequence", "limit"], "properties": {"after_sequence": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 32}}},
     ),
     _function(
-        "inspection.propose_plan", "Propose a configured catalogue plan for review.",
+        wire_tool_name("inspection.propose_plan"), "Propose a configured catalogue plan for review.",
         {"type": "object", "additionalProperties": False, "required": ["catalogue_plan_id"], "properties": {"catalogue_plan_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"}, "reason": {"type": "string", "maxLength": 512}}},
     ),
     _function(
-        "task.create", "Propose a task from an available observation and evidence reference.",
+        wire_tool_name("task.create"), "Propose a task from an available observation and evidence reference.",
         {"type": "object", "additionalProperties": False, "required": ["perception_result_id", "section_id", "evidence_artifact_id"], "properties": {"perception_result_id": {"type": "string", "format": "uuid"}, "section_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"}, "evidence_artifact_id": {"type": "string", "format": "uuid"}}},
     ),
     _function(
-        "patroller.rank_for_task", "Read the coordinator ranking for a proposed task.",
+        wire_tool_name("patroller.rank_for_task"), "Read the coordinator ranking for a proposed task.",
         {"type": "object", "additionalProperties": False, "required": ["task_id"], "properties": {"task_id": {"type": "string", "format": "uuid"}}},
     ),
     _function(
-        "assignment.propose", "Propose a configured patroller for coordinator review.",
+        wire_tool_name("assignment.propose"), "Propose a configured patroller for coordinator review.",
         {"type": "object", "additionalProperties": False, "required": ["task_id", "patroller_id", "reason"], "properties": {"task_id": {"type": "string", "format": "uuid"}, "patroller_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"}, "reason": {"type": "string", "minLength": 1, "maxLength": 512}}},
     ),
     _function(
-        "wait_for_event", "Wait for named lifecycle events before the next bounded turn.",
+        wire_tool_name("wait_for_event"), "Wait for named lifecycle events before the next bounded turn.",
         {"type": "object", "additionalProperties": False, "required": ["event_types", "reason"], "properties": {"event_types": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 64}}, "reason": {"type": "string", "minLength": 1, "maxLength": 512}}},
     ),
     _function(
-        "finish", "Finish the current bounded agent turn with a reviewable summary.",
+        wire_tool_name("finish"), "Finish the current bounded agent turn with a reviewable summary.",
         {"type": "object", "additionalProperties": False, "required": ["status", "summary"], "properties": {"status": {"type": "string", "enum": ["DONE", "NEEDS_REVIEW", "FAILED"]}, "summary": {"type": "string", "minLength": 1, "maxLength": 512}}},
     ),
 )
