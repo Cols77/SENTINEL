@@ -23,3 +23,9 @@ for module_name in tuple(sys.modules):
 importlib = __import__("importlib")
 sentinel_package = importlib.import_module("sentinel")
 assert Path(sentinel_package.__file__).resolve().is_relative_to(SOURCE_ROOT)
+
+# Allow cross-package test helpers (tests.coordinator.harness) to be imported
+# from tests/agent boundary tests; the repo root is not on sys.path by default.
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
