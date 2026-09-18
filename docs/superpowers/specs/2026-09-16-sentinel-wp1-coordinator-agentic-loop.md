@@ -36,6 +36,14 @@ Colin’s coordinator lives in `sentinel/coordinator/` (repository, transitions,
 
 WP0 supplies the closed, directly-validatable `AgentRequest` and `AgentModelResult` schemas, their discriminators/enums, validators and fixtures. `AgentRequest` supplies the run/state summary, allowed intent-schema revision, compact event/evidence references and deadline that this adapter needs; preflight is supplied as a typed, immutable `PreflightReport` with its WP0-defined check list, read-only facts only. A successful `INTENT` proposes exactly one `catalogue_plan_id`; the coordinator resolves its catalogue revision/hash and creates the immutable plan. `NO_ACTION`, `MALFORMED` and `UNAVAILABLE` carry no plan proposal. No model result contains raw SDK calls or a dispatch instruction. WP1 must consume these contracts rather than add adapter-local wire fields.
 
+> **Amendment (2026-09-17, Colin Aubé, PM authority):** the agent's invocable
+> tool surface is a closed, versioned allowlist owned by WP0 and referenced by
+> `tool_policy_revision` (SR-SENTINEL-V0-A03). The V0 default allowlist contains
+> no side-effecting tools: no drone control, no dispatch, no SQLite access. World
+> and run facts reach the agent only as typed read-only `AgentRequest` fields.
+> The allowlist schema and its enumeration are a WP0 contract artifact; any
+> future tool addition is a schema amendment plus a `tool_policy_revision` bump.
+
 Runtime configuration validates against [`contracts/llm-adapter-config-v1.schema.json`](contracts/llm-adapter-config-v1.schema.json). It is built from `SENTINEL_LLM_PROVIDER`, `SENTINEL_LLM_MODEL`, `SENTINEL_LLM_TIMEOUT_MS`, `SENTINEL_LLM_PROMPT_REVISION`, `SENTINEL_LLM_TOOL_POLICY_REVISION`, and optional `SENTINEL_LLM_API_KEY_ENV`; artifacts contain only the environment-variable name, never a secret. Missing required input fails before provider construction with `LLM_CONFIG_MISSING` naming the missing variable. Non-integer/out-of-range timeout, invalid schema, blank required values, or an invalid API-key environment variable name fails with `LLM_CONFIG_INVALID`; no fallback is attempted. Missing the named optional dependency at real-adapter construction fails `LLM_DEPENDENCY_MISSING`; absent referenced credential at invocation fails `LLM_CREDENTIAL_MISSING`. `LLM_CONFIG_MISSING`, `LLM_CONFIG_INVALID`, `LLM_DEPENDENCY_MISSING` and `LLM_CREDENTIAL_MISSING` are adapter-local codes, not shared coordinator registry codes. The optional dependency name is `llm` (installation as an optional `llm` extra is WP1 implementation work; this spec does not modify `pyproject.toml`). Tests use the deterministic fake adapter and require no credential.
 
 ## 4. Run transition matrix
