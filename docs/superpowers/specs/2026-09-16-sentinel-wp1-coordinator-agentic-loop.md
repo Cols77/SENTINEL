@@ -16,25 +16,39 @@ Implement the coordinator and real-LLM adapter against WP0. The deterministic fa
 
 Alan’s adapter cannot access SQLite, drone sockets, perception providers, policy arithmetic, approval transitions or UI storage. It receives worker preflight facts read-only and may assess their structured pass/fail values only; it has no hardware access and cannot physically correct a route or issue a correction command. WP2 alone owns rendering. Colin’s coordinator must not parse model-native provider responses.
 
+This is a separation of cognition from authority, not a claim that agents must remain capability-blind. For the MVP, the coordinator gives the agent a bounded request plus a small read-only capability view; the agent may choose which named read to call, while the coordinator remains the only component that validates state, records events, applies approval/preflight/idempotency rules and invokes external ports. This prevents an agent retry, stale read, malformed provider output or prompt-level instruction from becoming an untracked state mutation or physical action without forcing a large context snapshot into every request.
+
+### 2.1 V0 coordinator-mediated agent read tools
+
+V0 exposes exactly three named, read-only tools through the coordinator-owned `AgentReadToolPort`: `read_state(context: AgentToolContext) -> StateSnapshot`, `read_mountain(context: AgentToolContext) -> MountainStateSnapshot` and `read_events(context: AgentToolContext, after_sequence, limit) -> EventEnvelope[]`. Alan’s model loop may choose among these tools, but it never emits SQL, opens SQLite, reads a filesystem path or calls a provider, perception adapter or worker. The coordinator creates the immutable `AgentToolContext` for the current `AgentRequest`; model-supplied arguments cannot replace its `agent_run_id`, `run_id`, expected `state_version`, `request_id`, allowed references or deadline. The tool façade validates the remaining cursor/limit arguments, enforces ownership and deadline/limits, and delegates to the corresponding `CoordinatorPort` read.
+
+Each tool result is typed, bounded and associated with the observed state version. Tool activity records the complete `ToolOperationAudit` described in WP0 §6.1. The coordinator rechecks the request state version before accepting the final `AgentModelResult`; a stale proposal is rejected without plan creation or dispatch. Tool calls are an in-process Python capability seam, not new `sentinel.v0` wire payloads; a future cross-process tool transport requires a WP0 contract amendment.
+
+Evidence/file reads, perception requests and operation proposals remain deferred. A later WP0 amendment may add them only as coordinator-mediated, versioned capabilities with explicit schemas, allowlists, limits, run/state binding, audit and fail-closed errors. A prompt/tool-policy configuration alone cannot enable them. V0 remains proposal-only for state mutation and physical action: only the coordinator may submit commands or call `WorkerPort`.
+
+If a later amendment adds an operation-proposal tool, its result is non-executing. The coordinator may translate it only into the canonical V0 catalogue-plan flow: resolve one exact immutable `SurveyPlanReference`; obtain the matching operator-only `PlanApproval`; require fresh preflight; persist the scoped `PENDING` operation; make at most one dispatch attempt; and reconcile by the original operation ID/idempotency key. A proposal that cannot resolve to that flow is rejected. The agent has no `WorkerPort`, emergency ingress, `FORCE_RUN_CREATE`, operator-decision or redispatch capability; prompt text and tool policy cannot grant one.
+
+If a later amendment adds a perception tool, the coordinator must resolve the stored run-bound artifact, `StationCaptureProvenance`, approved provider profile and frozen threshold/provenance facts; construct and validate the canonical `PerceptionRequest`; reject artifact-hash mismatches and non-`LIVE` judged evidence fail-closed; invoke `PerceptionPort` only through its typed boundary; validate the returned `PerceptionResult`; and persist it through the existing coordinator command/event ingress. The agent cannot construct or submit `PerceptionRequest`/`PerceptionResult` directly, select an unapproved profile, alter thresholds or bypass the persisted result path.
+
 ## 3. Ports
 
+The authoritative Python protocol declarations and the complete `CoordinatorPort` surface are defined in WP0 §6.1. Implementations use those signatures; this section states the WP1 ownership and behavior only.
+
 ```text
-AgentModelPort.propose(https://sentinel.local/contracts/sentinel-v0-wire.schema.json#AgentRequest) -> #AgentModelResult
-WorkerPort.dispatch(https://sentinel.local/contracts/sentinel-v0-wire.schema.json#WorkerDispatch) -> #ResultEnvelope
-WorkerPort.reconcile(operation_id, idempotency_key) -> #ReconciliationResult
-WorkerPort.read_video_status(run_id) -> #VideoStatus
-WorkerPort.open_live_video(run_id) -> #SafeVideoStreamHandle
-PerceptionPort.observe(https://sentinel.local/contracts/sentinel-v0-wire.schema.json#PerceptionRequest) -> #PerceptionResult
-CoordinatorPort: all WP0 command/read methods
-CoordinatorPort.read_plan(plan_id) -> #PlanReadModel
-CoordinatorPort.read_preflight(run_id) -> #PreflightReport
+sentinel.coordinator.ports.CoordinatorPort
+sentinel.coordinator.ports.AgentReadToolPort
+sentinel.coordinator.ports.WorkerPort
+sentinel.coordinator.ports.PerceptionPort
+sentinel.adapter.llm.AgentModelPort
 ```
+
+`CoordinatorPort.submit()` is the only command entry point. `AgentReadToolPort` is the only V0 tool surface visible to the model loop; it delegates the three named reads to the coordinator and cannot submit commands. `read_events()` uses an exclusive `after_sequence` cursor and returns committed events in ascending sequence order. `WorkerPort.reconcile()` is the only legal resolver for an `IN_DOUBT` operation; an `UNKNOWN` result fails closed and never causes redispatch. The UI, agent and adapters must not add convenience methods that bypass these boundaries.
 
 ### 3.1 Module layout and fake adapters
 
-Colin’s coordinator lives in `sentinel/coordinator/` (repository, transitions, idempotency, command gateway, read models); Alan’s runtime lives in `sentinel/adapter/llm/` (`AgentModelPort`, provider config, structured parser). The deterministic fake agent, fake worker and fake perception providers are mandatory before any provider or drone integration and import only `sentinel.contracts` and fixtures. Every fake adapter emits `source_kind: SIMULATED`; there is no "fake real-mode". A real-mode test must use a live-capable adapter or be rejected from the judged path.
+Colin’s coordinator lives in `sentinel/coordinator/` (repository, port declarations, transitions, idempotency, command gateway and read models); Alan’s runtime lives in `sentinel/adapter/llm/` (`AgentModelPort`, provider config and structured parser). Colin owns the deterministic fake worker and the coordinator restart/replay harness. Alan owns the deterministic fake agent. Dzivha owns the deterministic fake perception responses consumed by WP1 and the corresponding perception fixtures. Alan also owns the fake `CoordinatorClient` used by WP2 tests; it is a test double of `CoordinatorPort`, not a second state store. All fake adapters import only `sentinel.contracts` and declared fixtures, emit `source_kind: SIMULATED`, require no credentials or network, and are rejected from the judged path. Replayed fixtures are labelled `REPLAYED` and are also rejected from judged use. A real-mode test must use a live-capable adapter or be rejected from the judged path.
 
-WP0 supplies the closed, directly-validatable `AgentRequest` and `AgentModelResult` schemas, their discriminators/enums, validators and fixtures. `AgentRequest` supplies the run/state summary, allowed intent-schema revision, compact event/evidence references and deadline that this adapter needs; preflight is supplied as a typed, immutable `PreflightReport` with its WP0-defined check list, read-only facts only. A successful `INTENT` proposes exactly one `catalogue_plan_id`; the coordinator resolves its catalogue revision/hash and creates the immutable plan. `NO_ACTION`, `MALFORMED` and `UNAVAILABLE` carry no plan proposal. No model result contains raw SDK calls or a dispatch instruction. WP1 must consume these contracts rather than add adapter-local wire fields.
+WP0 supplies the closed, directly-validatable `AgentRequest` and `AgentModelResult` schemas, their discriminators/enums, validators and fixtures. `AgentRequest` remains small: it carries agent/run identity, expected `state_version`, allowed intent-schema revision and deadline; it does not carry a live database handle or arbitrary context. During `propose`, Alan’s adapter receives the injected coordinator-owned `AgentReadToolPort` and may choose only `read_state`, `read_mountain` and bounded `read_events` to obtain typed context. A successful `INTENT` proposes exactly one `catalogue_plan_id`; the coordinator resolves its catalogue revision/hash and creates the immutable plan. `NO_ACTION`, `MALFORMED` and `UNAVAILABLE` carry no plan proposal. No model result contains raw SDK calls, SQL, a dispatch instruction or an operation command. WP1 must consume these contracts rather than add adapter-local wire fields.
 
 > **Amendment (2026-09-17, Colin Aubé, PM authority):** the agent's invocable
 > tool surface is a closed, versioned allowlist owned by WP0 and referenced by
@@ -117,6 +131,7 @@ WP1 uses a fake worker initially. The real worker belongs to the later detailed 
 ## 9. Acceptance criteria
 
 - `uv run python -m pytest tests/coordinator tests/agent -q` passes after implementation.
+- V0 agent-tool tests prove that the model may choose only `read_state`, `read_mountain` and bounded `read_events`; foreign run IDs, invalid cursors, over-limit reads, expired deadlines and stale final proposals fail closed, and no tool call can submit a command or invoke worker/perception code.
 - Every transition-matrix row has an explicit test, including catalogue-plan resolution, immutable approval-before-dispatch, typed preflight failure, and operator-only `FORCE_RUN_CREATE`.
 - Deterministic fake provenance is `SIMULATED`, never "fake real-mode"; a real-mode test must use a live-capable adapter or be rejected from the judged path.
 - Configuration tests prove each exact `LLM_CONFIG_MISSING`, `LLM_CONFIG_INVALID`, `LLM_DEPENDENCY_MISSING`, and `LLM_CREDENTIAL_MISSING` failure, and a fake-adapter test proves no optional dependency or credential is needed.

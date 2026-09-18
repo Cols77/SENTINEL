@@ -170,12 +170,9 @@ latency targets, formal benchmark governance and provider failover are deferred.
   `docs/superpowers/specs/superseded/`, with a replacement header and links.
   The direct-UDP command-test design is superseded. The historical broad worker
   specification is retained as non-authoritative support unless a focused review
-  shows a whole file has no remaining live content.
-  **Retained open task (not executed in this rework):** the physical move of the
-  superseded files into `superseded/`, the replacement headers and the links are
-  a separate follow-up and are explicitly out of scope for the indoor-alley V0
-  spec rework. No spec file is moved or rewritten as part of approving this
-  design.
+  shows a whole file has no remaining live content. This archival follow-up is
+  complete in the current working tree; see
+  [`superseded/README.md`](superseded/README.md).
 
 ## 9. Acceptance evidence
 

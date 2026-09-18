@@ -1,3 +1,8 @@
+> **Status:** Superseded historical material; non-authoritative for V0.
+> **Replacement:** [WP4 Supervised Tello/Live Video](../2026-09-16-sentinel-wp4-supervised-tello-live-video.md), [V0 Coherence Specification](../2026-09-16-sentinel-v0-coherence-spec.md), and [Current safety checklist](../../../safety.md).
+>
+> Retained for historical context only. Use the active V0 contracts and WP4 specification for current backend, preflight, evidence, and emergency semantics.
+
 # SENTINEL DJITelloPy Backend Specification
 
 **Date:** 2026-09-15  
