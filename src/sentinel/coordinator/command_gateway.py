@@ -13,10 +13,16 @@ from sentinel.contracts.validators import validate_perception
 
 from .errors import CoordinatorError
 from .approval import PlanApprovalService
+from .evidence import EvidencePolicy
 from .tasks import AssignmentService, EvidenceTaskService
 from .tasks import SimulatedPatroller
 from .catalogue import CatalogueResolver
 from .plans import PlanResolver
+
+
+# Minimum-loop evidence threshold: a DETECTED result must clear this score to
+# create a task; anything scoreless or below enters NEEDS_REVIEW, no task.
+EVIDENCE_SCORE_THRESHOLD = 0.5
 
 
 _EVENT_TYPES = {
@@ -323,6 +329,27 @@ class CommandGateway:
                 )
             if command_type == "TASK_CREATE":
                 payload = command["payload"]
+                # Enforce the evidence policy at the boundary: low-confidence,
+                # scoreless, or provider-error evidence must not create a task.
+                ref = self.repository.connection.execute(
+                    "SELECT artifact_id, result_json FROM perception_references WHERE result_id = ? AND run_id = ?",
+                    (payload["perception_result_id"], run_id),
+                ).fetchone()
+                if ref is not None:
+                    art = self.repository.connection.execute(
+                        "SELECT sha256 FROM artifacts WHERE artifact_id = ? AND run_id = ?",
+                        (ref["artifact_id"], run_id),
+                    ).fetchone()
+                    try:
+                        result = json.loads(ref["result_json"])
+                    except json.JSONDecodeError as exc:
+                        raise CoordinatorError("INVALID_CONTRACT", "stored perception result is not JSON") from exc
+                    decision = EvidencePolicy().evaluate(
+                        result, artifact_sha256=art["sha256"], threshold=EVIDENCE_SCORE_THRESHOLD,
+                        judged=False,
+                    )
+                    if decision.status != "COMPLETED":
+                        raise CoordinatorError("INVALID_STATE_TRANSITION", f"evidence is not actionable: {decision.reason}")
                 EvidenceTaskService(self.repository).create_task(
                     run_id, payload["perception_result_id"], payload["section_id"],
                     payload["evidence_artifact_id"],

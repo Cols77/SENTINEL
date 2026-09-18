@@ -88,6 +88,26 @@ def test_provider_error_and_low_confidence_never_create_actionable_evidence():
     assert policy.evaluate(low, artifact_sha256="a" * 64, threshold=0.5, judged=False).status == "NEEDS_REVIEW"
 
 
+def test_low_confidence_detected_evidence_creates_no_task_via_gateway(tmp_path):
+    """The threshold guardrail must hold at the real gateway boundary, not only in EvidencePolicy."""
+    repo, gateway = open_harness(tmp_path)
+    try:
+        gateway.submit(envelope("RUN_CREATE", {"request_text": "inspect"}, sequence=1, actor_type="OPERATOR"))
+        low = perception_result("77777777-7777-4777-8777-777777777778", "a" * 64)
+        low["raw_score"] = 0.1  # below any sensible threshold; schema-legal DETECTED
+        gateway.submit(envelope("PERCEPTION_INGEST", {"perception_result": low}, sequence=2, actor_type="WORKER"))
+        with pytest.raises(CoordinatorError) as caught:
+            gateway.submit(envelope("TASK_CREATE", {
+                "perception_result_id": low["result_id"],
+                "section_id": "LEFT_ALLEY_MIDDLE",
+                "evidence_artifact_id": low["artifact_id"],
+            }, sequence=3))
+        assert caught.value.code == "INVALID_STATE_TRANSITION"
+        assert repo.connection.execute("SELECT COUNT(*) FROM tasks WHERE run_id = ?", (RUN_ID,)).fetchone()[0] == 0
+    finally:
+        close(repo)
+
+
 def test_emergency_latch_blocks_ordinary_commands(tmp_path):
     repo, gateway = open_harness(tmp_path)
     try:
