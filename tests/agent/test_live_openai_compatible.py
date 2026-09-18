@@ -160,12 +160,13 @@ class RecordingFakeAgentLoop:
                 request = AgentRequest.from_dict(
                     {**request.to_dict(), "previous_result": previous_result}
                 )
-            payload_context = self.adapter.last_request
             started = time.monotonic()
             result = self.adapter.propose(request)
             latency_ms = int((time.monotonic() - started) * 1000)
 
             # The model must embed the Sentinel context supplied by the request.
+            # Read AFTER propose(): last_request holds the payload just sent.
+            payload_context = self.adapter.last_request
             assert payload_context is not None
             context_blob = json.dumps(payload_context["messages"], sort_keys=True)
             for required in (
