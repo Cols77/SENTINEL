@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "jev-adapter-config.v1",
+  "type": "object",
+  "properties": {
+    "config_version": { "const": "jev-adapter-config.v1" },
+    "model": { "const": "typesafe-ai/jev" },
+    "model_env": { "const": "SENTINEL_SYSTEM_ONE_MODEL" },
+    "api_key_env": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,127}$" },
+    "path_role": { "const": "SHADOW_EVALUATION_ONLY" }
+  },
+  "required": ["config_version", "model", "model_env", "api_key_env", "path_role"],
+  "additionalProperties": false
+}

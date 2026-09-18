@@ -144,6 +144,21 @@ def test_six_zone_mountain_snapshot_is_wire_valid():
     assert not errors, [error.message for error in errors]
 
 
+def test_jev_adapter_config_schema_rejects_critical_path_role():
+    schema = _load("jev-adapter-config-v1.schema.json")
+    validator = Draft202012Validator(schema)
+    good = {
+        "config_version": "jev-adapter-config.v1",
+        "model": "typesafe-ai/jev",
+        "model_env": "SENTINEL_SYSTEM_ONE_MODEL",
+        "api_key_env": "JEV_API_KEY",
+        "path_role": "SHADOW_EVALUATION_ONLY",
+    }
+    assert not list(validator.iter_errors(good))
+    bad = dict(good, path_role="CRITICAL_PATH")
+    assert list(validator.iter_errors(bad)), "path_role must be locked to SHADOW_EVALUATION_ONLY"
+
+
 def test_force_run_create_is_discriminated_to_typed_payload():
     validator = Draft202012Validator(_load("sentinel-v0-wire.schema.json"))
     plan = {
