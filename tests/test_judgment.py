@@ -59,3 +59,34 @@ def test_jev_judge_missing_api_key_env_fails_closed(monkeypatch):
     judge = JevJudge(api_key_env="SENTINEL_TEST_KEY", transport=lambda payload: {"choices": []})
     with pytest.raises(JudgeUnavailable):
         judge.boolean({}, "q?", name="anything")
+
+
+def test_state_snapshot_is_pure_and_versioned():
+    from sentinel.judgment import state_snapshot
+
+    mountain = {
+        "hazards": [{"id": "h1", "object": "rock", "confidence": 0.91,
+                     "position_relation": "inside_trail_corridor",
+                     "resolved": False}],
+        "patrollers": [{"id": "p1", "status": "available"}],
+        "trail_status": "closed_pending_inspection",
+        "workflow": "daily_opening_inspection",
+    }
+    obs = {"detection_id": "h1", "source": "drone_1"}
+    ctx_a = state_snapshot(mountain, obs)
+    ctx_b = state_snapshot(mountain, obs)
+    assert ctx_a == ctx_b  # purity: identical inputs, identical output
+    assert ctx_a["context_version"] == "judgment_context.v1"
+    # pre-resolved facts, not raw state:
+    assert ctx_a["observation"]["duplicate_of_existing_detection"] is False
+    assert ctx_a["operations"]["patroller_available"] is True
+    assert "hazards" not in ctx_a  # raw collections are projected, not passed through
+
+
+def test_state_snapshot_detects_duplicate():
+    from sentinel.judgment import state_snapshot
+    mountain = {"hazards": [{"id": "h1", "object": "rock", "confidence": 0.9,
+                             "position_relation": "inside_trail_corridor", "resolved": True}],
+                "patrollers": [], "trail_status": "open", "workflow": "daily_opening_inspection"}
+    ctx = state_snapshot(mountain, {"detection_id": "h1", "source": "drone_1"})
+    assert ctx["observation"]["duplicate_of_existing_detection"] is True

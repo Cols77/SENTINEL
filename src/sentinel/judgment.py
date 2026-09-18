@@ -133,3 +133,37 @@ def timed(judge_call) -> tuple[dict, int]:
     start = time.perf_counter()
     result = judge_call()
     return result, int((time.perf_counter() - start) * 1000)
+
+
+CONTEXT_VERSION = "judgment_context.v1"
+
+
+def state_snapshot(mountain_state: dict, observation: dict) -> dict:
+    """Pure projection: Mountain State + raw observation -> judgment_context.v1.
+
+    Resolves all facts the judge must not have to derive itself (duplicates,
+    patroller availability). Any judgment requiring a tool call to answer is
+    the wrong question for a System One model — route it to the LLM planner.
+    """
+    haz = next((h for h in mountain_state.get("hazards", [])
+                if h.get("id") == observation.get("detection_id")), None)
+    if haz is None:
+        raise KeyError(f"detection {observation.get('detection_id')!r} not in mountain state")
+    return {
+        "context_version": CONTEXT_VERSION,
+        "observation": {
+            "source": observation.get("source"),
+            "object": haz.get("object"),
+            "perception_confidence": haz.get("confidence"),
+            "position_relation": haz.get("position_relation"),
+            "duplicate_of_existing_detection": bool(haz.get("resolved")),
+        },
+        "mission": {
+            "workflow": mountain_state.get("workflow"),
+            "trail_status": mountain_state.get("trail_status"),
+        },
+        "operations": {
+            "patroller_available": any(
+                p.get("status") == "available" for p in mountain_state.get("patrollers", [])),
+        },
+    }
