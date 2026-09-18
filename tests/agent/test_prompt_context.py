@@ -55,6 +55,44 @@ def test_prompt_request_has_exact_static_tools_and_bounded_dynamic_feedback():
     assert "one tool call" in payload["messages"][0]["content"].lower()
 
 
+def test_system_prompt_states_decision_protocol():
+    payload = build_chat_request(REQUEST, prompt_revision="prompt-v2", tool_policy_revision="tools-v1")
+    prompt = payload["messages"][0]["content"].lower()
+    # (1) decision-point executor framing: advance the workflow with one state-appropriate action.
+    assert "decision-point executor" in prompt
+    assert "advance the workflow" in prompt
+    assert "state-appropriate" in prompt
+    # (2) inspection tools are for verification/reconciliation, not exploration.
+    assert "state.get_summary" in prompt
+    assert "state.get_recent_events" in prompt
+    assert "not for exploration" in prompt
+    assert "sufficient to act" in prompt
+    # (3) act on context: single matching legal domain tool gets called with the identifier in context.
+    assert "exactly one actionable domain tool" in prompt
+    assert "identifier already present in the context" in prompt
+    assert "instead of re-inspecting state" in prompt
+    # (4) invariants: one tool call, legal tools only, facts only, no invented evidence/identifiers.
+    assert "exactly one tool call per response" in prompt
+    assert "only a legal tool" in prompt
+    assert "context as facts" in prompt
+    assert "never invent evidence or identifiers" in prompt
+
+
+def test_system_prompt_does_not_encode_scenario_specific_answers():
+    payload = build_chat_request(REQUEST, prompt_revision="prompt-v2", tool_policy_revision="tools-v1")
+    prompt = payload["messages"][0]["content"]
+    lowered = prompt.lower()
+    for scenario_token in ("survey", "catalogue", "plan id", "patroller", "route", "drone"):
+        assert scenario_token not in lowered, scenario_token
+
+
+def test_prompt_revision_flows_from_config_into_payload_unchanged():
+    payload = build_chat_request(REQUEST, prompt_revision="prompt-v2-from-config", tool_policy_revision="tools-v9")
+    context = json.loads(payload["messages"][1]["content"])
+    assert context["config"]["prompt_revision"] == "prompt-v2-from-config"
+    assert context["config"]["tool_policy_revision"] == "tools-v9"
+
+
 def test_prompt_build_is_deterministic_and_does_not_mutate_request():
     first = build_chat_request(REQUEST, prompt_revision="prompt-v1", tool_policy_revision="tools-v1")
     second = build_chat_request(REQUEST, prompt_revision="prompt-v1", tool_policy_revision="tools-v1")

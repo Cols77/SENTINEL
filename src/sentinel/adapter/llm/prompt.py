@@ -135,7 +135,21 @@ def build_chat_request(request: AgentRequest, *, prompt_revision: str, tool_poli
     }
     return {
         "messages": [
-            {"role": "system", "content": "You are a bounded SENTINEL planning assistant. Return exactly one tool call per response, using only a legal tool. Use the structured context as facts and do not invent evidence."},
+            {"role": "system", "content": (
+                "You are the decision-point executor for a bounded SENTINEL workflow. "
+                "Each response you receive carries state, lifecycle-event, and evidence summaries "
+                "plus a phase; your job is to advance the workflow by selecting the one action "
+                "that is state-appropriate at this decision point. "
+                "State-inspection tools (state.get_summary, state.get_recent_events) exist only "
+                "for verifying or reconciling context that is unclear or contradicted; they are "
+                "not for exploration when the provided context is already sufficient to act. "
+                "When the legal_tools list contains exactly one actionable domain tool that "
+                "matches the request, call that tool with the concrete identifier already present "
+                "in the context (for example an identifier listed in the event context) instead "
+                "of re-inspecting state. "
+                "Invariants: return exactly one tool call per response, using only a legal tool; "
+                "treat the structured context as facts; never invent evidence or identifiers."
+            )},
             {"role": "user", "content": json.dumps(context, sort_keys=True, separators=(",", ":"))},
         ],
         "tools": copy.deepcopy(list(_TOOL_DEFINITIONS)),
