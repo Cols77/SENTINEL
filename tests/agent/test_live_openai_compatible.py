@@ -82,15 +82,7 @@ def _previous_result_for_next_turn(
         "event_cursor": 1,
         "legal_tools": list(scenario["legal_tools"]),
         "safe_summary": str(feedback["safe_summary"])[:1024],
-        "result": {
-            "kind": feedback.get("kind", "empty"),
-            **(
-                {"task_id": feedback["task_id"]}
-                if isinstance(feedback.get("task_id"), str)
-                else {}
-            ),
-            "run_status": feedback.get("run_status", "UNKNOWN"),
-        },
+        "result": {"kind": feedback.get("kind", "empty")},
     }
 
 
@@ -240,6 +232,31 @@ def test_approval_wait(scenarios, adapter):
     """Both turns must wait (or finish) while operator approval is pending."""
     scenario = next(item for item in scenarios if item["name"] == "approval_wait")
     RecordingFakeAgentLoop(adapter).run_scenario(scenario, AGENT_RUN_ID)
+
+
+def test_coordinator_feedback_is_schema_valid_for_all_scenarios():
+    """Hermetic two-turn regression: the sanitized coordinator feedback for
+    every scenario must validate as an AgentToolResult document and round-trip
+    through AgentRequest.from_dict as the next turn's previous_result."""
+    from sentinel.contracts import AgentRequest as _AR  # local import keeps module import cheap
+
+    for scenario in _load_scenarios():
+        feedback_spec = scenario.get("coordinator_feedback")
+        if not isinstance(feedback_spec, Mapping):
+            continue
+        expected_tool = scenario["expected_turns"][0]["expected_tool"]
+        tool_name = expected_tool[0] if isinstance(expected_tool, list) else expected_tool
+        request = _build_request(scenario, AGENT_RUN_ID)
+        feedback = _previous_result_for_next_turn(
+            scenario, {"tool_name": tool_name, "arguments": {}}
+        )
+        assert feedback is not None
+        # The result payload must carry exactly the feedback kind - no extra keys.
+        assert feedback["result"] == {"kind": feedback_spec["kind"]}
+        # The whole document must validate against the WP0 wire schema.
+        validate_document(feedback)
+        # And it must round-trip as the next turn's previous_result.
+        _AR.from_dict({**request.to_dict(), "previous_result": feedback})
 
 
 def test_gate_flag_missing_skips_explicitly():
