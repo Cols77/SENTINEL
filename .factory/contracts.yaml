@@ -1,0 +1,69 @@
+# SENTINEL V0 contract catalog (KB-BOOT-09)
+# Opt-in inventory of normative machine-readable contract artifacts.
+# Grammar: coherence.contract-catalog.v1 (pi-agent-factory @ cb76075).
+# Inventory only — each declared file stays authoritative for its own semantics.
+schema: coherence.contract-catalog.v1
+contracts:
+  - id: SENTINEL-V0-CONTRACT-ROOT
+    path: docs/superpowers/specs/contracts/sentinel-v0-contract.schema.json
+    kind: json_schema
+    status: active
+    authority: spec:2026-09-16-sentinel-wp0-shared-coherence-contracts
+    consumers:
+      - test:tests/contracts/test_schema_validation.py
+      - code:src/sentinel/contracts/schemas.py
+
+  - id: SENTINEL-V0-WIRE
+    path: docs/superpowers/specs/contracts/sentinel-v0-wire.schema.json
+    kind: json_schema
+    status: active
+    authority: spec:2026-09-16-sentinel-wp0-shared-coherence-contracts
+    consumers:
+      - test:tests/contracts/test_schema_validation.py
+      - test:tests/test_indoor_alley_contract_probe.py
+      - code:src/sentinel/contracts/schemas.py
+
+  - id: SURVEY-CATALOGUE-V1
+    path: docs/superpowers/specs/contracts/survey-catalogue-v1.schema.json
+    kind: json_schema
+    status: active
+    authority: spec:2026-09-16-sentinel-wp0-shared-coherence-contracts
+    consumers:
+      - test:tests/test_indoor_alley_contract_probe.py
+
+  - id: PROVIDER-PROFILE-V1
+    path: docs/superpowers/specs/contracts/provider-profile-v1.schema.json
+    kind: json_schema
+    status: active
+    authority: spec:2026-09-16-sentinel-wp0-shared-coherence-contracts
+
+  - id: EVALUATION-MANIFEST-V1
+    path: docs/superpowers/specs/contracts/evaluation-manifest-v1.schema.json
+    kind: json_schema
+    status: active
+    authority: spec:2026-09-16-sentinel-wp0-shared-coherence-contracts
+
+  - id: LLM-ADAPTER-CONFIG-V1
+    path: docs/superpowers/specs/contracts/llm-adapter-config-v1.schema.json
+    kind: json_schema
+    status: active
+    authority: spec:2026-09-16-sentinel-wp0-shared-coherence-contracts
+
+  - id: SENTINEL-V0-MOUNTAIN-SCHEMA
+    path: docs/superpowers/specs/contracts/mountain-v0.schema.json
+    kind: json_schema
+    status: active
+    authority: spec:2026-09-16-sentinel-wp0-shared-coherence-contracts
+    consumers:
+      - test:tests/contracts/test_semantics.py
+      - code:src/sentinel/contracts/schemas.py
+
+  - id: SENTINEL-V0-MOUNTAIN-FIXTURE
+    path: docs/superpowers/specs/contracts/mountain-v0.fixture.json
+    kind: fixture
+    status: active
+    authority: spec:2026-09-16-sentinel-wp0-shared-coherence-contracts
+    validates_against: contract:SENTINEL-V0-MOUNTAIN-SCHEMA
+    consumers:
+      - test:tests/contracts/test_semantics.py
+      - test:tests/test_indoor_alley_contract_probe.py

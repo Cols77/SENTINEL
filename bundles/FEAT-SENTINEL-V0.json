@@ -1,7 +1,7 @@
 {
   "id": "FEAT-SENTINEL-V0",
   "label": "SENTINEL V0 bootstrap scope",
-  "description": "The consent-approved SENTINEL V0 requirement set bound to its normative authority documents and the bootstrap plan. Members are the exact SRs registered under requirements/ (33 accepted atomic SRs), the V0 authority specs, and the bootstrap plan that carries the consented atomic SR matrix. No WP1-WP4 future work, no hardware or provider claims, no contract refs (the native contract-artifact capability is not landed at the current upstream pin).",
+  "description": "The consent-approved SENTINEL V0 requirement set bound to its normative authority documents and the bootstrap plan. Members are the exact SRs registered under requirements/ (33 accepted atomic SRs), the V0 authority specs, and the bootstrap plan that carries the consented atomic SR matrix. No WP1-WP4 future work, no hardware or provider claims.",
   "members": [
     "plan:docs/superpowers/plans/2026-09-17_135641-sentinel-native-coherence-bootstrap.md",
     "spec:docs/superpowers/specs/2026-09-16-sentinel-v0-coherence-spec.md",
@@ -39,6 +39,14 @@
     "sr:SR-SENTINEL-V0-W05",
     "sr:SR-SENTINEL-V0-W06",
     "sr:SR-SENTINEL-V0-W07",
-    "sr:SR-SENTINEL-V0-W08"
+    "sr:SR-SENTINEL-V0-W08",
+    "contract:SENTINEL-V0-CONTRACT-ROOT",
+    "contract:SENTINEL-V0-WIRE",
+    "contract:SURVEY-CATALOGUE-V1",
+    "contract:PROVIDER-PROFILE-V1",
+    "contract:EVALUATION-MANIFEST-V1",
+    "contract:LLM-ADAPTER-CONFIG-V1",
+    "contract:SENTINEL-V0-MOUNTAIN-SCHEMA",
+    "contract:SENTINEL-V0-MOUNTAIN-FIXTURE"
   ]
 }

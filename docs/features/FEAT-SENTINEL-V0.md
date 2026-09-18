@@ -84,16 +84,21 @@ restatements.
 ## Contract catalog
 
 The native Coherence contract-artifact capability (catalog loading,
-`contract:<id>` bundle members, contract-aware freshness) is **not present** at
-the released upstream pin `04c8833e` (verified against the clean pinned
-revision: the four required implementation/schema paths are absent and
-`coherence` exposes no catalog surface). Therefore:
+`contract:<id>` bundle members, contract-aware freshness) landed upstream at
+merged pin `cb76075` (landed as the bootstrap capability pin by KB-BOOT-08).
 
-- No `.factory/contracts.yaml` is authored in this revision.
-- No `contract:<id>` member refs are declared anywhere.
-- Catalog entries for `docs/superpowers/specs/contracts/*.json`,
-  `src/sentinel/contracts/**`, and their test consumers are deferred to a later
-  card and will use only the native grammar that exists at that time.
+`.factory/contracts.yaml` is now authored with 8 declarations covering the
+normative machine-readable artifacts under `docs/superpowers/specs/contracts/`
+(7 JSON Schemas + the mountain fixture; the deliberately `UNAPPROVED` provider
+template is not declared). All contracts carry
+`spec:2026-09-16-sentinel-wp0-shared-coherence-contracts` as authority; the
+mountain fixture `validates_against` the mountain schema; consumers are only
+the tests/code that actually load each artifact. `contract:<id>` refs for all
+8 declarations are members of `bundles/FEAT-SENTINEL-V0.json` (45 members).
+
+Freshness at this revision reports 10 `CONTRACT_VALIDATION_UNAVAILABLE`
+warnings (honest callouts: no `evidence/runs/` manifests exist yet) and zero
+errors or other contract findings.
 
 ## Current implementation consumers and validation commands
 
