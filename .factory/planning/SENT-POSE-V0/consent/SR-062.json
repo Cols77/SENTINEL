@@ -1,0 +1,1 @@
+{"schema":1,"run_id":"SENT-POSE-V0","sr_id":"SR-062","requirement_sha256":"0e315c544e72a0674d9a386810575947fd137110d33101dff45f3ec649051316","decision":"approve","reviewer":"human","phrase":"I independently approve this SR for adoption.","reason":"Approved as presented; hash-bound run-scoped persistence with read-time staleness."}
