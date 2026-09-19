@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Judgment cases v2",
+  "description": "Per-case judgment labels with separated hazard / needs_review / priority fields (draft relabel of cases.v1.jsonl).",
+  "type": "object",
+  "required": ["case_id", "state", "hazard", "needs_review", "priority", "rationale"],
+  "additionalProperties": true,
+  "properties": {
+    "case_id": {"type": "string", "minLength": 1},
+    "state": {
+      "type": "object",
+      "required": ["observation", "mission", "operations"],
+      "properties": {
+        "observation": {"type": "string", "minLength": 1},
+        "mission": {"type": "string", "minLength": 1},
+        "operations": {"type": "array"}
+      }
+    },
+    "reference": {"type": "object", "description": "v1 reference label kept for traceability"},
+    "hazard": {"type": ["boolean", "null"], "description": "null = undetermined (unscored pending review)"},
+    "needs_review": {"type": "boolean"},
+    "priority": {"enum": ["ignore", "low", "medium", "high", "critical", null]},
+    "rationale": {"type": "string", "minLength": 1}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"hazard": {"const": true}}, "required": ["hazard"]},
+      "then": {"properties": {"priority": {"enum": ["low", "medium", "high", "critical"]}}}
+    },
+    {
+      "if": {"properties": {"hazard": {"const": null}}, "required": ["hazard"]},
+      "then": {"properties": {"needs_review": {"const": true}, "priority": {"const": null}}}
+    }
+  ]
+}
