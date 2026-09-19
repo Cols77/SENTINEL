@@ -1,0 +1,82 @@
+{
+  "schema_version": "tag-map-v1",
+  "tag_family": "36h11",
+  "room": {
+    "width_units": 100,
+    "height_units": 100,
+    "origin": "LEFT_ALLEY_FRONT_CORNER"
+  },
+  "room_scale_m_per_unit": 0.1,
+  "tags": [
+    {
+      "tag_id": 0,
+      "zone_id": "LEFT_ALLEY_FRONT",
+      "x_units": 52.5,
+      "y_units": 23.6,
+      "z_units": 1.52,
+      "yaw_deg": 180.0,
+      "size_m": 0.20,
+      "mounting": "WALL"
+    },
+    {
+      "tag_id": 1,
+      "zone_id": "LEFT_ALLEY_MIDDLE",
+      "x_units": 6.7,
+      "y_units": 28.9,
+      "z_units": 0.38,
+      "yaw_deg": -90.0,
+      "size_m": 0.20,
+      "mounting": "WALL"
+    },
+    {
+      "tag_id": 2,
+      "zone_id": "LEFT_ALLEY_BACK",
+      "x_units": 44.2,
+      "y_units": 0.0,
+      "z_units": 1.2,
+      "yaw_deg": 90.0,
+      "size_m": 0.20,
+      "mounting": "WALL"
+    },
+    {
+      "tag_id": 3,
+      "zone_id": "ALLEY_FRONT_CORNER",
+      "x_units": 0.0,
+      "y_units": 6.5,
+      "z_units": 1.02,
+      "yaw_deg": 0.0,
+      "size_m": 0.20,
+      "mounting": "WALL"
+    },
+    {
+      "tag_id": 4,
+      "zone_id": "RIGHT_ALLEY_MIDDLE",
+      "x_units": 35.0,
+      "y_units": 28.9,
+      "z_units": 0.52,
+      "yaw_deg": -90.0,
+      "size_m": 0.20,
+      "mounting": "WALL"
+    },
+    {
+      "tag_id": 5,
+      "zone_id": "RIGHT_ALLEY_BACK",
+      "x_units": 20.3,
+      "y_units": 0.0,
+      "z_units": 0.55,
+      "yaw_deg": 90.0,
+      "size_m": 0.20,
+      "mounting": "WALL"
+    }
+  ],
+  "camera_calibration": {
+    "width": 960,
+    "height": 720,
+    "fx": 547.0,
+    "fy": 547.0,
+    "cx": 480.0,
+    "cy": 360.0,
+    "dist_coeffs": [],
+    "calibration_source": "nominal"
+  }
+}
