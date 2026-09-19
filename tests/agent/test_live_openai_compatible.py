@@ -348,6 +348,53 @@ def test_catalogue_plan_ids_reach_adapter_payload():
             )
 
 
+TASK_ID = "22222222-2222-4222-8222-222222222222"
+
+
+def test_created_task_id_reaches_request_event_context():
+    """The scenario whose turn 2 expects patroller.rank_for_task must expose
+    the created task id via schema-legal event_context summaries, and the
+    whole request must validate."""
+    from sentinel.contracts import validate_document as _vd
+
+    scenario = next(
+        item
+        for item in _load_scenarios()
+        if item["name"] == "qualifying_evidence_to_task"
+    )
+    request = _build_request(scenario, AGENT_RUN_ID)
+    summaries = [event["summary"] for event in request.event_context]
+    assert any(TASK_ID in s for s in summaries), (
+        f"{scenario['name']}: created task id {TASK_ID} absent from event_context"
+    )
+    for event in request.event_context:
+        assert len(event["event_type"]) <= 64
+        assert len(event["summary"]) <= 512
+    _vd(request.to_dict())
+
+
+def test_created_task_id_reaches_adapter_payload():
+    """build_chat_request output (what the model actually sees) must contain
+    the created task id in the serialized context messages."""
+    from sentinel.adapter.llm.prompt import build_chat_request as _bcr
+
+    scenario = next(
+        item
+        for item in _load_scenarios()
+        if item["name"] == "qualifying_evidence_to_task"
+    )
+    request = _build_request(scenario, AGENT_RUN_ID)
+    payload = _bcr(
+        request,
+        prompt_revision="test-prompt-rev",
+        tool_policy_revision="test-tool-policy-rev",
+    )
+    blob = json.dumps(payload["messages"], sort_keys=True)
+    assert TASK_ID in blob, (
+        f"{scenario['name']}: created task id {TASK_ID} not visible in adapter messages"
+    )
+
+
 def test_gate_flag_missing_skips_explicitly():
     """Without the flag the gate never runs and says so explicitly."""
     import os
