@@ -28,12 +28,13 @@ def test_every_v2_case_validates_against_v2_schema(v2_cases):
         assert not errors, (case["case_id"], [e.message for e in errors])
 
 
-def test_v2_state_fields_are_identical_to_v1(v2_cases):
-    with (FIXTURES / "cases.v1.jsonl").open(encoding="utf-8") as handle:
-        v1 = {case["case_id"]: case for case in (json.loads(line) for line in handle if line.strip())}
-    assert len(v2_cases) == len(v1)
+def test_v2_state_validates_as_judgment_context_v1(v2_cases):
+    """J2 acceptance: every v2 case's replay state is a judgment_context.v1
+    structured snapshot (no prose observations)."""
+    from sentinel.judgment import validate_judgment_state
+
     for case in v2_cases:
-        assert case["state"] == v1[case["case_id"]]["state"], case["case_id"]
+        assert validate_judgment_state(case["state"]) == case["state"], case["case_id"]
 
 
 def test_v2_labels_match_approved_draft_matrix(v2_cases):

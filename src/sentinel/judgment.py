@@ -505,12 +505,14 @@ def state_snapshot(mountain_state: dict, observation: dict) -> dict:
                 if h.get("id") == observation.get("detection_id")), None)
     if haz is None:
         raise KeyError(f"detection {observation.get('detection_id')!r} not in mountain state")
+    size_m = haz.get("size_m")
     return {
         "context_version": CONTEXT_VERSION,
         "observation": {
             "source": observation.get("source"),
             "object": haz.get("object"),
             "perception_confidence": haz.get("confidence"),
+            "size_m": float(size_m) if size_m is not None else None,
             "position_relation": haz.get("position_relation"),
             "duplicate_of_existing_detection": bool(haz.get("resolved")),
         },
@@ -523,3 +525,50 @@ def state_snapshot(mountain_state: dict, observation: dict) -> dict:
                 p.get("status") == "available" for p in mountain_state.get("patrollers", [])),
         },
     }
+
+
+REQUIRED_OBSERVATION_FIELDS = (
+    "source", "object", "perception_confidence", "size_m",
+    "position_relation", "duplicate_of_existing_detection",
+)
+
+
+def validate_judgment_state(state: dict) -> dict:
+    """Validate that a state payload is a judgment_context.v1 projection.
+
+    Fail-closed guard for replay: the harness must never send prose
+    observations or criteria-style dicts where the verified wire shape is
+    the versioned structured snapshot. Returns the input unchanged on
+    success (usable inline: ``state = validate_judgment_state(state)``).
+    """
+    if not isinstance(state, dict):
+        raise ValueError("judgment state must be an object")
+    if state.get("context_version") != CONTEXT_VERSION:
+        raise ValueError(f"context_version must be {CONTEXT_VERSION!r}, got {state.get('context_version')!r}")
+    for section, required in (
+        ("observation", REQUIRED_OBSERVATION_FIELDS),
+        ("mission", ("workflow", "trail_status")),
+        ("operations", ("patroller_available",)),
+    ):
+        section_value = state.get(section)
+        if not isinstance(section_value, dict):
+            raise ValueError(f"judgment state section {section!r} must be an object")
+        missing = [field for field in required if field not in section_value]
+        if missing:
+            raise ValueError(f"judgment state {section} missing fields: {missing}")
+    obs = state["observation"]
+    if not isinstance(obs["object"], str) or not obs["object"]:
+        raise ValueError("observation.object must be a non-empty string")
+    confidence = obs["perception_confidence"]
+    if confidence is not None and (not isinstance(confidence, (int, float)) or not 0.0 <= confidence <= 1.0):
+        raise ValueError("observation.perception_confidence must be null or 0..1")
+    size_m = obs["size_m"]
+    if size_m is not None and (not isinstance(size_m, (int, float)) or size_m <= 0):
+        raise ValueError("observation.size_m must be null or a positive number")
+    if not isinstance(obs["position_relation"], str):
+        raise ValueError("observation.position_relation must be a string")
+    if not isinstance(obs["duplicate_of_existing_detection"], bool):
+        raise ValueError("observation.duplicate_of_existing_detection must be boolean")
+    if not isinstance(state["operations"]["patroller_available"], bool):
+        raise ValueError("operations.patroller_available must be boolean")
+    return state

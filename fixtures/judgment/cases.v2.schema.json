@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Judgment cases v2",
-  "description": "Per-case judgment labels with separated hazard / needs_review / priority fields (draft relabel of cases.v1.jsonl).",
+  "description": "Per-case judgment labels with separated hazard / needs_review / priority fields. J2: state is a structured judgment_context.v1 snapshot, not prose.",
   "type": "object",
   "required": ["case_id", "state", "hazard", "needs_review", "priority", "rationale"],
   "additionalProperties": true,
@@ -9,11 +9,37 @@
     "case_id": {"type": "string", "minLength": 1},
     "state": {
       "type": "object",
-      "required": ["observation", "mission", "operations"],
+      "required": ["context_version", "observation", "mission", "operations"],
       "properties": {
-        "observation": {"type": "string", "minLength": 1},
-        "mission": {"type": "string", "minLength": 1},
-        "operations": {"type": "array"}
+        "context_version": {"const": "judgment_context.v1"},
+        "observation": {
+          "type": "object",
+          "required": ["source", "object", "perception_confidence", "size_m",
+                       "position_relation", "duplicate_of_existing_detection"],
+          "properties": {
+            "source": {"type": ["string", "null"]},
+            "object": {"type": "string", "minLength": 1},
+            "perception_confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+            "size_m": {"type": ["number", "null"], "exclusiveMinimum": 0},
+            "position_relation": {"type": "string", "minLength": 1},
+            "duplicate_of_existing_detection": {"type": "boolean"}
+          }
+        },
+        "mission": {
+          "type": "object",
+          "required": ["workflow", "trail_status"],
+          "properties": {
+            "workflow": {"type": "string", "minLength": 1},
+            "trail_status": {"type": "string"}
+          }
+        },
+        "operations": {
+          "type": "object",
+          "required": ["patroller_available"],
+          "properties": {
+            "patroller_available": {"type": "boolean"}
+          }
+        }
       }
     },
     "reference": {"type": "object", "description": "v1 reference label kept for traceability"},

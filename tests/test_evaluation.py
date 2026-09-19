@@ -14,13 +14,12 @@ def test_question_set_has_five_questions_with_expected_types():
     assert set(by_name) == {"hazard_relevant", "priority", "priority_scored",
                             "human_review_needed", "more_evidence_needed"}
     assert by_name["hazard_relevant"]["type"] == "noul"
-    assert by_name["hazard_relevant"]["criteria"] == {
-        "true": "operational trail-opening hazard requiring action",
-        "false": "not operationally relevant"}
+    assert by_name["hazard_relevant"]["criteria"] is None  # Jev docs: criteria-less noul
     assert by_name["priority"]["type"] == "choice"
     assert by_name["priority"]["criteria"] == {
         "ignore": "no action warranted", "low": "minor, monitor",
-        "medium": "should be inspected soon", "high": "blocks trail or immediate risk"}
+        "medium": "should be inspected soon", "high": "blocks trail or immediate risk",
+        "critical": "life-safety or immediate response required"}
     assert by_name["priority_scored"]["type"] == "score"
     assert by_name["priority_scored"]["criteria"] == ["not a hazard", "minor", "needs inspection", "urgent"]
     assert by_name["human_review_needed"]["type"] == "noul"
@@ -42,11 +41,11 @@ def test_run_cases_single_batched_call_and_confidence_logging(tmp_path):
         {"case_id": "pos-001", "state": {"observation": "fallen tree"}, "reference": {"hazard_relevant": True}},
     ]
     judge = CountingJudge(
-        booleans={"hazard_relevant": (False, 0.9), "human_review_needed": (True, 0.8),
-                  "more_evidence_needed": (False, 0.3)},
-        choices={"priority": ("low", {"ignore": 0.1, "low": 0.7, "medium": 0.1, "high": 0.1})},
-        scores={"priority_scored": 1.0},
-    )
+            booleans={"hazard_relevant": (False, 0.9), "human_review_needed": (True, 0.8),
+                      "more_evidence_needed": (False, 0.3)},
+            choices={"priority": ("low", {"ignore": 0.1, "low": 0.7, "medium": 0.1, "high": 0.05, "critical": 0.05})},
+            scores={"priority_scored": 1.0},
+        )
     metrics, log_path = run_cases(cases, judge, log_path=tmp_path / "log.jsonl")
     assert metrics == {"total": 2, "false_safe": 1, "false_escalation": 0, "unavailable": 0}
     # ONE batched evaluate call per case, carrying the full QUESTION_SET

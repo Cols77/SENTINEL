@@ -19,15 +19,15 @@ QUESTION_SET = [
         "name": "hazard_relevant",
         "type": "noul",
         "instruction": "Is the observed object an operational trail-opening hazard requiring action?",
-        "criteria": {"true": "operational trail-opening hazard requiring action",
-                     "false": "not operationally relevant"},
+        "criteria": None,
     },
     {
         "name": "priority",
         "type": "choice",
         "instruction": "What priority applies to this observation?",
         "criteria": {"ignore": "no action warranted", "low": "minor, monitor",
-                     "medium": "should be inspected soon", "high": "blocks trail or immediate risk"},
+                     "medium": "should be inspected soon", "high": "blocks trail or immediate risk",
+                     "critical": "life-safety or immediate response required"},
     },
     {
         "name": "priority_scored",
