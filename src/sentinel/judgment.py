@@ -131,7 +131,10 @@ class JevJudge:
     def evaluate(self, state: dict, questions: list[dict]) -> dict[str, dict[str, Any]]:
         wire = {}
         for q in questions:
-            wire[q["name"]] = {"type": q["type"], "instructions": q["instruction"], "criteria": q["criteria"]}
+            entry = {"type": q["type"], "instructions": q["instruction"]}
+            if q.get("criteria") is not None:
+                entry["criteria"] = q["criteria"]
+            wire[q["name"]] = entry
         raw = self._post({"model": self._model, "state": state, "questions": wire})
         try:
             responses = raw["answers"]
@@ -193,10 +196,14 @@ class LlmJudge:
     SYSTEM_INSTRUCTIONS = (
         "You are a judgment module answering fixed questions about one observation "
         "in a mountain-resort opening workflow. Reply ONLY with a single JSON object "
-        'of the form {"answers": {"<question name>": {...}, ...}} containing EXACTLY '
-        "one entry per requested question name (no extras). For each answer include "
-        "a 'confidence' field: your self-assessed confidence (0..1) in that answer. "
-        "Answer every question using ONLY the provided state; never request tools."
+        'of the form {"answers": {"<question name": {...}, ...}} containing EXACTLY '
+        "one entry per requested question name (no extras). Answer shapes by question "
+        'type: "noul" -> {"probability": <0..1>}; "choice" -> {"choice": <one of the '
+        'criteria keys>, "probabilities": {<criteria key>: <0..1>, ...}}; "score" -> '
+        '{"score": <number>, "probabilities": {<legend key>: <0..1>, ...}}. For each '
+        "answer also include a 'confidence' field: your self-assessed confidence (0..1) "
+        "in that answer. Answer every question using ONLY the provided state; never "
+        "request tools."
     )
 
     def __init__(self, api_key_env: str, base_url: str, model: str, timeout_s: float = 5.0,

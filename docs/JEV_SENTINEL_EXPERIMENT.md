@@ -757,3 +757,64 @@ replay with the batched evaluate per case returned:
 ```text
 total: 21   false_safe: 0   false_escalation: 5   unavailable: 0
 ```
+
+## 17. Consented live dual replay — Jev vs LLM baseline (2026-09-19)
+
+Consented by the operator (2026-09-19; ~45 paid live calls, est. < 0.01 USD).
+Both arms replayed the IDENTICAL 21-case fixture (`fixtures/judgment/cases.v1.jsonl`),
+same state payloads, same `QUESTION_SET`; one batched call per case per arm.
+Jev via `typesafe/jev-1.13-20260917` (OpenRouter `/api/alpha/decisions`), baseline
+LLM `z-ai/glm-5.3-flash` via OpenRouter chat/completions JSON mode.
+Artifacts: `artifacts/jev/jev-replay.jsonl`, `artifacts/jev/llm-replay.jsonl`,
+`artifacts/jev/dual-replay-summary.json` (not committed).
+
+### Judgment-suite comparison (21 cases)
+
+| Metric | Jev | LLM (glm-5.3-flash) | Δ (LLM − Jev) |
+|---|---|---|---|
+| Cases replayed | 21 | 21 | — |
+| Unavailable | 0 | 0 | 0 |
+| False-safe (ref True → judged False) | 9 | 6 | −3 |
+| False-escalation (ref False → judged True) | 0 | 0 | 0 |
+| Mean latency (ms, per batched case) | 428 | 17 015 | +16 587 |
+
+Per-question agreement (LLM vs Jev answers, identical questions):
+`hazard_relevant` 2/21 (0.095), `priority` 0/21, `priority_scored` 0/21,
+`human_review_needed` 0/21, `more_evidence_needed` 0/21. Per-case agreement
+rate: 0/21 — the two judges disagree on essentially every answer. Neither arm
+is close to the reference labels' distribution (Jev 9 false-safe vs static
+baseline's 0), so the honest go/no-go reading is: **Jev is NOT yet decision-grade
+on this fixture, and the LLM baseline is no better (6 false-safe) at ~40× the
+latency.** Jev's latency/cost advantage (one batched decisions call, usage.cost
+≈ $1e-5/batch) is real but immaterial while accuracy is below the deterministic
+static baseline.
+
+Caveats: (1) LLM 'confidence' is the model's SELF-assessment and is NOT
+calibrated; Jev probabilities are RLCD-trained. (2) Both arms' false-safe rates
+(9/21 and 6/21) are worse than the conservative static baseline (0 false-safe,
+5 false-escalations) — at this fixture size, the deterministic rules win.
+(3) LlmJudge required a system-instruction fix after two live attempts failed
+fail-closed: the original instructions omitted per-type answer shapes, so models
+omitted the `probability` field on noul questions; the fix (explicit shapes)
+kept all 151 tests green and both failed runs were preserved
+(`llm-replay.jsonl.failed-attempt*`, `*.noncompliant-glm-5.3`).
+
+### WP1 scenario replay through Jev (B10 pass criteria)
+
+`artifacts/jev/jev-scenario-replay.json` — real WP1 `live_scenarios.json`
+through the live Jev decisions API:
+
+```text
+turns: 4/6 passed; scenarios: 1/3 passed (exit 1)
+```
+
+- `initial_plan_one_station`: turn 0 passed (correct plan argument chosen);
+  turn 1 failed (chose `inspection.propose_plan` instead of `wait_for_event`).
+- `qualifying_evidence_to_task`: turn 0 failed (chose `patroller.rank_for_task`
+  instead of `task.create` — plausibly a legal-tool sibling, still a miss);
+  turn 1 passed with the right task id.
+- `approval_wait`: passed (both turns `wait_for_event`).
+
+Scenario pass rate 1/3 (vs static offline replay 0/3) — Jev understands the
+tool surface partially but not the workflow sequencing; not a go for
+coordinator-facing tool choice on this evidence.
