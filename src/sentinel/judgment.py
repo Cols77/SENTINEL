@@ -9,7 +9,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 
 class BoundedJudge(Protocol):
@@ -175,9 +175,13 @@ class JevJudge:
     def boolean(self, state: dict, instruction: str, *, name: str) -> dict[str, Any]:
         return self.evaluate(state, [{"name": name, "type": "noul", "instruction": instruction, "criteria": None}])[name]
 
-    def choice(self, state: dict, instruction: str, *, options: Sequence[str], name: str) -> dict[str, Any]:
+    def choice(self, state: dict, instruction: str, *, options: Sequence[str] | None = None,
+               criteria: Mapping[str, str | None] | None = None, name: str) -> dict[str, Any]:
+        # D11: pass label descriptions through when the caller has them (the
+        # policy seam's legal-candidate descriptions), instead of bare labels.
+        resolved = dict(criteria) if criteria is not None else {opt: None for opt in (options or [])}
         return self.evaluate(state, [{"name": name, "type": "choice", "instruction": instruction,
-                                      "criteria": {opt: None for opt in options}}])[name]
+                                      "criteria": resolved}])[name]
 
 
 class LlmJudge:
