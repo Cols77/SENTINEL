@@ -40,6 +40,9 @@ class TagMap:
     def tag(self, tag_id: int) -> Tag:
         return self._by_id[tag_id]  # KeyError = unknown tag, fail closed upstream
 
+    def has_tag(self, tag_id: int) -> bool:
+        return tag_id in self._by_id
+
 
 def load_tag_map(path: str) -> TagMap:
     with open(path, "r", encoding="utf-8") as f:
