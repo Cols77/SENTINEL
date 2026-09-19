@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 
@@ -303,6 +304,150 @@ def timed(judge_call) -> tuple[dict, int]:
 
 
 CONTEXT_VERSION = "judgment_context.v1"
+
+
+SCENARIO_QUESTION_TOOL = "tool_choice"
+SCENARIO_QUESTION_ARG = "arg_choice"
+
+
+def _load_scenarios(scenarios_path: str | Path) -> list[dict[str, Any]]:
+    document = json.loads(Path(scenarios_path).read_text(encoding="utf-8"))
+    scenarios = document.get("scenarios")
+    if not isinstance(scenarios, list) or not scenarios:
+        raise ValueError("scenario document must define a non-empty 'scenarios' list")
+    return scenarios
+
+
+def _arg_choice_criteria(scenario: dict[str, Any]) -> list[str]:
+    """Catalogue plan IDs (in document order) for the arg_choice question."""
+    catalogue = scenario.get("catalogue") or {}
+    return [plan["id"] for plan in catalogue.get("plans", []) if plan.get("id")]
+
+
+def replay_scenarios(scenarios_path: str, judge) -> dict[str, Any]:
+    """Replay WP1 live_scenarios.json turns through a BoundedJudge.
+
+    Mirrors the B10 live-acceptance pass criteria: each turn maps to ONE
+    batched judge evaluate() call with a 'tool_choice' question (criteria =
+    the scenario's legal_tools, keyed by name with description-or-name
+    values) plus, when the turn asserts arguments (e.g.
+    arguments.catalogue_plan_id), an 'arg_choice' question over the
+    catalogue plan IDs. Turn passes iff tool_choice.value == expected_tool
+    AND every asserted argument matches. Shadow-only: read-only over the
+    scenario document, no network, no coordinator side effects.
+    """
+    scenarios = _load_scenarios(scenarios_path)
+    report_scenarios: list[dict[str, Any]] = []
+    for scenario in scenarios:
+        legal_tools = list(scenario.get("legal_tools", []))
+        descriptions = {
+            event.get("summary", "")
+            for event in scenario.get("event_context", [])
+        }
+        criteria: dict[str, str | None] = {}
+        for tool in legal_tools:
+            desc = next((s for s in descriptions if tool in s), None)
+            criteria[tool] = desc if desc else tool
+        catalogue = scenario.get("catalogue") or {}
+        feedback = scenario.get("coordinator_feedback")
+
+        turns_report: list[dict[str, Any]] = []
+        scenario_error: str | None = None
+        for turn_index, expected_turn in enumerate(scenario.get("expected_turns", [])):
+            expected_tool = expected_turn.get("expected_tool")
+            allowed = expected_tool if isinstance(expected_tool, list) else [expected_tool]
+            expectations: dict[str, Any] = expected_turn.get("expectations") or {}
+            arg_keys = [
+                dotted.split(".", 1)[1]
+                for dotted in expectations
+                if dotted.startswith("arguments.")
+            ]
+
+            state: dict[str, Any] = {
+                "user_request": scenario.get("user_request", ""),
+                "phase": scenario.get("phase"),
+                "state_version": scenario.get("state_version"),
+                "legal_tools": legal_tools,
+                "event_context": list(scenario.get("event_context", [])),
+                "evidence_context": list(scenario.get("evidence_context") or []),
+                "catalogue": catalogue,
+            }
+            if turn_index > 0 and isinstance(feedback, dict):
+                state["coordinator_feedback"] = feedback
+
+            questions: list[dict[str, Any]] = [{
+                "name": SCENARIO_QUESTION_TOOL,
+                "type": "choice",
+                "instruction": (
+                    "Which single tool must the coordinator call for this turn? "
+                    "Choose exactly one legal tool for the supplied state."
+                ),
+                "criteria": criteria,
+            }]
+            if arg_keys and _arg_choice_criteria(scenario):
+                questions.append({
+                    "name": SCENARIO_QUESTION_ARG,
+                    "type": "choice",
+                    "instruction": (
+                        "Which catalogue plan id must the turn's arguments carry? "
+                        "Choose exactly one."
+                    ),
+                    "criteria": {plan_id: plan_id
+                                 for plan_id in _arg_choice_criteria(scenario)},
+                })
+
+            answer_map: dict[str, dict[str, Any]] | None
+            try:
+                answer_map = judge.evaluate(state, questions)
+            except Exception as exc:
+                scenario_error = (
+                    f"turn {turn_index}: judge unavailable: {exc}"
+                    if not isinstance(exc, JudgeUnavailable)
+                    else f"turn {turn_index}: {exc}"
+                )
+                turns_report.append({
+                    "turn": turn_index, "passed": False,
+                    "failures": [scenario_error],
+                })
+                break
+
+            failures: list[str] = []
+            tool_answer = answer_map.get(SCENARIO_QUESTION_TOOL)
+            actual_tool = tool_answer.get("value") if tool_answer else None
+            if actual_tool not in allowed:
+                failures.append(
+                    f"expected {allowed}, judge selected {actual_tool!r}")
+            turn_report: dict[str, Any] = {
+                "turn": turn_index,
+                "tool_choice": actual_tool,
+                "expected_tool": allowed,
+                "failures": failures,
+            }
+            if any(q["name"] == SCENARIO_QUESTION_ARG for q in questions) and answer_map.get(SCENARIO_QUESTION_ARG):
+                arg_value = answer_map[SCENARIO_QUESTION_ARG].get("value")
+                turn_report["arg_choice"] = arg_value
+                for dotted, expected in expectations.items():
+                    expected_values = expected if isinstance(expected, list) else [expected]
+                    if arg_value not in expected_values:
+                        failures.append(
+                            f"{dotted}: expected one of {expected_values}, "
+                            f"judge selected {arg_value!r}"
+                        )
+            turn_report["passed"] = not failures
+            turns_report.append(turn_report)
+
+        report_scenarios.append({
+            "name": scenario.get("name"),
+            "passed": scenario_error is None and all(t["passed"] for t in turns_report),
+            "error": scenario_error,
+            "turns": turns_report,
+        })
+
+    return {
+        "scenario_set": "sentinel.live-llm-acceptance.v1",
+        "passed": all(s["passed"] for s in report_scenarios),
+        "scenarios": report_scenarios,
+    }
 
 
 def state_snapshot(mountain_state: dict, observation: dict) -> dict:
