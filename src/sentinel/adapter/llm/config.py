@@ -114,9 +114,9 @@ def load_config(environ: Mapping[str, str] | None = None) -> LLMConfig:
     the API-key environment-variable *name*, never the value.
 
     When ``environ`` is None the in-process path auto-populates ``os.environ``
-    from the nearest ``.env`` file first (existing variables win); when a
-    mapping is injected, the file overlays only that private copy and
-    ``os.environ`` is never touched.
+    from the nearest ``.env`` file first (existing variables win).  When a
+    mapping is injected it is strictly authoritative: the ``.env`` file is
+    NOT consulted and ``os.environ`` is never touched.
     """
     if environ is None:
         from sentinel.env_file import load_env_file
@@ -124,10 +124,7 @@ def load_config(environ: Mapping[str, str] | None = None) -> LLMConfig:
         load_env_file()
         source: Mapping[str, str] = os.environ
     else:
-        from sentinel.env_file import load_env_file
-
-        merged = load_env_file(search_dir=Path.cwd(), environ=dict(environ))
-        source = {**merged, **dict(environ)}
+        source = dict(environ)
     values = {
         variable: _required_value(
             source, variable, max_length=_FIELD_MAX_LENGTHS.get(variable)
