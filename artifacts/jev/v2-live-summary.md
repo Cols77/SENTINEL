@@ -10,3 +10,5 @@ Jev remains SHADOW_EVALUATION_ONLY regardless of outcome.
 | llm | 0/3/15 | 0/5/21 | 0/4 | 1.0 | 4/36 (count 6) | YES |
 
 Decision rule: an arm ranks only if it has equal-or-better false-safe outcomes and beats always-escalate on false escalation; the task's worse criterion additionally requires losing on clean-positive false-safe and needs_review recall.
+
+Provenance: committed J5 logs predate the fix; their `judge.model` field reads `static` for both arms and is wrong; the Jev endpoint resolved `~typesafe/jev-latest`, not the consented pinned revision.

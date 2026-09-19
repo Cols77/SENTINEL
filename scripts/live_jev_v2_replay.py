@@ -110,6 +110,12 @@ def main() -> int:
     }
     arms = {}
     for name, judge in specs.items():
+        # Provenance fix (J5): run_cases() logs `getattr(judge, "model", "static")`,
+        # but JevJudge/LlmJudge only carry the resolved model id on the private
+        # `_model` attribute, so every logged record's `judge.model` read the
+        # "static" default. Expose it publicly so future runs record the real,
+        # resolved model id (never "static", never an unpinned "latest" alias).
+        judge.model = judge._model
         path = ART / f"v2-live-{name}.jsonl"
         if path.exists():
             path.unlink()
