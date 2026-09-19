@@ -105,11 +105,25 @@ class StaticJudge:
         return {"value": ESCALATE_LABEL, "confidence": 0.95, "probabilities": {}}
 
 
+CONSENT_ENV = "SENTINEL_SHADOW_SWEEP_CONSENT"
+
+
+def require_live_consent(gate: str) -> str:
+    """Raise unless the operator granted a paid live batch. Called by every
+    live-advisor builder, so no caller can bypass the gate by skipping main()."""
+    consent = os.environ.get(CONSENT_ENV)
+    if not consent:
+        raise PermissionError(
+            f"{CONSENT_ENV} is not set: live advisors make paid remote calls and require fresh, "
+            f"explicit operator consent (plan gate {gate}); set {CONSENT_ENV}=<batch-id> to proceed.")
+    return consent
+
+
 def _build_live_judge(advisor: str) -> Any:
-    """Constructs the real Jev/LLM judge (Task 2's advisor arms). Only
-    ever reached after the consent gate in ``main`` -- see the module
-    docstring. Importing here (not at module top) keeps ``httpx``/network
-    setup out of the offline path entirely."""
+    """Constructs the real Jev/LLM judge (Task 2's advisor arms). Refuses
+    without operator consent. Importing here (not at module top) keeps
+    ``httpx``/network setup out of the offline path entirely."""
+    require_live_consent("G-sweep")
     from sentinel.judgment import JevJudge, LlmJudge
 
     if advisor == "jev":
@@ -224,16 +238,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.advisor in ("jev", "llm"):
-        consent = os.environ.get("SENTINEL_SHADOW_SWEEP_CONSENT")
-        if not consent:
-            print(
-                f"refusing to run a live '{args.advisor}' sweep: SENTINEL_SHADOW_SWEEP_CONSENT is not set. "
-                "This is a paid remote call and requires fresh, explicit operator consent "
-                "(plan gate G-sweep) -- set SENTINEL_SHADOW_SWEEP_CONSENT=<batch-id> to proceed.",
-                file=sys.stderr,
-            )
+        try:
+            judge = _build_live_judge(args.advisor)
+        except PermissionError as exc:
+            print(f"refusing to run a live '{args.advisor}' sweep: {exc}", file=sys.stderr)
             return 2
-        judge = _build_live_judge(args.advisor)
     else:
         judge = _OFFLINE_JUDGES[args.advisor]()
 

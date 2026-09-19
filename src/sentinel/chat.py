@@ -28,12 +28,9 @@ SYSTEM_MESSAGE = (
 
 _RECENT_AUDIT_LIMIT = 10
 _JUDGMENT_RECORD = "judgment"
-# Split so this module's own source text never spells the mutating
-# operator-choice module's name -- the (d) static-boundary test checks for
-# exactly that substring. The value is still the real audit record type
-# written by that module (see shadow.py, and the module next to this one
-# that submits the operator's pick through the gateway).
-_RESOLVING_RECORD = "operator" "_choice"
+# Audit record type written when the operator decides; only its presence
+# releases the advisors' picks for that decision into the chat prompt.
+_RESOLVING_RECORD = "operator_choice"
 
 
 def _resolved_decisions(records: Sequence[dict]) -> set[tuple[Any, Any, Any]]:

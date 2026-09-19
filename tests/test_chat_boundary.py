@@ -108,11 +108,22 @@ def test_unresolved_advisors_are_withheld_then_shown_once_resolved():
 # --- (d) static boundary: chat.py never touches a mutating surface ----------
 
 def test_chat_module_never_imports_a_mutating_surface():
+    import ast
     import sentinel.chat as chat_module
 
-    source = Path(chat_module.__file__).read_text(encoding="utf-8").lower()
-    for forbidden in ("command_gateway", "agent_loop", "operator_choice", "sqlite3", "submit("):
-        assert forbidden not in source, forbidden
+    tree = ast.parse(Path(chat_module.__file__).read_text(encoding="utf-8"))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module or "")
+            imported.update(f"{node.module}.{alias.name}" for alias in node.names)
+    for forbidden in ("command_gateway", "agent_loop", "operator_choice", "ladder", "sqlite3"):
+        assert not any(forbidden in name for name in imported), (forbidden, sorted(imported))
+    calls = {node.func.attr for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
+    assert "submit" not in calls and "submit_choice" not in calls
 
 
 # --- (e) the production complete's request carries no `tools` key -----------

@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import uuid
 from pathlib import Path
@@ -75,8 +74,9 @@ def _offline_advisors() -> list[tuple[str, Any]]:
 
 
 def _live_advisors() -> list[tuple[str, Any]]:
-    """The real Task 2 advisor arms. Only ever reached after the consent
-    gate in ``main`` -- see the module docstring."""
+    """The real Task 2 advisor arms. Refuses without operator consent."""
+    from scripts.shadow_sweep import require_live_consent
+    require_live_consent("G-rehearsal")
     from sentinel.judgment import JevJudge, LlmJudge
     jev = JevJudge(api_key_env="OPENROUTER_API_KEY", base_url="https://openrouter.ai",
                     model="typesafe/jev-1.13-20260917")
@@ -173,6 +173,7 @@ def run_rehearsal(*, advisors_mode: str, choices: dict[str, str], db_path: Path,
     mutation path."""
     run_id = run_id or str(uuid.uuid4())
     agent_run_id = agent_run_id or str(uuid.uuid4())
+    advisors = build_advisors(advisors_mode)  # before any side effect: live mode refuses without consent
 
     repo = CoordinatorRepository.open(db_path)
     try:
@@ -180,7 +181,6 @@ def run_rehearsal(*, advisors_mode: str, choices: dict[str, str], db_path: Path,
         boundary = CoordinatorBoundary(repo, gateway)
         catalogue = load_catalogue_plans()
         sink = JsonlAuditSink(audit_path)
-        advisors = build_advisors(advisors_mode)
         ladder = ShadowLadder(RulePolicy(), advisors, sink)
         policy = bind_context(ladder, repo, catalogue)
 
@@ -241,14 +241,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--audit", type=Path, default=None, help="JSONL audit path (default: artifacts/shadow/<run_id>.jsonl)")
     args = parser.parse_args(argv)
 
-    if args.advisors == "live" and not os.environ.get("SENTINEL_SHADOW_SWEEP_CONSENT"):
-        print(
-            "refusing to run rehearsal with '--advisors live': SENTINEL_SHADOW_SWEEP_CONSENT is not set. "
-            "This is a paid remote call and requires fresh, explicit operator consent "
-            "(plan gate G-rehearsal) -- set SENTINEL_SHADOW_SWEEP_CONSENT=<batch-id> to proceed.",
-            file=sys.stderr,
-        )
-        return 2
+    if args.advisors == "live":
+        from scripts.shadow_sweep import require_live_consent
+        try:
+            require_live_consent("G-rehearsal")
+        except PermissionError as exc:
+            print(f"refusing to run rehearsal with '--advisors live': {exc}", file=sys.stderr)
+            return 2
 
     run_id = args.run_id or str(uuid.uuid4())
     db_path = args.db or (REPO_ROOT / "artifacts" / "shadow" / f"{run_id}.sqlite3")
