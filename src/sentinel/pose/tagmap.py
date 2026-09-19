@@ -34,6 +34,7 @@ class TagMap:
             mounting=t["mounting"],
         ) for t in doc["tags"]}
         c = doc["camera_calibration"]
+        self.room_scale_m_per_unit = float(doc.get("room_scale_m_per_unit", 0.1))
         self.K = np.array([[c["fx"], 0, c["cx"]], [0, c["fy"], c["cy"]], [0, 0, 1]], dtype=float)
         self.dist = np.array(c["dist_coeffs"], dtype=np.float64)
 

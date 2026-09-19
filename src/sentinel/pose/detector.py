@@ -5,29 +5,41 @@ import numpy as np
 from sentinel.contracts.pose import DronePoseReport, TagObservation
 from sentinel.pose.tagmap import TagMap
 
-ROOM_SCALE_M_PER_UNIT = 0.1  # metres per room unit; refined in KB5-C4
+ROOM_SCALE_M_PER_UNIT = 0.1  # metres per room unit
 
 
-def _report_point(tvec_room, tag):
-    """Compose a camera-frame metres tvec into the drone's floor position.
+def _report_point(rvec, tvec, tag, scale: float):
+    """Compose a PnP solution into the drone's room position and heading.
 
-    Camera forward is assumed to face the tag head-on: forward = -(tag outward
-    normal), camera right = (-ny, nx) on the floor plane. The tag position in
-    the camera frame is tvec, so the drone sits at
-        drone = tag - (tvec_z * forward + tvec_x * right)
-    This metres-to-room-units composition is the KB5-C4 open point; it is
-    isolated in this one helper so C4 can refine it precisely.
+    ``rvec``/``tvec`` (from solvePnP) map tag-frame points (metres, tag plane
+    z=0, z into the wall) into the camera frame: p_cam = R @ p_tag + t, with
+    tvec the tag centre in camera coordinates. The tag's map entry gives its
+    room position and yaw; with the room z axis up, the tag frame in the room
+    is exactly the yaw rotation (x_tag = right when facing the tag, y_tag = up,
+    z_tag = into the wall). Composing R_room_tag @ R_cam_tag.T yields the
+    camera orientation in the room, and cam = tag_pos - R_room_cam @ tvec
+    yields the camera (== drone) position. Heading is the horizontal direction
+    the camera faces (its +z axis in the room).
     """
-    tvec = np.asarray(tvec_room, dtype=float)
+    R_cam_tag, _ = cv2.Rodrigues(np.asarray(rvec, dtype=float))
+    tvec = np.asarray(tvec, dtype=float).flatten()
     yaw = np.deg2rad(tag.yaw_deg)
-    nx, ny = np.cos(yaw), np.sin(yaw)
-    fwd = np.array([-nx, -ny])
-    right = np.array([-ny, nx])
-    dx_m = -(tvec[2] * fwd[0] + tvec[0] * right[0])
-    dy_m = -(tvec[2] * fwd[1] + tvec[0] * right[1])
-    x_units = tag.x_units + dx_m / ROOM_SCALE_M_PER_UNIT
-    y_units = tag.y_units + dy_m / ROOM_SCALE_M_PER_UNIT
-    return (round(float(x_units), 3), round(float(y_units), 3))
+    # OpenCV tag frame (from _tag_object_points + image corner order): x to the
+    # right as the camera sees it, y downward in the tag plane, z out of the
+    # wall toward the viewer. With room z up and the tag yawed by yaw_deg
+    # (outward normal = (cos yaw, sin yaw, 0)): z_tag = normal, y_tag = down,
+    # x_tag = y x z = right when facing the tag.
+    R_room_tag = np.array([
+        [np.sin(yaw), 0.0, np.cos(yaw)],
+        [-np.cos(yaw), 0.0, np.sin(yaw)],
+        [0.0, -1.0, 0.0],
+    ])
+    R_room_cam = R_room_tag @ R_cam_tag.T
+    tag_pos = np.array([tag.x_units, tag.y_units, 0.0]) * scale + np.array([0.0, 0.0, tag.z_units])
+    cam_pos = tag_pos - R_room_cam @ tvec
+    fwd = R_room_cam[:, 2]  # camera +z axis in the room = viewing direction
+    heading = float(np.degrees(np.arctan2(fwd[1], fwd[0])) % 360.0)
+    return (round(float(cam_pos[0] / scale), 3), round(float(cam_pos[1] / scale), 3)), heading
 
 
 def estimate_pose(frame, tag_map: TagMap, *, run_id: str, report_id: str) -> DronePoseReport:
@@ -90,14 +102,14 @@ def estimate_pose(frame, tag_map: TagMap, *, run_id: str, report_id: str) -> Dro
             best = (err, tag, rvec, tvec)
 
     err, tag, rvec, tvec = best
-    tvec_room = tvec.flatten().copy()  # camera frame, metres (camera->tag)
+    point, heading = _report_point(rvec, tvec, tag, tag_map.room_scale_m_per_unit)
     return DronePoseReport(
         report_id=report_id,
         run_id=run_id,
         observed_at=datetime.now(),
         source_kind="SIMULATED",
-        point=_report_point(tvec_room, tag),
-        heading_deg=None,
+        point=point,
+        heading_deg=round(heading, 2),
         altitude_m=None,
         method="APRILTAG_36H11_PNP",
         tag_observations=(TagObservation(
