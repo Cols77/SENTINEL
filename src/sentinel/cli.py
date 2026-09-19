@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import sqlite3
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,9 @@ from .emergency import EmergencyHotkey, EmergencySender
 from .models import RunReport
 from .reporting import ProgressLogger, write_report, write_video_manifest
 from .safe_tools import FixedPositionYawTools, ToolRefusal, YawCommand
+from .pose.persistence import ensure_schema
+from .pose.stream import run_pose_stream
+from .pose.tagmap import load_tag_map
 
 try:  # Task 1/3 may be landed independently in the shared worktree.
     from .dry_run import DryRunClient
@@ -91,6 +96,23 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--interface-name")
     probe.add_argument("--interface-index", type=int)
     probe.add_argument("--timeout", type=float, default=7.0)
+
+    pose_stream = subparsers.add_parser(
+        "pose-stream",
+        help="stream video only and persist fail-closed pose reports",
+    )
+    pose_stream.add_argument("--real", action="store_true", required=True)
+    pose_stream.add_argument("--confirm", action="store_true")
+    pose_stream.add_argument("--tag-map", type=Path, required=True)
+    pose_stream.add_argument("--db", type=Path, default=Path("artifacts/pose.db"))
+    pose_stream.add_argument("--max-frames", type=int)
+    pose_stream.add_argument("--duration", type=float)
+    pose_stream.add_argument("--run-id")
+    pose_stream.add_argument("--tello-ip", default="192.168.10.1")
+    pose_stream.add_argument("--local-ip")
+    pose_stream.add_argument("--interface-name")
+    pose_stream.add_argument("--interface-index", type=int)
+    pose_stream.add_argument("--timeout", type=float, default=7.0)
 
     emergency = subparsers.add_parser(
         "emergency", help="send an immediate motor-stop command"
@@ -359,6 +381,60 @@ def _run_connection_probe(args: Any) -> int:
             progress.close()
 
 
+def _run_pose_stream(args: Any) -> int:
+    """Run bounded video-only pose estimation without flight commands."""
+    if not args.confirm:
+        print("Real pose streams require --confirm after the physical preflight.")
+        return 1
+    if args.max_frames is None and args.duration is None:
+        print("pose-stream requires --max-frames and/or --duration.")
+        return 1
+    if args.max_frames is not None and args.max_frames < 1:
+        print("--max-frames must be at least 1.")
+        return 1
+    if args.duration is not None and args.duration <= 0:
+        print("--duration must be positive.")
+        return 1
+
+    client: Any | None = None
+    conn: sqlite3.Connection | None = None
+    try:
+        tag_map = load_tag_map(str(args.tag_map))
+        args.db.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(args.db)
+        ensure_schema(conn)
+        client = build_real_client(args)
+        client.connect()
+        run_id = args.run_id or uuid.uuid4().hex
+        reports = run_pose_stream(
+            client,
+            tag_map,
+            conn,
+            run_id=run_id,
+            max_frames=args.max_frames,
+            duration_s=args.duration,
+        )
+        for report in reports:
+            print(
+                f"pose x={report.point[0]} y={report.point[1]} "
+                f"z={report.altitude_m}",
+                flush=True,
+            )
+        print(f"pose-stream complete: {len(reports)} report(s), run_id={run_id}")
+        return 0
+    except KeyboardInterrupt:
+        print("pose-stream interrupted", flush=True)
+        return 130
+    except Exception as exc:
+        print(f"Pose stream failed: {exc}", flush=True)
+        return 1
+    finally:
+        if client is not None:
+            client.close()
+        if conn is not None:
+            conn.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -396,6 +472,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "probe":
         return _run_connection_probe(args)
+
+    if args.command == "pose-stream":
+        return _run_pose_stream(args)
 
     if args.real and not args.confirm:
         print("Real mode requires --confirm after the physical preflight.")

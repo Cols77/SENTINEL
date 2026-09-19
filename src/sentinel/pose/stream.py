@@ -10,6 +10,7 @@ been consumed, ``stop_video()`` is called and the collected reports are
 returned.
 """
 import logging
+import time
 
 import numpy as np
 
@@ -45,19 +46,35 @@ def run_pose_stream(
     conn,
     *,
     run_id: str,
-    max_frames: int,
+    max_frames: int | None,
+    duration_s: float | None = None,
 ) -> list[DronePoseReport]:
     """Stream ``max_frames`` frames from ``client`` and persist good poses.
 
     Returns the list of successfully estimated reports (blank/no-tag frames
     contribute nothing). Always calls ``stop_video()`` before returning.
     """
+    if max_frames is None and duration_s is None:
+        raise ValueError("max_frames or duration_s is required")
+    if max_frames is not None and max_frames < 1:
+        raise ValueError("max_frames must be at least 1")
+    if duration_s is not None and duration_s <= 0:
+        raise ValueError("duration_s must be positive")
+
     reports: list[DronePoseReport] = []
+    deadline = time.monotonic() + duration_s if duration_s is not None else None
     client.start_video()
     try:
-        for i in range(max_frames):
+        i = 0
+        while max_frames is None or i < max_frames:
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             try:
-                frame = client.read_frame(timeout=FRAME_READ_TIMEOUT_S)
+                timeout = FRAME_READ_TIMEOUT_S
+                if deadline is not None:
+                    timeout = min(timeout, max(0.001, deadline - time.monotonic()))
+                frame = client.read_frame(timeout=timeout)
+                i += 1
             except (RuntimeError, EOFError, StopIteration) as exc:
                 logger.info("stream ended after %d frame(s): %s", i, exc)
                 break
