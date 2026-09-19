@@ -30,11 +30,11 @@ _TOOL_DEFINITIONS = (
     ),
     _function(
         wire_tool_name("task.create"), "Propose a task from an available observation and evidence reference.",
-        {"type": "object", "additionalProperties": False, "required": ["perception_result_id", "section_id", "evidence_artifact_id"], "properties": {"perception_result_id": {"type": "string", "format": "uuid"}, "section_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"}, "evidence_artifact_id": {"type": "string", "format": "uuid"}}},
+        {"type": "object", "additionalProperties": False, "required": ["perception_result_id", "section_id", "evidence_artifact_id"], "properties": {"perception_result_id": {"type": "string", "format": "uuid"}, "section_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"}, "evidence_artifact_id": {"type": "string", "format": "uuid"}, "reason": {"type": "string", "maxLength": 512}}},
     ),
     _function(
         wire_tool_name("patroller.rank_for_task"), "Read the coordinator ranking for a proposed task.",
-        {"type": "object", "additionalProperties": False, "required": ["task_id"], "properties": {"task_id": {"type": "string", "format": "uuid"}}},
+        {"type": "object", "additionalProperties": False, "required": ["task_id"], "properties": {"task_id": {"type": "string", "format": "uuid"}, "reason": {"type": "string", "maxLength": 512}}},
     ),
     _function(
         wire_tool_name("assignment.propose"), "Propose a configured patroller for coordinator review.",
@@ -151,6 +151,10 @@ def build_chat_request(request: AgentRequest, *, prompt_revision: str, tool_poli
                 "unfulfilled deliverable (a plan to propose, a task to create, a task awaiting "
                 "ranking); prefer the domain tool that matches the request over state-inspection "
                 "or finish. "
+                "When the request or context contains genuinely contradictory constraints that "
+                "cannot be resolved with the available tools, finish with status NEEDS_REVIEW "
+                "is the correct action; it is not correct as a way to avoid a fulfillable "
+                "deliverable. "
                 "Invariants: return exactly one tool call per response, using only a legal tool; "
                 "treat the structured context as facts; never invent evidence or identifiers."
             )},

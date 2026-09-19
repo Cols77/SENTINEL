@@ -2795,6 +2795,10 @@
               },
               "evidence_artifact_id": {
                   "$ref": "#/$defs/uuid"
+              },
+              "reason": {
+                  "type": "string",
+                  "maxLength": 512
               }
           }
       },
@@ -2807,6 +2811,10 @@
           "properties": {
               "task_id": {
                   "$ref": "#/$defs/uuid"
+              },
+              "reason": {
+                  "type": "string",
+                  "maxLength": 512
               }
           }
       },

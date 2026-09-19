@@ -4,7 +4,7 @@
   "scenarios": [
     {
       "name": "initial_plan_one_station",
-      "user_request": "Survey only the LEFT_ALLEY_MIDDLE station. Marker-verified plans are unavailable for this run, so exclude any plan that requires marker verification or covers more stations than requested.",
+      "user_request": "Survey only the LEFT_ALLEY_MIDDLE station. Marker-verified plans are unavailable for this run, so exclude any plan that requires marker verification; among the remaining plans, propose the one with the fewest stations.",
       "phase": "PLAN",
       "state_version": 1,
       "legal_tools": [
@@ -81,11 +81,6 @@
           "sequence_no": 6,
           "event_type": "DETECTION_RECORDED",
           "summary": "Perception result 55555555-5555-4555-8555-555555555555 judged qualifying for LEFT_ALLEY_MIDDLE."
-        },
-        {
-          "sequence_no": 7,
-          "event_type": "RUN_TASK_CREATED",
-          "summary": "Task created 22222222-2222-4222-8222-222222222222 for station LEFT_ALLEY_MIDDLE awaiting patrol ranking."
         }
       ],
       "evidence_context": [

@@ -113,10 +113,20 @@ def _build_request(scenario: Mapping[str, Any], agent_run_id: str) -> AgentReque
 def _previous_result_for_next_turn(
     scenario: Mapping[str, Any], call: Mapping[str, Any]
 ) -> dict[str, Any] | None:
-    """Build the sanitized coordinator feedback for the next reasoning turn."""
+    """Build the sanitized coordinator feedback for the next reasoning turn.
+
+    For task-creating turns the scenario's coordinator_feedback task_id is
+    surfaced inside the schema-legal safe_summary (result.kind stays bare per
+    the AgentToolResultPayload wire schema): after task.create the model must
+    be able to see the new task id to use it for patroller.rank_for_task.
+    """
     feedback = scenario.get("coordinator_feedback")
     if not isinstance(feedback, Mapping):
         return None
+    safe_summary = str(feedback["safe_summary"])[:1024]
+    task_id = feedback.get("task_id")
+    if isinstance(task_id, str) and task_id:
+        safe_summary = f"{safe_summary} (created task id {task_id})"[:1024]
     return {
         "contract_version": "sentinel.v0",
         "wire_type": "agent_tool_result",
@@ -126,7 +136,7 @@ def _previous_result_for_next_turn(
         "state_version": int(scenario["state_version"]) + 1,
         "event_cursor": 1,
         "legal_tools": list(scenario["legal_tools"]),
-        "safe_summary": str(feedback["safe_summary"])[:1024],
+        "safe_summary": safe_summary,
         "result": {"kind": feedback.get("kind", "empty")},
     }
 
@@ -142,6 +152,12 @@ def _expectation_matches(expectations: Mapping[str, Any], call: Mapping[str, Any
         if actual not in allowed:
             failures.append(f"{dotted}: expected one of {allowed}, got {actual!r}")
     return failures
+
+
+def _finish_status(call: Mapping[str, Any]) -> str | None:
+    arguments = call.get("arguments", {})
+    status = arguments.get("status") if isinstance(arguments, Mapping) else None
+    return status if isinstance(status, str) else None
 
 
 def _describe_call(call: Mapping[str, Any]) -> dict[str, Any]:
@@ -218,6 +234,30 @@ def test_bounded_horizon_fails_with_horizon_exhausted():
 
 def test_bounded_horizon_classifies_premature_finish():
     scenario = _scenario_by_name("initial_plan_one_station")
+    model = _ScriptedAgentModel([("finish", {"status": "DONE", "summary": "done"})])
+    outcome = run_bounded_horizon_scenario(model.propose, scenario, AGENT_RUN_ID)
+    assert any("PREMATURE_FINISH" in f for f in outcome["failures"]), outcome["failures"]
+
+
+def test_bounded_horizon_escales_contradictory_scenario_as_pass():
+    """A scenario flagged contradictory:true is PASSED when the model correctly
+    finishes with status NEEDS_REVIEW while deliverables are still pending; no
+    PREMATURE_FINISH failure is recorded."""
+    scenario = dict(_scenario_by_name("qualifying_evidence_to_task"))
+    scenario["contradictory"] = True
+    model = _ScriptedAgentModel(
+        [("finish", {"status": "NEEDS_REVIEW", "summary": "constraints contradict"})]
+    )
+    outcome = run_bounded_horizon_scenario(model.propose, scenario, AGENT_RUN_ID)
+    assert outcome["failures"] == [], outcome["failures"]
+    assert outcome["outcome"] == "ESCALATED — correct escalation on contradictory constraints"
+
+
+def test_bounded_horizon_contradictory_scenario_still_fails_wrong_needs_review_shape():
+    """finish with DONE (not NEEDS_REVIEW) on a contradictory scenario is still
+    a PREMATURE_FINISH: only a correct escalation passes."""
+    scenario = dict(_scenario_by_name("qualifying_evidence_to_task"))
+    scenario["contradictory"] = True
     model = _ScriptedAgentModel([("finish", {"status": "DONE", "summary": "done"})])
     outcome = run_bounded_horizon_scenario(model.propose, scenario, AGENT_RUN_ID)
     assert any("PREMATURE_FINISH" in f for f in outcome["failures"]), outcome["failures"]
@@ -521,6 +561,12 @@ def run_bounded_horizon_scenario(
         expected_tool = expected["expected_tool"]
         allowed_expected = expected_tool if isinstance(expected_tool, list) else [expected_tool]
         if tool == FINISH_TOOL and pending < len(expected_turns):
+            if scenario.get("contradictory") is True and _finish_status(call) == "NEEDS_REVIEW":
+                return {
+                    "calls": calls,
+                    "failures": [],
+                    "outcome": "ESCALATED — correct escalation on contradictory constraints",
+                }
             failures.append(
                 f"turn {turn_index}: PREMATURE_FINISH - finish called while deliverable "
                 f"{pending} ({allowed_expected}) is unfulfilled"
@@ -576,7 +622,11 @@ def run_bounded_horizon_scenario(
             f"HORIZON_EXHAUSTED - only {pending}/{len(expected_turns)} deliverables "
             f"fulfilled within {max_turns} turns"
         )
-    return {"calls": calls, "failures": failures}
+    return {
+        "calls": calls,
+        "failures": failures,
+        "outcome": "PASSED" if pending >= len(expected_turns) and not failures else "FAILED",
+    }
 
 
 def _assert_context_embedded(propose: Any, request: AgentRequest) -> None:
@@ -719,10 +769,10 @@ def test_catalogue_plan_ids_reach_adapter_payload():
 TASK_ID = "22222222-2222-4222-8222-222222222222"
 
 
-def test_created_task_id_reaches_request_event_context():
-    """The scenario whose turn 2 expects patroller.rank_for_task must expose
-    the created task id via schema-legal event_context summaries, and the
-    whole request must validate."""
+def test_created_task_id_reaches_next_turn_previous_result():
+    """After task.create the created task id must reach the next turn through
+    the sanitized previous_result safe_summary (schema-legal), not through a
+    premature event_context entry."""
     from sentinel.contracts import validate_document as _vd
 
     scenario = next(
@@ -730,20 +780,30 @@ def test_created_task_id_reaches_request_event_context():
         for item in _load_scenarios()
         if item["name"] == "qualifying_evidence_to_task"
     )
-    request = _build_request(scenario, AGENT_RUN_ID)
-    summaries = [event["summary"] for event in request.event_context]
-    assert any(TASK_ID in s for s in summaries), (
-        f"{scenario['name']}: created task id {TASK_ID} absent from event_context"
+    # No premature RUN_TASK_CREATED event may name the task id before creation.
+    summaries = [event["summary"] for event in scenario.get("event_context", [])]
+    assert not any(TASK_ID in s for s in summaries), (
+        f"{scenario['name']}: task id {TASK_ID} prematurely present in event_context"
     )
-    for event in request.event_context:
-        assert len(event["event_type"]) <= 64
-        assert len(event["summary"]) <= 512
-    _vd(request.to_dict())
+
+    feedback = _previous_result_for_next_turn(
+        scenario, {"tool_name": "task.create", "arguments": {}}
+    )
+    assert feedback is not None
+    assert TASK_ID in feedback["safe_summary"], (
+        f"{scenario['name']}: created task id {TASK_ID} absent from previous_result safe_summary"
+    )
+    # The whole document must validate against the WP0 wire schema...
+    _vd(feedback)
+    # ...and round-trip as the next turn's previous_result.
+    request = _build_request(scenario, AGENT_RUN_ID)
+    AgentRequest.from_dict({**request.to_dict(), "previous_result": feedback})
 
 
-def test_created_task_id_reaches_adapter_payload():
+def test_created_task_id_reaches_adapter_payload_via_previous_result():
     """build_chat_request output (what the model actually sees) must contain
-    the created task id in the serialized context messages."""
+    the created task id via the previous_result safe_summary, even though the
+    raw event_context never names it."""
     from sentinel.adapter.llm.prompt import build_chat_request as _bcr
 
     scenario = next(
@@ -752,6 +812,14 @@ def test_created_task_id_reaches_adapter_payload():
         if item["name"] == "qualifying_evidence_to_task"
     )
     request = _build_request(scenario, AGENT_RUN_ID)
+    request = AgentRequest.from_dict(
+        {
+            **request.to_dict(),
+            "previous_result": _previous_result_for_next_turn(
+                scenario, {"tool_name": "task.create", "arguments": {}}
+            ),
+        }
+    )
     payload = _bcr(
         request,
         prompt_revision="test-prompt-rev",

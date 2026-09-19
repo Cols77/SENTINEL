@@ -76,11 +76,34 @@ def test_system_prompt_states_decision_protocol():
     assert "never call it while the request still describes an unfulfilled deliverable" in prompt
     assert "a plan to propose, a task to create, a task awaiting ranking" in prompt
     assert "prefer the domain tool that matches the request over state-inspection" in prompt
-    # (5) invariants: one tool call, legal tools only, facts only, no invented evidence/identifiers.
+    # (5) escalation semantics: NEEDS_REVIEW is correct only for genuinely contradictory constraints.
+    assert "genuinely contradictory constraints" in prompt
+    assert "cannot be resolved with the available tools" in prompt
+    assert "finish with status needs_review" in prompt
+    assert "not correct as a way to avoid a fulfillable" in prompt
+    # (6) invariants: one tool call, legal tools only, facts only, no invented evidence/identifiers.
     assert "exactly one tool call per response" in prompt
     assert "only a legal tool" in prompt
     assert "context as facts" in prompt
     assert "never invent evidence or identifiers" in prompt
+
+
+def test_system_prompt_states_escalation_semantics():
+    payload = build_chat_request(REQUEST, prompt_revision="prompt-v2", tool_policy_revision="tools-v1")
+    prompt = payload["messages"][0]["content"].lower()
+    assert "genuinely contradictory constraints" in prompt
+    assert "finish with status needs_review" in prompt
+    assert "not correct as a way to avoid a fulfillable" in prompt
+
+
+def test_reason_argument_is_advertised_for_task_create_and_rank():
+    payload = build_chat_request(REQUEST, prompt_revision="prompt-v1", tool_policy_revision="tools-v1")
+    schemas = {item["function"]["name"]: item["function"]["parameters"] for item in payload["tools"]}
+
+    for tool in ("task.create", "patroller.rank_for_task"):
+        reason = schemas[wire_tool_name(tool)]["properties"]["reason"]
+        assert reason == {"type": "string", "maxLength": 512}, (tool, reason)
+        assert "reason" not in schemas[wire_tool_name(tool)]["required"]
 
 
 def test_system_prompt_does_not_encode_scenario_specific_answers():
