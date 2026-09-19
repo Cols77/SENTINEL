@@ -1,0 +1,176 @@
+{
+  "title": "Jev v2 live shadow replay (J5)",
+  "fixture": "fixtures/judgment/cases.v2.jsonl",
+  "label_source": "approved v2 case-level hazard/needs_review labels projected into run_cases reference shape",
+  "repeats": 3,
+  "network": "live OpenRouter calls; Jev /api/alpha/decisions and LLM /api/v1/chat/completions",
+  "jev_model": "~typesafe/jev-latest",
+  "llm_model": "z-ai/glm-5.3-flash",
+  "arms": {
+    "jev": {
+      "metrics": {
+        "total": 21,
+        "unavailable": 0,
+        "hazard": {
+          "scored": 15,
+          "false_safe": 1,
+          "false_escalation": 2
+        },
+        "review": {
+          "scored": 21,
+          "false_safe": 0,
+          "false_escalation": 10
+        },
+        "stability": {
+          "cases": 36,
+          "flipped": 1,
+          "flip_count": 1
+        },
+        "routing": {
+          "threshold_0.5": {
+            "escalate": 92,
+            "no_escalate": 16
+          },
+          "bands": {
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "unknown": 108
+          }
+        },
+        "pos_and_review": {
+          "pos_clean_false_safe": {
+            "false_safe": 1,
+            "scored": 4
+          },
+          "needs_review_recall": {
+            "hits": 11,
+            "needed": 11,
+            "recall": 1.0,
+            "false_escalation_on_negatives": 10
+          },
+          "self_confidence_bands_noul": {
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "unknown": 42
+          }
+        },
+        "decision_rule_vs_always_escalate": {
+          "ranks_fixture": false,
+          "false_safe": {
+            "judge": 1,
+            "always_escalate": 0
+          },
+          "false_escalation": {
+            "judge": 2,
+            "always_escalate": 7
+          },
+          "equal_or_better_false_safe": false,
+          "beats_false_escalation": true
+        }
+      },
+      "repeats": 3
+    },
+    "llm": {
+      "metrics": {
+        "total": 21,
+        "unavailable": 0,
+        "hazard": {
+          "scored": 15,
+          "false_safe": 0,
+          "false_escalation": 3
+        },
+        "review": {
+          "scored": 21,
+          "false_safe": 0,
+          "false_escalation": 5
+        },
+        "stability": {
+          "cases": 36,
+          "flipped": 4,
+          "flip_count": 6
+        },
+        "routing": {
+          "threshold_0.5": {
+            "escalate": 80,
+            "no_escalate": 28
+          },
+          "bands": {
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "unknown": 108
+          }
+        },
+        "pos_and_review": {
+          "pos_clean_false_safe": {
+            "false_safe": 0,
+            "scored": 4
+          },
+          "needs_review_recall": {
+            "hits": 11,
+            "needed": 11,
+            "recall": 1.0,
+            "false_escalation_on_negatives": 5
+          },
+          "self_confidence_bands_noul": {
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "unknown": 42
+          }
+        },
+        "decision_rule_vs_always_escalate": {
+          "ranks_fixture": true,
+          "false_safe": {
+            "judge": 0,
+            "always_escalate": 0
+          },
+          "false_escalation": {
+            "judge": 3,
+            "always_escalate": 7
+          },
+          "equal_or_better_false_safe": true,
+          "beats_false_escalation": true
+        }
+      },
+      "repeats": 3
+    }
+  },
+  "always_escalate_baseline": {
+    "total": 21,
+    "unavailable": 0,
+    "hazard": {
+      "scored": 15,
+      "false_safe": 0,
+      "false_escalation": 7
+    },
+    "review": {
+      "scored": 21,
+      "false_safe": 0,
+      "false_escalation": 10
+    },
+    "stability": {
+      "cases": 36,
+      "flipped": 0,
+      "flip_count": 0
+    },
+    "routing": {
+      "threshold_0.5": {
+        "escalate": 36,
+        "no_escalate": 0
+      },
+      "bands": {
+        "high": 36,
+        "medium": 0,
+        "low": 0,
+        "unknown": 0
+      }
+    }
+  },
+  "policy": {
+    "jev_mode": "SHADOW_EVALUATION_ONLY",
+    "worse_only_if_loses_to_always_escalate_on_false_safe_and_needs_review_recall": true
+  }
+}
