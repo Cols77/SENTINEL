@@ -165,17 +165,16 @@ def test_no_catalogue_argument_assertion_still_scored_not_silently_passed(tmp_pa
     class RecordingJudge:
         def evaluate(self, state, questions):
             seen["questions"] = questions
-            # Correct tool, wrong argument value.
-            return {"tool_choice": {"value": "task.create_from_evidence"},
-                    "arg_choice": {"value": "PERC_OTHER"}}
+            # Correct tool, wrong argument value on every asserted field.
+            return {q["name"]: {"value": "PERC_OTHER"} for q in questions}
 
     report = replay_scenarios(path, RecordingJudge())
     names = [q["name"] for q in seen["questions"]]
-    assert names == ["tool_choice", "arg_choice"]
-    arg_q = seen["questions"][1]
-    assert arg_q["type"] == "choice"
-    # Criteria = the expected argument values (no catalogue fallback).
-    assert set(arg_q["criteria"]) == {"PERC_9", "TASK_A"}
+    assert names[0] == "tool_choice"
+    assert all(n.startswith("arg_choice") for n in names[1:])
+    # Criteria = the expected argument values (no catalogue fallback),
+    # one question per asserted field.
+    assert {c for q in seen["questions"][1:] for c in q["criteria"]} == {"PERC_9", "TASK_A"}
     turn = report["scenarios"][0]["turns"][0]
     assert turn["passed"] is False
     assert any("PERC_9" in f for f in turn["failures"])
