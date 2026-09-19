@@ -1,3 +1,9 @@
+---
+id: sentinel-v0-coherence-spec
+title: "SENTINEL V0 Coherence Specification"
+status: review-pending
+---
+
 # SENTINEL V0 Coherence Specification
 
 > **Status:** Revised after independent review; re-review pending
@@ -150,3 +156,12 @@ V0 release requires G0–G4. G0–G3 can be completed without live hardware; G4 
 ## 9. Non-goals
 
 V0 excludes real GIS/terrain, GPS/localisation, multi-drone coordination, autonomous patroller dispatch, external notification, hidden chain-of-thought display, automatic provider failover and a broker.
+
+> **Amendment (2026-09-17, Colin Aubé, PM authority):** one safety carve-out is
+> added to these non-goals: autonomous **geofence hard stop** (SR-SENTINEL-V0-W08).
+> The worker continuously verifies its AprilTag-derived position against the
+> configured room safety envelope and, on envelope exit, issues the terminal
+> emergency hard stop without waiting for coordinator or operator action. This is
+> a fail-safe reflex, not autonomy: it can only stop the drone and is always
+> ingested as `EMERGENCY_LATCHED`. No other autonomous motion, correction or
+> dispatch is introduced.

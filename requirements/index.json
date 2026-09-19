@@ -1,0 +1,169 @@
+{
+  "requirements": [
+    {
+      "id": "SR-SENTINEL-V0-001",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-002",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-003",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-004",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-A01",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-A02",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-A03",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-C01",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-C02",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-C03",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-C04",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-C05",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-C06",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-M01",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-M02",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-P01",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-P02",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-P03",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-P04",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-P05",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-P06",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-U01",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-U02",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-U03",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-U04",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-W01",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-W02",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-W03",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-W04",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-W05",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-W06",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-W07",
+      "checksum": null,
+      "proposed": true
+    },
+    {
+      "id": "SR-SENTINEL-V0-W08",
+      "checksum": null,
+      "proposed": true
+    }
+  ]
+}

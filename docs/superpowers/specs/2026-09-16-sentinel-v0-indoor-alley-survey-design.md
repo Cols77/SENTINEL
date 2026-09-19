@@ -35,6 +35,17 @@ accepted capture, the worker verifies the station's expected tag. This provides
 an approximate visual pose for display and proves the capture's zone. It does
 not steer the drone or correct its route.
 
+> **Amendment (2026-09-17, Colin Aubé, PM authority):** AprilTag pose estimation
+> is promoted from an approximate display-only aid to a required V0 worker
+> capability (SR-SENTINEL-V0-W07). The pose estimate remains display- and
+> verification-oriented — it does not steer the drone or correct its route — and
+> additionally feeds the worker's continuous safety-cube position check
+> (SR-SENTINEL-V0-W08). A failed or unreadable expected tag in marker mode
+> remains a capture failure. This supersedes the "optional/deferred" localization
+> note in `2026-09-15-sentinel-djitellopy-backend.md` for the V0 marker-mode
+> path; that spec's open-loop x/y estimate note remains valid only for the
+> route-only fallback.
+
 ### Route-only fallback
 
 The operator selects the mode before preflight. In `ROUTE_ONLY_2_ZONE` mode,

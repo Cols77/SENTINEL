@@ -1,0 +1,54 @@
+{
+  "manifest_version": "sentinel.v0",
+  "dialect": "sqlite3",
+  "invariants": {
+    "event_uniqueness_order": "events are unique and monotonically ordered by (run_id, sequence_no)",
+    "scoped_idempotency_uniqueness": "idempotency is unique for run_id, actor_type, actor_id, idempotency_key",
+    "state_version_concurrency": "commands compare expected_state_version before mutation and state_version is non-negative",
+    "append_only_events": "persisted events cannot be updated or deleted",
+    "tool_operation_states": "operation status follows PENDING -> DISPATCHED -> SUCCEEDED|FAILED, with IN_DOUBT reconciliation",
+    "envelope_choreography_registry_references": "wire envelopes reference registered envelope and choreography IDs",
+    "approval_actions": "approval actions bind plan hash, run, actor and expected state version",
+    "emergency_records": "emergency records are independently latched and immutable"
+  },
+  "tables": [
+    {
+      "name": "runs",
+      "sql": "CREATE TABLE runs (run_id TEXT PRIMARY KEY, state_version INTEGER NOT NULL CHECK (state_version >= 0), status TEXT NOT NULL, latest_event_sequence INTEGER NOT NULL DEFAULT 0 CHECK (latest_event_sequence >= 0), emergency_latched INTEGER NOT NULL DEFAULT 0 CHECK (emergency_latched IN (0,1)));"
+    },
+    {
+      "name": "events",
+      "sql": "CREATE TABLE events (event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(run_id), sequence_no INTEGER NOT NULL CHECK (sequence_no > 0), event_type TEXT NOT NULL, state_version INTEGER NOT NULL CHECK (state_version >= 0), payload_json TEXT NOT NULL, recorded_at TEXT NOT NULL, UNIQUE (run_id, sequence_no));"
+    },
+    {
+      "name": "idempotency_keys",
+      "sql": "CREATE TABLE idempotency_keys (run_id TEXT NOT NULL REFERENCES runs(run_id), actor_type TEXT NOT NULL, actor_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, command_type TEXT NOT NULL, expected_state_version INTEGER CHECK (expected_state_version IS NULL OR expected_state_version >= 0), payload_sha256 TEXT NOT NULL, result_json TEXT NOT NULL, PRIMARY KEY (run_id, actor_type, actor_id, idempotency_key));"
+    },
+    {
+      "name": "operation_records",
+      "sql": "CREATE TABLE operation_records (operation_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(run_id), mission_id TEXT NOT NULL, command_id TEXT NOT NULL, worker_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('PENDING','DISPATCHED','SUCCEEDED','FAILED','IN_DOUBT')), dispatch_recorded_at TEXT, reconciled_at TEXT);"
+    },
+    {
+      "name": "envelope_registry",
+      "sql": "CREATE TABLE envelope_registry (wire_type TEXT PRIMARY KEY, schema_id TEXT NOT NULL UNIQUE, contract_version TEXT NOT NULL);"
+    },
+    {
+      "name": "choreography_registry",
+      "sql": "CREATE TABLE choreography_registry (choreography_id TEXT PRIMARY KEY, envelope_schema_id TEXT NOT NULL REFERENCES envelope_registry(schema_id), enabled INTEGER NOT NULL CHECK (enabled IN (0,1)));"
+    },
+    {
+      "name": "approval_actions",
+      "sql": "CREATE TABLE approval_actions (action_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(run_id), plan_id TEXT NOT NULL, plan_sha256 TEXT NOT NULL, actor_id TEXT NOT NULL, action TEXT NOT NULL CHECK (action IN ('CONFIRM','REJECT')), expected_state_version INTEGER NOT NULL CHECK (expected_state_version >= 0), created_at TEXT NOT NULL);"
+    },
+    {
+      "name": "emergency_records",
+      "sql": "CREATE TABLE emergency_records (signal_id TEXT PRIMARY KEY, run_id TEXT REFERENCES runs(run_id), mission_id TEXT, worker_id TEXT NOT NULL, latched_at TEXT NOT NULL, source_kind TEXT NOT NULL, reason_code TEXT NOT NULL);"
+    }
+  ],
+  "triggers": [
+    "CREATE TRIGGER events_append_only_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;",
+    "CREATE TRIGGER events_append_only_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;",
+    "CREATE TRIGGER emergency_records_append_only_update BEFORE UPDATE ON emergency_records BEGIN SELECT RAISE(ABORT, 'emergency records are immutable'); END;",
+    "CREATE TRIGGER emergency_records_append_only_delete BEFORE DELETE ON emergency_records BEGIN SELECT RAISE(ABORT, 'emergency records are immutable'); END;"
+  ]
+}

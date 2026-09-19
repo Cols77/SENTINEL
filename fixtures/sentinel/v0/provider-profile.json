@@ -1,0 +1,16 @@
+{
+  "profile_version": "provider-profile.v1",
+  "profile_id": "55555555-5555-4555-8555-555555555555",
+  "approval_status": "APPROVED",
+  "selection_decision_id": "SIMULATED_SELECTION_1",
+  "provider": "simulated-provider",
+  "model": "simulated-model",
+  "model_revision": "simulated-model-r1",
+  "prompt_revision": "simulated-prompt-r1",
+  "transform_revision": "simulated-transform-r1",
+  "evaluation_pack_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "score_semantics": "deterministic simulated score",
+  "decision_threshold": 0.5,
+  "replay_allowed_in_judged_path": false,
+  "box_required": false
+}
