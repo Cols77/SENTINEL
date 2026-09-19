@@ -47,6 +47,31 @@ def validate_perception(document: Mapping[str, Any]) -> Mapping[str, Any]:
     return document
 
 
+_PREFLIGHT_CHECKS = {
+    "WIFI_INTERFACE",
+    "DRONE_LINK",
+    "BATTERY_TELEMETRY",
+    "LIVE_VIDEO",
+    "LAYOUT_MARKERS",
+    "BOUNDED_AREA",
+    "HEIGHT_ENVELOPE",
+    "EMERGENCY_LATCH",
+}
+
+
+def validate_preflight_report(report: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Enforce the immutable report's exact check set and aggregate result."""
+    if not isinstance(report, Mapping):
+        raise ContractViolation("INVALID_PREFLIGHT_REPORT", "report must be an object")
+    checks = report.get("checks")
+    names = [check.get("name") for check in checks] if isinstance(checks, list) else []
+    if set(names) != _PREFLIGHT_CHECKS or len(names) != len(_PREFLIGHT_CHECKS):
+        raise ContractViolation("INVALID_PREFLIGHT_REPORT", "report must contain exactly the eight named checks")
+    if report.get("passed") != all(check.get("passed") is True for check in checks):
+        raise ContractViolation("INVALID_PREFLIGHT_REPORT", "passed must equal the conjunction of check results")
+    return report
+
+
 def _orientation(a, b, c):
     return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
 

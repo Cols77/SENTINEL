@@ -101,6 +101,8 @@ class _WireRecord:
         def convert(value: Any) -> Any:
             if isinstance(value, LocalPoint):
                 return [value.x, value.y]
+            if isinstance(value, _WireRecord) and value is not self:
+                return value.to_dict()
             if is_dataclass(value):
                 return {field.name: convert(getattr(value, field.name)) for field in fields(value)}
             if isinstance(value, tuple):
@@ -111,10 +113,27 @@ class _WireRecord:
                 return {key: convert(item) for key, item in value.items()}
             return value
 
-        return convert(self)
+        result = convert(self)
+        if isinstance(result, dict):
+            result.setdefault("wire_type", self.wire_type)
+        return result
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def from_dict(cls, document: Mapping[str, Any]):
+        if not isinstance(document, Mapping):
+            raise ContractValidationError("wire document must be an object")
+        validate_document(document)
+        if document.get("wire_type") != cls.wire_type:
+            raise ContractValidationError(
+                f"expected wire_type {cls.wire_type}, got {document.get('wire_type')}"
+            )
+        names = {
+            item.name for item in fields(cls) if item.init and item.name != "wire_type"
+        }
+        return cls(**{name: document[name] for name in names if name in document})
 
 
 @dataclass(frozen=True)
@@ -246,6 +265,81 @@ class ArtifactRef(_WireRecord):
     source_kind: str
     contract_version: str = "sentinel.v0"
     wire_type: ClassVar[str] = "artifact_ref"
+
+
+@dataclass(frozen=True)
+class AgentToolCall(_WireRecord):
+    tool_name: str
+    arguments: dict[str, Any]
+    contract_version: str = "sentinel.v0"
+    wire_type: ClassVar[str] = "agent_tool_call"
+
+
+@dataclass(frozen=True)
+class AgentToolResult(_WireRecord):
+    tool_name: str
+    status: str
+    error_code: str | None
+    state_version: int
+    event_cursor: int
+    legal_tools: list[str]
+    safe_summary: str
+    result: dict[str, Any]
+    contract_version: str = "sentinel.v0"
+    wire_type: ClassVar[str] = "agent_tool_result"
+
+
+@dataclass(frozen=True)
+class AgentRequest(_WireRecord):
+    agent_run_id: str
+    run_id: str
+    state_version: int
+    allowed_intent_schema_id: str
+    deadline: str
+    phase: str
+    event_context: list[dict[str, Any]]
+    evidence_context: list[dict[str, Any]]
+    legal_tools: list[str]
+    previous_result: dict[str, Any] | None
+    user_request: str
+    contract_version: str = "sentinel.v0"
+    wire_type: ClassVar[str] = "agent_request"
+
+
+@dataclass(frozen=True)
+class AgentModelResult(_WireRecord):
+    agent_run_id: str
+    status: str
+    tool_calls: list[AgentToolCall]
+    intent: str | None = None
+    catalogue_plan_id: str | None = None
+    diagnostic: str | None = None
+    contract_version: str = "sentinel.v0"
+    wire_type: ClassVar[str] = "agent_result"
+
+    @classmethod
+    def from_dict(cls, document: Mapping[str, Any]):
+        validate_document(document)
+        calls = [AgentToolCall.from_dict(item) for item in document.get("tool_calls", [])]
+        return cls(
+            agent_run_id=document["agent_run_id"],
+            status=document["status"],
+            tool_calls=calls,
+            intent=document.get("intent"),
+            catalogue_plan_id=document.get("catalogue_plan_id"),
+            diagnostic=document.get("diagnostic"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        result = super().to_dict()
+        if self.status != "TOOL_CALLS":
+            result.pop("tool_calls", None)
+
+
+        for name in ("intent", "catalogue_plan_id", "diagnostic"):
+            if result.get(name) is None:
+                result.pop(name, None)
+        return result
 
 
 def as_wire_dict(value: Any) -> Any:

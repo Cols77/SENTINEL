@@ -15,6 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "jsonschema>=4.23"]
+llm = ["openai>=1,<2"]
 
 [project.scripts]
 sentinel = "sentinel.__main__:main"
@@ -22,6 +23,9 @@ sentinel = "sentinel.__main__:main"
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "live_llm: opt-in live LLM acceptance gate; requires SENTINEL_RUN_LIVE_LLM_ACCEPTANCE=1 and real provider config",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

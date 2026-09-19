@@ -1,6 +1,10 @@
 """Public SENTINEL WP0 contract gate."""
 
 from .schemas import (
+    AgentModelResult,
+    AgentRequest,
+    AgentToolCall,
+    AgentToolResult,
     ArtifactRef,
     ContractValidationError,
     EmergencySignal,
@@ -17,8 +21,13 @@ from .schemas import (
     load_schema,
     validate_document,
 )
+from .validators import validate_preflight_report
 
 __all__ = [
+    "AgentModelResult",
+    "AgentRequest",
+    "AgentToolCall",
+    "AgentToolResult",
     "ArtifactRef",
     "ContractValidationError",
     "EmergencySignal",
@@ -34,4 +43,5 @@ __all__ = [
     "iter_validation_errors",
     "load_schema",
     "validate_document",
+    "validate_preflight_report",
 ]
