@@ -139,6 +139,94 @@ def test_arg_choice_criteria_are_catalogue_plan_ids_and_missing_arg_fails(tmp_pa
     assert any("PLAN_B" in f and "PLAN_A" in f for f in turn["failures"])
 
 
+def test_no_catalogue_argument_assertion_still_scored_not_silently_passed(tmp_path):
+    """Mirrors the real qualifying_evidence_to_task shape: no catalogue key.
+
+    A turn asserting arguments.* without a catalogue must still produce an
+    arg_choice question (criteria = expected values) and fail when the judge
+    picks outside the expectation — never pass on tool match alone.
+    """
+    scenarios = {
+        "scenario_set": "s", "scenarios": [{
+            "name": "qualifying_evidence_to_task", "user_request": "u",
+            "phase": "EVIDENCE_REVIEW", "state_version": 2,
+            "legal_tools": ["task.create_from_evidence", "finish"],
+            "event_context": [], "evidence_context": [{"id": "EV1"}],
+            "expected_turns": [{
+                "expected_tool": "task.create_from_evidence",
+                "expectations": {"arguments.perception_result_id": "PERC_9",
+                                 "arguments.task_id": "TASK_A"},
+            }],
+        }]
+    }
+    path = _write_scenarios(tmp_path / "s.json", scenarios)
+    seen: dict[str, Any] = {}
+
+    class RecordingJudge:
+        def evaluate(self, state, questions):
+            seen["questions"] = questions
+            # Correct tool, wrong argument value.
+            return {"tool_choice": {"value": "task.create_from_evidence"},
+                    "arg_choice": {"value": "PERC_OTHER"}}
+
+    report = replay_scenarios(path, RecordingJudge())
+    names = [q["name"] for q in seen["questions"]]
+    assert names == ["tool_choice", "arg_choice"]
+    arg_q = seen["questions"][1]
+    assert arg_q["type"] == "choice"
+    # Criteria = the expected argument values (no catalogue fallback).
+    assert set(arg_q["criteria"]) == {"PERC_9", "TASK_A"}
+    turn = report["scenarios"][0]["turns"][0]
+    assert turn["passed"] is False
+    assert any("PERC_9" in f for f in turn["failures"])
+
+
+def test_multi_argument_assertions_scored_independently(tmp_path):
+    scenarios = {
+        "scenario_set": "s", "scenarios": [{
+            "name": "multi", "user_request": "u", "phase": "PLAN", "state_version": 1,
+            "legal_tools": ["inspection.propose_plan", "finish"],
+            "event_context": [], "evidence_context": [],
+            "expected_turns": [{
+                "expected_tool": "inspection.propose_plan",
+                "expectations": {"arguments.catalogue_plan_id": "PLAN_A",
+                                 "arguments.task_id": "TASK_1"},
+            }],
+        }]
+    }
+    path = _write_scenarios(tmp_path / "s.json", scenarios)
+
+    class RecordingJudge:
+        def evaluate(self, state, questions):
+            seen["names"] = [q["name"] for q in questions]
+            return {q["name"]: {"value": "PLAN_A"} for q in questions}
+
+    seen: dict[str, Any] = {}
+    report = replay_scenarios(path, RecordingJudge())
+    turn = report["scenarios"][0]["turns"][0]
+    assert turn["passed"] is False
+    assert any("task_id" in f for f in turn["failures"])
+
+
+def test_judge_missing_arg_answer_fails_closed(tmp_path):
+    scenarios = {
+        "scenario_set": "s", "scenarios": [{
+            "name": "n", "user_request": "u", "phase": "PLAN", "state_version": 1,
+            "legal_tools": ["t"], "event_context": [], "evidence_context": [],
+            "expected_turns": [{
+                "expected_tool": "t",
+                "expectations": {"arguments.perception_result_id": "P1"},
+            }],
+        }]
+    }
+    path = _write_scenarios(tmp_path / "s.json", scenarios)
+    judge = StaticJudge(answers={"tool_choice": {"value": "t"}})
+    report = replay_scenarios(path, judge)
+    turn = report["scenarios"][0]["turns"][0]
+    assert turn["passed"] is False
+    assert any("no answer" in f for f in turn["failures"])
+
+
 def test_coordinator_feedback_only_after_first_turn(tmp_path):
     scenarios = {
         "scenario_set": "s", "scenarios": [{
@@ -161,6 +249,55 @@ def test_coordinator_feedback_only_after_first_turn(tmp_path):
     replay_scenarios(path, RecordingJudge())
     assert "coordinator_feedback" not in states[0]
     assert states[1]["coordinator_feedback"]["safe_summary"] == "still pending"
+
+
+def test_no_catalogue_argument_assertions_are_never_silently_dropped(tmp_path):
+    """Mirrors the real 'qualifying_evidence_to_task' shape: arguments
+    asserted with NO catalogue key. B10 fails the turn for every unmet
+    expectation; the replay must ask and score each one (fail closed)."""
+    scenarios = {
+        "scenario_set": "s", "scenarios": [{
+            "name": "qualifying_evidence_to_task", "user_request": "u",
+            "phase": "EVIDENCE_QUALIFIED", "state_version": 7,
+            "legal_tools": ["task.create", "finish"],
+            "event_context": [], "evidence_context": [],
+            "expected_turns": [{
+                "expected_tool": "task.create",
+                "expectations": {
+                    "arguments.perception_result_id": "5555",
+                    "arguments.task_id": "2222",
+                },
+            }],
+        }]
+    }
+    path = _write_scenarios(tmp_path / "s.json", scenarios)
+    seen: dict[str, Any] = {}
+
+    class RecordingJudge:
+        def evaluate(self, state, questions):
+            seen["questions"] = {q["name"]: q["criteria"] for q in questions}
+            return {q["name"]: {"value": "WRONG"} for q in questions}
+
+    report = replay_scenarios(path, RecordingJudge())
+    turn = report["scenarios"][0]["turns"][0]
+    # every asserted argument got its own question whose criteria include
+    # the expected values even without a catalogue
+    assert "arg_choice_0_perception_result_id" in seen["questions"]
+    assert seen["questions"]["arg_choice_0_perception_result_id"] == {"5555": "5555"}
+    assert "arg_choice_1_task_id" in seen["questions"]
+    assert seen["questions"]["arg_choice_1_task_id"] == {"2222": "2222"}
+    # and every unmet assertion fails the turn (B10 semantics)
+    assert turn["passed"] is False
+    assert any("perception_result_id" in f and "5555" in f for f in turn["failures"])
+    assert any("task_id" in f and "2222" in f for f in turn["failures"])
+
+    # with matching answers the same shape passes
+    class GoodJudge:
+        def evaluate(self, state, questions):
+            return {q["name"]: {"value": next(iter(q["criteria"]))} for q in questions}
+
+    report = replay_scenarios(path, GoodJudge())
+    assert report["scenarios"][0]["passed"] is True
 
 
 def test_judge_unavailable_propagates_fail_closed(tmp_path):

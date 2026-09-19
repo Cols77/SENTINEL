@@ -332,9 +332,15 @@ def replay_scenarios(scenarios_path: str, judge) -> dict[str, Any]:
     the scenario's legal_tools, keyed by name with description-or-name
     values) plus, when the turn asserts arguments (e.g.
     arguments.catalogue_plan_id), an 'arg_choice' question over the
-    catalogue plan IDs. Turn passes iff tool_choice.value == expected_tool
-    AND every asserted argument matches. Shadow-only: read-only over the
-    scenario document, no network, no coordinator side effects.
+    arguments. Turn passes iff tool_choice.value == expected_tool
+    AND every asserted argument matches. When the scenario has no
+    catalogue, arg_choice criteria fall back to the expected argument
+    values; a turn asserting arguments with no usable criteria fails
+    closed (never silently passes). Shadow-only: read-only over the
+    scenario document, no network, no coordinator side effects. Note:
+    coordinator_feedback is passed through as the raw scenario dict,
+    not B10's sanitized sentinel.v0 tool-result wire shape (shadow
+    harness per card spec).
     """
     scenarios = _load_scenarios(scenarios_path)
     report_scenarios: list[dict[str, Any]] = []
@@ -363,6 +369,31 @@ def replay_scenarios(scenarios_path: str, judge) -> dict[str, Any]:
                 if dotted.startswith("arguments.")
             ]
 
+            def _arg_question_name(index: int, key: str) -> str:
+                # Canonical card shape: exactly 'arg_choice' for a single
+                # asserted argument; suffixed per key when several exist so
+                # each expectation (B10-style) is scored independently.
+                return (SCENARIO_QUESTION_ARG if len(arg_keys) == 1
+                        else f"{SCENARIO_QUESTION_ARG}_{index}_{key}")
+
+            # B10 fails a turn for EVERY unmet expectation, so each asserted
+            # argument gets its own choice question. Criteria always include
+            # the expected values (plus catalogue plan IDs for
+            # catalogue_plan_id) — an assertion is never silently dropped,
+            # with or without a catalogue.
+            arg_questions: list[tuple[str, str, dict[str, str]]] = []  # (name, key, criteria)
+            for arg_index, key in enumerate(arg_keys):
+                values: list[str] = [
+                    str(v) for v in (expectations[f"arguments.{key}"]
+                                     if isinstance(expectations[f"arguments.{key}"], list)
+                                     else [expectations[f"arguments.{key}"]])
+                ]
+                if key == "catalogue_plan_id":
+                    values.extend(plan_id for plan_id in _arg_choice_criteria(scenario)
+                                  if plan_id not in values)
+                arg_questions.append((_arg_question_name(arg_index, key), key,
+                                      {v: v for v in values}))
+
             state: dict[str, Any] = {
                 "user_request": scenario.get("user_request", ""),
                 "phase": scenario.get("phase"),
@@ -384,17 +415,17 @@ def replay_scenarios(scenarios_path: str, judge) -> dict[str, Any]:
                 ),
                 "criteria": criteria,
             }]
-            if arg_keys and _arg_choice_criteria(scenario):
-                questions.append({
-                    "name": SCENARIO_QUESTION_ARG,
-                    "type": "choice",
-                    "instruction": (
-                        "Which catalogue plan id must the turn's arguments carry? "
-                        "Choose exactly one."
-                    ),
-                    "criteria": {plan_id: plan_id
-                                 for plan_id in _arg_choice_criteria(scenario)},
-                })
+            if arg_questions:
+                for q_name, _key, q_criteria in arg_questions:
+                    questions.append({
+                        "name": q_name,
+                        "type": "choice",
+                        "instruction": (
+                            "Which value must the turn's arguments carry for this "
+                            "asserted field? Choose exactly one."
+                        ),
+                        "criteria": q_criteria,
+                    })
 
             answer_map: dict[str, dict[str, Any]] | None
             try:
@@ -423,14 +454,20 @@ def replay_scenarios(scenarios_path: str, judge) -> dict[str, Any]:
                 "expected_tool": allowed,
                 "failures": failures,
             }
-            if any(q["name"] == SCENARIO_QUESTION_ARG for q in questions) and answer_map.get(SCENARIO_QUESTION_ARG):
-                arg_value = answer_map[SCENARIO_QUESTION_ARG].get("value")
-                turn_report["arg_choice"] = arg_value
-                for dotted, expected in expectations.items():
+            if arg_questions:
+                for q_name, key, _q_criteria in arg_questions:
+                    arg_answer = answer_map.get(q_name)
+                    if not arg_answer:
+                        failures.append(
+                            f"arguments.{key}: judge produced no answer for {q_name!r}")
+                        continue
+                    arg_value = arg_answer.get("value")
+                    turn_report[f"arg_choice_{key}"] = arg_value
+                    expected = expectations[f"arguments.{key}"]
                     expected_values = expected if isinstance(expected, list) else [expected]
                     if arg_value not in expected_values:
                         failures.append(
-                            f"{dotted}: expected one of {expected_values}, "
+                            f"arguments.{key}: expected one of {expected_values}, "
                             f"judge selected {arg_value!r}"
                         )
             turn_report["passed"] = not failures
