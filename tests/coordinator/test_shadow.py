@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 
 from sentinel.coordinator.agent_loop import AgentLoop
@@ -145,6 +146,46 @@ class _CountingAdvisor:
         return {"ignored": True}
 
 
+class _ConcurrencyProbeAdvisor:
+    """Its first ``decide()`` call hangs (past any reasonable timeout) until
+    released; every call counts how many ``decide()`` invocations were ever
+    concurrently in flight on this *same instance*. Used to prove that a
+    straggling, timed-out call can never run alongside a later call to the
+    same advisor instance."""
+
+    def __init__(self) -> None:
+        self.last: Decision | None = None
+        self.calls = 0
+        self.max_concurrent = 0
+        self._active = 0
+        self._lock = threading.Lock()
+        self._hang = threading.Event()
+        self.second_call_finished = threading.Event()
+
+    def release(self) -> None:
+        self._hang.set()
+
+    def decide(self, request: dict, context: PolicyContext) -> dict:
+        with self._lock:
+            self.calls += 1
+            call_no = self.calls
+            self._active += 1
+            self.max_concurrent = max(self.max_concurrent, self._active)
+        try:
+            if call_no == 1:
+                self._hang.wait(timeout=5.0)
+            candidate = context.legal.candidates[0]
+            self.last = Decision(chooser="JEV", label=candidate.label, confidence=0.9, band="HIGH",
+                                  legal_labels=context.legal.labels, model=f"probe-call-{call_no}",
+                                  error=None, latency_ms=1)
+            return {"ignored": True}
+        finally:
+            with self._lock:
+                self._active -= 1
+            if call_no == 2:
+                self.second_call_finished.set()
+
+
 # --- (a) non-interference: drive the real one-station flow -----------------
 
 def _run_select_plan_only(tmp_path, wrap):
@@ -188,6 +229,34 @@ def test_non_interference_opposite_raising_and_timeout_advisors(tmp_path):
         # the ladder actually ran the advisor and swallowed whatever it did
         assert advisor.calls == 1, name
         assert sink.records[0]["advisors"]["bad"]["error"] is not None or name == "opposite", name
+
+
+def test_timed_out_advisor_call_never_races_a_later_call_on_the_same_instance():
+    """Regression test: advisor instances are constructed once and reused
+    across multiple judgment points in the same run (e.g. SELECT_PLAN then
+    EVIDENCE_GATE). If a first call times out, its worker thread keeps
+    running in the background -- it must never run *concurrently* with a
+    later ``decide()`` call on that same advisor instance, or the
+    straggler's eventual write to the shared ``.last`` attribute can land
+    after (and clobber) the later call's own write, corrupting that later
+    call's audit record with stale data."""
+    advisor = _ConcurrencyProbeAdvisor()
+    sink = MemoryAuditSink()
+    ladder = ShadowLadder(RulePolicy(), [("x", advisor)], sink, advisor_timeout_s=0.05)
+
+    # Call 1 (SELECT_PLAN): the advisor hangs well past the timeout, so the
+    # ladder gives up and moves on -- but the thread keeps running.
+    ladder.decide(_request(), PolicyContext(state=_dummy_state(1), legal=_select_plan_legal()))
+    assert sink.records[0]["advisors"]["x"]["error"] is not None
+
+    # Call 2 (EVIDENCE_GATE), same advisor instance, issued immediately while
+    # call 1's advisor.decide() is still running in the background.
+    ladder.decide(_request(), PolicyContext(state=_dummy_state(2), legal=_evidence_gate_legal()))
+
+    advisor.release()
+    assert advisor.second_call_finished.wait(timeout=5.0), "call 2 never completed"
+    assert advisor.max_concurrent == 1, \
+        "the same advisor instance ran two decide() calls concurrently -- .last is no longer safe to read"
 
 
 # --- (b)/(c) advisors called only at judgment points, audit shape ----------

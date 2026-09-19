@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -98,6 +99,31 @@ class ShadowLadder:
         self.advisors = list(advisors)
         self.sink = sink
         self.advisor_timeout_s = advisor_timeout_s
+        # Advisor instances are constructed once and reused across multiple
+        # judgment points in the same run (e.g. SELECT_PLAN then
+        # EVIDENCE_GATE), and each records its decision on its own shared
+        # ``.last`` attribute. A timed-out call cannot be force-cancelled --
+        # its thread keeps running `advisor.decide()` in the background --
+        # so a fresh pool per call would let that straggler run
+        # *concurrently* with a later call on the same advisor instance,
+        # racing the straggler's eventual write to `.last` against the
+        # later call's own write and read. One persistent, single-worker
+        # pool per advisor *instance* instead makes `decide()` calls on
+        # that instance strictly serialized: a later call's job cannot even
+        # start until every earlier one (including a straggler) has
+        # finished, so `.last` is always read right after the call that
+        # itself just wrote it, with nothing else running concurrently.
+        self._advisor_pools: dict[int, ThreadPoolExecutor] = {}
+        self._advisor_pools_lock = threading.Lock()
+
+    def _pool_for(self, advisor: ContextualPolicy) -> ThreadPoolExecutor:
+        key = id(advisor)
+        with self._advisor_pools_lock:
+            pool = self._advisor_pools.get(key)
+            if pool is None:
+                pool = ThreadPoolExecutor(max_workers=1)
+                self._advisor_pools[key] = pool
+            return pool
 
     def decide(self, request: dict[str, Any], context: PolicyContext) -> dict[str, Any]:
         decision_point = context.legal.decision_point
@@ -151,20 +177,20 @@ class ShadowLadder:
 
     def _run_advisor(self, advisor: ContextualPolicy, request: dict[str, Any], context: PolicyContext) -> dict:
         start = time.perf_counter()
-        pool = ThreadPoolExecutor(max_workers=1)
+        pool = self._pool_for(advisor)
         error: str | None = None
+        # Never block on a hung advisor thread: a timeout must return
+        # immediately. The job stays queued/running on this advisor's own
+        # persistent pool regardless -- it is not torn down -- so that a
+        # later call on the same advisor instance queues strictly behind it
+        # instead of running concurrently with it (see `_pool_for`).
+        future = pool.submit(advisor.decide, request, context)
         try:
-            future = pool.submit(advisor.decide, request, context)
-            try:
-                future.result(timeout=self.advisor_timeout_s)
-            except FutureTimeoutError:
-                error = f"advisor timed out after {self.advisor_timeout_s:.3f}s"
-            except Exception as exc:  # noqa: BLE001 -- any advisor failure is swallowed here
-                error = f"{type(exc).__name__}: {exc}"
-        finally:
-            # Never block on a hung advisor thread: a timeout must return
-            # immediately, so the pool is torn down without waiting for it.
-            pool.shutdown(wait=False)
+            future.result(timeout=self.advisor_timeout_s)
+        except FutureTimeoutError:
+            error = f"advisor timed out after {self.advisor_timeout_s:.3f}s"
+        except Exception as exc:  # noqa: BLE001 -- any advisor failure is swallowed here
+            error = f"{type(exc).__name__}: {exc}"
         latency_ms = int((time.perf_counter() - start) * 1000)
         decision = None if error is not None else getattr(advisor, "last", None)
         return _advisor_entry(decision, fallback_latency_ms=latency_ms, error=error)
