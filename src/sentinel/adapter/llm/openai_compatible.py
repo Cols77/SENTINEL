@@ -70,7 +70,19 @@ class OpenAICompatibleAgentModel:
         while len(entries) > 1 and len(json.dumps(entries, default=str)) > _HISTORY_CHAR_BUDGET:
             entries.pop(0)
 
-    def _forget(self, agent_run_id: str) -> None:
+    def forget(self, agent_run_id: str) -> None:
+        """Clear any bounded history/pending state kept for ``agent_run_id``.
+
+        D8: this is a public hook so the *caller* (typically ``AgentLoop``,
+        which calls it on every ``run()`` return -- see
+        ``AgentLoop.run``) can tell the adapter the run is over, rather than
+        this adapter guessing from the model's own ``finish`` call. A model
+        can be interrupted (WAITING_FOR_APPROVAL, MAX_TURNS, a terminal
+        state, ...) without ever proposing ``finish``, and a resumed run
+        reusing the same ``agent_run_id`` against this same instance must
+        not see history or a pending call from before that boundary.
+        Idempotent: forgetting an unknown or already-forgotten id is a no-op.
+        """
         self._history.pop(agent_run_id, None)
         self._pending.pop(agent_run_id, None)
 
@@ -135,9 +147,11 @@ class OpenAICompatibleAgentModel:
         last turn for the same agent_run_id, that (call, result) pair joins
         the bounded in-memory history and is replayed as chat turns ahead of
         the current context. History is instance-local, keyed by
-        agent_run_id, and is forgotten once the model proposes `finish` --
-        the one tool call after which AgentLoop never calls this agent_run_id
-        again.
+        agent_run_id. It is opportunistically forgotten here when the model
+        itself proposes `finish` (the common case), but the authoritative
+        clearing happens in `forget`, which the caller invokes on every
+        `AgentLoop.run()` return -- including the paths that never reach
+        `finish` (WAITING_FOR_APPROVAL, MAX_TURNS, a terminal state, ...).
         """
         if not isinstance(request, AgentRequest):
             raise TypeError("request must be an AgentRequest")
@@ -190,7 +204,7 @@ class OpenAICompatibleAgentModel:
         if result.status == "TOOL_CALLS" and len(result.tool_calls) == 1:
             call = result.tool_calls[0]
             if call.tool_name == "finish":
-                self._forget(agent_run_id)
+                self.forget(agent_run_id)
             else:
                 self._pending[agent_run_id] = call
         return result

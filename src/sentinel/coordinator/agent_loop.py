@@ -109,6 +109,22 @@ class AgentLoop:
         self.catalogue = catalogue if catalogue is not None else (load_catalogue_plans() if repository is not None else None)
 
     def run(self, run_id: str, agent_run_id: str, user_request: str, *, deadline: str = "2999-01-01T00:00:00Z") -> dict[str, Any]:
+        try:
+            return self._run_turns(run_id, agent_run_id, user_request, deadline)
+        finally:
+            # D8/D9: tell the policy the run is over for this agent_run_id on
+            # *every* return path -- a finish call, WAITING_FOR_APPROVAL, a
+            # terminal run_status, DEADLINE_EXPIRED, EMERGENCY, MAX_TURNS
+            # exhaustion, or corrective-retry-budget exhaustion -- not only
+            # when the model itself proposes ``finish``. A policy that keeps
+            # bounded per-agent_run_id state across turns (the LLM adapter)
+            # must not see stale pre-boundary state on a resumed run that
+            # reuses the same agent_run_id, e.g. after WAITING_FOR_APPROVAL.
+            forget = getattr(self.policy, "forget", None)
+            if callable(forget):
+                forget(agent_run_id)
+
+    def _run_turns(self, run_id: str, agent_run_id: str, user_request: str, deadline: str) -> dict[str, Any]:
         previous = None
         cursor = 0
         corrective_retries = 0

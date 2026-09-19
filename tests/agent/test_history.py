@@ -113,6 +113,42 @@ def test_history_turns_bounds_how_many_pairs_are_replayed():
     assert "turn 2 accepted" in rendered
 
 
+def test_forget_clears_pending_and_history_independent_of_finish():
+    """D8: ``forget`` must be usable as the authoritative clearing hook, not
+    just the model's own ``finish`` call. This reproduces the resume
+    boundary from tests/coordinator/test_one_station_flow.py: the same
+    agent_run_id, against the same adapter instance, is driven by an
+    AgentLoop that returns via WAITING_FOR_APPROVAL (never ``finish``) and
+    is later resumed by a fresh AgentLoop.run() call after operator
+    approval. The pre-approval turn must not leak into the resumed prompt."""
+    completions = ScriptedCompletions([
+        _response("wait_for_event", {"reason": "pending-turn", "event_types": ["RUN_CREATED"]}),
+        _response("finish", {"status": "DONE", "summary": "done"}),
+    ])
+    adapter = OpenAICompatibleAgentModel(load_config(ENV), client_factory=lambda **_: Client(completions), environ=ENV)
+
+    # Pre-approval phase: one turn, proposing a non-finish tool call. This
+    # becomes the adapter's pending call, awaiting a previous_result that
+    # (in the buggy behaviour) never arrives before the loop returns.
+    adapter.propose(_request())
+    assert AGENT_RUN_ID in adapter._pending
+
+    # AgentLoop returns via WAITING_FOR_APPROVAL here -- the model was never
+    # asked again and never proposed `finish`. The caller (AgentLoop) is
+    # responsible for calling `forget` on this return path.
+    adapter.forget(AGENT_RUN_ID)
+    assert AGENT_RUN_ID not in adapter._pending
+    assert AGENT_RUN_ID not in adapter._history
+
+    # Resume: a second AgentLoop.run() call reuses the same agent_run_id
+    # against this same adapter instance after operator approval, and the
+    # gateway hands back a previous_result for the (now-approved) plan.
+    adapter.propose(_request(previous_result=_tool_result("wait_for_event", 1)))
+
+    rendered = json.dumps(completions.calls[1]["messages"])
+    assert "pending-turn" not in rendered
+
+
 def test_history_is_scoped_per_agent_run_id():
     """A second, unrelated agent_run_id starts with no history."""
     completions = _three_turn_script()
