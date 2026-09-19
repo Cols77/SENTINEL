@@ -4,7 +4,8 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 *.egg-info/
-artifacts/
+artifacts/*
+!artifacts/jev
 docs/.obsidian/
 .env
 
