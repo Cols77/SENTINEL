@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import json
 import os
 from typing import Any, Callable
 
@@ -23,6 +24,13 @@ ENDPOINTS = {
     "openrouter": "https://openrouter.ai/api/v1",
 }
 
+# D8: bounded adapter-side history. Kept only in memory, per agent_run_id, so a
+# multi-turn provider conversation can see its own prior actions and their
+# gateway results without the coordinator's wire schema growing a history
+# field. Both caps are enforced on every append.
+_DEFAULT_HISTORY_TURNS = 4
+_HISTORY_CHAR_BUDGET = 12_000
+
 
 class OpenAICompatibleAgentModel:
     """An injected, one-turn Chat Completions implementation of AgentModelPort."""
@@ -34,6 +42,7 @@ class OpenAICompatibleAgentModel:
         client_factory: Callable[..., Any] | None = None,
         base_url: str | None = None,
         environ: Mapping[str, str] | None = None,
+        history_turns: int = _DEFAULT_HISTORY_TURNS,
     ):
         if not isinstance(config, LLMConfig):
             raise TypeError("config must be an LLMConfig")
@@ -47,6 +56,23 @@ class OpenAICompatibleAgentModel:
         self._environ = environ
         self._client: Any | None = None
         self.last_request: dict[str, Any] | None = None
+        self.history_turns = max(1, history_turns)
+        # agent_run_id -> [(AgentToolCall, agent_tool_result dict | None), ...]
+        self._history: dict[str, list[tuple[Any, Any]]] = {}
+        # agent_run_id -> the AgentToolCall issued last turn, awaiting the
+        # gateway result that will arrive as the *next* request's previous_result.
+        self._pending: dict[str, Any] = {}
+
+    def _record_history(self, agent_run_id: str, call: Any, result: Any) -> None:
+        entries = self._history.setdefault(agent_run_id, [])
+        entries.append((call, result))
+        del entries[: max(0, len(entries) - self.history_turns)]
+        while len(entries) > 1 and len(json.dumps(entries, default=str)) > _HISTORY_CHAR_BUDGET:
+            entries.pop(0)
+
+    def _forget(self, agent_run_id: str) -> None:
+        self._history.pop(agent_run_id, None)
+        self._pending.pop(agent_run_id, None)
 
     def _default_client(self, api_key: str | None) -> Any:
         try:
@@ -103,13 +129,27 @@ class OpenAICompatibleAgentModel:
         request: AgentRequest,
         read_tools: Any = None,
     ) -> AgentModelResult:
-        """Call the provider once; tool calls are parsed, never executed here."""
+        """Call the provider once; tool calls are parsed, never executed here.
+
+        D8: if `request.previous_result` answers the call this instance made
+        last turn for the same agent_run_id, that (call, result) pair joins
+        the bounded in-memory history and is replayed as chat turns ahead of
+        the current context. History is instance-local, keyed by
+        agent_run_id, and is forgotten once the model proposes `finish` --
+        the one tool call after which AgentLoop never calls this agent_run_id
+        again.
+        """
         if not isinstance(request, AgentRequest):
             raise TypeError("request must be an AgentRequest")
+        agent_run_id = request.agent_run_id
+        pending_call = self._pending.pop(agent_run_id, None)
+        if pending_call is not None and request.previous_result is not None:
+            self._record_history(agent_run_id, pending_call, request.previous_result)
         payload = build_chat_request(
             request,
             prompt_revision=self.config.prompt_revision,
             tool_policy_revision=self.config.tool_policy_revision,
+            history=self._history.get(agent_run_id, ()),
         )
         self.last_request = payload
         api_key = self.config.resolve_api_key(
@@ -146,7 +186,14 @@ class OpenAICompatibleAgentModel:
                     "diagnostic": "MALFORMED_RESPONSE",
                 }
             )
-        return parse_chat_completion(mapped, agent_run_id=request.agent_run_id)
+        result = parse_chat_completion(mapped, agent_run_id=request.agent_run_id)
+        if result.status == "TOOL_CALLS" and len(result.tool_calls) == 1:
+            call = result.tool_calls[0]
+            if call.tool_name == "finish":
+                self._forget(agent_run_id)
+            else:
+                self._pending[agent_run_id] = call
+        return result
 
 
 __all__ = ["ENDPOINTS", "OpenAICompatibleAgentModel"]
