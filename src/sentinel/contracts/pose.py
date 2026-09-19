@@ -59,10 +59,45 @@ class DronePoseReport:
         if not self.tag_observations:
             raise ValueError("DronePoseReport requires >=1 tag observation")
 
+    def to_dict(self) -> dict:
+        """Wire adapter: wire-shaped dict matching the DronePoseReport anchor."""
+        return {
+            "report_id": self.report_id,
+            "run_id": self.run_id,
+            "observed_at": (
+                self.observed_at.isoformat()
+                if isinstance(self.observed_at, datetime)
+                else str(self.observed_at)
+            ),
+            "source_kind": self.source_kind,
+            "pose": {
+                "point": {"x": self.point[0], "y": self.point[1]},
+                "heading_deg": self.heading_deg,
+                "altitude_m": self.altitude_m,
+            },
+            "method": self.method,
+            "tag_observations": [
+                {
+                    "tag_id": o.tag_id,
+                    "zone_id": o.zone_id,
+                    "distance_m": o.distance_m,
+                    "reprojection_error_px": o.reprojection_error_px,
+                }
+                for o in self.tag_observations
+            ],
+            "reprojection_error_px": self.reprojection_error_px,
+        }
+
     @classmethod
     def from_dict(cls, d: dict) -> "DronePoseReport":
         """Wire adapter: coerce dict tag observations into TagObservation."""
         d = dict(d)
+        if isinstance(d.get("pose"), dict):
+            pose = d.pop("pose")
+            point = pose["point"]
+            d["point"] = (point["x"], point["y"])
+            d["heading_deg"] = pose.get("heading_deg")
+            d["altitude_m"] = pose.get("altitude_m")
         raw_obs = d.get("tag_observations") or ()
         d["tag_observations"] = tuple(
             o if isinstance(o, TagObservation) else TagObservation(**o)
