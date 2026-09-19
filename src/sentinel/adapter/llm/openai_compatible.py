@@ -123,6 +123,9 @@ class OpenAICompatibleAgentModel:
                 messages=payload["messages"],
                 tools=payload["tools"],
                 tool_choice=payload["tool_choice"],
+                # V0 accepts exactly one tool call per turn; parser and
+                # agent_loop one-call checks remain as defense-in-depth.
+                parallel_tool_calls=False,
             )
         except AdapterConfigError:
             raise

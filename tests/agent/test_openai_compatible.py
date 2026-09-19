@@ -64,6 +64,8 @@ def test_adapter_lazily_constructs_injected_client_and_pins_call_arguments():
     assert completions.kwargs["tool_choice"] == "auto"
     assert completions.kwargs["messages"] == adapter.last_request["messages"]
     assert completions.kwargs["tools"] == adapter.last_request["tools"]
+    # V0 accepts exactly one tool call per turn: the adapter must request it.
+    assert completions.kwargs["parallel_tool_calls"] is False
     assert result.status == "TOOL_CALLS"
     assert "super-secret" not in repr(result)
 

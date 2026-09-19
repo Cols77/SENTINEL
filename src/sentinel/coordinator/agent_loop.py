@@ -26,6 +26,7 @@ class AgentLoop:
     def run(self, run_id: str, agent_run_id: str, user_request: str, *, deadline: str = "2999-01-01T00:00:00Z") -> dict[str, Any]:
         previous = None
         cursor = 0
+        corrective_retries = 0
         for _turn in range(self.max_turns):
             state = self.port.read_state(run_id)
             if hasattr(state, "to_dict"):
@@ -57,7 +58,21 @@ class AgentLoop:
                 if model_result.agent_run_id != agent_run_id:
                     raise ValueError("agent result belongs to a different agent run")
             except Exception:
-                return {"status": "FAILED", "error_code": "INVALID_AGENT_RESULT", "summary": "agent result failed contract validation"}
+                # Bounded corrective feedback: a schema-invalid result earns the
+                # model a REJECTED previous_result for the same turn budget,
+                # up to twice per run, before INVALID_AGENT_RESULT is terminal.
+                if corrective_retries >= 2:
+                    return {"status": "FAILED", "error_code": "INVALID_AGENT_RESULT", "summary": "agent result failed contract validation"}
+                corrective_retries += 1
+                previous = AgentToolResult.from_dict({
+                    "contract_version": "sentinel.v0", "wire_type": "agent_tool_result", "tool_name": "state.get_summary",
+                    "status": "REJECTED", "error_code": "INVALID_AGENT_RESULT",
+                    "state_version": int(state.get("state_version", 0)), "event_cursor": cursor,
+                    "legal_tools": _TOOLS,
+                    "safe_summary": "previous agent result was rejected as schema-invalid; emit exactly one valid agent_result with the matching agent_run_id",
+                    "result": {"kind": "empty"},
+                }).to_dict()
+                continue
             if model_result.status == "INTENT":
                 return {"status": "NEEDS_REVIEW", "summary": "agent intent requires operator review"}
             if model_result.status in {"NO_ACTION", "MALFORMED", "UNAVAILABLE"}:

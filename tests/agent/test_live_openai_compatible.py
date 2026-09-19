@@ -165,6 +165,14 @@ class _ScriptedAgentModel:
         if not self._tool_calls:
             raise AssertionError("script exhausted")
         tool_name, arguments = self._tool_calls.pop(0)
+        if tool_name is None:
+            # Scripted malformed turn: no schema-valid tool call at all.
+            return AgentModelResult(
+                agent_run_id=request.agent_run_id,
+                status="MALFORMED",
+                diagnostic="scripted malformed result",
+                tool_calls=[],
+            )
         # Built directly (not from_dict): scripted bad-argument cases are
         # deliberately schema-invalid and must reach the evaluator.
         return AgentModelResult(
@@ -218,17 +226,120 @@ def test_bounded_horizon_classifies_premature_finish():
 def test_bounded_horizon_classifies_wrong_tool_and_missing_arguments():
     scenario = _scenario_by_name("qualifying_evidence_to_task")
     wrong = _ScriptedAgentModel(
-        [("patroller.rank_for_task", {"task_id": TASK_ID})]
+        [("patroller.rank_for_task", {"task_id": TASK_ID})] * DEFAULT_MAX_TURNS
     )
     outcome = run_bounded_horizon_scenario(wrong.propose, scenario, AGENT_RUN_ID)
     assert any("WRONG_TOOL" in f for f in outcome["failures"]), outcome["failures"]
 
     bad_args = _ScriptedAgentModel(
         [("task.create", {"perception_result_id": "55555555-5555-4555-8555-555555555555"})]
+        * DEFAULT_MAX_TURNS
     )
     outcome = run_bounded_horizon_scenario(bad_args.propose, scenario, AGENT_RUN_ID)
     assert any("MISSING_ARGUMENTS" in f for f in outcome["failures"]), outcome["failures"]
     assert any(f.startswith("HORIZON_EXHAUSTED") for f in outcome["failures"]), outcome["failures"]
+
+
+def test_bounded_horizon_recovers_after_wrong_tool():
+    """A WRONG_TOOL turn consumes a corrective retry; the next turn receives a
+    REJECTED previous_result naming the required tool and must recover."""
+    scenario = _scenario_by_name("qualifying_evidence_to_task")
+    requests = []
+    script = [
+        ("patroller.rank_for_task", {"task_id": TASK_ID}),  # turn 0: WRONG_TOOL
+        ("task.create", {  # turn 1: fulfills deliverable 0
+            "perception_result_id": "55555555-5555-4555-8555-555555555555",
+            "section_id": "LEFT_ALLEY_MIDDLE",
+            "evidence_artifact_id": "33333333-3333-4333-8333-333333333333",
+        }),
+        ("patroller.rank_for_task", {"task_id": TASK_ID}),  # turn 2: fulfills deliverable 1
+    ]
+
+    def propose(request):
+        requests.append(request)
+        return _ScriptedAgentModel([script.pop(0)]).propose(request)
+
+    propose.last_request = None  # plain closure: no adapter payload to check
+
+    outcome = run_bounded_horizon_scenario(propose, scenario, AGENT_RUN_ID)
+    assert outcome["failures"] == [], outcome["failures"]
+    # The corrective feedback must be schema-valid AgentToolResult-shaped.
+    feedback = requests[1].to_dict()["previous_result"]
+    assert feedback["status"] == "REJECTED"
+    assert feedback["error_code"] == "WRONG_TOOL"
+    assert feedback["tool_name"] == "patroller.rank_for_task"
+    assert "task.create" in feedback["safe_summary"]
+
+
+def test_bounded_horizon_recovers_after_missing_arguments():
+    """A MISSING_ARGUMENTS turn consumes a corrective retry; the next turn
+    receives a REJECTED previous_result naming the required arguments."""
+    scenario = _scenario_by_name("qualifying_evidence_to_task")
+    requests = []
+    script = [
+        ("task.create", {"perception_result_id": "55555555-5555-4555-8555-555555555555"}),
+        ("task.create", {  # turn 1: full arguments fulfill deliverable 0
+            "perception_result_id": "55555555-5555-4555-8555-555555555555",
+            "section_id": "LEFT_ALLEY_MIDDLE",
+            "evidence_artifact_id": "33333333-3333-4333-8333-333333333333",
+        }),
+        ("patroller.rank_for_task", {"task_id": TASK_ID}),
+    ]
+
+    def propose(request):
+        requests.append(request)
+        return _ScriptedAgentModel([script.pop(0)]).propose(request)
+
+    propose.last_request = None  # plain closure: no adapter payload to check
+
+    outcome = run_bounded_horizon_scenario(propose, scenario, AGENT_RUN_ID)
+    assert outcome["failures"] == [], outcome["failures"]
+    feedback = requests[1].to_dict()["previous_result"]
+    assert feedback["status"] == "REJECTED"
+    assert feedback["error_code"] == "MISSING_ARGUMENTS"
+    assert "task.create" in feedback["safe_summary"]
+
+
+def test_bounded_horizon_recovers_after_malformed_result():
+    """A MALFORMED (non TOOL_CALLS) turn consumes a corrective retry and the
+    horizon continues."""
+    scenario = _scenario_by_name("qualifying_evidence_to_task")
+    requests = []
+    script = [
+        (None, {}),  # turn 0: MALFORMED
+        ("task.create", {  # turn 1: fulfills deliverable 0
+            "perception_result_id": "55555555-5555-4555-8555-555555555555",
+            "section_id": "LEFT_ALLEY_MIDDLE",
+            "evidence_artifact_id": "33333333-3333-4333-8333-333333333333",
+        }),
+        ("patroller.rank_for_task", {"task_id": TASK_ID}),
+    ]
+
+    def propose(request):
+        requests.append(request)
+        return _ScriptedAgentModel([script.pop(0)]).propose(request)
+
+    propose.last_request = None  # plain closure: no adapter payload to check
+
+    outcome = run_bounded_horizon_scenario(propose, scenario, AGENT_RUN_ID)
+    assert outcome["failures"] == [], outcome["failures"]
+    feedback = requests[1].to_dict()["previous_result"]
+    assert feedback["status"] == "REJECTED"
+    assert feedback["error_code"] == "MALFORMED"
+    assert "task.create" in feedback["safe_summary"]
+
+
+def test_bounded_horizon_terminal_after_two_corrective_retries():
+    """Two corrective retries for the same pending deliverable are terminal:
+    the third failure of the same classification fails the horizon."""
+    scenario = _scenario_by_name("qualifying_evidence_to_task")
+    model = _ScriptedAgentModel(
+        [("patroller.rank_for_task", {"task_id": TASK_ID})] * DEFAULT_MAX_TURNS
+    )
+    outcome = run_bounded_horizon_scenario(model.propose, scenario, AGENT_RUN_ID)
+    wrong_tool = [f for f in outcome["failures"] if "WRONG_TOOL" in f]
+    assert len(wrong_tool) == 3, outcome["failures"]  # 2 retries + terminal third
+    assert any(f.startswith("HORIZON_EXHAUSTED") for f in outcome["failures"])
 
 
 def test_bounded_horizon_state_inspection_never_fails_scenario():
@@ -323,9 +434,36 @@ def run_bounded_horizon_scenario(
     expected_turns = list(scenario["expected_turns"])
     max_turns = int(scenario.get("max_turns", DEFAULT_MAX_TURNS))
     pending = 0  # index of the next unfulfilled deliverable
+    corrective_retries = 0  # corrective retries spent on the pending deliverable
     calls: list[dict[str, Any]] = []
     failures: list[str] = []
+    corrective_failures: list[str] = []  # cleared when the pending deliverable is fulfilled
     previous_result: dict[str, Any] | None = None
+
+    def _correction(tool: str, classification: str) -> dict[str, Any]:
+        """Schema-valid REJECTED feedback naming the pending deliverable."""
+        expected = expected_turns[pending]
+        expected_tool = expected["expected_tool"]
+        allowed_expected = expected_tool if isinstance(expected_tool, list) else [expected_tool]
+        required = ", ".join(
+            f"{dotted}={value!r}" for dotted, value in expected.get("expectations", {}).items()
+        )
+        summary = (
+            f"REJECTED {classification}: tool {tool!r} was rejected; next turn must call "
+            f"{' or '.join(allowed_expected)} with {required} to fulfill deliverable {pending}"
+        )[:1024]
+        return {
+            "contract_version": "sentinel.v0",
+            "wire_type": "agent_tool_result",
+            "tool_name": tool if tool in allowed_tools else allowed_expected[0],
+            "status": "REJECTED",
+            "error_code": classification,
+            "state_version": int(scenario["state_version"]) + 1,
+            "event_cursor": 1,
+            "legal_tools": list(scenario["legal_tools"]),
+            "safe_summary": summary,
+            "result": {"kind": "empty"},
+        }
 
     for turn_index in range(max_turns):
         if pending >= len(expected_turns):
@@ -344,19 +482,32 @@ def run_bounded_horizon_scenario(
         _assert_context_embedded(propose, request)
 
         if result.status != "TOOL_CALLS" or len(result.tool_calls) != 1:
-            failures.append(
-                f"turn {turn_index}: expected exactly one TOOL_CALLS entry, got status={result.status}"
+            failure = (
+                f"turn {turn_index}: MALFORMED - expected exactly one TOOL_CALLS entry, "
+                f"got status={result.status}"
             )
-            break
+            if corrective_retries >= 2:
+                failures.append(failure)
+                break
+            corrective_failures.append(failure)
+            corrective_retries += 1
+            previous_result = _correction("state.get_summary", "MALFORMED")
+            continue
         call = result.tool_calls[0].to_dict()
         try:
             validate_document(result.to_dict())
         except ContractValidationError as exc:
-            failures.append(
+            failure = (
                 f"turn {turn_index}: MISSING_ARGUMENTS - model call is not schema-valid: "
                 + str(exc).split(": ", 1)[-1][:256]
             )
-            break
+            if corrective_retries >= 2:
+                failures.append(failure)
+                break
+            corrective_failures.append(failure)
+            corrective_retries += 1
+            previous_result = _correction(call["tool_name"], "MISSING_ARGUMENTS")
+            continue
         tool = call["tool_name"]
 
         if tool not in allowed_tools:
@@ -380,18 +531,32 @@ def run_bounded_horizon_scenario(
         elif tool in allowed_expected:
             argument_failures = _expectation_matches(expected["expectations"], call)
             if argument_failures:
-                failures.append(
+                failure = (
                     f"turn {turn_index}: MISSING_ARGUMENTS - " + "; ".join(argument_failures)
                 )
-                break
+                if corrective_retries >= 2:
+                    failures.append(failure)
+                    break
+                corrective_failures.append(failure)
+                corrective_retries += 1
+                previous_result = _correction(tool, "MISSING_ARGUMENTS")
+                continue
             else:
                 pending += 1  # deliverable fulfilled
+                corrective_retries = 0  # fresh budget for the next deliverable
+                corrective_failures.clear()  # corrective turns recovered
         else:
-            failures.append(
+            failure = (
                 f"turn {turn_index}: WRONG_TOOL - deliverable {pending} expects "
                 f"{allowed_expected}, model selected {tool!r}"
             )
-            break
+            if corrective_retries >= 2:
+                failures.append(failure)
+                break
+            corrective_failures.append(failure)
+            corrective_retries += 1
+            previous_result = _correction(tool, "WRONG_TOOL")
+            continue
 
         calls.append(
             {
@@ -406,6 +571,7 @@ def run_bounded_horizon_scenario(
         previous_result = _previous_result_for_next_turn(scenario, call)
 
     if pending < len(expected_turns):
+        failures.extend(corrective_failures)  # unresolved corrective turns count
         failures.append(
             f"HORIZON_EXHAUSTED - only {pending}/{len(expected_turns)} deliverables "
             f"fulfilled within {max_turns} turns"
