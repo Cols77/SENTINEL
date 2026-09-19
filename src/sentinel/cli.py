@@ -99,6 +99,20 @@ def build_parser() -> argparse.ArgumentParser:
     emergency.add_argument("--local-ip")
     emergency.add_argument("--interface-name")
     emergency.add_argument("--interface-index", type=int)
+
+    pending = subparsers.add_parser(
+        "pending", help="show the pending coordinator operator decision for a run, if any"
+    )
+    pending.add_argument("--db", type=Path, required=True)
+    pending.add_argument("--run-id", required=True)
+
+    decide = subparsers.add_parser(
+        "decide", help="submit the operator's choice at a coordinator judgment point"
+    )
+    decide.add_argument("--db", type=Path, required=True)
+    decide.add_argument("--run-id", required=True)
+    decide.add_argument("--label", required=True)
+    decide.add_argument("--audit", type=Path)
     return parser
 
 
@@ -359,6 +373,62 @@ def _run_connection_probe(args: Any) -> int:
             progress.close()
 
 
+def _run_pending(args: Any) -> int:
+    """`sentinel pending --db PATH --run-id UUID`: print the pending
+    coordinator judgment-point decision, if any. Operator-facing only --
+    ``pending_decision`` never surfaces advisor output."""
+    from .coordinator.legal_tools import load_catalogue_plans
+    from .coordinator.operator_choice import pending_decision
+    from .coordinator.repository import CoordinatorRepository
+
+    repository = CoordinatorRepository.open(args.db)
+    try:
+        pending = pending_decision(repository, args.run_id, load_catalogue_plans())
+    except KeyError:
+        print(f"no such run: {args.run_id}")
+        return 2
+    finally:
+        repository.close()
+
+    if pending is None:
+        print("no pending operator decision")
+        return 0
+    print(f"decision_point: {pending['decision_point']}")
+    for option in pending["options"]:
+        print(f"  {option['label']}: {option['description']}")
+    return 0
+
+
+def _run_decide(args: Any) -> int:
+    """`sentinel decide --db PATH --run-id UUID --label LABEL [--audit PATH]`:
+    submit the operator's choice among the current legal candidates at a
+    judgment point. Exits 0 on success, 2 on an invalid label (or run)."""
+    from .coordinator.command_gateway import CommandGateway
+    from .coordinator.errors import CoordinatorError
+    from .coordinator.legal_tools import load_catalogue_plans
+    from .coordinator.operator_choice import submit_choice
+    from .coordinator.repository import CoordinatorRepository
+    from .coordinator.shadow import JsonlAuditSink, MemoryAuditSink
+
+    repository = CoordinatorRepository.open(args.db)
+    try:
+        gateway = CommandGateway(repository)
+        sink = JsonlAuditSink(args.audit) if args.audit else MemoryAuditSink()
+        try:
+            result = submit_choice(repository, gateway, args.run_id, args.label,
+                                    catalogue=load_catalogue_plans(), sink=sink)
+        except CoordinatorError as exc:
+            print(f"decide failed: {exc}")
+            return 2
+        except KeyError:
+            print(f"no such run: {args.run_id}")
+            return 2
+    finally:
+        repository.close()
+    print(f"decide OK: {result}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -396,6 +466,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "probe":
         return _run_connection_probe(args)
+
+    if args.command == "pending":
+        return _run_pending(args)
+
+    if args.command == "decide":
+        return _run_decide(args)
 
     if args.real and not args.confirm:
         print("Real mode requires --confirm after the physical preflight.")
