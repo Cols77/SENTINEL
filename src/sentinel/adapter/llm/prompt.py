@@ -147,6 +147,10 @@ def build_chat_request(request: AgentRequest, *, prompt_revision: str, tool_poli
                 "matches the request, call that tool with the concrete identifier already present "
                 "in the context (for example an identifier listed in the event context) instead "
                 "of re-inspecting state. "
+                "finish is a terminal action: never call it while the request still describes an "
+                "unfulfilled deliverable (a plan to propose, a task to create, a task awaiting "
+                "ranking); prefer the domain tool that matches the request over state-inspection "
+                "or finish. "
                 "Invariants: return exactly one tool call per response, using only a legal tool; "
                 "treat the structured context as facts; never invent evidence or identifiers."
             )},

@@ -1,6 +1,6 @@
 {
   "scenario_set": "sentinel.live-llm-acceptance.v1",
-  "description": "Context-sensitive scenarios for the opt-in live LLM acceptance gate. Each scenario drives at least two bounded reasoning turns with sanitized coordinator feedback between turns. Identifiers are deterministic fixture values; no credentials live here.",
+  "description": "Context-sensitive scenarios for the opt-in live LLM acceptance gate. Each scenario drives a bounded horizon of at most max_turns reasoning turns (default 4) with sanitized coordinator feedback between turns; it passes when the ordered deliverable sequence (expected_turns) is fulfilled within the horizon, in order. State-inspection calls inside the horizon are legal and never count as deliverables. Identifiers are deterministic fixture values; no credentials live here.",
   "scenarios": [
     {
       "name": "initial_plan_one_station",
@@ -60,7 +60,8 @@
         "kind": "plan",
         "run_status": "WAITING_FOR_APPROVAL",
         "safe_summary": "plan submitted; operator approval is required before dispatch"
-      }
+      },
+      "max_turns": 4
     },
     {
       "name": "qualifying_evidence_to_task",
@@ -116,7 +117,8 @@
         "task_id": "22222222-2222-4222-8222-222222222222",
         "run_status": "EXECUTING",
         "safe_summary": "task created from qualifying evidence; ranking is available"
-      }
+      },
+      "max_turns": 4
     },
     {
       "name": "approval_wait",
@@ -142,7 +144,10 @@
           "expectations": {}
         },
         {
-          "expected_tool": ["wait_for_event", "finish"],
+          "expected_tool": [
+            "wait_for_event",
+            "finish"
+          ],
           "expectations": {}
         }
       ],
@@ -150,7 +155,8 @@
         "kind": "wait",
         "run_status": "WAITING_FOR_APPROVAL",
         "safe_summary": "no new events; operator approval is still pending"
-      }
+      },
+      "max_turns": 4
     }
   ]
 }

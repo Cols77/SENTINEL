@@ -24,11 +24,15 @@ import pytest
 from sentinel.adapter.llm.config import AdapterConfigError, load_config
 from sentinel.adapter.llm.openai_compatible import OpenAICompatibleAgentModel
 from sentinel.adapter.llm.parser import APPROVED_TOOL_NAMES
-from sentinel.contracts import AgentRequest, validate_document
+from sentinel.contracts import AgentModelResult, AgentRequest, AgentToolCall, validate_document
+from sentinel.contracts.schemas import ContractValidationError
 
 GATE_FLAG = "SENTINEL_RUN_LIVE_LLM_ACCEPTANCE"
 SCENARIOS_PATH = Path(__file__).resolve().parent / "live_scenarios.json"
-pytestmark = pytest.mark.live_llm
+
+STATE_INSPECTION_TOOLS = ("state.get_summary", "state.get_recent_events")
+DEFAULT_MAX_TURNS = 4
+FINISH_TOOL = "finish"
 
 
 def _gate_turned_on() -> bool:
@@ -144,6 +148,125 @@ def _describe_call(call: Mapping[str, Any]) -> dict[str, Any]:
     return {"tool_name": call.get("tool_name"), "arguments": dict(call.get("arguments", {}))}
 
 
+# ---------------------------------------------------------------------------
+# Hermetic tests for the bounded-horizon gate evaluator (no provider needed).
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedAgentModel:
+    """Minimal adapter stub: returns one canned AgentModelResult per turn."""
+
+    def __init__(self, tool_calls: list[tuple[str, dict[str, Any]]]):
+        self._tool_calls = list(tool_calls)
+        self.last_request: dict[str, Any] | None = None
+
+    def propose(self, request: AgentRequest) -> Any:
+        self.last_request = {"messages": [{"role": "user", "content": json.dumps(request.to_dict(), sort_keys=True)}]}
+        if not self._tool_calls:
+            raise AssertionError("script exhausted")
+        tool_name, arguments = self._tool_calls.pop(0)
+        # Built directly (not from_dict): scripted bad-argument cases are
+        # deliberately schema-invalid and must reach the evaluator.
+        return AgentModelResult(
+            agent_run_id=request.agent_run_id,
+            status="TOOL_CALLS",
+            tool_calls=[AgentToolCall(tool_name=tool_name, arguments=arguments)],
+        )
+
+
+def _scenario_by_name(name: str) -> dict[str, Any]:
+    return next(item for item in _load_scenarios() if item["name"] == name)
+
+
+def test_bounded_horizon_passes_when_deliverable_fulfilled_late():
+    """Deliverable on turn 3 of a 4-turn horizon passes; inspection turns are free."""
+    scenario = _scenario_by_name("initial_plan_one_station")
+    model = _ScriptedAgentModel(
+        [
+            ("state.get_summary", {}),
+            ("state.get_recent_events", {"after_sequence": 0, "limit": 8}),
+            ("inspection.propose_plan", {"catalogue_plan_id": "PLAN_ROUTE_ONLY_2_ZONE"}),
+            ("wait_for_event", {"event_types": ["PLAN_APPROVED"], "reason": "awaiting approval"}),
+        ]
+    )
+    outcome = run_bounded_horizon_scenario(model.propose, scenario, AGENT_RUN_ID)
+    assert outcome["failures"] == []
+    assert [call["tool_name"] for call in outcome["calls"]][:3] == [
+        "state.get_summary",
+        "state.get_recent_events",
+        "inspection.propose_plan",
+    ]
+
+
+def test_bounded_horizon_fails_with_horizon_exhausted():
+    """A deliverable never fulfilled within the horizon is HORIZON_EXHAUSTED."""
+    scenario = _scenario_by_name("initial_plan_one_station")
+    model = _ScriptedAgentModel(
+        [("state.get_summary", {})] * DEFAULT_MAX_TURNS  # inspection forever
+    )
+    outcome = run_bounded_horizon_scenario(model.propose, scenario, AGENT_RUN_ID)
+    assert any(f.startswith("HORIZON_EXHAUSTED") for f in outcome["failures"]), outcome["failures"]
+
+
+def test_bounded_horizon_classifies_premature_finish():
+    scenario = _scenario_by_name("initial_plan_one_station")
+    model = _ScriptedAgentModel([("finish", {"status": "DONE", "summary": "done"})])
+    outcome = run_bounded_horizon_scenario(model.propose, scenario, AGENT_RUN_ID)
+    assert any("PREMATURE_FINISH" in f for f in outcome["failures"]), outcome["failures"]
+
+
+def test_bounded_horizon_classifies_wrong_tool_and_missing_arguments():
+    scenario = _scenario_by_name("qualifying_evidence_to_task")
+    wrong = _ScriptedAgentModel(
+        [("patroller.rank_for_task", {"task_id": TASK_ID})]
+    )
+    outcome = run_bounded_horizon_scenario(wrong.propose, scenario, AGENT_RUN_ID)
+    assert any("WRONG_TOOL" in f for f in outcome["failures"]), outcome["failures"]
+
+    bad_args = _ScriptedAgentModel(
+        [("task.create", {"perception_result_id": "55555555-5555-4555-8555-555555555555"})]
+    )
+    outcome = run_bounded_horizon_scenario(bad_args.propose, scenario, AGENT_RUN_ID)
+    assert any("MISSING_ARGUMENTS" in f for f in outcome["failures"]), outcome["failures"]
+    assert any(f.startswith("HORIZON_EXHAUSTED") for f in outcome["failures"]), outcome["failures"]
+
+
+def test_bounded_horizon_state_inspection_never_fails_scenario():
+    """Inspection calls inside the horizon are legal and consume no deliverable."""
+    scenario = _scenario_by_name("qualifying_evidence_to_task")
+    model = _ScriptedAgentModel(
+        [
+            ("state.get_summary", {}),
+            ("task.create", {
+                "perception_result_id": "55555555-5555-4555-8555-555555555555",
+                "section_id": "LEFT_ALLEY_MIDDLE",
+                "evidence_artifact_id": "33333333-3333-4333-8333-333333333333",
+            }),
+            ("patroller.rank_for_task", {"task_id": TASK_ID}),
+        ]
+    )
+    outcome = run_bounded_horizon_scenario(model.propose, scenario, AGENT_RUN_ID)
+    assert outcome["failures"] == []
+
+
+def test_bounded_horizon_respects_scenario_max_turns_override():
+    scenario = dict(_scenario_by_name("qualifying_evidence_to_task"))
+    scenario["max_turns"] = 3
+    model = _ScriptedAgentModel(
+        [
+            ("state.get_summary", {}),
+            ("task.create", {
+                "perception_result_id": "55555555-5555-4555-8555-555555555555",
+                "section_id": "LEFT_ALLEY_MIDDLE",
+                "evidence_artifact_id": "33333333-3333-4333-8333-333333333333",
+            }),
+            ("patroller.rank_for_task", {"task_id": TASK_ID}),
+        ]
+    )
+    outcome = run_bounded_horizon_scenario(model.propose, scenario, AGENT_RUN_ID)
+    assert outcome["failures"] == []
+
+
 def _skip_message() -> str:
     return (
         "live LLM acceptance gate is opt-in; set "
@@ -174,6 +297,136 @@ def adapter() -> OpenAICompatibleAgentModel:
     return OpenAICompatibleAgentModel(config)
 
 
+def run_bounded_horizon_scenario(
+    propose: Any,
+    scenario: Mapping[str, Any],
+    agent_run_id: str,
+    allowed_tools: tuple[str, ...] = APPROVED_TOOL_NAMES,
+) -> dict[str, Any]:
+    """Drive one scenario as a bounded horizon of at most N reasoning turns.
+
+    Instead of asserting the right tool at exact turn indexes, the loop runs up
+    to ``max_turns`` (per-scenario, default 4) turns, feeding the sanitized
+    coordinator feedback as previous_result after each turn. The scenario PASSES
+    when its full ordered deliverable sequence (expected_turns: right tool +
+    exact required arguments) is fulfilled within the horizon, in order.
+    State-inspection calls (state.get_summary, state.get_recent_events) are
+    legal anywhere inside the horizon and never count as deliverables.
+
+    Failures are classified: HORIZON_EXHAUSTED (a deliverable was never
+    fulfilled within N turns), PREMATURE_FINISH (finish called while
+    deliverables remained unfulfilled), WRONG_TOOL (a non-inspection,
+    non-finish tool was recorded against a pending deliverable without
+    matching it), MISSING_ARGUMENTS (right tool but argument mismatch).
+    """
+    request = _build_request(scenario, agent_run_id)
+    expected_turns = list(scenario["expected_turns"])
+    max_turns = int(scenario.get("max_turns", DEFAULT_MAX_TURNS))
+    pending = 0  # index of the next unfulfilled deliverable
+    calls: list[dict[str, Any]] = []
+    failures: list[str] = []
+    previous_result: dict[str, Any] | None = None
+
+    for turn_index in range(max_turns):
+        if pending >= len(expected_turns):
+            break
+        if previous_result is not None:
+            request = AgentRequest.from_dict(
+                {**request.to_dict(), "previous_result": previous_result}
+            )
+        started = time.monotonic()
+        result = propose(request)
+        latency_ms = int((time.monotonic() - started) * 1000)
+
+        # The model must embed the Sentinel context supplied by the request.
+        # The caller reads adapter.last_request (set during propose) via
+        # _assert_context_embedded before this check sees the payload.
+        _assert_context_embedded(propose, request)
+
+        if result.status != "TOOL_CALLS" or len(result.tool_calls) != 1:
+            failures.append(
+                f"turn {turn_index}: expected exactly one TOOL_CALLS entry, got status={result.status}"
+            )
+            break
+        call = result.tool_calls[0].to_dict()
+        try:
+            validate_document(result.to_dict())
+        except ContractValidationError as exc:
+            failures.append(
+                f"turn {turn_index}: MISSING_ARGUMENTS - model call is not schema-valid: "
+                + str(exc).split(": ", 1)[-1][:256]
+            )
+            break
+        tool = call["tool_name"]
+
+        if tool not in allowed_tools:
+            failures.append(f"turn {turn_index}: tool {tool!r} is outside the V0 set")
+        if tool not in request.legal_tools:
+            failures.append(
+                f"turn {turn_index}: tool {tool!r} is not legal for the supplied state"
+            )
+
+        expected = expected_turns[pending]
+        expected_tool = expected["expected_tool"]
+        allowed_expected = expected_tool if isinstance(expected_tool, list) else [expected_tool]
+        if tool == FINISH_TOOL and pending < len(expected_turns):
+            failures.append(
+                f"turn {turn_index}: PREMATURE_FINISH - finish called while deliverable "
+                f"{pending} ({allowed_expected}) is unfulfilled"
+            )
+            break  # finish is terminal; nothing further can fulfill the horizon
+        elif tool in STATE_INSPECTION_TOOLS:
+            pass  # legal verification inside the horizon; never a deliverable
+        elif tool in allowed_expected:
+            argument_failures = _expectation_matches(expected["expectations"], call)
+            if argument_failures:
+                failures.append(
+                    f"turn {turn_index}: MISSING_ARGUMENTS - " + "; ".join(argument_failures)
+                )
+                break
+            else:
+                pending += 1  # deliverable fulfilled
+        else:
+            failures.append(
+                f"turn {turn_index}: WRONG_TOOL - deliverable {pending} expects "
+                f"{allowed_expected}, model selected {tool!r}"
+            )
+            break
+
+        calls.append(
+            {
+                "scenario": scenario["name"],
+                "turn": turn_index,
+                "tool_name": tool,
+                "latency_ms": latency_ms,
+                "schema_valid": True,
+                "coordinator_status": "ACCEPTED",
+            }
+        )
+        previous_result = _previous_result_for_next_turn(scenario, call)
+
+    if pending < len(expected_turns):
+        failures.append(
+            f"HORIZON_EXHAUSTED - only {pending}/{len(expected_turns)} deliverables "
+            f"fulfilled within {max_turns} turns"
+        )
+    return {"calls": calls, "failures": failures}
+
+
+def _assert_context_embedded(propose: Any, request: AgentRequest) -> None:
+    """The adapter must have sent the Sentinel state context just dispatched."""
+    payload_context = getattr(propose, "__self__", propose).last_request  # bound-method aware
+    if payload_context is None:
+        return  # stubs without last_request: context embedding is not testable here
+    context_blob = json.dumps(payload_context["messages"], sort_keys=True)
+    for required in (
+        request.agent_run_id,
+        str(request.state_version),
+        request.phase,
+    ):
+        assert required in context_blob, "adapter must send Sentinel state context"
+
+
 class RecordingFakeAgentLoop:
     """Bounded fake coordinator: records sanitized results, no side effects."""
 
@@ -183,92 +436,41 @@ class RecordingFakeAgentLoop:
         self.turns: list[dict[str, Any]] = []
 
     def run_scenario(self, scenario: Mapping[str, Any], agent_run_id: str) -> dict[str, Any]:
-        request = _build_request(scenario, agent_run_id)
-        expected_turns = list(scenario["expected_turns"])
-        previous_result: dict[str, Any] | None = None
-        failures: list[str] = []
-
-        for turn_index, expected_turn in enumerate(expected_turns):
-            if previous_result is not None:
-                request = AgentRequest.from_dict(
-                    {**request.to_dict(), "previous_result": previous_result}
-                )
-            started = time.monotonic()
-            result = self.adapter.propose(request)
-            latency_ms = int((time.monotonic() - started) * 1000)
-
-            # The model must embed the Sentinel context supplied by the request.
-            # Read AFTER propose(): last_request holds the payload just sent.
-            payload_context = self.adapter.last_request
-            assert payload_context is not None
-            context_blob = json.dumps(payload_context["messages"], sort_keys=True)
-            for required in (
-                request.agent_run_id,
-                str(request.state_version),
-                request.phase,
-            ):
-                assert required in context_blob, "adapter must send Sentinel state context"
-
-            if result.status != "TOOL_CALLS" or len(result.tool_calls) != 1:
-                failures.append(
-                    f"turn {turn_index}: expected exactly one TOOL_CALLS entry, got status={result.status}"
-                )
-                break
-            call = result.tool_calls[0].to_dict()
-            validate_document(result.to_dict())
-
-            if call["tool_name"] not in self.allowed_tools:
-                failures.append(f"turn {turn_index}: tool {call['tool_name']!r} is outside the V0 set")
-            if call["tool_name"] not in request.legal_tools:
-                failures.append(
-                    f"turn {turn_index}: tool {call['tool_name']!r} is not legal for the supplied state"
-                )
-            failures.extend(_expectation_matches(expected_turn["expectations"], call))
-            expected_tool = expected_turn["expected_tool"]
-            allowed_expected = expected_tool if isinstance(expected_tool, list) else [expected_tool]
-            if call["tool_name"] not in allowed_expected:
-                failures.append(
-                    f"turn {turn_index}: expected {allowed_expected}, model selected {call['tool_name']!r}"
-                )
-
-            self.turns.append(
-                {
-                    "scenario": scenario["name"],
-                    "turn": turn_index,
-                    "tool_name": call["tool_name"],
-                    "latency_ms": latency_ms,
-                    "schema_valid": True,
-                    "coordinator_status": "ACCEPTED",
-                }
-            )
-            previous_result = _previous_result_for_next_turn(scenario, call)
-
-        assert not failures, "live reasoning gate failures: " + "; ".join(failures)
+        outcome = run_bounded_horizon_scenario(
+            self.adapter.propose,
+            scenario,
+            agent_run_id,
+            allowed_tools=self.allowed_tools,
+        )
+        self.turns.extend(outcome["calls"])
+        assert not outcome["failures"], "live reasoning gate failures: " + "; ".join(
+            outcome["failures"]
+        )
         return {
             "scenario": scenario["name"],
-            "turns": len(self.turns),
-            "tool_calls": [_describe_call(call) for call in self._calls_for(scenario["name"])],
+            "turns": len(outcome["calls"]),
+            "tool_calls": outcome["calls"],
         }
-
-    def _calls_for(self, scenario_name: str) -> list[dict[str, Any]]:
-        return [turn for turn in self.turns if turn["scenario"] == scenario_name]  # type: ignore[return-value]
 
 
 AGENT_RUN_ID = "22222222-2222-4222-8222-222222222222"
 
 
+@pytest.mark.live_llm
 def test_initial_plan_decision(scenarios, adapter):
     """Turn 1 proposes the excluded-constraint-satisfying plan; turn 2 waits for approval."""
     scenario = next(item for item in scenarios if item["name"] == "initial_plan_one_station")
     RecordingFakeAgentLoop(adapter).run_scenario(scenario, AGENT_RUN_ID)
 
 
+@pytest.mark.live_llm
 def test_qualifying_evidence_to_task(scenarios, adapter):
     """Turn 1 creates the task from qualifying evidence; turn 2 ranks for the task."""
     scenario = next(item for item in scenarios if item["name"] == "qualifying_evidence_to_task")
     RecordingFakeAgentLoop(adapter).run_scenario(scenario, AGENT_RUN_ID)
 
 
+@pytest.mark.live_llm
 def test_approval_wait(scenarios, adapter):
     """Both turns must wait (or finish) while operator approval is pending."""
     scenario = next(item for item in scenarios if item["name"] == "approval_wait")

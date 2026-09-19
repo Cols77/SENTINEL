@@ -71,7 +71,12 @@ def test_system_prompt_states_decision_protocol():
     assert "exactly one actionable domain tool" in prompt
     assert "identifier already present in the context" in prompt
     assert "instead of re-inspecting state" in prompt
-    # (4) invariants: one tool call, legal tools only, facts only, no invented evidence/identifiers.
+    # (4) anti-premature-finish: finish is terminal while a deliverable is unfulfilled.
+    assert "terminal action" in prompt
+    assert "never call it while the request still describes an unfulfilled deliverable" in prompt
+    assert "a plan to propose, a task to create, a task awaiting ranking" in prompt
+    assert "prefer the domain tool that matches the request over state-inspection" in prompt
+    # (5) invariants: one tool call, legal tools only, facts only, no invented evidence/identifiers.
     assert "exactly one tool call per response" in prompt
     assert "only a legal tool" in prompt
     assert "context as facts" in prompt
