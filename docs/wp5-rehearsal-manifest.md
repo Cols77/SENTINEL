@@ -53,6 +53,13 @@ the flight itself.
 2. **Tape 6-10 floor points** across the alley, measured in the tag-map room
    frame (record x, y in room units, and the camera heading in degrees). Vary
    position and heading; include points seeing one tag and points seeing two.
+   **Stratify by tag distance** (see "Static accuracy characterization" below):
+   distance dominates every other factor, so the point set must span the
+   working range rather than clustering at one radius. Points beyond ~1 m from
+   the nearest tag will not meet the 10 cm gate on lateral error.
+   **Truth must be measured to the camera lens**, not to the drone body, and
+   from the same reference at every point; a body-vs-lens mix-up is worth
+   several centimetres and is indistinguishable from a pipeline error.
 3. **One stationary run per point, 30 frames each**, with a distinct
    `--run-id` per point (e.g. `p01` .. `p10`), recording raw frames so the run
    can be re-scored: `pose-stream --real --confirm --max-frames 30
@@ -84,3 +91,76 @@ uv run python -m pytest tests/contracts tests/pose tests/integration tests/test_
 ```
 
 All must pass before the physical run is scheduled.
+
+## Static accuracy characterization (2026-09-20)
+
+Single tag (id 4, 36h11, `size_m` 0.192, chessboard-calibrated map), drone
+stationary with motors off, tag square-on, scored with `pose-score`. Camera at
+12 cm for the 40 and 80 cm runs, on the floor for 111 cm.
+
+| tag distance | n | bias dx (lateral) | bias dy (depth) | spread p95 | heading bias |
+|---|---|---|---|---|---|
+| 40 cm | 27 | +0.4 cm | +0.1 cm | 1.0 cm | -0.9 deg |
+| 80 cm | 42 | +0.2 cm | +2.0 cm | 2.1 cm | -0.1 deg |
+| 111 cm | 100 | +2.0 cm | +1.6 cm | 11.1 cm | +2.6 deg |
+
+**Precision degrades faster than distance squared.** 2.8x the distance gives
+12.8x the scatter, where D^2 predicts 7.7x. Spread is measured against each
+run's own median, so this result does not depend on ground truth and is not
+affected by any tape-measurement error.
+
+**The working envelope is roughly 40-80 cm per tag** for centimetre accuracy.
+At 111 cm lateral error reaches +2.0 cm with 11.1 cm of spread, which passes
+the 10 cm p95 gate only marginally. Six tags covering a full alley at
+metre-plus ranges will not deliver what a closed-loop position target would
+need; that is a coverage/density question, not a calibration one.
+
+**At 111 cm the lateral solve is degenerate, not noisy.** corr(x, heading) =
++0.9999 across 100 poses, which collapsed to 10 distinct solutions: the solver
+trades lateral offset against yaw along a single ill-conditioned direction.
+A nearly fronto-parallel planar target is the classic ill-posed case for PnP.
+
+**The Tello camera is pitched about 8.6 deg downward.** Measured from the
+horizon position in a recorded frame (wall/floor junction at y~215 against
+cy 353.8, camera 1 cm off the floor). This sets the visibility envelope: a tag
+above camera height climbs in the frame as the drone approaches and clips out
+of view. With the camera on the floor and the tag centre at 10.5 cm, the tag
+leaves the frame closer than ~85 cm. Nothing in the tag map or the planner
+models this today.
+
+**Reprojection error is not a proxy for pose accuracy.** It was ~0.5 px in both
+the most accurate run (40 cm, 1-4 mm) and the least (111 cm, 11 cm spread).
+Do not use it as a quality gate for positioning.
+
+### Retraction: the Test A "systematic bias"
+
+Test A (one point, one tag, 108 cm, 25 poses) reported median == p95 == 4.4 cm
+and was read as a systematic bias of unknown origin. It is not. Candidates
+tested and rejected:
+
+- **Tag size / `size_m`** - predicted the tag would measure ~19.5 cm; it
+  measures 19.2 cm. Rejected by direct measurement.
+- **Focal-length bias** - would scale with distance; the 40 cm residual was
+  -0.10 cm where a proportional error predicted -0.62 cm. Rejected.
+- **Constant lens-to-body offset** - predicted -1.74 cm at every distance; the
+  40 cm residual was -0.10 cm. Rejected as stated, though a ~1.7 cm offset
+  remains consistent with the 80 and 111 cm runs alone.
+
+The 4.4 cm is better explained by distance-dependent degradation plus
+ground-truth measurement error. Test A's apparent precision (median == p95)
+was a stable *wrong* solution in the ill-conditioned regime, not evidence of
+accuracy - which is why `pose-score` now reports bias and spread separately.
+
+### Open: residual depth bias
+
+A ~1.5-2 cm depth (range) bias persists at 80 and 111 cm but not at 40 cm. It
+cannot be resolved by this method: hand-measured truth in these runs carried
+several centimetres of uncertainty (one run intended as 70 cm was actually
+80 cm), which is larger than the effect. Settling it requires either truth
+measured to a few mm, or a truth-free method.
+
+**The truth-free method is cross-tag disagreement.** With two or more tags in
+view, each tag independently estimates the camera position and they must
+agree; disagreement isolates map/geometry error with no tape measure involved.
+`estimate_all` and `flag_tag_disagreement` already implement this and are not
+yet exercised outside unit tests.
