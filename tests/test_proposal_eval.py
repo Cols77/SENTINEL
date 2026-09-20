@@ -89,8 +89,10 @@ def test_audit_interruption_reopens_durable_state(tmp_path):
 def test_import_preserves_hand_reference_and_reports_exclusions(tmp_path):
     import json
     source = tmp_path / "cases.jsonl"
-    rows = [{"turn_id": "hand-1", "decision_point": "SELECT_PLAN", "label_source": "hand", "label": "escalate", "packet": {"operator_request": "Count computers"}},
-            {"turn_id": "draft-1", "decision_point": "SELECT_PLAN", "label_source": "draft", "label": "escalate"}]
+    rows = [{"turn_id": "hand-1", "decision_point": "SELECT_PLAN", "label_source": "hand", "label": "escalate", "packet": {"operator_request": "Count computers"},
+             "candidates": [{"label": "PLAN_ROUTE_ONLY_2_ZONE"}, {"label": "PLAN_MARKER_VERIFIED_6"}, {"label": "escalate"}]},
+            {"turn_id": "draft-1", "decision_point": "SELECT_PLAN", "label_source": "draft", "label": "escalate",
+             "candidates": [{"label": "PLAN_ROUTE_ONLY_2_ZONE"}, {"label": "PLAN_MARKER_VERIFIED_6"}, {"label": "escalate"}]}]
     source.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
     cases, excluded = load_case_bundle(source)
     assert cases[0].expected_escalation
@@ -183,3 +185,18 @@ def test_permanent_proposal_audit_failure_cannot_be_hidden_by_router(tmp_path):
     assert record["final_state"]["run_status"] == "COMPLETED"
     assert not record["metrics"]["outcome_success"]
     assert "permanent_audit_failure" in record["metrics"]["failure_reasons"]
+
+
+def test_draft_catalogue_escalation_reference_is_excluded(tmp_path):
+    import json
+    source = tmp_path / "draft.jsonl"
+    source.write_text(json.dumps({
+        "turn_id": "draft-escalation", "decision_point": "SELECT_PLAN",
+        "label_source": "hand", "label": "escalate",
+        "packet": {"operator_request": "Unsupported operation"},
+        "candidates": [{"label": "PLAN_ROUTE_ONLY_2_ZONE"}, {"label": "PLAN_MARKER_VERIFIED_6"},
+                       {"label": "DRAFT_PLAN_NEW"}, {"label": "escalate"}],
+    }) + "\n", encoding="utf-8")
+    cases, excluded = load_case_bundle(source)
+    assert cases == []
+    assert excluded == [{"case_id": "draft-escalation", "reason": "incompatible_or_draft_catalogue"}]

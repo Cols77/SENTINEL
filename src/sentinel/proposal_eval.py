@@ -81,11 +81,14 @@ def load_case_bundle(path=None):
         raise ValueError("unsupported proposal fixture version")
     rows = document.get("cases", []) if isinstance(document, dict) else document
     cases, excluded = [], []
+    approved_labels = {plan.plan_id for plan in load_catalogue_plans()} | {"escalate"}
     for row in rows:
         reason = None
         if "turn_id" in row:
             if row.get("decision_point") != SELECT_PLAN:
                 reason = "outside_SELECT_PLAN_scope"
+            elif not isinstance(row.get("candidates"), list) or any(not isinstance(candidate, dict) or not isinstance(candidate.get("label"), str) for candidate in row["candidates"]) or {candidate["label"] for candidate in row["candidates"]} != approved_labels:
+                reason = "incompatible_or_draft_catalogue"
             elif row.get("label_source") != "hand" or row.get("label") not in {ROUTE, FULL, "escalate"}:
                 reason = "draft_or_unlabelled_reference"
             elif row.get("packet", {}).get("facts", {}).get("plan_exists") or row.get("packet", {}).get("facts", {}).get("detection_present") or row.get("packet", {}).get("facts", {}).get("task_exists"):
