@@ -12,8 +12,8 @@ carrying v1's fields plus ``rule_choice``:
   ``fixtures/catalogue_draft/survey-catalogue-v2.draft.json`` -- never proposed
   through the gateway, only fed to ``legal_set`` for enumeration): 56 scored
   requests (42 exact per-plan matches, 5 ambiguous, 5 out-of-catalogue,
-  4 contradictory) plus 24 ``operator_pending`` placeholder slots the operator
-  fills in at gate G-labels-v2.
+  4 contradictory) plus 24 generated requests in the former pending slots.
+  Generated expectations are not independently labelled operator evidence.
 - ``EVIDENCE_GATE`` duplicate turns (``rule_choice is None``): a detection that
   duplicates an already-tasked station, varied by score band, whether the
   earlier task is ranked, and whether a second pending detection is queued
@@ -183,7 +183,7 @@ _ESCALATE_RATIONALE: dict[str, Callable[[str], str]] = {
         f'the request contradicts itself on scope ("{text}"); escalate for operator clarification'),
 }
 
-_PENDING_SLOT_COUNT = 24
+GENERATED_REQUESTS_PATH = Path(__file__).resolve().parents[2] / "fixtures/decisions_v2/generated-requests.v1.json"
 
 # --- EVIDENCE_GATE duplicate variants --------------------------------------------
 
@@ -294,25 +294,27 @@ def _generate_select_plan_scored_turns(tmp_path: Path, draft_catalogue) -> list[
 
 
 def _generate_select_plan_pending_turns(tmp_path: Path, draft_catalogue) -> list[dict[str, Any]]:
-    """24 empty slots for the operator to fill in with real request texts at gate
-    G-labels-v2 (Task 10, Step 5). ``RUN_CREATE`` requires a non-empty
-    ``request_text`` (wire schema minLength 1), so each slot is built from a
-    placeholder run and then its ``operator_request`` is nulled out in the
-    packet -- the placeholder text itself is never a real request and is
-    discarded, not scored. label/rationale stay ``None``; label_source
-    ``"operator_pending"`` flags them as excluded from every count and from
-    scoring (see test_turn_fixture_v2.py)."""
+    """Drive canonical generated requests through the gateway, retaining old IDs."""
+    source = json.loads(GENERATED_REQUESTS_PATH.read_text(encoding="utf-8"))
+    if source.get("version") != "generated-requests.v1" or source.get("provenance") != "generated" or source.get("catalogue_status") != "draft":
+        raise ValueError("unsupported generated request provenance")
+    rows = source["requests"]
+    expected_ids = {f"sp2-pending-{i:02d}" for i in range(1, 25)}
+    if len(rows) != 24 or {row["turn_id"] for row in rows} != expected_ids:
+        raise ValueError("generated request asset must fill exactly the 24 former slots")
     turns = []
-    for i in range(1, _PENDING_SLOT_COUNT + 1):
-        turn_id = f"sp2-pending-{i:02d}"
-        placeholder = f"PLACEHOLDER REQUEST {i}: operator writes the real text at gate G-labels-v2"
-        run = _new_run(tmp_path, turn_id, request=placeholder)
+    for row in rows:
+        turn_id = row["turn_id"]
+        if not row["request"].strip() or not row["rationale"].strip():
+            raise ValueError("generated requests and rationales must be nonblank")
+        run = _new_run(tmp_path, turn_id, request=row["request"])
         try:
             turn = _capture_turn_v2(run, draft_catalogue, turn_id, expected_point="SELECT_PLAN")
         finally:
             run.close()
-        turn["packet"] = {**turn["packet"], "operator_request": None}
-        turn.update(label=None, label_source="operator_pending", rationale=None)
+        if row["label"] not in {candidate["label"] for candidate in turn["candidates"]}:
+            raise ValueError(f"{turn_id}: generated label is outside the draft catalogue")
+        turn.update(label=row["label"], label_source="generated", rationale=row["rationale"])
         turns.append(turn)
     return turns
 
@@ -486,8 +488,8 @@ def _generate_rule_turns(tmp_path: Path, catalogue) -> list[dict[str, Any]]:
 
 
 def generate_turns() -> list[dict[str, Any]]:
-    """Drive the real gateway and return every v2 turn: 56 scored + 24
-    operator_pending ``SELECT_PLAN`` (against the draft catalogue), the distinct
+    """Drive the real gateway and return every v2 turn: 56 original + 24
+    generated ``SELECT_PLAN`` (against the draft catalogue), the distinct
     ``EVIDENCE_GATE`` duplicate turns, the distinct ``ASSIGN`` near-tie turns,
     and 8 single-candidate RULE turns. No REPLAN turns (Task 9 was dropped)."""
     catalogue = load_catalogue_plans()
