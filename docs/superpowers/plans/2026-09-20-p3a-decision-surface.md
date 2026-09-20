@@ -45,12 +45,14 @@
 
 | Wave | Tasks | Needs P2b (`rule_choice`)? |
 |---|---|---|
-| 1 | 0–5 | **No.** Start now, from the current tip of `feat/p2-shadow-advisors`. |
-| 2 | 6–11 | **Yes.** Task 6 is a mechanical gate + rebase + interface pin. |
+| 1 | 0–5 | **No.** ✅ **Done 2026-09-20.** |
+| 2 | 6–11 | **Yes.** ✅ **P2b landed** (`847d7af`); Task 6 done 2026-09-20 — rebased, pin filled. Tasks 7–11 are ready to dispatch. |
+
+**Branch point correction (2026-09-20):** this branch was cut from **`9f657ac`**, P2b's code commit, not from `620e8ac` — the P2 session had already advanced `feat/p2-shadow-advisors`. So the P2b code was present for all of Wave 1. Baselines per commit: `620e8ac` = 472 passed (the handoff's figure was **correct**, not stale); `9f657ac` = 492 passed; after Wave 1 = 522; after rebasing onto `847d7af` = **524 passed, 3 skipped, 0 failed**. Details in `p3a-interface-pin.md`.
 
 Wave 1 touches one shared file (`decision_state.py`), additively. Everything else in Wave 1 is a new file.
 
-**Wave 1 was dry-run on 2026-09-20**: the code and tests of Tasks 1–5, applied verbatim to a throwaway checkout of `620e8ac`, gave **30 new tests passed** (read from the summary line) and a full suite with **0 failures**. The dry-run checkout's total (502) does not reconcile with this worktree's 492 baseline plus 30, so trust **your own** suite gate, not either total. A Wave 1 dev whose tests fail has most likely mis-applied a snippet (watch the indentation of the snippets that go inside `DecisionState` and inside `read_decision_state`), not found a plan error. Wave 2's test bodies are outlines by necessity (they depend on P2b's final names) and were **not** dry-run.
+**Wave 1 was executed on 2026-09-20 and is complete** (commits `da5a828`…`e6d557a` after the rebase): 5/5 tasks, each dev + fresh independent review, zero fix rounds, 30 new tests. Suite after Wave 1: 522 passed; after the P2b rebase: **524 passed, 3 skipped, 0 failed**. A Wave 1 dev whose tests fail has most likely mis-applied a snippet (watch the indentation of the snippets that go inside `DecisionState` and inside `read_decision_state`), not found a plan error. Wave 2's test bodies are outlines by necessity (they depend on P2b's final names) and were **not** dry-run.
 
 ## Operator gates (parent brings these; never self-grant)
 
@@ -788,11 +790,16 @@ def operator_touches(audit_records: Iterable[dict], events: Iterable[dict]) -> d
 
 ## WAVE 2 — requires P2b
 
-### Task 6 (parent): P2b gate, rebase, interface pin
+### Task 6 (parent): P2b gate, rebase, interface pin — ✅ DONE 2026-09-20
 
-- [ ] **Step 1 — gate.** `git -C C:/coding/sentinel/.worktrees/p2-shadow-advisors grep -n "rule_choice" -- src/sentinel/coordinator/legal_tools.py`. **No output ⇒ P2b has not landed: stop Wave 2** and tell the operator. (Do not implement `rule_choice` here: the P2 session owns it, and two implementations in `legal_tools.py`/`policies.py` would collide.)
-- [ ] **Step 2 — rebase.** `git rebase feat/p2-shadow-advisors` in the P3 worktree. Expected conflicts: none, or `decision_state.py` only. Resolve by keeping both sides' additions; re-run the suite gate.
-- [ ] **Step 3 — interface pin.** Read P2b's `legal_tools.py`, `policies.py`, `shadow.py`, `operator_choice.py`, `turn_generator.py` and write `docs/superpowers/plans/p3a-interface-pin.md` answering, with file:line:
+**All four steps are complete. Read `docs/superpowers/plans/p3a-interface-pin.md`, then go to Task 7.** What happened:
+
+- **Step 1 — gate:** satisfied. P2b landed at `847d7af`; `rule_choice`, `EVIDENCE_TASK_SCORE = 0.75`, `JUDGMENT_POINTS`, `ADVISORY_POINTS` all verified in the code.
+- **Step 2 — rebase:** `git rebase feat/p2-shadow-advisors` replayed all six P3 commits with **no conflicts** (P2b never touched `decision_state.py`). Suite after: **524 passed, 3 skipped, 0 failed**.
+- **Step 3 — interface pin:** pre-filled in `p3a-interface-pin.md`, every row verified against `847d7af` rather than against the P2 session's summary. Rows 1, 2, 3, 5 and 8 are exactly as this plan assumed. **Row 6 is not**, and it changes Tasks 7–9 — the consequent edits are already applied below.
+- **Step 4 — reconcile:** done; see the ❗ notes in Tasks 7, 8 and 9.
+
+<details><summary>Original Step 3 question table (kept for the record — all rows now answered in the pin)</summary>
 
 | # | This plan assumes | Actual |
 |---|---|---|
@@ -805,8 +812,7 @@ def operator_touches(audit_records: Iterable[dict], events: Iterable[dict]) -> d
 | 7 | What `ADVISORY_POINTS` contains and who reads it | |
 | 8 | The helper names in Ground truth §12 still exist in `turn_generator.py` | |
 
-- [ ] **Step 4 — reconcile.** Where "Actual" differs from the assumption, edit Tasks 7–10 of this plan (names only) **before** dispatching them, and commit the pin + the edited plan: `docs(p3): P2b interface pin`.
-- [ ] **Step 5:** Suite gate; record the new baseline in `HANDOFF-P3.md`.
+</details>
 
 ### Task 7: Work queue in `legal_set` — oldest-first triage, duplicates become the judgment point
 
@@ -815,8 +821,12 @@ def operator_touches(audit_records: Iterable[dict], events: Iterable[dict]) -> d
 - Test: `tests/coordinator/test_legal_tools_queue.py`
 
 **Interfaces:**
-- Consumes: `DecisionState.detections`, `.tasks`, `.detection_facts()` (Task 2); P2b's `LegalSet.rule_choice`, `EVIDENCE_TASK_SCORE` (pin rows 1–3).
-- Produces: `DETECTION_TRIAGE = EVIDENCE_GATE` (alias, same string); `needs_judgment(legal: LegalSet) -> bool` = `legal.rule_choice is None and len(legal.candidates) > 1` (skip if the pin shows P2b already has an equivalent — then use theirs everywhere this plan says `needs_judgment`); queue order below.
+- Consumes: `DecisionState.detections`, `.tasks`, `.detection_facts()` (Task 2); P2b's `LegalSet.rule_choice`, `EVIDENCE_TASK_SCORE` (pin rows 1–3, all confirmed as assumed).
+- Produces: `DETECTION_TRIAGE = EVIDENCE_GATE` (alias, same string); `needs_judgment(legal: LegalSet) -> bool` = `legal.rule_choice is None and len(legal.candidates) > 1`, **exported from `legal_tools.py` in this task** (Tasks 8 and 11 both import it); queue order below.
+
+❗ **Pin row 4/6 — do not misread `rule_choice is None`.** P2b leaves `rule_choice = None` on *single-candidate* sets too (`RANK`, `ASSIGN`, the waits), and `RulePolicy` settles those by its `len(candidates) == 1` branch first. That is why `needs_judgment` tests **both** conditions. A predicate of `rule_choice is None` alone would turn every RULE point into an escalation.
+
+❗ **Extend P2b's rule, do not rewrite it.** P2b already computes `rule_choice = "create_task" if inside_plan and score >= EVIDENCE_TASK_SCORE else "escalate"` at `EVIDENCE_GATE`. P3a adds exactly one new case on top: `None` when the detection is a duplicate or repeat that would otherwise have qualified. Keep P2b's candidate tuple, labels and descriptions byte-identical — the v1 golden fixture compares them.
 
 **Queue order (deterministic):**
 1. `TERMINAL`, `WAIT_APPROVAL`, `SELECT_PLAN` exactly as today.
@@ -899,8 +909,14 @@ def _triage(state: DecisionState, d, evidence_threshold: float) -> LegalSet:
 ### Task 8: `ASSIGN` near-tie and SELECT_PLAN without already-proposed entries
 
 **Files:**
-- Modify: `src/sentinel/coordinator/legal_tools.py`, `policies.py` (add `INSTRUCTIONS["ASSIGN"]`), and — only if pin row 6 says membership in `JUDGMENT_POINTS` is what triggers the human path — `shadow.py` and `operator_choice.py` to use `needs_judgment(legal)` instead
+- Modify: `src/sentinel/coordinator/legal_tools.py`, `policies.py` (add `INSTRUCTIONS["ASSIGN"]`, extend `ADVISORY_POINTS`), `operator_choice.py` (**required** — see below)
 - Test: `tests/coordinator/test_assignment_choice.py`
+
+❗ **Pin row 6 — this step is now mandatory, not conditional.** P2b decides "this turn needs a human" by **set membership**: `operator_choice.py:29` and `:56` test `legal.decision_point not in JUDGMENT_POINTS`, and `JUDGMENT_POINTS = frozenset({SELECT_PLAN})`. Without the change below, Task 7's duplicate judgment and this task's near-tie **dead-end**: `RulePolicy` escalates (chooser `OPERATOR`, run finishes `NEEDS_REVIEW`) but `pending_decision` returns `None` and `submit_choice` raises `INVALID_OPERATOR_CHOICE`, so the operator can never answer.
+
+Required change: in `pending_decision` and `submit_choice`, replace `legal.decision_point not in JUDGMENT_POINTS` with `not needs_judgment(legal)`. This is backward-compatible with every P2b test — `SELECT_PLAN` still qualifies (`rule_choice is None`, 3 candidates), an ordinary `EVIDENCE_GATE` still does not (`rule_choice` is set), and single-candidate points still do not. **Before relying on that, confirm P2b's `test_operator_choice.py` `EVIDENCE_GATE` case uses a non-duplicate detection.** If any P2b test constructs a duplicate and asserts `INVALID_OPERATOR_CHOICE`, stop and report rather than editing their test.
+
+Also add `ASSIGN` to `ADVISORY_POINTS` in `legal_tools.py`. Without it, `JevPolicy.decide`'s `assert point in ADVISORY_POINTS` (`policies.py:107`) fires and `INSTRUCTIONS[point]` raises `KeyError` the first time an advisor is shadowed at a near-tie. Leave `scripts/shadow_sweep.py` alone — it keeps its own local `JUDGMENT_POINTS` tuple and is P2-owned (Never-edit list); note the staleness in the handoff instead.
 
 **Interfaces:**
 - Consumes: `is_near_tie`, `gap_band`, `rank_gap` (Task 4); `TaskView.ranking_scores`; `DecisionState.proposed_catalogue_plan_ids` (Task 3); `needs_judgment` (Task 7).
@@ -929,7 +945,7 @@ def _triage(state: DecisionState, d, evidence_threshold: float) -> LegalSet:
 
 - `replan.covering_plans(catalogue, station_id, current_station_ids, already_proposed) -> tuple[CataloguePlan, ...]`: plans whose `station_ids` ⊇ `current_station_ids ∪ {station_id}`, minus `already_proposed`, fewest stations first then by id.
 - In `_triage`: if the detection is `DETECTED`, score ≥ `EVIDENCE_TASK_SCORE`, `inside_plan is False`, and `covering_plans(...)` is non-empty → `LegalSet("REPLAN", (one inspection.propose_plan candidate per covering plan) + (escalate,), rule_choice=None)`. Otherwise Task 7's behaviour.
-- Add `REPLAN` to `JUDGMENT_POINTS` (and wherever pin row 6/7 requires).
+- Add `REPLAN` to **`ADVISORY_POINTS`** (so advisors are shadowed there for P3b, and `JevPolicy`'s assert and `INSTRUCTIONS` lookup both succeed). After Task 8's `needs_judgment` change, `JUDGMENT_POINTS` is no longer what routes the operator surface, so add `REPLAN` to it only if something still reads that set directly — check before assuming.
 
 - [ ] **Step 1: Failing tests:** `covering_plans` unit cases (v1 catalogue: `LEFT_FRONT` over the route plan → only `PLAN_MARKER_VERIFIED_6`; after that entry was proposed → empty; draft catalogue → `PLAN_VERIFIED_FULL_SITE` is the only superset of both middles + `LEFT_ALLEY_FRONT`); out-of-plan 0.90 → `REPLAN`, labels `("PLAN_MARKER_VERIFIED_6", "escalate")`; choosing the plan through `AgentLoop` → `WAITING_FOR_APPROVAL` **and `run.state().plan_station_ids` is still the two middle stations**; `CONFIRM` → the same detection is now `EVIDENCE_GATE` with `rule_choice == "create_task"`; `REJECT` → the detection escalates by rule (no covering plan left) and the old plan is still approved; out-of-plan 0.62 → never `REPLAN`. **Update** Task 7's `test_out_of_plan_detection_escalates_by_rule` to use score 0.62 (this is the one sanctioned edit of a P3 test).
 - [ ] **Step 2:** FAIL. **Step 3:** Implement. **Step 4:** PASS + suite gate. **Step 5:** Commit `feat(coordinator): replanning as an approval-gated proposal on an out-of-plan detection`.
@@ -947,6 +963,8 @@ Same method as v1 (`tests/coordinator/turn_generator.py`, `test_turn_fixture.py`
 | Point | How states are built | Expected distinct turns |
 |---|---|---|
 | `SELECT_PLAN` vs the **draft** catalogue (`legal_set(state, load_catalogue_plans(DRAFT_CATALOGUE_PATH))`, never proposed through the gateway) | `RUN_CREATE` with 56 agent-written request texts: for each of the 14 plans, 3 phrasings that name its coverage (42); 5 ambiguous; 5 out-of-catalogue; 4 contradictory. Plus **24 empty slots** `label_source: "operator_pending"`, `operator_request: null`, excluded from every count and from scoring | 56 + 24 pending |
+
+❗ **The rich catalogue flips the v1 single-station labels, and that is the headline result.** P2b's `4df8770` relabelled v1 `sp-001..006` (single-station requests) to **`escalate`**, operator-approved 2026-09-20, because no v1 plan covers exactly one station. Against the draft catalogue the same requests have an exact `PLAN_ROUTE_<STATION>` match, so their correct label becomes that plan. Say this explicitly in the v2 rationale strings and put it in front of the operator at **G-labels-v2**: it is the sharpest evidence that proposal item P-3 (the rich catalogue) deletes a whole class of escalation, which is the "approvals only" argument in one line.
 | `EVIDENCE_GATE` duplicate (`rule_choice is None`) | new-detection score {0.78, 0.90, 0.99} × station {L-mid, R-mid} × earlier task {unranked, ranked} × another pending detection {no, yes} | ≤ 24; keep the distinct ones |
 | `ASSIGN` near-tie | gaps {0.00, 0.02, 0.06} × patrollers {2, 3} via `SimulatedPatroller.rank_for_task` | ≤ 6 |
 | `REPLAN` | outside station {4 non-middle stations} × score {0.78, 0.90, 0.99} | ≤ 12; keep the distinct ones |

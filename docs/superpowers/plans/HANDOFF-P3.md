@@ -9,24 +9,33 @@
 Verified on `feat/p2-shadow-advisors` @ `620e8ac`. Where this section and a later section disagree, this section wins.
 
 1. **The worktree and branch in the header do not exist yet.** P3a Task 0 creates them. The P3a plan and this handoff existed only in a temp scratchpad; they now live untracked in the main checkout under `docs/superpowers/plans/` until Task 0 commits them on the P3 branch.
-2. **P2b has not landed.** Sections 2 and 4 describe `LegalSet.rule_choice`, `EVIDENCE_TASK_SCORE = 0.75` and `ADVISORY_POINTS`; none exists on any branch. On `620e8ac`, `LegalSet` is `(decision_point, candidates)` and `RulePolicy` means "one candidate acts, otherwise escalate". The operator confirmed a parallel session owns P2b. P3a rev 2 is split accordingly: **Wave 1 (Tasks 0–5) does not need P2b; Wave 2 (Tasks 6–11) starts with a mechanical P2b gate + rebase + interface pin.** P3 must not implement `rule_choice` itself.
+2. **P2b has landed** (updated 2026-09-20, later the same day). The P2 session shipped it at `847d7af`, and this branch's merge-base turned out to be `9f657ac` — P2b's code commit — so the P2b code was present for all of Wave 1. `LegalSet.rule_choice`, `EVIDENCE_TASK_SCORE = 0.75`, `JUDGMENT_POINTS = {SELECT_PLAN}` and `ADVISORY_POINTS = {SELECT_PLAN, EVIDENCE_GATE}` are all live. The branch is rebased onto `847d7af` and the interface pin is filled: see `p3a-interface-pin.md`. **Wave 1 is complete; Task 6 is complete; Tasks 7–11 are ready.** P3 must still never implement `rule_choice` itself — the P2 session owns it.
 3. **`docs/superpowers/specs/2026-09-20_wp0-proposal-single-zone-catalogue-entry.md` (section 1, item 5) does not exist.** It is superseded by `docs/superpowers/specs/2026-09-20_wp0-proposal-p3-decision-surface-amendments.md`.
 4. **Section 5 understates the gaps.** The gateway itself blocks three of the four decision types end-to-end (run completes on the first confirmed assignment; rank-1-only proposals and no `scores` in `TASK_RANK`; the catalogue schema, wire schema, DB CHECK and a hardcoded path pin the two-plan catalogue). Full table A1–A13 in the consolidated proposal. **Operator decision 2026-09-20: `CommandGateway` stays untouchable; everything goes into that one proposal (gate G-amend); blocked slices become a short P3a-2 plan after consent.**
 5. **A read-model bug was found (A13):** after a rejected mid-run plan proposal, `read_decision_state` reports the rejected plan as the approved one. P3a Task 3 fixes it in the read model.
 6. A fresh worktree needs `uv sync --extra dev` before the test command in section 8 works.
 7. Section 8, step 3 still holds (Workflow: dev → fresh review → fix → suite gate, on Sonnet, gates outside), against **rev 2** of the P3a plan. Wave 1's code was dry-run verbatim in a throwaway checkout: 30 new tests passed, full suite 0 failures.
-8. **Section 4's "472 passed" is wrong.** See Baseline below.
+8. **Section 4's "472 passed" is correct** for `620e8ac`. An earlier revision of this section called it stale; that was wrong, and the cause was assuming this worktree sat on `620e8ac` when its merge-base is `9f657ac`. See Baseline.
+9. `scripts/shadow_sweep.py` keeps a local `JUDGMENT_POINTS = (SELECT_PLAN, EVIDENCE_GATE)` that does not know about P3's new decision points. It is P2-owned and on P3's Never-edit list, so P3 leaves it alone; the P2 session may want to update it before any sweep that should cover `ASSIGN`/`REPLAN`.
 
 ## Baseline
 
-Measured 2026-09-20 in `C:/coding/sentinel/.worktrees/p3-decision-surface` at `620e8ac` (P3a Task 0), after `uv sync --extra dev`:
+Measured in `C:/coding/sentinel/.worktrees/p3-decision-surface` (after `uv sync --extra dev`; use `rtk proxy uv run python -m pytest …` if the hook swallows the run):
 
-```
-495 tests collected
-492 passed, 3 skipped, 0 failed   (~3 min)
-```
+| Commit | Collected | Passed | Skipped | When |
+|---|---|---|---|---|
+| `620e8ac` | 475 | 472 | 3 | P2 tip as the original handoff described it |
+| `9f657ac` | 495 | 492 | 3 | **this branch's actual merge-base** — P2b code included |
+| after Wave 1 | 525 | 522 | 3 | 30 new tests from Tasks 1–5 |
+| after rebase onto `847d7af` | 527 | **524** | 3 | current; 0 failed |
 
-The 3 skipped are the opt-in live LLM gate. Every task's suite gate is measured against this.
+The 3 skipped are the opt-in live LLM gate. Every task's suite gate is measured against the current row.
+
+## Wave 1 result (2026-09-20)
+
+5/5 tasks, each implemented then reviewed by a fresh agent that re-ran the suite itself; **zero fix rounds** — every task approved on first review. Commits after the rebase: `da5a828` (draft catalogue), `fa34518` (multi-detection state), `0890a08` (confirmed-plan fix, A13), `b2f03a7` (near-tie facts), `e6d557a` (operator-touch counting).
+
+Note for future workflow runs: commit trailers on this branch are mixed (`Claude Opus 5` on most, `Claude Sonnet 5` on `0890a08`) because each session applies its own attribution rule. Harmless, but do not "fix" it by rewriting history.
 
 ## 1. Read these first, in order
 
