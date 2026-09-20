@@ -35,6 +35,7 @@ from .harness import (
     envelope,
     open_harness,
 )
+from .p3_helpers import LEFT_MID, P3Run
 
 
 def _request() -> dict:
@@ -190,6 +191,25 @@ class _ConcurrencyProbeAdvisor:
                 self.second_call_finished.set()
 
 
+class _CreateTaskAdvisor:
+    """Always confidently picks ``create_task`` -- the opposite of what
+    RulePolicy does at a DUPLICATE-detection EVIDENCE_GATE turn (it
+    escalates, since ``rule_choice`` is ``None`` there) -- proves the
+    ladder's returned result is the executor's regardless of what an
+    advisor 'wants'."""
+
+    def __init__(self) -> None:
+        self.last: Decision | None = None
+        self.calls = 0
+
+    def decide(self, request: dict, context: PolicyContext) -> dict:
+        self.calls += 1
+        candidate = context.legal.by_label("create_task")
+        self.last = Decision(chooser="JEV", label=candidate.label, confidence=0.97, band="HIGH",
+                              legal_labels=context.legal.labels, model="duplicate-test", error=None, latency_ms=1)
+        return {"ignored": True}
+
+
 # --- (a) non-interference: drive the real one-station flow -----------------
 
 def _run_select_plan_only(tmp_path, wrap):
@@ -261,6 +281,45 @@ def test_timed_out_advisor_call_never_races_a_later_call_on_the_same_instance():
     assert advisor.second_call_finished.wait(timeout=5.0), "call 2 never completed"
     assert advisor.max_concurrent == 1, \
         "the same advisor instance ran two decide() calls concurrently -- .last is no longer safe to read"
+
+
+def test_non_interference_advisor_cannot_change_a_duplicate_detection_gate(tmp_path):
+    """P3a's DUPLICATE-detection judgment at EVIDENCE_GATE (``rule_choice`` is
+    ``None`` because ``facts["duplicates_open_task"]`` holds) had no
+    non-interference test of its own -- it leaned on P2b's plain EVIDENCE_GATE
+    proof (no duplicate involved) and on the near-tie ASSIGN test. Modeled on
+    ``test_non_interference_advisor_cannot_change_a_near_tie_assignment`` in
+    ``test_assignment_choice.py``: an advisor that confidently picks
+    ``create_task`` at a duplicate turn must still run and be recorded, while
+    the executor -- which escalates, since a duplicate is a real judgment
+    point -- is the only chooser of what actually executes."""
+    run = P3Run(tmp_path, "evidence-gate-duplicate-shadow")
+    try:
+        run.approve_route_plan()
+        first = run.ingest("a", LEFT_MID, 0.90)
+        run.ingest("b", LEFT_MID, 0.92)   # same station, still pending
+        run.create_task(first)            # opens a task at LEFT_MID -- "b" now duplicates it
+
+        boundary = CoordinatorBoundary(run.repo, run.gateway)
+        catalogue = load_catalogue_plans()
+        executor = RulePolicy()
+        advisor = _CreateTaskAdvisor()
+        sink = MemoryAuditSink()
+        ladder = ShadowLadder(executor, [("optimistic", advisor)], sink)
+        policy = bind_context(ladder, run.repo, catalogue)
+
+        result = AgentLoop(boundary, policy, max_turns=2, repository=run.repo, catalogue=catalogue).run(
+            run.run_id, AGENT_RUN_ID, "route-only survey of the alley stations")
+
+        assert result["status"] == "NEEDS_REVIEW"    # the executor's own decision, unaffected by the advisor
+        assert advisor.calls == 1                    # the advisor actually ran
+
+        judgment = next(r for r in sink.records if r["record"] == "judgment" and r["decision_point"] == EVIDENCE_GATE)
+        assert judgment["rule_choice"] is None                                       # a real judgment point
+        assert judgment["executor"] == {"chooser": "OPERATOR", "label": "escalate"}  # execution was the executor's choice
+        assert judgment["advisors"]["optimistic"]["label"] == "create_task"          # audit captured the advisor's differing pick
+    finally:
+        run.close()
 
 
 # --- (b)/(c) advisors called only at judgment points, audit shape ----------
