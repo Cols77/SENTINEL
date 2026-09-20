@@ -75,6 +75,30 @@ Each item: the change, the files that change on consent, and what must be re-ver
 - Question: does a revisit choreography exist, or is it wanted, given WP5 (pose) is pending?
 - If yes, it needs: `WorkerPort.dispatch` with a `revisit` choreography; a command `INSPECTION_REVISIT {section_id, mission_id, reason}` (or a `purpose` field on `INSPECTION_DISPATCH`); a decision point `REVISIT` for the marginal band (0.5–0.75, inside the plan, not a duplicate) with candidates `closer_look / create_task / escalate`; a bound of one revisit per station per run; a second marginal result escalates. The static veto and the flight envelope are unchanged: a revisit is an ordinary dispatch inside the approved plan.
 
+### P-9 Pose-aware navigation: recover positioning before acting — **design together with P-7**
+
+Operator idea, 2026-09-20: instead of always routing to one fixed point, the drone should notice when its positioning is weak and proceed carefully to re-establish an accurate fix from the tags.
+
+**Feasibility: better than expected. The hard parts already exist.**
+
+| Need | Status |
+|---|---|
+| A measurable accuracy signal | ✅ exists. `drone-pose-report` carries `reprojection_error_px`, per-tag `distance_m`, `zone_id` and tag count, plus read-time staleness. Test A measured median = p95 = 4.4 cm at 0.23 px reprojection — precision is excellent and the residual is a systematic bias, not noise |
+| A way to move "carefully" | ✅ expressible today. `djitellopy_backend` exposes `set_speed(cm_per_second)`, `move(direction, distance_cm)` and `rotate(direction, degrees)`. "Careful" = lower speed + shorter steps + re-observe between steps. **No new control mode and no continuous RC servo loop is needed** |
+| A number for "weak" | ❌ **missing, and this is the real blocker.** WP5's Test B (static accuracy at many ground-marked points against the 6-tag map) has not run. Until it has, any threshold for "positioning is degraded" is a guess |
+| Merged data | ❌ `master` has none of WP5. `src/sentinel/pose/*`, the pose contracts and the tag map live only on `feat/sentinel-wp5-drone-pose` |
+
+**Proposed shape, once Test B gives the numbers.** Two layers, kept apart:
+
+- **Worker layer (WP5/WP4, not the coordinator):** a creep-and-check routine — short `move` at reduced `set_speed`, re-observe tags, re-estimate, repeat until the fix is good or a step budget is spent. **Safety-critical default: prefer rotation over translation when the fix is poor.** A drone that translates *because* it is lost is more dangerous than one that holds position and turns to reacquire tags. Rotation is cheap, stays inside the envelope (±50 cm x/y), and is the natural recovery when tags have simply left the frame. Translate only once a fix is re-established; escalate if the budget is spent.
+- **Coordinator layer (P3-shaped):** pose confidence becomes facts in the decision packet (`pose_fix_band`, `tags_visible`, `pose_stale`), and a decision point `POSE_DEGRADED` offers `relocalize_in_place` / `continue` / `escalate`. A rule settles the clear cases (good fix → continue; no tags at all → escalate); the marginal band is a genuine judgment point.
+
+**Why this is worth more than it looks:** unlike the duplicate and near-tie judgments, this decision is **information-rich** — continuous error metrics, tag geometry and staleness, rather than the coarse bands of blocker A12. It is the first P3 judgment point where an advisor would have real signal to work with, so it is the most promising candidate for a P3b promotion study.
+
+**Dependencies and sequencing:** needs WP5 merged, Test B complete, an `INSPECTION_RELOCALIZE`-style command or a `purpose` field on `INSPECTION_DISPATCH`, and the pose report surfaced in the decision read model.
+
+**Design it with P-7 (closer look).** Both are "go back and observe again under better conditions", and both need a revisit choreography on `WorkerPort`. Designed separately they would produce two incompatible mechanisms for the same manoeuvre; designed together, the closer look is just a re-observation whose trigger is evidence quality rather than pose quality. **Recommend one combined design pass covering P-7 and P-9, after P3 lands and WP5 Test B reports.**
+
 ### P-8 Richer decision facts (A12) — read-model only once data exists
 - Duplicate judgment: capture time gap band, bounding-box overlap band. Near-tie judgment: patroller skill / distance / load. Needs WP3/WP5 data sources; listed so the promotion criteria are not applied to an information-thin point.
 

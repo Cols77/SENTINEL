@@ -44,6 +44,38 @@ Tasks 7 and 8 landed; **Task 9 was attempted and deliberately dropped**; Tasks 1
 1. **`P-6` / the gateway `IntegrityError`.** The operator released the gateway to the P1/P2 session for that one defect; the fix is `1ba6bfb` on `fix/gateway-integrity-error`, **unmerged**. When it reaches a branch P3 builds on, `test_characterization_reproposing_an_entry_raises_a_raw_integrity_error` (Task 3) must flip from the raw `sqlite3.IntegrityError` to `CoordinatorError("PLAN_ALREADY_PROPOSED")`. Not before.
 2. **"CommandGateway is untouchable" now has one exception.** That release was granted to that session for that defect and **does not extend to P3**. If you find master's gateway differs from this plan's Global Constraints, that is why — it is not licence to edit it.
 
+## Wave 2c result + P3a CLOSE-OUT (2026-09-20)
+
+- `1669a5f` Task 10 — decision-turn fixture v2. **102 records: 78 scored + 24 `operator_pending` slots** awaiting operator-written request texts. Scored: `SELECT_PLAN` 56, `EVIDENCE_GATE` 11 (8 duplicate judgments + 3 rule), `ASSIGN` 7 (6 near-tie judgments + 1 rule), 8 rule turns total. Every `(decision_point, packet, candidates)` triple is unique — the reviewer re-derived all counts from the JSONL rather than trusting the tests. Nothing was padded to hit a target. No `REPLAN` turns.
+- `33e00e7` Task 11 — operator-load report, `artifacts/p3/operator-load.md`.
+
+### The headline result: "approvals only" holds for clean runs and breaks exactly where expected
+
+| Scenario | Approvals | Choices | Escalations | Approvals only | Broken by |
+|---|---|---|---|---|---|
+| Clean single detection | 2 | 0 | 0 | **yes** | — |
+| Clean two detections | 2 | 0 | 0 | **yes** | — |
+| Duplicate detection | 1 | 0 | 1 | no | `EVIDENCE_GATE` |
+| Near-tie assignment | 2 | 1 | 1 | no | `ASSIGN` |
+
+This is the direct input to P3b: the two judgment points P3a added are precisely the two places a promoted policy would buy back an operator action.
+
+**Two platform limits made concrete by the rehearsals:**
+- *Clean two detections* meets the target only because blocker **A1** strands the second task — the run completes on the first confirmed assignment, so no second approval is possible. Granting **P-1** will make an honest two-detection run cost **3** touches. Decide then whether "approvals only" means one approval per assignment, or whether a batch approval is wanted.
+- *Duplicate detection* is worse than one extra touch: because the duplicate stays at the head of the queue (blocker **A7**), the first task's own rank and assign never run. **One escalation blocks the whole run.** That is the strongest argument for **P-4**.
+
+### Final review checklist — all clean
+
+- No file on the Never-edit list is touched anywhere on the branch (`git diff --name-only master...HEAD`, verified against the full list).
+- No `artifacts/` path outside `artifacts/p3/` is touched.
+- No production code under `src/` references the draft catalogue.
+- Gateway blockers pinned by characterization tests: **A1** (`test_characterization_second_task_is_stranded_by_run_completion`), **A2** (`test_characterization_rank_2_is_rejected_by_the_gateway`), **A9** (`test_characterization_reproposing_an_entry_raises_a_raw_integrity_error`), plus three pinning the REPLAN drop.
+- Non-interference: the near-tie `ASSIGN` judgment is proven directly (`advisor.calls == 1` while the executor's escalate still wins). The duplicate `EVIDENCE_GATE` judgment relies on P2b's existing `EVIDENCE_GATE` non-interference proof — the `ShadowLadder` mechanism is decision-point-agnostic, and the near-tie test covers the same `rule_choice is None` shape. Adequate, but a dedicated duplicate-case test would be a cheap improvement.
+
+### Suite
+
+**574 passed, 3 skipped, 0 failed.** From the `9f657ac` branch point: +82 tests.
+
 ## Wave 1 result (2026-09-20)
 
 5/5 tasks, each implemented then reviewed by a fresh agent that re-ran the suite itself; **zero fix rounds** — every task approved on first review. Commits after the rebase: `da5a828` (draft catalogue), `fa34518` (multi-detection state), `0890a08` (confirmed-plan fix, A13), `b2f03a7` (near-tie facts), `e6d557a` (operator-touch counting).
