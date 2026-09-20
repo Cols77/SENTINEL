@@ -1,0 +1,21 @@
+{
+  "version": "proposal-outcomes.v1",
+  "provenance": "synthetic; no empirical model accuracy claim",
+  "cases": [
+    {"case_id": "route_complete", "request": "Survey only the two alley zones without marker verification.", "acceptable_plans": ["PLAN_ROUTE_ONLY_2_ZONE"]},
+    {"case_id": "marker_complete", "request": "Inspect all six stations with marker verification.", "acceptable_plans": ["PLAN_MARKER_VERIFIED_6"]},
+    {"case_id": "ambiguous", "request": "Inspect the area.", "expected_escalation": true, "expected_terminal": "RUNNING", "expected_effects": []},
+    {"case_id": "contradictory", "request": "Verify every marker but do not perform marker verification.", "expected_escalation": true, "expected_terminal": "RUNNING", "expected_effects": []},
+    {"case_id": "unsupported_computer_count", "request": "Count the computers in this building.", "expected_escalation": true, "expected_terminal": "RUNNING", "expected_effects": [], "scripted_choices": ["PLAN_ROUTE_ONLY_2_ZONE"]},
+    {"case_id": "provider_failure", "request": "Route-only survey of two zones.", "acceptable_plans": ["PLAN_ROUTE_ONLY_2_ZONE"], "scripted_choices": ["provider_error"]},
+    {"case_id": "malformed_provider", "request": "Route-only survey of two zones.", "acceptable_plans": ["PLAN_ROUTE_ONLY_2_ZONE"], "scripted_choices": ["malformed"]},
+    {"case_id": "illegal_reference", "request": "Route-only survey of two zones.", "acceptable_plans": ["PLAN_ROUTE_ONLY_2_ZONE"], "scripted_choices": ["PLAN_STALE_OR_NONEXISTENT"]},
+    {"case_id": "pending_approval_zero_calls", "request": "Route-only survey of two zones.", "acceptable_plans": ["PLAN_ROUTE_ONLY_2_ZONE"], "setup": "pending_approval", "expected_terminal": "WAITING_FOR_APPROVAL", "expected_effects": ["plan"], "operator_decisions": []},
+    {"case_id": "reject_then_different_plan", "request": "Begin with a route survey; if rejected propose marker verification.", "acceptable_plans": ["PLAN_ROUTE_ONLY_2_ZONE", "PLAN_MARKER_VERIFIED_6"], "scripted_choices": ["PLAN_ROUTE_ONLY_2_ZONE", "PLAN_MARKER_VERIFIED_6"], "operator_decisions": ["REJECT", "CONFIRM", "CONFIRM"]},
+    {"case_id": "duplicate_recovery", "request": "Route-only survey of two zones.", "acceptable_plans": ["PLAN_ROUTE_ONLY_2_ZONE"], "setup": "duplicate_recovery"},
+    {"case_id": "missing_evidence", "request": "Route-only survey of two zones.", "acceptable_plans": ["PLAN_ROUTE_ONLY_2_ZONE"], "setup": "missing_evidence"},
+    {"case_id": "stale_evidence_retry", "request": "Route-only survey of two zones.", "acceptable_plans": ["PLAN_ROUTE_ONLY_2_ZONE"], "setup": "stale_evidence_retry"},
+    {"case_id": "audit_interruption", "request": "Route-only survey of two zones.", "acceptable_plans": ["PLAN_ROUTE_ONLY_2_ZONE"], "setup": "audit_interruption"},
+    {"case_id": "exhausted_turn_budget", "request": "Route-only survey of two zones.", "acceptable_plans": ["PLAN_ROUTE_ONLY_2_ZONE"], "turn_limit": 1}
+  ]
+}
