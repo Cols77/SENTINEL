@@ -78,3 +78,50 @@ Not covered by any of the above: any further push, any further paid call, G-amen
 - It does not authorise promotion of any policy to act. Promotion has its own criteria and gate (`2026-09-19-p3-hybrid-E-followup.md`).
 - It does not authorise further paid batches. C-6 covers batch `2026-09-20-operator-grant-1` only; any other batch needs fresh consent with its call count and cost stated first.
 - It does not authorise live drone operation or network changes.
+
+
+---
+
+## C-20 — standing Coherence consent for the survey/counting flow (2026-09-20)
+
+The operator first said the Coherence steps could be bypassed for this work
+("consider coherence work bypassed, let it drift"), then reversed it:
+
+> "Changed my mind, if you can maintain the coherence steps, that's good. but consider my consent
+> automatically granted."
+
+**C-20 therefore keeps the Coherence process and removes only the blocking wait.** Each contract
+change is still written as a reviewed proposal, still validated against its fixtures, and still
+recorded here as its own numbered entry. What the operator has pre-granted is the *approval*, not
+the rigour.
+
+| Covered | Not covered |
+|---|---|
+| Creating and amending `docs/superpowers/specs/contracts/sentinel-survey-v1.schema.json` | Any paid model call |
+| The `sentinel.survey` SQLite schema and its migrations | Any flight, indoor or outdoor |
+| Fixture and requirement edits that follow from those contract changes | Any merge to `master` or push to origin |
+| | Any change to `CommandGateway`, the alley wire schema, or the WP3 judged path |
+| | Promotion of any policy to act without an operator gate |
+| | **G-filming-consent** — recorded per location and date, never pre-granted, never recorded by Claude |
+
+**G-filming-consent is explicitly excluded from C-20.** A standing grant cannot cover other people's
+agreement to be filmed. It remains per location, per date, recorded by the operator.
+
+### Changes made under C-20
+
+| # | Change | Recorded |
+|---|---|---|
+| C-20a | `sentinel-survey-v1.schema.json` created: `Detection` (copied verbatim from the WP3 pipeline spec §4.1), `Sweep`, `Frame`, `Sighting`, `Object`, `ClassCount`, `Report` | rev 1 of the survey design |
+| C-20b | `Frame` gains `image_path`, `captured_at`, `command_completed_at` and altitude above the surface plane | rev 3, from the adversarial review: without timestamps the Tello's 150–400 ms stream latency is unmeasurable, and the replay path keyed on a path the store never held |
+| C-20c | `Sighting` gains a stored `band` column and its computed `(x_cm, y_cm, depth_cm)` | rev 3: the band gate was dead code — the ingest path overwrote every row to `high`, so "no low-confidence confirmation" was enforced only in unit tests |
+| C-20d | `Object` gains `depth_spread_pct`; `sweeps` gains an `ABORTED` status that does not consume a flight | rev 3 |
+| C-20e | Survey classes are `computer`, `person`, `phone`, `pen`; `score_kind` reuses WP3's `DETECTOR_RAW` / `VLM_CONFIDENCE_BAND` / `NONE` and survey detections **never** claim `DETECTOR_RAW` | rev 1 §6.1, the stated WP3 exception |
+
+### The WP3 boundary, restated for the record
+
+WP3 lists "No VLM-only approval" as a non-goal and forbids a VLM band substituting for a detector
+score. Those rules govern the **judged rock path**, where a detection becomes a hazard and then a
+patrol task a human acts on. The survey flow records `VLM_CONFIDENCE_BAND` honestly, never claims
+`DETECTOR_RAW`, and no survey detection may enter the rock path. This is a stated exception, not an
+oversight, and **Dzivha must see it before the provider profile is approved** — provider selection
+is a joint Colin-and-Dzivha gate under WP3 §3, which C-20 does not replace.

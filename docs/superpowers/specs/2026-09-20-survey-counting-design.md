@@ -129,9 +129,9 @@ rule, and the property the merge depends on).
 | Shape | Carries |
 |---|---|
 | `Sweep` | option id, stops actually flown, pose mode, start/end time, status |
-| `Frame` | sweep id, stop index, look offset, drone position and heading, **`position_kind: COMMANDED \| MEASURED`**, artifact id + sha256, analysis status |
-| `Sighting` | frame id + one `Detection` |
-| `Object` | class, estimated position, supporting sighting ids, distinct stop count, `band: CONFIRMED \| UNCERTAIN`, appearance summary |
+| `Frame` | sweep id, stop index, look offset, drone position, heading **and altitude above the surface plane**, **`position_kind: COMMANDED \| MEASURED`**, artifact id + sha256, **`image_path`**, **`captured_at` and `command_completed_at`**, analysis status |
+| `Sighting` | frame id + one `Detection`, its stored **`band`**, and its computed `(x_cm, y_cm, depth_cm)` |
+| `Object` | class, position, supporting sighting ids, distinct stop count, `band: CONFIRMED \| UNCERTAIN`, `depth_spread_pct`, appearance summary |
 | `ClassCount` | class, confirmed count, uncertain count, `method: MERGED_MULTI_VIEW \| SINGLE_VIEW_LOWER_BOUND \| NOT_OBSERVABLE` |
 | `Report` | class counts, agent caveats, flights used, unanalysed frame count |
 
@@ -179,47 +179,96 @@ actual range, so a closer follow-up can legitimately change a class from not-obs
 observable. **This is what gives the follow-up flight a real reason to exist**; without it the
 second flight would be theatre.
 
-### 5.2 Triangulation
+### 5.2 Depth comes from the ground plane, not from the baseline
 
-Each sighting yields a **bearing** from the box's horizontal centre: `θ = atan((u − 480)/f)` in the
-drone frame, plus the frame's position and heading. The principal point is 480, half of the 960 px
-frame width. Two sightings may be the same object when they
-share a class, come from different stops, and their rays cross in front of both at 0.5–12 m.
-Crossing points are clustered; tolerance grows with distance.
+> **Rev 3 correction.** Rev 1–2 made cross-stop triangulation the primary measurement. An
+> adversarial review refuted that, and the arithmetic was reproduced and confirmed (§5.2.1). Depth
+> now comes from the **vertical** bearing against a known surface height. The baseline survives only
+> as a cross-check.
 
-**Only a bearing is needed — not a tight box.** This is the least demanding thing a grounding model
-can produce and is why a *pointing*-capable provider is acceptable even if its boxes are loose
-(E9).
+**Primary measurement.** Objects rest on a surface whose height is known (a garden table, a lecture
+desk). With the camera `Δz` above that surface and the object's box centre `v` pixels below the
+image centre:
+
+```
+D = Δz · f / v
+```
+
+At `Δz` = 55 cm and `D` = 3 m, `v` = 125 px and `dD/dv` = **2.40 cm per pixel**. A 5 px error is
+12 cm of depth error. The inputs are the box, the camera's **altitude** — which the Tello measures —
+and one tape-measured surface height. Lateral position, which the drone only *commands*, does not
+enter at all.
+
+**Horizontal position** still comes from the horizontal bearing, `θ = atan((u − 480)/f)`, where 480
+is half the 960 px frame width. Combined with `D`, one sighting gives a full `(x, y)` from **one
+frame**.
+
+**Association, not triangulation.** Two sightings are the same object when they share a class and
+their independently-computed positions agree within tolerance. Crossing rays are no longer used to
+*derive* position, only to corroborate it. This removes the correspondence problem entirely: there
+is nothing to cross, so there are no phantom crossings.
+
+#### 5.2.1 Why the baseline method failed
+
+Depth from two bearings is `D_est = D · B_believed / B_actual`. Stop positions are *commanded*, not
+measured, with ~15 cm error at **each** end, so a believed 75 cm baseline is actually 45–105 cm and
+the depth estimate for a single object at 3 m ranges 214–500 cm:
+
+| stop pair | B believed | B actual | D estimated |
+|---|---|---|---|
+| 0–1 | 75 | 45 | **500** |
+| 1–2 | 75 | 105 | **214** |
+| 0–2 | 150 | 150 | 300 |
+| 0–3 | 225 | 195 | 346 |
+
+Clustered, that single laptop becomes **two `CONFIRMED` objects plus one `UNCERTAIN`** — confidently
+wrong, in the sparse garden scene. Three further defects made it worse:
+
+- **`1/B_actual` is convex**, so the estimate is biased long; spurious clusters land *behind* the
+  truth rather than scattering around it.
+- **Evenly spaced objects generate an organised phantom lattice.** Rays to object *n* from one stop
+  cross rays to object *n+k* from another at a depth independent of *n*, so ghosts form their own
+  tidy row, draw sightings from every stop, and pass `distinct_stops ≥ 3` as `CONFIRMED`.
+- **No tolerance value works.** Separating a lecture-room laptop row (60 cm spacing) needs < 30 cm;
+  holding one object together under 15 cm position error needs > 150 cm. Mutually exclusive by 5×.
+
+Rev 1–2's error table also charged `ΔB/B` = 20 % for a 15 cm error, which assumes only one endpoint
+is wrong. Both are, independently: up to 30 cm on 75 cm is 40 %.
 
 ### 5.3 Why the main rail never rotates
 
-Depth from a baseline `B` and a bearing difference `Δθ` behaves as `D ≈ B/Δθ` for small angles, so
+Still true, and now for a second reason.
 
-```
-relative depth error ≈ (ΔB/B)  ⊕  (Δ(Δθ)/Δθ)
-```
+A **constant** yaw offset cancels in any bearing *difference*; **differential** yaw does not, and
+rotate-to-look-then-rotate-back introduces exactly that at every stop. At 3 m, 5° of differential
+yaw is 26 cm of lateral error.
 
-At `D` = 3 m with `B` = 75 cm, `Δθ` ≈ 0.25 rad (an object shift of ~170 px between neighbouring
-stops — a strong signal):
+Under §5.2 the rail also must not rotate because **`Δz` must stay known**: pitch changes the
+relationship between image row and ground plane. The mission holds one heading and one altitude for
+its whole length, and `looks_deg` is reserved for follow-up close looks, whose sightings carry a
+widened tolerance and are excluded from ground-plane depth unless the pitch is recorded.
 
-| Error source | Magnitude | Depth impact |
-|---|---|---|
-| position error 15 cm on a 75 cm baseline | ΔB/B = 20 % | ~60 cm |
-| **differential** yaw of 5° between stops | 0.087 rad on 0.25 rad = 35 % | ~105 cm |
-| 1 px bearing noise | 0.084° | negligible |
+### 5.4 Bands, exclusivity, and the honest failure direction
 
-A **constant** yaw offset cancels exactly, because `Δθ = θ₂ − θ₁` and both shift equally; it
-rotates the whole scene without distorting it. **Differential** yaw does not cancel, and it is
-precisely what rotate-to-look-then-rotate-back introduces at every stop. Therefore the main rail
-holds a single heading for its whole length. Follow-up close looks may use `looks_deg`; their
-sightings carry a widened tolerance.
+**Each sighting belongs to exactly one object.** Association runs as mutual-nearest-neighbour: a
+sighting is matched to its closest compatible object and to no other. Rev 1–2 accumulated sightings
+into every cluster they touched, which is what let phantoms reach `distinct_stops ≥ 3`.
 
-### 5.4 Bands, and the honest failure direction
+`CONFIRMED` requires ≥ 3 distinct stops **and** no contributing sighting below the `medium` band —
+enforced against a stored `band` column, not a value the ingest path overwrites. `UNCERTAIN`
+otherwise, or when a sighting is nearly equidistant from two objects.
 
-`CONFIRMED` requires ≥ 3 distinct stops with a non-low band. `UNCERTAIN` otherwise, or when a
-sighting could belong to two clusters. Appearance (`description`) breaks ties between
-geometrically-ambiguous clusters of the same class — valuable in a sparse garden scene, weaker in a
-row of identical laptops.
+**Depth agreement is itself evidence.** If the per-sighting depths for one object spread by more
+than 30 % of their median, the geometry has failed for that object: it stays `UNCERTAIN` and the
+sweep records `geometry_degraded`. If more than half the objects are degraded, the whole sweep falls
+back to `SINGLE_VIEW_LOWER_BOUND` for every class and says so.
+
+Appearance (`description`) breaks ties between geometrically-ambiguous candidates of the same class:
+useful in a sparse garden, weak in a row of identical laptops, and never load-bearing.
+
+**The dominant error is undercount** — two true objects inside the tolerance collapse into one —
+which runs the same way as the provider's own documented undercount bias. The report therefore
+supports a range and never forces a bare number.
 
 **The dominant error is undercount**: two true objects closer than the merge tolerance collapse into
 one. This runs in the same direction as the VLM's own documented undercount bias (E8). The system
@@ -348,6 +397,9 @@ Jev was missing. See `docs/handoffs/2026-09-20-HANDOFF-to-codex-jev.md`.
 | Failure | Behaviour |
 |---|---|
 | Provider names an object but returns no location | sighting stored with `bbox: null`; unmergeable; counted `UNCERTAIN`; surfaced to the agent |
+| **Provider returns a label the class map does not know** | counted as `dropped_labels` and surfaced in `get_results` with the offending strings. If more than half the returned items were dropped, the frame fails as `CLASS_MAP_MISS` rather than reading as an empty scene. A closed map that silently discards `macbook`, `open laptop` or `chromebook` would report a full room as empty. |
+| **Box width changes by more than 2× between stops** | a laptop seen edge-on from one stop and open from another shifts its box centre by up to 15 cm of real extent. That sighting's tolerance widens and it is excluded from depth agreement. |
+| **Operator approval must show what will happen** | `on_approval` receives the candidate's full rendered description — stops, extent, range, resolvable classes, duration — not just an option id and a sentence. Approving a bare token is not approval. |
 | Provider error or timeout | frame marked unanalysed, never silently dropped; report states *"6 of 8 frames analysed"* |
 | Outdoor drift | stops are `COMMANDED`; if passive pose reports drift beyond threshold the sweep is marked degraded and merge tolerance widens |
 | Ambiguous cluster | stays as separate `UNCERTAIN` objects; count reported as a range |
@@ -461,11 +513,51 @@ to learn the answer.
 
 ### 13.2 Risk on the record
 
-The cube mission runner **has never flown**. 09-21 is the first time. Mitigations: a rail sweep is
-the simplest possible mission (sideways moves, fixed height, no rotation — §5.3); if pose behaves
-badly outdoors the sweep flies `--pose off` and loses nothing the count needs; and if the capture
-goes badly the cut is **modes `E`/`J` and the follow-up flight**, leaving a single-sweep
-translate-and-report demo that still shows the loop.
+The cube mission runner **has never flown**. 09-21 is the first time. A rail sweep is the simplest
+possible mission: sideways moves, fixed height, no rotation (§5.3).
+
+**The first action on 09-21, before anything else, is a tape measure.** Fly the rail once and record
+by hand where the drone actually stopped. Fifteen minutes, and it is the highest-information action
+available before the 25th: it converts the position-error assumption from a guess into a number. If
+the residual exceeds ~20 cm, §5.2's ground-plane path is not merely preferable, it is the only
+viable one, and we will know on day 2 rather than day 4.
+
+**Corrected fallback.** Rev 2 said the cut was "modes `E`/`J` and the follow-up flight". That was
+backwards on both counts: `E`/`J` are pure software that runs on free replay and are not on the
+critical path, and the follow-up flight is the most compelling thing in the demo (§13.5). The real
+fallback is a **replay-path demo**: capture frames by whatever means work — tripod, handheld, a
+chair slid to tape marks — run the full loop through `ReplayFlight`, and film the drone separately.
+It uses code that already exists, it survives any hardware failure, and it is honest as long as the
+video says so.
+
+### 13.2.1 Operational risks not previously recorded
+
+| Risk | Why it matters | Mitigation |
+|---|---|---|
+| **2.4 GHz saturation** | The Tello is its own access point. A lecture room full of laptops and phones degrades the link; video stutters or the drone enters failsafe mid-mission. This is probably the single likeliest cause of 09-27 failing outright. | Scout the channel before the session; have the replay-path demo ready as the answer. |
+| **Battery** | ~13 min rated, 7–8 min usable, less in wind, refuses takeoff below ~10 %. A sweep plus connect and land is ~3 min, so **2–3 sweeps per battery** then ~90 min recharge. | State the battery count on 09-20. Run the merge on sweep 1's frames *before* flying sweep 2. |
+| **Mid-sweep landing** | A low-battery auto-land at stop 3 of 4 must not consume one of the two permitted flights. | `sweeps.status = ABORTED` does not count toward `flights_used`; a partial sweep is never merged. |
+| **Stream latency** | Tello video is buffered UDP H.264, 150–400 ms end to end. At 50 cm/s that is 15 cm of *systematic* lag toward the previous stop — the worst error shape for any baseline method. | §5.2 removes the dependence on lateral position. `captured_at` and `command_completed_at` make the residual measurable rather than invisible. |
+| **Flying near people** | The `SweepEnvelope` is geometric and people-blind. `consent.py` gates *photographing* people; nothing gated *flying at* them. | Prop guards fitted; a minimum horizontal separation recorded in the site file; the operator confirms the flight line is clear before takeoff. This is a safety gate, not a privacy one. |
+| **Unmeasured room** | `standoff_cm` is hand-entered and silently drives `range_cm` → `resolvable_classes` → what the report may claim. | The site file records who measured it and when; a sweep whose standoff was never measured is flagged in the report. |
+
+### 13.5 What the demo should actually show
+
+Counting alone is a weak payoff: an informed viewer can count six laptops from one photograph, and
+§4.3 already concedes single-frame counting is adequate for people. Three things here a photograph
+cannot do, in order of strength:
+
+1. **Uncertainty resolving.** Half-hide one laptop. Sweep 1 reports "at least 5, one uncertain
+   behind the monitor". The agent proposes a close look *at that spot*; the operator approves;
+   sweep 2 reports 6. This is §9.2's decision-quality metric made visible.
+2. **A refusal with its arithmetic.** Ask it to count pens. *"A pen is 2.3 px wide at 3 m — not
+   observable at this range."* A system that declines with a derivation is more convincing than one
+   that answers, and it needs no flight.
+3. **`check_report` rejecting an invented number**, live. Ten seconds, no flight risk, and it is the
+   genuinely novel architectural property.
+
+Ground truth belongs on screen — an establishing wide shot or a printed count — so the number is
+verifiable rather than merely asserted.
 
 ### 13.3 Gates never self-granted
 
@@ -484,17 +576,34 @@ like every other one.
 and has agreed.** Claude never records this on the operator's behalf and never infers it from a
 previous session or location.
 
+> **Rev 3 correction.** Rev 2 promised that without consent "person regions are blurred before the
+> frame is written, so no unblurred image reaches disk or the provider". **That guarantee was false
+> and could not be made true in that shape**: the implementation nulled two text fields on the
+> detection records *after* the frame had already been written and sent, and you cannot blur people
+> before the provider tells you where they are. The guarantee is now one the code actually delivers.
+
 Enforced in code, not left to discipline:
 
 | Consent state | Behaviour |
 |---|---|
-| recorded for this location and date | frames retained normally |
-| absent | the flight still runs, but person regions are **blurred before the frame is written**, so no unblurred image reaches disk or the provider |
-| absent **and** `--retain-person-frames` requested | the run **refuses to start** |
+| recorded for this location and date | frames are sent to the provider and retained |
+| absent | **no frame leaves the process and none is retained.** The provider is not called; the run ends `CONSENT_REQUIRED` before any capture is written |
 
-Counts and person boxes survive blurring, so the demo works either way — the gate costs evidence
-quality, never the count. The garden shoot on 09-21/25 needs it for anyone in frame; the lecture
-room on 09-27 needs it for the room's occupants.
+There is no partial path, because every partial path I examined leaked an unblurred frame to a
+third-party API. The rule is simply: **without recorded consent, no frame is sent anywhere and none
+is kept.**
+
+Consequences, accepted deliberately:
+
+- A provider-backed run needs consent. That is the correct constraint, not a limitation.
+- Replay runs over already-consented frames are unaffected, so all hermetic and evaluation work
+  proceeds without touching this gate.
+- The garden shoot needs it for anyone in frame; the lecture room on 09-27 needs it for the room's
+  occupants, which must be asked before the session, not during it.
+
+A local person-blur pass before anything leaves the process would restore the middle option. It
+needs a local detector and roughly half a day, and it is **not** in scope for the 25th. If the
+operator wants it, it becomes its own task with its own evidence.
 
 ## 14. Out of scope
 

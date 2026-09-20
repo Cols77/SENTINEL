@@ -24,6 +24,91 @@
 - **Classes:** `computer`, `person`, `phone`, `pen`. Nominal real widths in cm: 35, 50, 15, 1.
 - Commit after every task. Conventional-commit subjects, `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>` as the last line.
 
+## Rev 3 amendments — read before executing any task
+
+An adversarial review on 2026-09-20 refuted the geometry and found five defects in the code in this
+plan. The spec is now at rev 3. **Where this section and a task body disagree, this section wins.**
+
+### R1. Depth comes from the ground plane (replaces Task 4's triangulation)
+
+`D = Delta_z * f / v`, where `Delta_z` is the camera's height above the surface the objects rest on
+and `v` is the box centre's pixel offset below the image centre. At `Delta_z` = 55 cm and `D` = 3 m,
+`v` = 125 px and sensitivity is 2.40 cm/px.
+
+Cross-stop triangulation is **demoted to a cross-check** and must not derive position. Reason,
+verified: `D_est = D * B_believed / B_actual`, and with ~15 cm error at each commanded stop a
+believed 75 cm baseline is really 45-105 cm, so one laptop at 3 m yields depths of 214-500 cm and
+clusters into two CONFIRMED objects plus one UNCERTAIN. Evenly spaced objects additionally generate
+an organised phantom lattice that passes `distinct_stops >= 3`.
+
+Task 4 therefore produces:
+
+- `ground_depth(bbox, delta_z_cm) -> float` and `position_of(sighting, delta_z_cm) -> (x_cm, y_cm)`;
+- `associate(sightings) -> list[dict]` using **mutual-nearest-neighbour** assignment, so each
+  sighting belongs to **exactly one** object;
+- `depth_spread_pct` per object; over 30 % marks it UNCERTAIN and flags `geometry_degraded`;
+- if over half the objects are degraded, the sweep reports `SINGLE_VIEW_LOWER_BOUND` for every class.
+
+`ray_intersection` and `bearing_of` stay; `_cluster` as written in Task 4 is **deleted**, not fixed.
+
+### R2. Schema additions (Task 1) — all under consent C-20
+
+- `frames`: `image_path TEXT NOT NULL`, `captured_at TEXT NOT NULL`,
+  `command_completed_at TEXT`, `delta_z_cm REAL NOT NULL`
+- `sightings`: `band TEXT NOT NULL`, `x_cm REAL`, `y_cm REAL`, `depth_cm REAL`
+- `objects`: `depth_spread_pct REAL`
+- `sweeps.status` gains `ABORTED`; `flights_used` counts only non-`ABORTED` sweeps
+
+### R3. The band gate was dead code (Tasks 1, 7)
+
+`loop.py:_fly_and_ingest` set `row["band"] = "high"` on every row, so the non-low-band rule was
+enforced only in unit tests. Store `band` at ingest and read it back. Add a test that a `low` band
+sighting cannot produce a CONFIRMED object **through the real store**, not through hand-built dicts.
+
+### R4. `check_report` scoping (Task 7)
+
+As written it rejects **any** integer not in the permitted set, so the spec's own prescribed wording
+"6 of 8 frames analysed" is rejected and the run ends with no report at all. Match only numbers
+adjacent to a class noun:
+
+```python
+_CLASS_NUMBER = re.compile(r"(\d+)\s+(computers?|people|persons?|phones?|pens?)", re.IGNORECASE)
+```
+
+Allow the writer **one** rewrite attempt before `REPORT_REJECTED`. Add a test using §8's exact
+sentence. Also fix `test_claiming_certainty_about_a_not_observable_class_is_rejected`, whose "3 pens"
+already fails the number check and so never exercises the pen rule it names.
+
+### R5. Consent is now refuse-or-allow, never blur (Task 8)
+
+`blur_person_regions` is **deleted**. It nulled two text fields *after* the frame had been written
+and sent, so rev 2's guarantee was false. Replace with:
+
+| Consent state | Behaviour |
+|---|---|
+| recorded for this location and date | frames sent and retained |
+| absent | **no frame leaves the process, none is retained**; the run ends `CONSENT_REQUIRED` before any capture is written |
+
+`consent_policy` returns `RETAIN` or raises `ConsentMissing`. There is no third value.
+
+### R6. Class map misses must be loud (Task 3)
+
+An unmapped label is currently `continue`d with no trace, so a model that finds every laptop under
+the label `macbook` reports an empty scene. `normalise` returns dropped labels alongside
+detections; `DetectionBatch` gains `dropped: tuple[str, ...]`. If dropped exceeds half the returned
+items, the frame's status is `CLASS_MAP_MISS`. **Remove `"monitor"` from `CLASS_MAP`** — in a
+lecture room it turns every external display and the projector screen into a computer.
+
+### R7. `on_approval` receives the rendered candidate (Task 7)
+
+Pass the full `Candidate.description` — stops, extent, range, resolvable classes, duration — not
+just `{option_id, reason}`. Approving a bare token is not approval, and this is the design's central
+safety claim.
+
+### R8. Task 9 scoring gains `depth_spread_pct` and `dropped_labels`
+
+Both are attribution signals: they separate "the provider missed it" from "the geometry failed".
+
 ## Dependency and gate map
 
 | Tasks | Blocked on |
@@ -34,6 +119,15 @@
 | 13 | Tasks 11 and 12. |
 
 The dependency on WP5 is confined to one module by design (Task 2 defines `SweepEnvelope` as a plain dataclass; Task 11 adds the only `sentinel.cube` importer). If WP5 slips, Tasks 1–10 and 12 still deliver a complete replay-driven system.
+
+### Codex dependency, verified 2026-09-20 at `ae2a617`
+
+**File overlap is empty.** Codex's branch touches ten files: `coordinator/{proposer,proposal_review,__init__}.py`, `cli.py`, `adapter/llm/openai_compatible.py` and their five test files. This plan creates `src/sentinel/survey/**`, `tests/survey/**`, `scripts/survey_run.py`, `fixtures/survey/**` and docs. Nothing intersects, so the two branches merge without conflict in either order.
+
+**One runtime coupling exists and is not avoidable.** Codex added `from .proposer import LlmProposer` to `coordinator/__init__.py`. Python executes that package `__init__` before any submodule, so every survey import of `coordinator.legal_tools` or `coordinator.shadow` also imports Codex's `proposer.py` and `agent_loop.py`. Consequence: **an import-time error in Codex's code fails the survey suite too.** Mitigation, not avoidance:
+
+- run `rtk proxy uv run pytest tests/survey -q` as the survey signal, so a failure there is attributable to this package;
+- if the survey suite fails with an error raised from a `coordinator/` module, that is a **Codex-side finding**: report it, do not patch their file.
 
 ## File structure
 
