@@ -38,7 +38,8 @@
   "options": {
     "rail": [
       "r0",
-      "r0"
+      "r0",
+      "r1"
     ]
   },
   "frames": [
@@ -55,8 +56,61 @@
       },
       "occluded_object_ids": [],
       "detections": [
-        {"class": "computer", "synthetic_detection_id": "left-view", "bbox": {"x": 440.1583333333, "y": 475.2166666667, "width": 79.6833333333, "height": 20}},
-        {"class": "computer", "synthetic_detection_id": "right-view", "bbox": {"x": 508.4583333333, "y": 475.2166666667, "width": 79.6833333333, "height": 20}}
+        {
+          "class": "computer",
+          "synthetic_detection_id": "left-view",
+          "bbox": {
+            "x": 440.1583333333,
+            "y": 475.2166666667,
+            "width": 79.6833333333,
+            "height": 20
+          }
+        },
+        {
+          "class": "computer",
+          "synthetic_detection_id": "right-view",
+          "bbox": {
+            "x": 508.4583333333,
+            "y": 475.2166666667,
+            "width": 79.6833333333,
+            "height": 20
+          }
+        }
+      ]
+    },
+    {
+      "frame_id": "r1",
+      "option_id": "rail",
+      "stop_index": 1,
+      "status": "OK",
+      "pose": {
+        "x_cm": 0,
+        "y_cm": 0,
+        "z_cm": 55,
+        "heading_deg": 0
+      },
+      "occluded_object_ids": [],
+      "detections": [
+        {
+          "class": "computer",
+          "synthetic_detection_id": "left-view",
+          "bbox": {
+            "x": 440.1583333333,
+            "y": 475.2166666667,
+            "width": 79.6833333333,
+            "height": 20
+          }
+        },
+        {
+          "class": "computer",
+          "synthetic_detection_id": "right-view",
+          "bbox": {
+            "x": 508.4583333333,
+            "y": 475.2166666667,
+            "width": 79.6833333333,
+            "height": 20
+          }
+        }
       ]
     }
   ]

@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "scene_id": "synthetic-rotated-elevated-surface",
+  "provenance": "synthetic",
+  "bounds_cm": {
+    "min_x": -1000,
+    "max_x": 1000,
+    "min_y": 0,
+    "max_y": 1000
+  },
+  "camera": {
+    "width_px": 960,
+    "height_px": 720,
+    "fx_px": 683,
+    "fy_px": 683,
+    "cx_px": 480,
+    "cy_px": 360,
+    "minimum_object_width_px": 20
+  },
+  "objects": [
+    {
+      "object_id": "elevated-computer",
+      "class": "computer",
+      "x_cm": 300,
+      "y_cm": 150,
+      "surface_z_cm": 75,
+      "width_cm": 35
+    }
+  ],
+  "options": {
+    "east": [
+      "e0"
+    ]
+  },
+  "frames": [
+    {
+      "frame_id": "e0",
+      "option_id": "east",
+      "stop_index": 0,
+      "status": "OK",
+      "pose": {
+        "x_cm": 0,
+        "y_cm": 0,
+        "z_cm": 130,
+        "heading_deg": 90
+      },
+      "occluded_object_ids": [],
+      "detections": [
+        {
+          "class": "computer",
+          "band": "CONFIRMED",
+          "synthetic_detection_id": "elevated-view",
+          "bbox": {
+            "x": 98.6583333333,
+            "y": 475.2166666667,
+            "width": 79.6833333333,
+            "height": 20
+          }
+        }
+      ]
+    }
+  ]
+}

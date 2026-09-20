@@ -17,7 +17,8 @@ unevaluable. There is no substitution from another option or inference that an
 unknown observation is empty.
 
 The close-pair manifest contains two independently individuated truth objects
-30 cm apart and repeats one frame ID in the replay schedule. Coverage remains
+30 cm apart, repeats one frame ID in the replay schedule, and includes a second
+distinct frame of the same scene. Coverage remains
 two unique truth objects. Merge outputs with only one object must expose an
 undercount; duplicate outputs cannot match the same truth twice.
 
@@ -25,15 +26,29 @@ The off-axis manifest places a phone at (150,600), observed from y=0 and y=300.
 Its projected width changes from 17.075 to 34.15 px, crossing the fixed 20 px
 resolution threshold through an actual change in pose. The other truth object
 is explicitly occluded. Far coverage is zero; the near follow-up adds the phone;
-whole-scene coverage is 1/2. The missing/unanalysed manifest must refuse replay
+whole-scene coverage is 1/2. The far observation explicitly records an uncertain
+phone label without a usable box. Near scoring must use observed truth: a
+correctly reported phone has observed recall 1 and whole-scene coverage 1/2.
+The rotated/elevated scene looks along +x with the camera 55 cm above a 75 cm
+surface; the expected reference pixel is (138.5,485.2166667).
+The missing/unanalysed manifest must refuse replay
 for both options.
 
 `sentinel.survey_eval.score_episode` accepts an explicit outcome plus optional
 room-localized object hypotheses and class count intervals. Precision/recall
 are object-hypothesis matching metrics, not bbox/provider metrics. Matching is
 maximum-cardinality within a caller-specified centimetre radius. Count intervals
-preserve uncertainty and open upper bounds. A run without a completed report has
-no count error or report-validity claim.
+preserve uncertainty and open upper bounds. A terminal status alone does not
+establish report emission; outcome.report must contain the emitted payload.
+An escalated run may still contain a valid report. An absent report has no
+validity/count claim; an empty dictionary without count evidence does not imply
+zero objects. An explicit report with objects=[] does. Exact unique-count error
+requires exact evidence for every relevant class; lower bounds leave it unset.
+
+Pass selected_option_ids to score_episode for observed-only matching and
+separate whole_scene_coverage. Selected replay must be complete. Without this
+argument, evaluation_scope is whole_scene_hypotheses and observed_recall remains
+unset; this cannot be used as production observed-recall evidence.
 
 `compare_modes(scene, episodes)` scores explicitly supplied episode payloads.
 It does not run F/E/J policies or integrate the pending production survey loop.

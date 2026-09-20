@@ -154,7 +154,8 @@ def _matching(truth, reported, radius):
     return len(assigned), duplicates
 
 
-def score_episode(scene: Scene, outcome: dict, *, reported_objects=(), class_counts=(), match_radius_cm=50.0) -> dict:
+def score_episode(scene: Scene, outcome: dict, *, reported_objects=None, class_counts=None,
+                  selected_option_ids=None, match_radius_cm=50.0) -> dict:
     """Score supplied episode evidence, not a simulated or implicitly run policy.
 
     Counts without explicit bounds derive confirmed/uncertain intervals. Exact
@@ -164,14 +165,30 @@ def score_episode(scene: Scene, outcome: dict, *, reported_objects=(), class_cou
     """
     if _number(match_radius_cm) <= 0:
         raise ValueError('matching radius must be positive')
-    completed = outcome.get('status') in {'REPORTED', 'REPORT_SUBMITTED', 'COMPLETE'}
-    matched, duplicates = _matching(scene.objects, reported_objects, match_radius_cm)
+    report = outcome.get('report')
+    report_present = report is not None
+    completed = report_present and outcome.get('status') in {'REPORTED', 'REPORT_SUBMITTED', 'COMPLETE'}
+    if isinstance(report, dict):
+        if reported_objects is None:
+            reported_objects = report.get('objects')
+        if class_counts is None:
+            class_counts = report.get('class_counts')
+    object_evidence = reported_objects is not None
+    reported_objects = tuple(reported_objects or ())
+    whole_matched, whole_duplicates = _matching(scene.objects, reported_objects, match_radius_cm)
+    observed_coverage = coverage(scene, selected_option_ids) if selected_option_ids is not None else None
+    observed_truth = ([o for o in scene.objects if o['object_id'] in observed_coverage['visible_resolvable_ids']]
+                      if observed_coverage is not None else None)
+    matched, duplicates = (_matching(observed_truth, reported_objects, match_radius_cm)
+                           if observed_truth is not None else (whole_matched, whole_duplicates))
+    evaluation_truth = observed_truth if observed_truth is not None else scene.objects
     true_counts = {name: sum(o['class'] == name for o in scene.objects)
                    for name in {o['class'] for o in scene.objects} | {o['class'] for o in reported_objects}}
     bounds, errors = {}, {}
-    if completed:
-        counts = list(class_counts)
-        if not counts:
+    count_evidence = report_present and (bool(class_counts) or object_evidence)
+    if count_evidence:
+        counts = list(class_counts or ())
+        if not counts and object_evidence:
             for name in true_counts:
                 rows = [r for r in reported_objects if r['class'] == name]
                 confirmed = sum(r.get('band') == 'CONFIRMED' for r in rows)
@@ -185,15 +202,22 @@ def score_episode(scene: Scene, outcome: dict, *, reported_objects=(), class_cou
                                    'contains_truth': lower <= truth and (upper is None or truth <= upper)}
             if upper == lower:
                 errors[row['class']] = lower - truth
+    exact_total = (sum(errors.values()) if count_evidence and set(bounds) >= set(true_counts)
+                   and all(b['upper'] == b['lower'] for b in bounds.values()) else None)
     return {'scene_id': scene.scene_id, 'provenance': scene.provenance, 'status': outcome.get('status'),
-            'report_completed': completed, 'report_valid': outcome.get('report_valid') if completed else None,
+            'report_present': report_present, 'report_completed': completed,
+            'report_valid': outcome.get('report_valid') if report_present and (bool(report) or count_evidence) else None,
             'escalated': outcome.get('status') == 'ESCALATED',
-            'count_error': errors if completed else None, 'count_bounds': bounds,
+            'count_error': errors if count_evidence else None, 'count_bounds': bounds,
             'matched_objects': matched, 'duplicate_count': duplicates,
-            'unique_count_error': len(reported_objects) - len(scene.objects),
+            'unique_count_error': exact_total,
             'precision': matched / len(reported_objects) if reported_objects else None,
-            'recall': matched / len(scene.objects) if scene.objects else None,
-            'localisation': matched / len(scene.objects) if scene.objects else None,
+            'recall': matched / len(evaluation_truth) if evaluation_truth else None,
+            'localisation': matched / len(evaluation_truth) if evaluation_truth else None,
+            'evaluation_scope': 'observed_truth' if observed_truth is not None else 'whole_scene_hypotheses',
+            'observed_recall': matched / len(observed_truth) if observed_truth else None,
+            'whole_scene_coverage': observed_coverage['whole_scene_fraction'] if observed_coverage is not None else None,
+            'whole_scene_localisation': whole_matched / len(scene.objects) if scene.objects else None,
             'flights': outcome.get('flights'), 'illegal_calls': outcome.get('illegal_calls'),
             'decision_quality': outcome.get('decision_quality')}
 

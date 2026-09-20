@@ -58,7 +58,14 @@
       "occluded_object_ids": [
         "hidden"
       ],
-      "detections": []
+      "detections": [
+        {
+          "class": "phone",
+          "band": "UNCERTAIN",
+          "synthetic_detection_id": "phone-far-uncertain",
+          "bbox": null
+        }
+      ]
     },
     {
       "frame_id": "n0",
@@ -75,7 +82,16 @@
         "hidden"
       ],
       "detections": [
-        {"class": "phone", "synthetic_detection_id": "phone-near", "bbox": {"x": 804.425, "y": 475.2166666667, "width": 34.15, "height": 20}}
+        {
+          "class": "phone",
+          "synthetic_detection_id": "phone-near",
+          "bbox": {
+            "x": 804.425,
+            "y": 475.2166666667,
+            "width": 34.15,
+            "height": 20
+          }
+        }
       ]
     }
   ]

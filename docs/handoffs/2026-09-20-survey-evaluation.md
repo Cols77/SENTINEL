@@ -70,8 +70,9 @@ Public interfaces:
 - `replay_option(scene, option_id) -> tuple[frame, ...]`, raising `Unevaluable`
   for missing or unanalysed observations.
 - `coverage(scene, option_ids, previous_option_ids=()) -> dict`
-- `score_episode(scene, outcome, reported_objects=(), class_counts=(),
-  match_radius_cm=50) -> dict` (last three arguments are keyword-only).
+- `score_episode(scene, outcome, reported_objects=None, class_counts=None,
+  selected_option_ids=None, match_radius_cm=50) -> dict` (after outcome all
+  arguments are keyword-only).
 - `compare_modes(scene, episodes) -> dict[mode, score]` takes explicit episode
   payloads, not policies. No production-loop execution is implied.
 
@@ -86,3 +87,24 @@ failures for missing module/assets. After implementation and two fixture/bounds
 checks, `rtk proxy uv run pytest tests/test_survey_eval.py -q` passed all 17 tests
 in 0.36 seconds. These are evaluator unit tests, not the survey production suite.
 Survey production HEAD was rechecked at `73846e4`; no model calls or flights ran.
+
+**Production F/E/J acceptance is BLOCKED.** The evaluator compares explicitly
+supplied evidence only. No completed production survey loop adapter or measured
+F/E/J survey comparison exists in these assets. Passing synthetic arithmetic
+tests is not evidence that any production proposer chose a useful flight.
+
+Review correction: selected_option_ids now requires complete replay and scopes
+observed precision/recall to independently visible, resolvable, unoccluded truth.
+Whole-scene coverage/localisation are separate. Without selected options the
+scope is explicitly whole_scene_hypotheses, with no observed-recall claim.
+Report emission requires an explicit payload independently of terminal status;
+an escalated episode can carry a valid lower-bound report. Empty/missing count
+evidence never invents an exact zero. unique_count_error requires exact report
+count evidence across all relevant classes. Fixtures now include distinct
+cross-frame duplicates, initial uncertain observations and rotated/elevated
+surface geometry.
+
+Review-fix verification: RED reproduced eight scoring/fixture defects (18 other
+tests passed); after corrections the evaluator suite passed all 28 tests in
+0.43 seconds. This remains synthetic evaluator evidence only, not production
+F/E/J acceptance or real-frame provider evidence.

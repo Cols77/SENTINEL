@@ -86,7 +86,7 @@ def test_matching_is_one_to_one_and_order_independent(tmp_path):
     s = scene(tmp_path, doc)
     rows = [{'class': 'phone', 'x_cm': 40, 'y_cm': 600, 'band': 'CONFIRMED'},
             {'class': 'phone', 'x_cm': 0, 'y_cm': 600, 'band': 'CONFIRMED'}]
-    outcome = {'status': 'REPORTED', 'report_valid': True}
+    outcome = {'status': 'REPORTED', 'report': {}, 'report_valid': True}
     for order in [rows, list(reversed(rows))]:
         result = api().score_episode(s, outcome, reported_objects=order)
         assert result['localisation'] == 1
@@ -97,7 +97,7 @@ def test_matching_is_one_to_one_and_order_independent(tmp_path):
 
 
 def test_lower_bound_is_not_scored_as_exact_zero(tmp_path):
-    result = api().score_episode(scene(tmp_path), {'status': 'REPORTED', 'report_valid': True},
+    result = api().score_episode(scene(tmp_path), {'status': 'REPORTED', 'report': {}, 'report_valid': True},
         class_counts=[{'class': 'phone', 'kind': 'LOWER_BOUND', 'lower': 0, 'upper': None}])
     assert result['count_error'] == {}
     assert result['count_bounds']['phone'] == {'lower': 0, 'upper': None, 'contains_truth': True}
@@ -105,7 +105,7 @@ def test_lower_bound_is_not_scored_as_exact_zero(tmp_path):
 
 def test_compare_modes_scores_supplied_episodes_without_claiming_integration(tmp_path):
     scores = api().compare_modes(scene(tmp_path), {'F': {'outcome': {'status': 'ESCALATED'}},
-                                                'E': {'outcome': {'status': 'REPORTED', 'report_valid': True}}})
+                                                'E': {'outcome': {'status': 'REPORTED', 'report': {}, 'report_valid': True}}})
     assert scores['F']['report_completed'] is False
     assert scores['E']['report_completed'] is True
 
@@ -134,7 +134,79 @@ def test_duplicate_replay_frames_do_not_increase_coverage():
 
 
 def test_uncertain_objects_form_an_interval_not_an_exact_count(tmp_path):
-    result = api().score_episode(scene(tmp_path), {'status': 'REPORTED'},
+    result = api().score_episode(scene(tmp_path), {'status': 'REPORTED', 'report': {}},
         reported_objects=[{'class': 'phone', 'band': 'UNCERTAIN', 'x_cm': 150, 'y_cm': 600}])
     assert result['count_error'] == {}
     assert result['count_bounds']['phone'] == {'lower': 0, 'upper': 1, 'contains_truth': True}
+
+
+def test_observed_recall_is_separate_from_whole_scene_coverage():
+    s = api().load_scene('fixtures/survey_eval/synthetic-off-axis-occlusion-closer-followup.json')
+    result = api().score_episode(s, {'status': 'REPORTED', 'report': {}}, selected_option_ids=['near'],
+        reported_objects=[{'class': 'phone', 'band': 'CONFIRMED', 'x_cm': 150, 'y_cm': 600}])
+    assert result['observed_recall'] == 1
+    assert result['whole_scene_coverage'] == 0.5
+
+
+def test_scoring_requires_complete_selected_replay():
+    s = api().load_scene('fixtures/survey_eval/synthetic-missing-unanalysed.json')
+    with pytest.raises(api().Unevaluable):
+        api().score_episode(s, {'status': 'COMPLETE'}, selected_option_ids=['missing'])
+
+
+@pytest.mark.parametrize('outcome,counts', [
+    ({'status': 'COMPLETE'}, []),
+    ({'status': 'REPORTED', 'report': {}}, [{'class': 'phone', 'lower': 0, 'upper': None}]),
+])
+def test_unique_count_error_requires_exact_report_evidence(tmp_path, outcome, counts):
+    assert api().score_episode(scene(tmp_path), outcome, class_counts=counts)['unique_count_error'] is None
+
+
+def test_complete_without_report_differs_from_explicit_empty_report(tmp_path):
+    s = scene(tmp_path)
+    assert api().score_episode(s, {'status': 'COMPLETE'})['report_completed'] is False
+    empty = api().score_episode(s, {'status': 'COMPLETE', 'report': {}},
+                              class_counts=[{'class': 'phone', 'lower': 0, 'upper': 0}])
+    assert empty['report_completed'] is True
+    assert empty['unique_count_error'] == -1
+
+
+def test_rotation_and_elevated_surface_projection(tmp_path):
+    s = scene(tmp_path)
+    obj = dict(s.objects[0], x_cm=300, y_cm=150, surface_z_cm=75)
+    p = api().project_object(s, obj, {'x_cm': 0, 'y_cm': 0, 'z_cm': 130, 'heading_deg': 90})
+    assert p['u_px'] == pytest.approx(138.5)
+    assert p['v_px'] == pytest.approx(485.2166666667)
+
+
+def test_acceptance_contains_distinct_duplicate_frames_and_initial_uncertainty():
+    close = api().load_scene('fixtures/survey_eval/synthetic-close-same-frame-and-duplicate-replay.json')
+    assert len(set(close.options['rail'])) >= 2
+    follow = api().load_scene('fixtures/survey_eval/synthetic-off-axis-occlusion-closer-followup.json')
+    assert follow.frames[0]['detections'][0]['band'] == 'UNCERTAIN'
+
+
+def test_escalated_episode_can_have_a_valid_lower_bound_report(tmp_path):
+    result = api().score_episode(scene(tmp_path), {'status': 'ESCALATED', 'report': {}, 'report_valid': True},
+        class_counts=[{'class': 'phone', 'lower': 0, 'upper': None}])
+    assert result['report_valid'] is True
+    assert result['report_completed'] is False
+    assert result['escalated'] is True
+    assert result['count_bounds']['phone']['contains_truth'] is True
+
+
+def test_report_payload_without_object_or_count_evidence_does_not_invent_zero(tmp_path):
+    result = api().score_episode(scene(tmp_path), {'status': 'COMPLETE', 'report': {}})
+    assert result['count_error'] is None
+    assert result['unique_count_error'] is None
+
+
+def test_explicit_empty_report_objects_are_exact_evidence(tmp_path):
+    result = api().score_episode(scene(tmp_path), {'status': 'COMPLETE', 'report': {'objects': []}})
+    assert result['count_error'] == {'phone': -1}
+    assert result['unique_count_error'] == -1
+
+
+def test_rotated_elevated_fixture_is_observable():
+    s = api().load_scene('fixtures/survey_eval/synthetic-rotated-elevated-surface.json')
+    assert api().coverage(s, ['east'])['visible_resolvable_ids'] == ['elevated-computer']
