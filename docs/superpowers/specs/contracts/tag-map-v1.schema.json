@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinel.local/contracts/tag-map-v1.schema.json",
+  "title": "TagMapV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tag_family", "room", "room_scale_m_per_unit", "tags", "camera_calibration"],
+  "properties": {
+    "schema_version": { "const": "tag-map-v1" },
+    "tag_family": { "const": "36h11" },
+    "room": {
+      "type": "object", "additionalProperties": false,
+      "required": ["width_units", "height_units", "origin"],
+      "properties": {
+        "width_units": { "const": 100 },
+        "height_units": { "const": 100 },
+        "origin": { "const": "LEFT_ALLEY_FRONT_CORNER" }
+      }
+    },
+    "room_scale_m_per_unit": { "const": 0.1 },
+    "tags": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["tag_id", "zone_id", "x_units", "y_units", "z_units", "yaw_deg", "size_m", "mounting"],
+        "properties": {
+          "tag_id":    { "type": "integer", "minimum": 0, "maximum": 586 },
+          "zone_id":   { "type": "string" },
+          "x_units":   { "type": "number", "minimum": 0, "maximum": 100 },
+          "y_units":   { "type": "number", "minimum": 0, "maximum": 100 },
+          "z_units":   { "type": "number", "minimum": 0, "description": "tag centre height above floor, metres" },
+          "yaw_deg":   { "type": "number", "minimum": -180, "maximum": 180 },
+          "size_m":    { "type": "number", "exclusiveMinimum": 0 },
+          "mounting":  { "enum": ["WALL", "FLOOR"] }
+        }
+      }
+    },
+    "camera_calibration": {
+      "type": "object", "additionalProperties": false,
+      "required": ["width", "height", "fx", "fy", "cx", "cy", "dist_coeffs", "calibration_source"],
+      "properties": {
+        "width":  { "const": 960 }, "height": { "const": 720 },
+        "fx": { "type": "number" }, "fy": { "type": "number" },
+        "cx": { "type": "number" }, "cy": { "type": "number" },
+        "dist_coeffs": { "type": "array", "items": { "type": "number" } },
+        "calibration_source": { "enum": ["nominal", "chessboard"] }
+      }
+    }
+  }
+}

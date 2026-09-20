@@ -1,6 +1,10 @@
 {
   "id": "FEAT-021",
-  "title": "SENTINEL-WP5-DRONE-POSE",
-  "description": "Host-side AprilTag 36h11 drone pose estimation for the SENTINEL six-zone survey demo, feeding the WP0 coordinator database.",
-  "requirements": ["SR-060", "SR-061", "SR-062", "SR-063"]
+  "members": [
+    "feat:FEAT-021",
+    "sr:SR-060",
+    "sr:SR-061",
+    "sr:SR-062",
+    "sr:SR-063"
+  ]
 }

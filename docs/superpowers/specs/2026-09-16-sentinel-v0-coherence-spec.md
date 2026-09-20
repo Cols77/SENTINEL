@@ -1,3 +1,9 @@
+---
+id: 2026-09-16-sentinel-v0-coherence-spec
+title: "SENTINEL V0 Coherence Specification"
+status: revised
+---
+
 # SENTINEL V0 Coherence Specification
 
 > **Status:** Revised after independent review; re-review pending
@@ -149,4 +155,8 @@ V0 release requires G0–G4. G0–G3 can be completed without live hardware; G4 
 
 ## 9. Non-goals
 
-V0 excludes real GIS/terrain, GPS/localisation, multi-drone coordination, autonomous patroller dispatch, external notification, hidden chain-of-thought display, automatic provider failover and a broker.
+V0 excludes real GIS/terrain, GPS/global localisation, multi-drone coordination, autonomous patroller dispatch, external notification, hidden chain-of-thought display, automatic provider failover and a broker. V0 includes host-side AprilTag-based room-local pose estimation emitted as `DRONE_POSE_REPORTED`; pose is evidence and read-model data, never a flight-control input.
+
+## 10. WP5 drone pose amendment (contract-amendment)
+
+The WP0 contract is amended by this specification (flight-boundary: pose never mutates flight state; the report is a closed wire object). WP5 adds a `DronePoseReport` wire object to the `sentinel-v0-wire.schema.json` oneOf registry, `DRONE_POSE_REPORTED` to the WP0 §3.5 event enum, and a `drone_pose` snapshot read model subject to the §3.4 staleness rule. Detection is host-side AprilTag 36h11 (`cv2.aruco` + `solvePnP` with `SOLVEPNP_IPPE_SQUARE`) against a versioned tag-map fixture with `room_scale_m_per_unit` fixed at 0.1 for V0 determinism, using nominal intrinsics (`calibration_source: nominal`, fx 547 at 960x720). The ingestion-slice appends run-scoped `DRONE_POSE_REPORTED` events to the SQLite store and projects them into `drone_pose`; the full coordinator remains the WP1 boundary. Pose estimates are room-local with `source_kind` provenance (LIVE/SIMULATED/REPLAYED) and are never a GPS claim. Acceptance is a user-approved supervised physical test run (detector works, DB position updates, real-time x/y/z terminal logging) behind the G4 operator-consent gate; all development and CI use synthetic rendered tag frames only, with no live drone connection in any implementation task (safety: G3 owner approval and G4 live rehearsal consent remain in force).
