@@ -66,7 +66,10 @@ from sentinel.coordinator.legal_tools import EVIDENCE_GATE, SELECT_PLAN, load_ca
 from sentinel.coordinator.operator_choice import submit_choice  # noqa: E402
 from sentinel.coordinator.policies import JevPolicy  # noqa: E402
 from sentinel.coordinator.policy import ContextualPolicy, PolicyContext, one_call  # noqa: E402
-from sentinel.coordinator.proposer import JevProposer  # noqa: E402
+from sentinel.coordinator.proposer_factory import (  # noqa: E402
+    ScriptedProposer, build_proposer, require_jev_proposer_consent,
+    require_proposer_consent, JEV_PROPOSER_CONSENT_ENV, JEV_PROPOSER_MODEL,
+)
 from sentinel.coordinator.repository import CoordinatorRepository  # noqa: E402
 from sentinel.coordinator.shadow import JsonlAuditSink  # noqa: E402
 
@@ -74,8 +77,6 @@ from tests.coordinator.harness import FakeWorker, envelope  # noqa: E402
 
 _MAX_STEPS = 10
 _POINT_ARG_KEYS = {SELECT_PLAN: "sp", EVIDENCE_GATE: "eg"}
-JEV_PROPOSER_CONSENT_ENV = "SENTINEL_JEV_PROPOSER_CONSENT"
-JEV_PROPOSER_MODEL = "typesafe/jev-1.13-20260917"
 
 
 # --- advisor construction ----------------------------------------------
@@ -177,68 +178,6 @@ def _confirm_task(repo: CoordinatorRepository, gateway: CommandGateway, run_id: 
     }, sequence=30, run_id=run_id, actor_type="OPERATOR", expected=_state_version(repo, run_id)))
 
 
-# --- architecture E's proposer --------------------------------------------
-
-class ScriptedProposer:
-    """``--proposer scripted:<PLAN_ID>``: always proposes the same catalogue
-    plan id, regardless of context -- no model, no network call. This is a
-    seam for exercising ``ArchitectureRouter`` end to end."""
-
-    def __init__(self, plan_id: str) -> None:
-        self.plan_id = plan_id
-
-    def decide(self, request: dict, context: PolicyContext) -> dict:
-        return one_call(request, "inspection.propose_plan", {"catalogue_plan_id": self.plan_id})
-
-
-def require_jev_proposer_consent() -> str:
-    """Require a distinct, fresh operator token for the paid Jev proposer."""
-    consent = os.environ.get(JEV_PROPOSER_CONSENT_ENV)
-    if not consent or not consent.strip():
-        raise PermissionError(
-            f"{JEV_PROPOSER_CONSENT_ENV} is not set: '--proposer jev' can make a paid "
-            "remote call and requires fresh explicit operator consent "
-            "(plan gate G-live-jev-proposer)"
-        )
-    return consent
-
-
-def _build_jev_judge(**kwargs: Any) -> Any:
-    from sentinel.judgment import JevJudge
-    return JevJudge(**kwargs)
-
-
-def build_proposer(
-    spec: str | None,
-    *,
-    sink: Any | None = None,
-    judge_factory: Callable[..., Any] | None = None,
-) -> ContextualPolicy | None:
-    """``None`` -> no proposer (architecture F, or E with none supplied --
-    ``architecture.build_policy`` is what raises ``ArchitectureUnavailable``
-    for that case). ``"scripted:<PLAN_ID>"`` -> ``ScriptedProposer``;
-    ``"jev"`` -> the separately consent-gated live ``JevProposer``."""
-    if spec is None:
-        return None
-    if spec == "jev":
-        require_jev_proposer_consent()
-        if sink is None:
-            raise ValueError("the Jev proposer requires the rehearsal's shared audit sink")
-        factory = judge_factory or _build_jev_judge
-        judge = factory(
-            api_key_env="OPENROUTER_API_KEY",
-            base_url="https://openrouter.ai",
-            model=JEV_PROPOSER_MODEL,
-        )
-        return JevProposer(judge, sink)
-    prefix = "scripted:"
-    if spec.startswith(prefix) and len(spec) > len(prefix):
-        return ScriptedProposer(spec[len(prefix):])
-    raise ValueError(
-        f"unknown --proposer spec: {spec!r} (expected 'jev' or 'scripted:<PLAN_ID>')"
-    )
-
-
 # --- the rehearsal itself -------------------------------------------------
 
 def run_rehearsal(*, advisors_mode: str, choices: dict[str, str], db_path: Path, audit_path: Path,
@@ -308,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--architecture", default=None, choices=("F", "E"),
                          help="F (default) or E; unset falls back to the SENTINEL_ARCHITECTURE env var, then F")
     parser.add_argument("--proposer", default=None,
-                         help="jev (live, separately consent-gated) or scripted:<PLAN_ID> for architecture E")
+                         help="llm/jev (live, separately consent-gated) or scripted:<PLAN_ID> for architecture E")
     parser.add_argument("--choices", default=None,
                          help="sp=<SELECT_PLAN label>,eg=<EVIDENCE_GATE label>; omitted entries are prompted for")
     parser.add_argument("--run-id", default=None)
@@ -325,15 +264,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"refusing to run rehearsal with '--advisors live': {exc}", file=sys.stderr)
             return 2
 
-    if args.proposer == "jev":
+    if args.proposer in {"jev", "llm"}:
         try:
-            require_jev_proposer_consent()
+            require_proposer_consent(args.proposer)
         except PermissionError as exc:
-            print(f"refusing to run rehearsal with '--proposer jev': {exc}", file=sys.stderr)
+            print(f"refusing to run rehearsal with '--proposer {args.proposer}': {exc}", file=sys.stderr)
             return 2
 
     try:
-        proposer = build_proposer(args.proposer) if args.proposer != "jev" else None
+        proposer = build_proposer(args.proposer) if args.proposer not in {"jev", "llm"} else None
     except (PermissionError, ValueError) as exc:
         print(f"invalid --proposer: {exc}", file=sys.stderr)
         return 2
@@ -345,9 +284,9 @@ def main(argv: list[str] | None = None) -> int:
     audit_path.parent.mkdir(parents=True, exist_ok=True)
 
     sink = JsonlAuditSink(audit_path)
-    if args.proposer == "jev":
+    if args.proposer in {"jev", "llm"}:
         try:
-            proposer = build_proposer("jev", sink=sink)
+            proposer = build_proposer(args.proposer, sink=sink)
         except (PermissionError, ValueError) as exc:
             print(f"invalid --proposer: {exc}", file=sys.stderr)
             return 2
