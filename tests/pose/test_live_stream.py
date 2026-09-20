@@ -123,7 +123,7 @@ def test_success_path_persists_synthetic_mapped_tag(tmp_path):
 
     snapshot = latest_pose(conn, "success")
     assert snapshot is not None
-    assert snapshot["pose"]["event_type"] == "DRONE_POSE_REPORTED"
+    assert "event_type" not in snapshot["pose"]
     assert snapshot["pose"]["report_id"] == report.report_id
     row = conn.execute(
         "SELECT event_type, payload_json, payload_sha256 FROM pose_events "
@@ -145,3 +145,157 @@ def test_blank_frame_emits_no_persisted_event(tmp_path):
     )
     assert events == []
     assert latest_pose(conn, "t2") is None
+
+# --- hardening: uuid ids, source_kind, timeouts, recorder, altitude ---------
+import uuid
+
+import pytest
+
+from sentinel.pose.replay import FrameRecorder
+from sentinel.video import VideoReadTimeout
+
+
+class _ScriptedClient(FakeClient):
+    """Yields frames or raises exceptions from a script."""
+
+    def read_frame(self, timeout):
+        if not self._frames:
+            raise RuntimeError("end of stream")
+        item = self._frames.pop(0)
+        self.frames_read += 1
+        if isinstance(item, Exception):
+            raise item
+        return _FrameLike(item, self._pixel_format)
+
+
+def test_report_id_is_uuid_and_source_kind_passed_through(tmp_path):
+    conn = _make_db(tmp_path)
+    client = FakeClient([_render_mapped_tag(0), _render_mapped_tag(0)])
+    reports = run_pose_stream(
+        client, load_tag_map(TAG_MAP), conn, run_id="r", max_frames=2, source_kind="LIVE"
+    )
+    assert len(reports) == 2
+    ids = {r.report_id for r in reports}
+    assert len(ids) == 2
+    for rid in ids:
+        assert str(uuid.UUID(rid)) == rid
+    assert {r.source_kind for r in reports} == {"LIVE"}
+
+
+def test_timeouts_do_not_consume_frame_budget(tmp_path):
+    conn = _make_db(tmp_path)
+    client = _ScriptedClient(
+        [VideoReadTimeout("t"), _render_mapped_tag(0), VideoReadTimeout("t"),
+         _render_mapped_tag(0), VideoReadTimeout("t"), _render_mapped_tag(0)]
+    )
+    reports = run_pose_stream(
+        client, load_tag_map(TAG_MAP), conn, run_id="r", max_frames=3
+    )
+    assert len(reports) == 3
+
+
+def test_tolerates_isolated_read_timeouts(tmp_path):
+    conn = _make_db(tmp_path)
+    client = _ScriptedClient(
+        [VideoReadTimeout("t"), _render_mapped_tag(0), VideoReadTimeout("t"),
+         VideoReadTimeout("t"), _render_mapped_tag(0)]
+    )
+    reports = run_pose_stream(
+        client, load_tag_map(TAG_MAP), conn, run_id="r", max_frames=2
+    )
+    assert len(reports) == 2
+    assert client.video_enabled is False
+
+
+def test_aborts_after_consecutive_timeouts(tmp_path):
+    conn = _make_db(tmp_path)
+    client = _ScriptedClient([VideoReadTimeout("t")] * 10 + [_render_mapped_tag(0)])
+    reports = run_pose_stream(
+        client, load_tag_map(TAG_MAP), conn, run_id="r", max_frames=1,
+        max_consecutive_timeouts=3,
+    )
+    assert reports == []
+    assert client.frames_read == 3
+    assert client.video_enabled is False
+
+
+def test_eof_ends_stream_immediately(tmp_path):
+    conn = _make_db(tmp_path)
+    client = _ScriptedClient([_render_mapped_tag(0)])
+    reports = run_pose_stream(
+        client, load_tag_map(TAG_MAP), conn, run_id="r", max_frames=5
+    )
+    assert len(reports) == 1
+
+
+def test_recorder_saves_every_frame(tmp_path):
+    conn = _make_db(tmp_path)
+    client = FakeClient([_render_mapped_tag(0), np.zeros((48, 64, 3), np.uint8)])
+    rec = FrameRecorder(tmp_path / "rec")
+    run_pose_stream(
+        client, load_tag_map(TAG_MAP), conn, run_id="r", max_frames=2, recorder=rec
+    )
+    assert rec.count == 2
+    assert len(list((tmp_path / "rec").glob("*.png"))) == 2
+
+
+def test_altitude_source_sets_z_and_failure_yields_none(tmp_path):
+    conn = _make_db(tmp_path)
+    client = FakeClient([_render_mapped_tag(0)])
+    reports = run_pose_stream(
+        client, load_tag_map(TAG_MAP), conn, run_id="r", max_frames=1,
+        altitude_source=lambda: 0.8,
+    )
+    assert reports[0].altitude_m == pytest.approx(0.8)
+    assert latest_pose(conn, "r")["pose"]["pose"]["altitude_m"] == pytest.approx(0.8)
+
+    def boom():
+        raise RuntimeError("no telemetry")
+
+    conn2 = sqlite3.connect(":memory:")
+    ensure_schema(conn2)
+    client = FakeClient([_render_mapped_tag(0)])
+    reports = run_pose_stream(
+        client, load_tag_map(TAG_MAP), conn2, run_id="r", max_frames=1, altitude_source=boom
+    )
+    assert reports[0].altitude_m is None
+
+
+def test_throttled_altitude_source_caches_and_disables_after_failures():
+    from sentinel.pose.stream import throttled_altitude_source
+
+    clock = [0.0]
+    calls = []
+
+    def read():
+        calls.append(clock[0])
+        return 80.0  # cm
+
+    src = throttled_altitude_source(read, scale=0.01, min_interval_s=1.0, clock=lambda: clock[0])
+    assert src() == pytest.approx(0.8)
+    clock[0] = 0.5
+    assert src() == pytest.approx(0.8)
+    assert len(calls) == 1
+    clock[0] = 1.5
+    src()
+    assert len(calls) == 2
+
+    def bad():
+        calls.append("bad")
+        raise RuntimeError("x")
+
+    calls.clear()
+    src = throttled_altitude_source(bad, min_interval_s=0.0, max_failures=2, clock=lambda: clock[0])
+    assert src() is None and src() is None and src() is None
+    assert calls == ["bad", "bad"]
+
+
+def test_negative_altitude_reading_is_dropped_not_persisted(tmp_path):
+    conn = _make_db(tmp_path)
+    client = FakeClient([_render_mapped_tag(4)])
+    reports = run_pose_stream(
+        client, load_tag_map(TAG_MAP), conn, run_id="r", max_frames=1,
+        altitude_source=lambda: -0.5,
+    )
+    assert reports[0].altitude_m is None
+    assert latest_pose(conn, "r")["pose"]["pose"]["altitude_m"] is None

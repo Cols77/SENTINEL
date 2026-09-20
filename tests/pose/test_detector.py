@@ -74,3 +74,26 @@ def test_unknown_tag_only_raises():
     with pytest.raises(ValueError):
         estimate_pose(render_frontal_tag(5), TagMap(TAG_MAP_DOC),
                       run_id="r1", report_id="p3")
+
+
+def test_observed_at_is_timezone_aware_utc():
+    report = estimate_pose(render_frontal_tag(0), TagMap(TAG_MAP_DOC),
+                           run_id="r1", report_id="p1")
+    assert report.observed_at.tzinfo is not None
+    assert report.observed_at.utcoffset().total_seconds() == 0
+    assert -180.0 <= report.heading_deg <= 180.0
+
+
+def test_source_kind_keyword_defaults_to_simulated():
+    tm = TagMap(TAG_MAP_DOC)
+    default = estimate_pose(render_frontal_tag(0), tm, run_id="r1", report_id="p1")
+    assert default.source_kind == "SIMULATED"
+    live = estimate_pose(render_frontal_tag(0), tm, run_id="r1", report_id="p1",
+                         source_kind="LIVE")
+    assert live.source_kind == "LIVE"
+
+
+@pytest.mark.parametrize("raw,expected", [(0, 0), (90, 90), (180, 180), (270, -90), (359, -1)])
+def test_heading_normalized_to_signed_range(raw, expected):
+    from sentinel.pose.detector import normalize_heading_deg
+    assert normalize_heading_deg(raw) == pytest.approx(expected)

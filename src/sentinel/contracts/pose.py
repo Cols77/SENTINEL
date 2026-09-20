@@ -1,6 +1,6 @@
 """DronePoseReport contract: WP0 amendment SENT-POSE-V0."""
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
 SourceKind = Literal["LIVE", "SIMULATED", "REPLAYED"]
@@ -50,12 +50,16 @@ class DronePoseReport:
     reprojection_error_px: float
 
     def __post_init__(self):
+        if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
+            raise ValueError("observed_at must be timezone-aware: pose report fails closed")
         LocalPoint(*self.point)
         if self.reprojection_error_px > MAX_REPROJECTION_ERROR_PX:
             raise ValueError(
                 f"reprojection_error_px={self.reprojection_error_px} exceeds "
                 f"{MAX_REPROJECTION_ERROR_PX}: pose report fails closed"
             )
+        if self.altitude_m is not None and self.altitude_m < 0:
+            raise ValueError(f"altitude_m={self.altitude_m} must be >= 0 (wire schema)")
         if not self.tag_observations:
             raise ValueError("DronePoseReport requires >=1 tag observation")
 
@@ -64,11 +68,8 @@ class DronePoseReport:
         return {
             "report_id": self.report_id,
             "run_id": self.run_id,
-            "observed_at": (
-                self.observed_at.isoformat()
-                if isinstance(self.observed_at, datetime)
-                else str(self.observed_at)
-            ),
+            "observed_at": self.observed_at.astimezone(timezone.utc)
+            .isoformat().replace("+00:00", "Z"),
             "source_kind": self.source_kind,
             "pose": {
                 "point": {"x": self.point[0], "y": self.point[1]},
@@ -98,6 +99,10 @@ class DronePoseReport:
             d["point"] = (point["x"], point["y"])
             d["heading_deg"] = pose.get("heading_deg")
             d["altitude_m"] = pose.get("altitude_m")
+        if isinstance(d.get("observed_at"), str):
+            d["observed_at"] = datetime.fromisoformat(
+                d["observed_at"].replace("Z", "+00:00")
+            )
         raw_obs = d.get("tag_observations") or ()
         d["tag_observations"] = tuple(
             o if isinstance(o, TagObservation) else TagObservation(**o)

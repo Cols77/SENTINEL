@@ -29,27 +29,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
 
 def _canonical_payload(report: DronePoseReport) -> str:
-    d = {
-        "event_type": EVENT_TYPE,
-        "report_id": report.report_id,
-        "run_id": report.run_id,
-        "observed_at": report.observed_at.isoformat(),
-        "source_kind": report.source_kind,
-        "point": list(report.point),
-        "heading_deg": report.heading_deg,
-        "altitude_m": report.altitude_m,
-        "method": report.method,
-        "tag_observations": [
-            {
-                "tag_id": o.tag_id,
-                "zone_id": o.zone_id,
-                "distance_m": o.distance_m,
-                "reprojection_error_px": o.reprojection_error_px,
-            }
-            for o in report.tag_observations
-        ],
-        "reprojection_error_px": report.reprojection_error_px,
-    }
+    # event_type lives in its own column; the payload is a bare DronePoseReport.
+    d = report.to_dict()
     return json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -57,11 +38,7 @@ def append_pose_event(conn: sqlite3.Connection, report: DronePoseReport) -> int:
     """Append one pose event; sequence_no is MAX+1 scoped to report.run_id."""
     payload_json = _canonical_payload(report)
     payload_sha256 = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
-    recorded_at = (
-        report.observed_at
-        if report.observed_at.tzinfo
-        else report.observed_at.replace(tzinfo=timezone.utc)
-    ).isoformat()
+    recorded_at = report.observed_at.astimezone(timezone.utc).isoformat()
     cur = conn.execute(
         "INSERT INTO pose_events (run_id, sequence_no, event_type, payload_json,"
         " payload_sha256, recorded_at) VALUES (?,"

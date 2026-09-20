@@ -37,6 +37,8 @@ class TagMap:
         self.room_scale_m_per_unit = float(doc.get("room_scale_m_per_unit", 0.1))
         self.K = np.array([[c["fx"], 0, c["cx"]], [0, c["fy"], c["cy"]], [0, 0, 1]], dtype=float)
         self.dist = np.array(c["dist_coeffs"], dtype=np.float64)
+        # Anything not explicitly "calibrated" is treated as nominal (fail-closed default).
+        self.calibration_source: str = c.get("calibration_source") or "nominal"
 
     def tag(self, tag_id: int) -> Tag:
         return self._by_id[tag_id]  # KeyError = unknown tag, fail closed upstream

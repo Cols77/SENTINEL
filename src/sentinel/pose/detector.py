@@ -1,8 +1,13 @@
 """AprilTag 36h11 detector + single-tag PnP pose estimation (fail-closed)."""
+import itertools
+import math
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
 import cv2
 import numpy as np
 
-from sentinel.contracts.pose import DronePoseReport, TagObservation
+from sentinel.contracts.pose import DronePoseReport, SourceKind, TagObservation
 from sentinel.pose.tagmap import TagMap
 
 ROOM_SCALE_M_PER_UNIT = 0.1  # metres per room unit
@@ -42,14 +47,32 @@ def _report_point(rvec, tvec, tag, scale: float):
     return (round(float(cam_pos[0] / scale), 3), round(float(cam_pos[1] / scale), 3)), heading
 
 
-def estimate_pose(frame, tag_map: TagMap, *, run_id: str, report_id: str) -> DronePoseReport:
-    """Detect AprilTag 36h11 tags, PnP-solve mapped ones, emit the best report.
+def normalize_heading_deg(heading: float) -> float:
+    """Wrap a heading in degrees into the wire range [-180, 180]."""
+    wrapped = (float(heading) + 180.0) % 360.0 - 180.0
+    if wrapped == -180.0 and heading > 0:
+        return 180.0
+    return wrapped
 
-    Fail-closed: raises ValueError when no tags are detected or only unknown
-    tags are detected.
+
+@dataclass(frozen=True)
+class TagPose:
+    """Drone pose implied by a single mapped tag."""
+    tag_id: int
+    zone_id: str
+    point: tuple[float, float]
+    heading_deg: float  # normalized to [-180, 180]
+    distance_m: float
+    reprojection_error_px: float
+
+
+def _solve_mapped_tags(frame, tag_map: TagMap):
+    """Detect tags and PnP-solve every mapped one.
+
+    Returns ``[(err, tag, rvec, tvec), ...]`` in detection order. Fail-closed:
+    raises ValueError when no tags are detected, only unknown tags are
+    detected, or any mapped tag fails PnP / the reprojection gate.
     """
-    from datetime import datetime
-
     aruco = cv2.aruco
     detector = aruco.ArucoDetector(
         aruco.getPredefinedDictionary(aruco.DICT_APRILTAG_36h11),
@@ -64,7 +87,7 @@ def estimate_pose(frame, tag_map: TagMap, *, run_id: str, report_id: str) -> Dro
         unknown = sorted(set(int(i) for i in ids.flatten()))
         raise ValueError(f"only unmapped tag(s) detected {unknown}: pose fails closed")
 
-    best = None
+    solved = []
     for i in mapped:
         tag_id = int(ids.flatten()[i])
         tag = tag_map.tag(tag_id)
@@ -98,6 +121,58 @@ def estimate_pose(frame, tag_map: TagMap, *, run_id: str, report_id: str) -> Dro
         err, rvec, tvec = best_tag
         if err > 2.0:
             raise ValueError(f"reprojection error {err:.2f}px exceeds 2.0px: pose fails closed")
+        solved.append((err, tag, rvec, tvec))
+    return solved
+
+
+def estimate_all(frame, tag_map: TagMap) -> list[TagPose]:
+    """Per-mapped-tag poses for every simultaneously visible tag (fail-closed)."""
+    out = []
+    for err, tag, rvec, tvec in _solve_mapped_tags(frame, tag_map):
+        point, heading = _report_point(rvec, tvec, tag, tag_map.room_scale_m_per_unit)
+        out.append(TagPose(
+            tag_id=tag.tag_id,
+            zone_id=tag.zone_id,
+            point=point,
+            heading_deg=round(normalize_heading_deg(heading), 2),
+            distance_m=round(float(np.linalg.norm(tvec)), 4),
+            reprojection_error_px=round(err, 4),
+        ))
+    return out
+
+
+def flag_tag_disagreement(
+    poses: list[TagPose], *, max_position_units: float, max_heading_deg: float,
+) -> list[dict]:
+    """Flag pairs of simultaneously visible tags whose implied poses disagree."""
+    flags = []
+    for a, b in itertools.combinations(sorted(poses, key=lambda p: p.tag_id), 2):
+        dpos = math.hypot(a.point[0] - b.point[0], a.point[1] - b.point[1])
+        dhead = abs((a.heading_deg - b.heading_deg + 180.0) % 360.0 - 180.0)
+        if dpos > max_position_units or dhead > max_heading_deg:
+            flags.append({
+                "tag_ids": (a.tag_id, b.tag_id),
+                "position_delta_units": round(dpos, 4),
+                "heading_delta_deg": round(dhead, 4),
+            })
+    return flags
+
+
+def estimate_pose(
+    frame,
+    tag_map: TagMap,
+    *,
+    run_id: str,
+    report_id: str,
+    source_kind: SourceKind = "SIMULATED",
+) -> DronePoseReport:
+    """Detect AprilTag 36h11 tags, PnP-solve mapped ones, emit the best report.
+
+    Fail-closed: raises ValueError when no tags are detected or only unknown
+    tags are detected.
+    """
+    best = None
+    for err, tag, rvec, tvec in _solve_mapped_tags(frame, tag_map):
         if best is None or err < best[0]:
             best = (err, tag, rvec, tvec)
 
@@ -106,10 +181,10 @@ def estimate_pose(frame, tag_map: TagMap, *, run_id: str, report_id: str) -> Dro
     return DronePoseReport(
         report_id=report_id,
         run_id=run_id,
-        observed_at=datetime.now(),
-        source_kind="SIMULATED",
+        observed_at=datetime.now(timezone.utc),
+        source_kind=source_kind,
         point=point,
-        heading_deg=round(heading, 2),
+        heading_deg=round(normalize_heading_deg(heading), 2),
         altitude_m=None,
         method="APRILTAG_36H11_PNP",
         tag_observations=(TagObservation(

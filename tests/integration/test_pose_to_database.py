@@ -43,7 +43,8 @@ def test_synthetic_frame_to_database_pose_artifact(tmp_path):
     assert latest["stale"] is False
 
     pose = latest["pose"]
-    assert pose["point"] == pytest.approx([10.0, 10.0], abs=1.0)
+    assert (pose["pose"]["point"]["x"], pose["pose"]["point"]["y"]) == pytest.approx(
+        (10.0, 10.0), abs=1.0)
     assert pose["method"] == "APRILTAG_36H11_PNP"
 
     # stored row: hash matches sha256 of the canonical payload
@@ -56,7 +57,8 @@ def test_synthetic_frame_to_database_pose_artifact(tmp_path):
 
     # stored payload re-validates against the wire schema after round-trip
     stored_payload = json.loads(payload_json)
-    assert stored_payload.pop("event_type") == "DRONE_POSE_REPORTED"  # envelope field
+    assert "event_type" not in stored_payload
+    assert not list(_validator.iter_errors(stored_payload))  # validates as stored
     rebuilt = DronePoseReport.from_dict(stored_payload)
     wire = rebuilt.to_dict()
     errors = list(_validator.iter_errors(wire))

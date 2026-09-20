@@ -14,7 +14,9 @@ from .models import RunReport
 from .reporting import ProgressLogger, write_report, write_video_manifest
 from .safe_tools import FixedPositionYawTools, ToolRefusal, YawCommand
 from .pose.persistence import ensure_schema
-from .pose.stream import run_pose_stream
+from .pose.replay import FrameRecorder, ReplayClient
+from .pose.scoring import Thresholds, load_truth, score_runs
+from .pose.stream import run_pose_stream, throttled_altitude_source
 from .pose.tagmap import load_tag_map
 
 try:  # Task 1/3 may be landed independently in the shared worktree.
@@ -101,18 +103,51 @@ def build_parser() -> argparse.ArgumentParser:
         "pose-stream",
         help="stream video only and persist fail-closed pose reports",
     )
-    pose_stream.add_argument("--real", action="store_true", required=True)
+    pose_source = pose_stream.add_mutually_exclusive_group(required=True)
+    pose_source.add_argument("--real", action="store_true")
+    pose_source.add_argument(
+        "--replay",
+        type=Path,
+        help="offline: replay an mp4/avi file or a directory of PNG frames",
+    )
+    pose_stream.add_argument(
+        "--record-dir",
+        type=Path,
+        help="save raw frames from a live run here for later --replay",
+    )
+    pose_stream.add_argument(
+        "--allow-nominal",
+        action="store_true",
+        help="permit a tag map whose camera calibration is nominal (uncalibrated)",
+    )
     pose_stream.add_argument("--confirm", action="store_true")
     pose_stream.add_argument("--tag-map", type=Path, required=True)
     pose_stream.add_argument("--db", type=Path, default=Path("artifacts/pose.db"))
     pose_stream.add_argument("--max-frames", type=int)
     pose_stream.add_argument("--duration", type=float)
-    pose_stream.add_argument("--run-id")
+    pose_stream.add_argument("--run-id", help="default: a fresh UUID4")
     pose_stream.add_argument("--tello-ip", default="192.168.10.1")
     pose_stream.add_argument("--local-ip")
     pose_stream.add_argument("--interface-name")
     pose_stream.add_argument("--interface-index", type=int)
     pose_stream.add_argument("--timeout", type=float, default=7.0)
+
+    pose_score = subparsers.add_parser(
+        "pose-score",
+        help="score stored pose runs against a ground-truth file (offline)",
+    )
+    pose_score.add_argument("--db", type=Path, default=Path("artifacts/pose.db"))
+    pose_score.add_argument("--truth", type=Path, required=True)
+    pose_score.add_argument(
+        "--tag-map", type=Path, required=True,
+        help="tag map used for the scored runs; nominal calibration fails the score",
+    )
+    pose_score.add_argument(
+        "--allow-nominal", action="store_true",
+        help="score even though the tag map calibration is nominal (uncalibrated)",
+    )
+    pose_score.add_argument("--p95-cm", type=float, default=Thresholds.p95_cm)
+    pose_score.add_argument("--heading-deg", type=float, default=Thresholds.heading_deg)
 
     emergency = subparsers.add_parser(
         "emergency", help="send an immediate motor-stop command"
@@ -383,7 +418,11 @@ def _run_connection_probe(args: Any) -> int:
 
 def _run_pose_stream(args: Any) -> int:
     """Run bounded video-only pose estimation without flight commands."""
-    if not args.confirm:
+    replay = args.replay is not None
+    if replay and args.record_dir is not None:
+        print("--record-dir applies to live (--real) runs only.")
+        return 1
+    if not replay and not args.confirm:
         print("Real pose streams require --confirm after the physical preflight.")
         return 1
     if args.max_frames is None and args.duration is None:
@@ -400,12 +439,32 @@ def _run_pose_stream(args: Any) -> int:
     conn: sqlite3.Connection | None = None
     try:
         tag_map = load_tag_map(str(args.tag_map))
+        if tag_map.calibration_source == "nominal" and not args.allow_nominal:
+            print(
+                "Tag map camera calibration is nominal (uncalibrated); positions "
+                "are not trustworthy. Run scripts/calibrate_camera.py or pass "
+                "--allow-nominal."
+            )
+            return 1
         args.db.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(args.db)
         ensure_schema(conn)
-        client = build_real_client(args)
-        client.connect()
-        run_id = args.run_id or uuid.uuid4().hex
+        recorder = None
+        altitude_source = None
+        if replay:
+            client = ReplayClient(args.replay)
+            source_kind = "REPLAYED"
+        else:
+            client = build_real_client(args)
+            client.connect()
+            source_kind = "LIVE"
+            if args.record_dir is not None:
+                recorder = FrameRecorder(args.record_dir)
+            # Read-only height query, throttled; failure just leaves z=n/a.
+            altitude_source = throttled_altitude_source(
+                lambda: client.height_cm(), scale=0.01
+            )
+        run_id = args.run_id or str(uuid.uuid4())
         reports = run_pose_stream(
             client,
             tag_map,
@@ -413,11 +472,15 @@ def _run_pose_stream(args: Any) -> int:
             run_id=run_id,
             max_frames=args.max_frames,
             duration_s=args.duration,
+            source_kind=source_kind,
+            recorder=recorder,
+            altitude_source=altitude_source,
         )
         for report in reports:
+            z = "n/a" if report.altitude_m is None else report.altitude_m
             print(
                 f"pose x={report.point[0]} y={report.point[1]} "
-                f"z={report.altitude_m}",
+                f"z={z} heading={report.heading_deg}",
                 flush=True,
             )
         print(f"pose-stream complete: {len(reports)} report(s), run_id={run_id}")
@@ -433,6 +496,42 @@ def _run_pose_stream(args: Any) -> int:
             client.close()
         if conn is not None:
             conn.close()
+
+
+def _run_pose_score(args: Any) -> int:
+    """Score stored pose runs against ground truth (offline, read-only)."""
+    try:
+        truth = load_truth(str(args.truth))
+        tag_map = load_tag_map(str(args.tag_map))
+        result = score_runs(
+            str(args.db),
+            truth,
+            Thresholds(p95_cm=args.p95_cm, heading_deg=args.heading_deg),
+            calibration_source=tag_map.calibration_source,
+            allow_nominal=args.allow_nominal,
+        )
+    except Exception as exc:
+        print(f"pose-score failed: {exc}", flush=True)
+        return 1
+    for run_id, run in result["runs"].items():
+        if run["n"] == 0:
+            print(f"{run_id}: FAIL (no stored poses)")
+            continue
+        print(
+            f"{run_id}: {'PASS' if run['passed'] else 'FAIL'} n={run['n']} "
+            f"median={run['median_error_cm']:.1f}cm p95={run['p95_error_cm']:.1f}cm "
+            f"heading_p95={run['heading_p95_deg']:.1f}deg"
+        )
+    if not result["calibration_ok"]:
+        print(
+            "pose-score: FAIL - tag map camera calibration is nominal (uncalibrated); "
+            "calibrate the camera or pass --allow-nominal."
+        )
+    print(
+        f"pose-score: {'PASS' if result['passed'] else 'FAIL'} "
+        f"(p95<={args.p95_cm}cm, heading<={args.heading_deg}deg)"
+    )
+    return 0 if result["passed"] else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -475,6 +574,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "pose-stream":
         return _run_pose_stream(args)
+
+    if args.command == "pose-score":
+        return _run_pose_score(args)
 
     if args.real and not args.confirm:
         print("Real mode requires --confirm after the physical preflight.")

@@ -46,3 +46,16 @@ def test_high_reprojection_error_fails_closed():
 def test_no_tag_observations_is_invalid():
     with pytest.raises(ValueError):
         _report(tag_observations=[])
+
+
+def test_naive_observed_at_is_rejected():
+    with pytest.raises(ValueError):
+        _report(observed_at=datetime(2026, 9, 18, 10, 0))
+
+
+def test_negative_altitude_fails_closed():
+    # wire schema: altitude_m minimum 0
+    with pytest.raises(ValueError):
+        _report(altitude_m=-0.5)
+    _report(altitude_m=0.0)
+    _report(altitude_m=None)
