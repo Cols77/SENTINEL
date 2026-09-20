@@ -20,7 +20,7 @@ from typing import Any
 
 from sentinel.coordinator.command_gateway import CommandGateway, EVIDENCE_SCORE_THRESHOLD
 from sentinel.coordinator.decision_state import read_decision_state
-from sentinel.coordinator.legal_tools import legal_set, load_catalogue_plans
+from sentinel.coordinator.legal_tools import EVIDENCE_TASK_SCORE, legal_set, load_catalogue_plans
 
 from .harness import envelope, open_harness
 
@@ -65,10 +65,17 @@ _SELECT_PLAN_REQUESTS: tuple[tuple[str, str], ...] = (
 )
 
 _SELECT_PLAN_RATIONALE = {
+    # Operator decision 2026-09-20: "Seems like PLAN_ROUTE_ONLY_2_ZONE does
+    # not make sense if you're visiting one zone?" -> "Escalate, and propose
+    # a catalogue entry". No catalogue plan covers exactly one station --
+    # PLAN_ROUTE_ONLY_2_ZONE, the narrowest one, visits two -- so a
+    # single-station request has no matching plan and must escalate. A WP0
+    # proposal for a 1-zone catalogue entry is pending separately (Task C).
     "single": lambda text: (
-        "PLAN_ROUTE_ONLY_2_ZONE", "hand",
-        f'the request names a single station ("{text}"); the two-zone route-only plan covers '
-        "it without marker verification",
+        "escalate", "hand",
+        f'the request names exactly one station ("{text}"); no catalogue plan covers exactly '
+        "one station -- PLAN_ROUTE_ONLY_2_ZONE, the narrowest catalogue plan, visits two -- so "
+        "escalate; a WP0 proposal for a 1-zone catalogue entry is pending (Task C)",
     ),
     "sweep": lambda text: (
         "PLAN_MARKER_VERIFIED_6", "hand",
@@ -114,22 +121,30 @@ _EVIDENCE_GATE_VARIANTS: tuple[tuple[float, bool, int], ...] = tuple(
 
 
 def _evidence_gate_label(raw_score: float, inside: bool, station_id: str) -> tuple[str, str, str]:
+    # Operator policy 2026-09-20 ("Escalate below 0.75"): create_task iff the
+    # detection is inside the approved plan AND raw_score >= EVIDENCE_TASK_SCORE
+    # (0.75); otherwise escalate. This mirrors legal_tools.legal_set()'s
+    # deterministic rule_choice (Task A) exactly -- these hand labels are now
+    # a rule-agreement check, not an independent judgment benchmark.
+    at_or_above_cut = raw_score >= EVIDENCE_TASK_SCORE
     if not inside:
         return (
             "escalate", "hand",
-            f"score {raw_score} at {station_id} lies outside the approved plan's stations; escalate "
-            "for operator review",
+            f"score {raw_score} at {station_id} lies outside the approved plan's stations; the "
+            f"{EVIDENCE_TASK_SCORE} create-task cut only applies inside the plan, so escalate for "
+            "operator review",
         )
-    if raw_score in (0.51, 0.55):
+    if not at_or_above_cut:
         return (
             "escalate", "hand",
-            f"score {raw_score} at {station_id} is inside the approved plan but in the marginal band "
-            "just above threshold; escalate rather than auto-task",
+            f"score {raw_score} at {station_id} is inside the approved plan but below the operator's "
+            f"{EVIDENCE_TASK_SCORE} create-task cut (\"Escalate below 0.75\"); escalate rather than "
+            "auto-task",
         )
     return (
         "create_task", "hand",
-        f"score {raw_score} at {station_id} is inside the approved plan and clears the marginal "
-        "band; create the patrol task",
+        f"score {raw_score} at {station_id} is inside the approved plan and meets the operator's "
+        f"{EVIDENCE_TASK_SCORE} create-task cut (\"Escalate below 0.75\"); create the patrol task",
     )
 
 

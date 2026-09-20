@@ -19,19 +19,56 @@ survives a regeneration that only refreshes `packet`/`candidates`.
 
 ## Label status
 
-**DRAFT — pending operator approval.** Every `label_source: "hand"` label in
-this fixture (the 48 `SELECT_PLAN`/`EVIDENCE_GATE` judgment turns) is a draft
-written by the generator's author, not yet reviewed by an operator. Gate
-`G-labels` (Task 1, Step 6) is the point where an operator reviews the table of
-`turn_id | request or variant | draft label | rationale` for all 48 judgment
-turns and records approval or edits here, verbatim. **That gate has not run.**
-Per the plan's Global Constraints, Task 5 (shadow sweep scoring) and Task 6
-(rehearsal scoring) must not score against these unapproved labels until
-`G-labels` has recorded approval.
+**Gate `G-labels`: APPROVED, with relabelling — recorded 2026-09-20.** The
+operator reviewed the table of `turn_id | request or variant | draft label |
+rationale` for all 48 `SELECT_PLAN`/`EVIDENCE_GATE` judgment turns (Task 1,
+Step 6) and recorded these decisions, quoted verbatim:
 
-The 5 `label_source: "rule"` labels (the RULE points) are not drafts: they are
-read directly off the single legal candidate at a decision point that has no
-judgment to make, so there is nothing for an operator to approve.
+1. EVIDENCE_GATE: "Make it a rule, keep shadow" — the create_task/escalate
+   policy is computable, so a deterministic rule decides it; advisors are
+   still consulted in shadow at that point and recorded. (This is
+   `legal_tools.legal_set()`'s deterministic `rule_choice`, Task A.)
+2. Score cut: "Escalate below 0.75" — a detection becomes a task only when
+   it is inside the approved plan AND its score is >= 0.75; otherwise
+   escalate.
+3. Single-station requests: the operator observed "Seems like
+   PLAN_ROUTE_ONLY_2_ZONE does not make sense if you're visiting one zone?"
+   and chose "Escalate, and propose a catalogue entry" — `sp-001`..`sp-006`
+   are labelled `escalate` because no catalogue plan covers exactly one
+   station (`PLAN_ROUTE_ONLY_2_ZONE`, the narrowest catalogue plan, visits
+   two); a WP0 proposal for a 1-zone catalogue entry is drafted separately
+   (Task C).
+4. Catalogue fixture: "Proposal only, you consent" —
+   `docs/superpowers/specs/contracts/fixtures/survey-catalogue-v1.fixture.json`
+   was **not** edited by this relabelling (decisions 2 and 3 above needed no
+   catalogue change; decision 3's 1-zone entry is Task C's proposal, not an
+   edit here).
+5. "All other draft labels in fixtures/decisions/turns.v1.jsonl are APPROVED
+   as drafted (gate G-labels), subject to the relabelling in decisions 2 and
+   3."
+
+Applying decisions 2 and 3, `turn_generator.py` was updated and the fixture
+regenerated (`SENTINEL_REGEN_TURNS=1`): `sp-001`..`sp-006` now carry
+`escalate` (decision 3), and the 24 `EVIDENCE_GATE` turns now carry
+`create_task` iff `detection_inside_plan` and `detection_score_band` is
+`high`/`very_high` (raw_score >= 0.75), `escalate` otherwise (decision 2) —
+which changed `eg-009`/`eg-010` (score `0.62`, inside the plan) from
+`create_task` to `escalate` relative to the original draft. Every other
+judgment turn keeps its originally drafted label, per decision 5.
+
+Because decision 1 makes `EVIDENCE_GATE` a deterministic rule
+(`legal_tools.legal_set()`'s `rule_choice`) and decision 2 gives that rule the
+same 0.75 cut this fixture's `EVIDENCE_GATE` hand labels now use, the 24
+`EVIDENCE_GATE` labels mirror the rule exactly. Scoring an advisor against
+them (Task 5/6) is therefore a **rule-agreement check** — does the advisor
+agree with what the deterministic rule would already have done — and not an
+independent judgment benchmark; the `SELECT_PLAN` labels remain the
+judgment benchmark, since `SELECT_PLAN` has no `rule_choice` and the operator
+still decides it (P2 Task 3).
+
+The 5 `label_source: "rule"` labels (the RULE points) are unaffected: they
+are read directly off the single legal candidate at a decision point that
+has no judgment to make, so there was nothing to approve or relabel.
 
 ## Deviation from the plan: the "duplicate open task" EVIDENCE_GATE dimension
 

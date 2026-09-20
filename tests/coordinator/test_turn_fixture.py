@@ -115,6 +115,48 @@ def test_turn_ids_are_unique(committed_turns):
     assert len(ids) == len(set(ids))
 
 
+_SINGLE_STATION_TURN_IDS = tuple(f"sp-{i:03d}" for i in range(1, 7))
+
+
+def test_single_station_requests_escalate_pending_catalogue_proposal(committed_turns):
+    """Operator decision 2026-09-20: single-station requests escalate because
+    no catalogue plan covers exactly one station (PLAN_ROUTE_ONLY_2_ZONE
+    visits two); a 1-zone catalogue entry proposal is pending (Task C)."""
+    by_id = {record["turn_id"]: record for record in committed_turns}
+    for turn_id in _SINGLE_STATION_TURN_IDS:
+        record = by_id[turn_id]
+        assert record["decision_point"] == "SELECT_PLAN", turn_id
+        assert record["label"] == "escalate", f"{turn_id}: expected escalate, got {record['label']!r}"
+        rationale = record["rationale"].lower()
+        assert "one station" in rationale, f"{turn_id}: rationale does not name the single-station cause: {rationale!r}"
+        assert "two" in rationale, f"{turn_id}: rationale does not note the 2-zone plan visits two stations: {rationale!r}"
+        assert "catalogue" in rationale and ("propos" in rationale or "pending" in rationale), (
+            f"{turn_id}: rationale does not reference the pending catalogue proposal: {rationale!r}"
+        )
+
+
+def test_evidence_gate_labels_follow_075_create_task_cut(committed_turns):
+    """Operator decision 2026-09-20 ("Escalate below 0.75"): create_task iff
+    the detection is inside the approved plan AND its score is >= 0.75;
+    otherwise escalate. detection_score_band is "high"/"very_high" iff
+    raw_score >= 0.75 (SCORE_BANDS), so this is checkable straight off the
+    committed packet without depending on turn_id ordering."""
+    evidence_gate_turns = [r for r in committed_turns if r["decision_point"] == "EVIDENCE_GATE"]
+    assert evidence_gate_turns, "no EVIDENCE_GATE turns found"
+    for record in evidence_gate_turns:
+        facts = record["packet"]["facts"]
+        inside = facts["detection_inside_plan"]
+        at_or_above_075 = facts["detection_score_band"] in ("high", "very_high")
+        expected = "create_task" if (inside and at_or_above_075) else "escalate"
+        assert record["label"] == expected, (
+            f"{record['turn_id']}: inside={inside} band={facts['detection_score_band']!r} "
+            f"expected {expected!r}, got {record['label']!r}"
+        )
+        assert "0.75" in record["rationale"], (
+            f"{record['turn_id']}: rationale does not state the 0.75 policy cut: {record['rationale']!r}"
+        )
+
+
 def test_golden_generator_reproduces_committed_packet_and_candidates(generated_turns, committed_turns):
     generated_by_id = {record["turn_id"]: record for record in generated_turns}
     committed_by_id = {record["turn_id"]: record for record in committed_turns}
