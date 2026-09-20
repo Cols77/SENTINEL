@@ -173,9 +173,13 @@ class ShadowLadder:
         executor_decision = self.executor.last
 
         # Collect the advisors against ONE shared deadline, so the audit
-        # record costs at most a single advisor_timeout_s in total rather
+        # record costs at most a single advisor_timeout_s of *waiting* rather
         # than one per advisor. They ran concurrently (a pool per advisor
-        # instance), so this usually costs nothing at all.
+        # instance), so this usually costs nothing at all. The deadline starts
+        # after the executor returns, so an advisor's total budget is the
+        # executor's own time plus advisor_timeout_s -- more generous to the
+        # advisor, and it leaves executor latency independent of advisors,
+        # which is the property that matters.
         deadline = time.monotonic() + self.advisor_timeout_s
         advisor_entries = {
             name: self._collect_advisor(advisor, future, start, deadline)

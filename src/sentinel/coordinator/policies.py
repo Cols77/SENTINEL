@@ -25,9 +25,22 @@ from .policy import PolicyContext, one_call
 INSTRUCTIONS: dict[str, str] = {
     "SELECT_PLAN": "Choose the survey plan that fully satisfies the operator request with the fewest stations and "
                    "least verification burden. Choose 'escalate' if no plan fits or the request is contradictory.",
-    "EVIDENCE_GATE": "The detection passed the score rules and lies inside the approved plan, but a task already "
-                     "exists at the same station. Choose 'create_task' if this is a second, distinct hazard. Choose "
-                     "'escalate' if it is the same hazard seen again or you cannot tell.",
+    # An instruction must not assert a premise the packet can contradict. The
+    # advisor is consulted at EVERY EVIDENCE_GATE turn (the point is in
+    # ADVISORY_POINTS and always offers two candidates), not only at the
+    # duplicate turns that make it a judgment point -- so an instruction
+    # asserting "a task already exists at the same station" was false on all 24
+    # turns of the v1 sweep fixture, and "lies inside the approved plan" was
+    # false on 12 of them. Asking a judge to reason from a false premise
+    # corrupts both its answer and its self-reported confidence, which is the
+    # quantity the shadow sweep exists to measure. State the decision, name the
+    # considerations conditionally, and let the packet's facts supply the truth.
+    "EVIDENCE_GATE": "Decide whether this detection should become a patrol task. The packet's facts carry its score "
+                     "band, whether its station lies inside the approved plan, and whether a task already exists at "
+                     "that station. Choose 'create_task' if it warrants a task of its own -- including where an "
+                     "existing task at the same station is a second, distinct hazard. Choose 'escalate' if it needs "
+                     "operator review: outside the approved plan, a marginal score, the same hazard seen again, or "
+                     "you cannot tell.",
     "ASSIGN": "Two or more patrollers are ranked within a near-tie. Choose 'assign_rank_1' if the top-ranked "
               "patroller is an acceptable assignment. Choose 'escalate' if the operator should pick.",
 }

@@ -129,6 +129,54 @@ is fine)?
    calls — not even the 18 calls (6 turns x 3 repeats) over unambiguous
    inputs cleared 0.80.
 
+## Two gaps found by adversarial review (2026-09-20) — read before acting on the verdict
+
+The review below reproduced every number in this document independently and
+upheld the verdict, but found two caveats the original analysis omitted. Both
+weaken the confidence of (C) without supplying a better account.
+
+### G1. The comparison baseline's model identity is unverified
+
+Item 3's cross-task-shape comparison — the load-bearing evidence against
+hypothesis (A) — is drawn from `artifacts/jev/v2-live-jev.jsonl`, cited above
+as `typesafe/jev-1.13-20260917`. **That attribution is not confirmed.** That
+run's own sibling summary (`artifacts/jev/v2-live-summary.md`) records that
+"the Jev endpoint resolved ~typesafe/jev-latest, not the consented pinned
+revision", and every one of its 63 records carries `judge.model == "static"`,
+a known-wrong field. The `SELECT_PLAN`/`EVIDENCE_GATE` sweep being diagnosed
+*does* pin `typesafe/jev-1.13-20260917` (`scripts/shadow_sweep.py`).
+
+So the "same model, different task shape" framing may be comparing two
+different model resolutions. The 19%/30% HIGH-band rates remain real
+measurements of *something*; what is not established is that they measure the
+same model the sweep used.
+
+### G2. The instruction handed to Jev contradicted the packet
+
+Every `EVIDENCE_GATE` call in the sweep received `INSTRUCTIONS["EVIDENCE_GATE"]`
+verbatim, which then asserted that the detection had passed the score rules,
+lay inside the approved plan, and that *a task already exists at the same
+station*. On the fixture those premises are false on 24 of 24 turns
+(duplicates) and 12 of 24 (plan membership). Asking a judge to reason from a
+premise its own evidence contradicts is a live, independent candidate
+explanation for suppressed confidence — and it is a **fixable prompt
+construction fault, different in kind from a task-shape ceiling.**
+
+So "6 textbook-unambiguous turns" overstates it: the prompt those turns
+actually received was not a clean rendering of an unambiguous case.
+
+**What limits this counter-explanation:** the LLM arm received the *identical*
+contradictory instruction on the *identical* 24 packets and still reported
+`coverage_high = 0.958`. So the contradiction alone cannot explain the
+Jev-vs-LLM asymmetry; something Jev-specific is still required. It does,
+however, mean the sweep measured the contradiction as well as the advisor.
+
+**Consequence for the re-sweep.** The instruction has since been corrected
+(it now states no premise the packet can contradict, guarded by
+`tests/coordinator/test_instruction_premises.py`). Any re-sweep should run
+against the corrected instruction, or it re-measures the same confound. This
+is the single cheapest improvement available to that paid batch.
+
 ## Verdict: (C) THRESHOLD MISMATCH
 
 Jev's `confidence` field is real, reaches the adapter and the policy
