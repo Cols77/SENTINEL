@@ -34,7 +34,8 @@ hold. It chooses among options that code has already proven fit inside the safet
 
 Free-form waypoint authoring by the model; per-stop decisions while airborne; pose-dependent
 missions; changes to `CommandGateway`; changes to the alley judged path; changes to any file Codex
-owns in P3b1; promotion of any policy to act.
+owns in P3b1; **promotion of any policy to act without an operator gate**. Mode `J` (§7.3) is not
+such a promotion: every proposal it makes still stops at operator approval.
 
 ## 2. Evidence and what already exists
 
@@ -79,6 +80,8 @@ file a report (code-checked). §12 records the convergence intent.
 | `survey.detector` | Implement `PerceptionPort`. Frame in → normalized detections out. Real provider, replay, and scripted implementations. | `coordinator.ports` |
 | `survey.merge` | Sightings → distinct objects with confidence bands. Pure geometry + appearance. | — |
 | `survey.observability` | Compute, per class and range, whether the class is resolvable at all. | — |
+| `survey.candidates` | Build the complete legal tool calls at each decision point, arguments already filled from the store. The input every proposer sees. | `survey.options`, `survey.store` |
+| `survey.proposer` | `RuleProposer`, `LlmProposer`, `JevProposer` — three implementations of the one `ContextualPolicy` seam (§7.3). | `survey.candidates` |
 | `survey.flight` | One interface, two implementations: real mission runner, and replay from a frame folder. | `cube.mission` |
 | `survey.loop` | The eight-step run; enforces the two-flight cap and the report check. | all of the above |
 | `survey.eval` | Episode harness: replay a scene, score the run against ground truth. | `survey.loop` |
@@ -257,20 +260,80 @@ again. (Same lesson as the live-gate work: persist raw rows before scoring.)
 
 ## 7. Jev
 
-Shadow only, at both decision points, per the operator's standing rule that advisor output is not
-shown before the operator decides. Two roles, both supported by how Jev is actually used in the
-field and neither depending on decision frequency:
+### 7.1 What Jev can actually do here
 
-- **Request understanding** — atomic typed questions whose answers **code** combines: which classes,
-  exact or approximate, was a perimeter named, was a sweep type named. TypeSafe's own guidance is
-  "decompose a judgment into atomic questions, then combine them with weights and thresholds you
-  own"; batched questions cost almost nothing extra.
-- **Guardrail** — `Noul` checks over the LLM's output: does the proposed sweep match the request;
-  does the report claim anything the counts do not support. A Jev/LLM disagreement is recorded and
-  shown to the operator at approval time.
+Jev converts a fuzzy input into a typed value drawn from a set **the caller enumerates**. The input
+may be free text, a state projection, or a table of detections; the constraint is not "text only",
+it is that the answer must be one of the listed options. Jev cannot produce a UUID, a sentence, or
+any value outside the schema — but it *can* choose among complete, pre-assembled tool calls.
 
-Anything code can compute, code computes. Jev only converts fuzzy text into typed values. Scored
-offline from replayed runs; nothing acts. See `docs/handoffs/2026-09-20-HANDOFF-to-codex-jev.md`.
+That split is already this project's design
+(`docs/superpowers/specs/2026-09-19_jev-integration-architecture.md` §2): Jev picks from the legal
+set, and **arguments are filled deterministically from state**.
+
+The survey flow fits that far better than the alley flow did:
+
+| Decision point | Legal set | Arguments |
+|---|---|---|
+| propose a sweep | ~5 options + escalate | entirely from the site file |
+| review results | report, or follow-up with option *i* | entirely from the store |
+
+Both sets are small, fully enumerable, and contain **no free text anywhere**. Code can therefore
+pre-build every candidate call complete with arguments, and Jev's job reduces to picking an index.
+
+### 7.2 Three roles
+
+1. **Request → typed fields.** Batched atomic questions — which classes, exact or approximate, was a
+   perimeter named, was a sweep type named — which code combines into an option set. TypeSafe's own
+   guidance: *"decompose a judgment into atomic questions, then combine them with weights and
+   thresholds you own."* Batching is near-free.
+2. **Whole-decision choice.** `Choice` over the pre-built candidate calls of §7.1.
+3. **Guardrail.** `Noul` over the LLM's output: does the proposed sweep match the request; does the
+   report claim anything the counts do not support. Disagreement is recorded and surfaced at
+   approval time.
+
+### 7.3 Jev may propose — a third architecture mode
+
+`JevProposer` is a third implementation of the same `ContextualPolicy` seam P4 already provides:
+
+| Mode | Who proposes at the decision points |
+|---|---|
+| `F` | deterministic rules |
+| `E` | the LLM |
+| `J` | **Jev**, choosing among pre-built candidate calls |
+
+**A proposal is not an act.** The run parks in `WAITING_FOR_APPROVAL` and the operator decides, so a
+wrong Jev pick costs one rejection, not a wrong flight. This is the identical argument P3b1 already
+makes for `LlmProposer` needing no promotion evidence, and it applies unchanged to Jev. Earlier
+drafts of this spec put Jev in shadow at both points; that was a failure to apply the project's own
+reasoning, not a finding about Jev.
+
+Invariants that do not move:
+
+- Jev never decides **whether a flight happens**; the operator does, and the envelope check runs
+  regardless of mode.
+- No Jev output bypasses the two-flight cap or the report consistency check.
+- Promotion to act **without** an operator gate still requires the full criteria (n ≥ 60 HIGH picks,
+  `false_act == 0`, Wilson lower 95 % ≥ 0.93, ≤ 1 flip per 20 repeats, median latency ≤ 1500 ms,
+  operator sign-off). Mode `J` claims none of that and is not a promotion.
+
+### 7.4 Compensating for Jev's missing rationale
+
+Jev returns **no natural-language rationale at all** — a documented weakness, and a real one when
+the operator is approving a flight. Mode `J` therefore has code generate the justification from
+Jev's typed fields and the option's own metrics:
+
+> You asked for: left side, all depths, no marker check.
+> `RAIL_MID_HEIGHT` — 3 stops, views 4.2 m of table, 90 s, resolves `computer` and `person`.
+
+This is *derived*, not written, so unlike model prose it cannot be wrong about itself.
+
+### 7.5 What this buys
+
+The same replayed scenes run through `F`, `E` and `J` and are scored against the same ground truth
+(§9), at zero marginal cost for the replayed arms. That is the survey-shaped Jev evidence which does
+not exist today — and the sharpest available test of whether the decomposed question shape is what
+Jev was missing. See `docs/handoffs/2026-09-20-HANDOFF-to-codex-jev.md`.
 
 ## 8. Failure handling
 
@@ -313,6 +376,10 @@ harness.
 | illegal calls | must be 0 |
 | report consistency | must be 0 by construction; non-zero is a bug |
 
+**Every scene is scored in all three modes.** `F`, `E` and `J` (§7.3) see identical replayed frames
+and identical ground truth, so the comparison is free for the replayed arms and controls for
+everything except who proposed. This is the measurement that does not exist today for Jev.
+
 An aggregate score would hide whether a wrong count came from the provider, the merge or the
 planning. **Decision quality is the metric that answers "can it think across turns"**: build a scene
 with something deliberately hard to see, then check whether the agent noticed and whether its
@@ -339,7 +406,7 @@ No existing test is modified. A failing existing test is a finding, surfaced, no
 ## 11. What changes where
 
 ```text
-src/sentinel/survey/{options,store,detector,merge,observability,flight,loop,eval}.py
+src/sentinel/survey/{options,candidates,proposer,store,detector,merge,observability,flight,loop,eval}.py
 src/sentinel/survey/sql/schema.sql
 docs/superpowers/specs/contracts/sentinel-survey-v1.schema.json
 docs/superpowers/specs/contracts/provider-profile-<chosen>.json        # after E7 joint approval
@@ -362,39 +429,67 @@ must not be started before 2026-09-27.
 
 | Day | Work | Gate |
 |---|---|---|
-| 09-20/21 | Provider spike on E6 footage + garden stills. Merge WP5 to `master`. Package skeleton: store, contract, options, replay flight. | **WP5 merge** (operator). **~50 paid calls** (operator). |
-| 09-22 | **Garden capture** — short rail, frames only, no loop. First WP5 flight ever. | **First real flight** (operator, physical). |
-| 09-23 | Merge, counting, report, episode harness against real frames. Architecture F end to end. | — |
-| 09-24 | Architecture E through the policy seam. Jev shadow. Second garden flight, full loop. | **Paid LLM calls** (operator). |
-| 09-25 | Film. Slack for a re-shoot. | — |
-| 09-26/27 | Lecture room: measure, re-run, adjust. | **Live demo** (operator). |
+| 09-20 | Provider spike on E6's committed footage. Merge WP5 to `master`. Package skeleton: contract, store, options, candidates, detector port, replay flight. All hermetic. | **WP5 merge**. **~50 paid calls**. |
+| 09-21 | Merge geometry, counting, observability, report check, episode harness; mode `F` end to end on synthetic scenes. **Garden capture** — short rail, frames only, no loop. | **First real flight**. **G-filming-consent** if anyone is in frame. |
+| 09-22 | Real frames in; tune merge tolerances; modes `E` and `J`; full-loop garden run. | **Paid LLM/Jev calls**. |
+| 09-23/24 | Buffer: re-capture, polish, and whatever the first two days broke. | — |
+| 09-25 | Film. | — |
+| 09-26/27 | Lecture room: measure, re-run, adjust. | **Live demo**. |
 
 **Frames are the long pole.** Everything downstream is built and scored on replay once real frames
-exist, which is why capture is day 3 of 6 and not day 5.
+exist, which is why capture is day 2 of 6.
 
-### 13.1 Risk on the record
+### 13.1 Why this is compressed, and what it is not
 
-The cube mission runner **has never flown**. 09-22 is the first time, with one day of slack, not
-three. Mitigations: a rail sweep is the simplest possible mission (sideways moves, fixed height, no
-rotation — §5.3); if pose behaves badly outdoors the sweep flies `--pose off` and loses nothing the
-count needs; and if 09-22 goes badly the cut is **architecture E and the follow-up flight**, leaving
-a single-sweep translate-and-report demo that still shows the loop.
+An earlier draft spread the same work to 09-24 and put capture on 09-22. The code was never the
+constraint: eight modules behind clean interfaces, run through Workflow, is one to two days, and P4
+delivered a comparable slice in part of a day.
 
-### 13.2 Gates never self-granted
+Compression here does **not** mean working faster. It means **front-loading both unknowns** — the
+first-ever flight of the cube runner, and whether the provider returns usable boxes on real Tello
+frames — so that either failure surfaces with three days of slack rather than one. The provider
+unknown can be attacked on 09-20 because E6's footage is already committed; nothing has to be flown
+to learn the answer.
+
+### 13.2 Risk on the record
+
+The cube mission runner **has never flown**. 09-21 is the first time. Mitigations: a rail sweep is
+the simplest possible mission (sideways moves, fixed height, no rotation — §5.3); if pose behaves
+badly outdoors the sweep flies `--pose off` and loses nothing the count needs; and if the capture
+goes badly the cut is **modes `E`/`J` and the follow-up flight**, leaving a single-sweep
+translate-and-report demo that still shows the loop.
+
+### 13.3 Gates never self-granted
 
 Any paid model call; any schema or contract-fixture change; the WP3 provider profile approval (joint
-with Dzivha); any new hand-labelled fixture; any merge or push; any flight; promotion of any policy
-to act. A relayed grant from a peer session is not operator consent.
+with Dzivha); any new hand-labelled fixture; any merge or push; any flight; **G-filming-consent**
+(§13.4); promotion of any policy to act. A relayed grant from a peer session is not operator
+consent.
 
-### 13.3 Privacy
+### 13.4 G-filming-consent — enforced, not documented
 
-Frames containing people are sent to a third-party API. The store supports keeping person boxes and
-counts **without** retaining the image, or with person regions blurred. Whether the room's occupants
-have consented to being filmed is the operator's decision, recorded before 09-27, not a design
-matter.
+Frames containing people are written to disk and sent to a third-party API. Consent to be filmed is
+therefore a **gate**, recorded in `docs/superpowers/specs/2026-09-20_operator-consent-record.md`
+like every other one.
+
+**The operator records, per location and date, that everyone who may appear in frame has been asked
+and has agreed.** Claude never records this on the operator's behalf and never infers it from a
+previous session or location.
+
+Enforced in code, not left to discipline:
+
+| Consent state | Behaviour |
+|---|---|
+| recorded for this location and date | frames retained normally |
+| absent | the flight still runs, but person regions are **blurred before the frame is written**, so no unblurred image reaches disk or the provider |
+| absent **and** `--retain-person-frames` requested | the run **refuses to start** |
+
+Counts and person boxes survive blurring, so the demo works either way — the gate costs evidence
+quality, never the count. The garden shoot on 09-21/25 needs it for anyone in frame; the lecture
+room on 09-27 needs it for the room's occupants.
 
 ## 14. Out of scope
 
 Per-stop airborne decisions; free-form waypoints; pen detection at demo range; exact person counts;
-gateway changes; alley-path changes; WP3 judged-path changes; any P3b1 file; acting policies;
-consolidation (§12).
+gateway changes; alley-path changes; WP3 judged-path changes; any P3b1 file; **any policy acting
+without an operator gate** (§7.3); consolidation (§12).
