@@ -1,10 +1,16 @@
 """Read-only review view for architecture E's pending plan proposal."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import inspect
 
-from sentinel.coordinator.legal_tools import load_catalogue_plans
-from sentinel.coordinator.proposal_review import pending_proposal_review
+import pytest
+
+from sentinel.coordinator.command_gateway import CommandGateway
+from sentinel.coordinator.errors import CoordinatorError
+from sentinel.coordinator.legal_tools import legal_set, load_catalogue_plans
+from sentinel.coordinator.proposal_review import pending_proposal_review, submit_plan_review
+from sentinel.coordinator.shadow import MemoryAuditSink
 
 from .p3_helpers import P3Run
 
@@ -201,5 +207,150 @@ def test_api_has_no_analysis_expansion_and_review_is_read_only(tmp_path):
         assert "analysis_expanded" not in repr(view)
         assert catalogue == before_catalogue
         assert run.repo.connection.total_changes == before_changes
+    finally:
+        run.close()
+
+
+FIXED_REVIEW_TIME = datetime(2026, 9, 20, 4, 5, 6, tzinfo=timezone.utc)
+
+
+def test_submit_plan_review_builds_operator_command_and_exact_audit(tmp_path):
+    run = P3Run(tmp_path, "proposal-review-command")
+    sink = MemoryAuditSink()
+    submitted = []
+
+    class GatewaySpy:
+        def submit(self, command):
+            submitted.append(command)
+            return {"status": "COMPLETED"}
+
+    try:
+        run.propose_plan(ROUTE_PLAN)
+        state = run.state()
+        proposal = next(
+            event for event in reversed(run.repo.read_events(run.run_id, 0, 100))
+            if event["event_type"] == "PLAN_PROPOSED"
+        )
+        proposed_at = datetime.fromisoformat(proposal["recorded_at"].replace("Z", "+00:00"))
+
+        result = submit_plan_review(
+            run.repo, GatewaySpy(), run.run_id, "CONFIRM", sink=sink,
+            clock=lambda: FIXED_REVIEW_TIME,
+        )
+
+        assert result == {"status": "COMPLETED"}
+        assert len(submitted) == 1
+        command = submitted[0]
+        assert command["command_type"] == "OPERATOR_DECIDE"
+        assert command["actor_type"] == "OPERATOR"
+        assert command["actor_id"] == "OPERATOR_1"
+        assert command["expected_state_version"] == state.state_version
+        assert command["payload"]["decision"] == "CONFIRM"
+        assert command["payload"]["target"]["kind"] == "PLAN"
+        reference = command["payload"]["target"]["plan_reference"]
+        assert reference["plan_id"] == state.plan_id
+        assert tuple(reference["station_ids"]) == state.plan_station_ids
+        assert reference["catalogue_id"] == "SURVEY_CATALOGUE_V1"
+        assert reference["catalogue_revision"] == "REV_1"
+        assert len(reference["plan_sha256"]) == 64
+        assert sink.records == [{
+            "record": "plan_review",
+            "run_id": run.run_id,
+            "state_version": state.state_version,
+            "decision": "CONFIRM",
+            "actor_id": "OPERATOR_1",
+            "proposed_label": ROUTE_PLAN,
+            "seconds_to_decision": max(0.0, (FIXED_REVIEW_TIME - proposed_at).total_seconds()),
+        }]
+    finally:
+        run.close()
+
+
+@pytest.mark.parametrize(
+    ("decision", "expected_status", "expected_point"),
+    [("CONFIRM", "WAITING_FOR_OBSERVATION", "WAIT_OBSERVATION"),
+     ("REJECT", "RUNNING", "SELECT_PLAN")],
+)
+def test_submit_plan_review_confirm_and_reject_through_real_gateway(
+    tmp_path, decision, expected_status, expected_point
+):
+    run = P3Run(tmp_path, f"proposal-review-real-{decision.lower()}")
+    sink = MemoryAuditSink()
+    try:
+        run.propose_plan(ROUTE_PLAN)
+
+        submit_plan_review(
+            run.repo, CommandGateway(run.repo), run.run_id, decision,
+            sink=sink, clock=lambda: FIXED_REVIEW_TIME,
+        )
+
+        state = run.state()
+        assert state.run_status == expected_status
+        assert legal_set(state, CATALOGUE).decision_point == expected_point
+        assert sink.records[0]["decision"] == decision
+    finally:
+        run.close()
+
+
+def test_submit_plan_review_clamps_negative_duration_to_zero(tmp_path):
+    run = P3Run(tmp_path, "proposal-review-duration")
+    sink = MemoryAuditSink()
+    try:
+        run.propose_plan(ROUTE_PLAN)
+        submit_plan_review(
+            run.repo, run.gateway, run.run_id, "REJECT", sink=sink,
+            clock=lambda: datetime(2000, 1, 1, tzinfo=timezone.utc),
+        )
+        assert sink.records == [{
+            **sink.records[0],
+            "seconds_to_decision": 0.0,
+        }]
+    finally:
+        run.close()
+
+
+def test_submit_plan_review_rejects_invalid_or_nonpending_review(tmp_path):
+    run = P3Run(tmp_path, "proposal-review-invalid")
+    sink = MemoryAuditSink()
+    try:
+        with pytest.raises(CoordinatorError):
+            submit_plan_review(run.repo, run.gateway, run.run_id, "MAYBE", sink=sink)
+        with pytest.raises(CoordinatorError):
+            submit_plan_review(run.repo, run.gateway, run.run_id, "CONFIRM", sink=sink)
+        assert sink.records == []
+    finally:
+        run.close()
+
+
+def test_submit_plan_review_rejects_missing_persisted_plan(tmp_path):
+    run = P3Run(tmp_path, "proposal-review-missing-plan")
+    sink = MemoryAuditSink()
+    try:
+        run.propose_plan(ROUTE_PLAN)
+        run.repo.connection.execute(
+            "UPDATE runs SET pending_approval_id = ? WHERE run_id = ?",
+            ("missing-plan-id", run.run_id),
+        )
+        run.repo.connection.commit()
+        with pytest.raises(CoordinatorError):
+            submit_plan_review(run.repo, run.gateway, run.run_id, "CONFIRM", sink=sink)
+        assert sink.records == []
+    finally:
+        run.close()
+
+
+def test_submit_plan_review_does_not_audit_failed_gateway_submission(tmp_path):
+    run = P3Run(tmp_path, "proposal-review-gateway-failure")
+    sink = MemoryAuditSink()
+
+    class FailingGateway:
+        def submit(self, command):
+            raise CoordinatorError("TEST_GATEWAY_FAILURE", "boom")
+
+    try:
+        run.propose_plan(ROUTE_PLAN)
+        with pytest.raises(CoordinatorError, match="boom"):
+            submit_plan_review(run.repo, FailingGateway(), run.run_id, "REJECT", sink=sink)
+        assert sink.records == []
     finally:
         run.close()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
+import json
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +106,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pending.add_argument("--db", type=Path, required=True)
     pending.add_argument("--run-id", required=True)
+    pending.add_argument("--audit", type=Path)
+
+    review_plan = subparsers.add_parser(
+        "review-plan", help="confirm or reject the specific plan awaiting approval"
+    )
+    review_plan.add_argument("--db", type=Path, required=True)
+    review_plan.add_argument("--run-id", required=True)
+    review_plan.add_argument(
+        "--decision", choices=("CONFIRM", "REJECT"), required=True
+    )
+    review_plan.add_argument("--audit", type=Path, required=True)
 
     decide = subparsers.add_parser(
         "decide", help="submit the operator's choice at a coordinator judgment point"
@@ -379,23 +391,75 @@ def _run_pending(args: Any) -> int:
     ``pending_decision`` never surfaces advisor output."""
     from .coordinator.legal_tools import load_catalogue_plans
     from .coordinator.operator_choice import pending_decision
+    from .coordinator.proposal_review import pending_proposal_review
     from .coordinator.repository import CoordinatorRepository
 
+    audit_records = []
+    if args.audit and args.audit.exists():
+        audit_records = [
+            json.loads(line)
+            for line in args.audit.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
     repository = CoordinatorRepository.open(args.db)
     try:
-        pending = pending_decision(repository, args.run_id, load_catalogue_plans())
+        catalogue = load_catalogue_plans()
+        proposal = pending_proposal_review(
+            repository, args.run_id, catalogue, audit_records
+        )
+        pending = None if proposal is not None else pending_decision(
+            repository, args.run_id, catalogue
+        )
     except KeyError:
         print(f"no such run: {args.run_id}")
         return 2
     finally:
         repository.close()
 
+    if proposal is not None:
+        proposed = proposal["proposed_plan"]
+        print(f"proposed_plan: {proposed['label']}: {proposed['description']}")
+        recommendation = proposed["recommendation"]
+        if recommendation is not None:
+            print(f"  reason: {recommendation['reason']}")
+            print(f"  facts: {json.dumps(recommendation['facts'], sort_keys=True)}")
+        print("other_plans:")
+        for plan in proposal["other_plans"]:
+            print(f"  {plan['label']}: {plan['description']}")
+        return 0
     if pending is None:
         print("no pending operator decision")
         return 0
     print(f"decision_point: {pending['decision_point']}")
     for option in pending["options"]:
         print(f"  {option['label']}: {option['description']}")
+    return 0
+
+
+def _run_review_plan(args: Any) -> int:
+    """Submit an operator decision for the exact persisted pending plan."""
+    from .coordinator.command_gateway import CommandGateway
+    from .coordinator.errors import CoordinatorError
+    from .coordinator.proposal_review import submit_plan_review
+    from .coordinator.repository import CoordinatorRepository
+    from .coordinator.shadow import JsonlAuditSink
+
+    repository = CoordinatorRepository.open(args.db)
+    try:
+        try:
+            result = submit_plan_review(
+                repository,
+                CommandGateway(repository),
+                args.run_id,
+                args.decision,
+                sink=JsonlAuditSink(args.audit),
+            )
+        except CoordinatorError as exc:
+            print(f"review-plan failed: {exc}")
+            return 2
+    finally:
+        repository.close()
+    print(f"review-plan OK: {result}")
     return 0
 
 
@@ -472,6 +536,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "decide":
         return _run_decide(args)
+
+    if args.command == "review-plan":
+        return _run_review_plan(args)
 
     if args.real and not args.confirm:
         print("Real mode requires --confirm after the physical preflight.")
