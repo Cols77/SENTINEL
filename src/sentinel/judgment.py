@@ -302,9 +302,15 @@ class LlmJudge:
     def boolean(self, state: dict, instruction: str, *, name: str) -> dict[str, Any]:
         return self.evaluate(state, [{"name": name, "type": "noul", "instruction": instruction, "criteria": None}])[name]
 
-    def choice(self, state: dict, instruction: str, *, options: Sequence[str], name: str) -> dict[str, Any]:
+    def choice(self, state: dict, instruction: str, *, options: Sequence[str] | None = None,
+               criteria: Mapping[str, str | None] | None = None, name: str) -> dict[str, Any]:
+        # Same D11 signature as JevJudge: a caller holding label descriptions
+        # (the policy seam's legal candidates) must be able to pass them to
+        # either judge. Without this the LLM advisor raised TypeError on every
+        # call, which the live shadow sweep of 2026-09-20 saw as error_rate 1.0.
+        resolved = dict(criteria) if criteria is not None else {opt: None for opt in (options or [])}
         return self.evaluate(state, [{"name": name, "type": "choice", "instruction": instruction,
-                                      "criteria": {opt: None for opt in options}}])[name]
+                                      "criteria": resolved}])[name]
 
 
 def timed(judge_call) -> tuple[dict, int]:
