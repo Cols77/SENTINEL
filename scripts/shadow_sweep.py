@@ -177,11 +177,36 @@ def _legal_set_for_turn(turn: dict) -> LegalSet:
     return LegalSet(turn["decision_point"], candidates)
 
 
+class RecordingJudge:
+    """Wraps a judge and keeps the raw answer of the last ``choice`` call.
+
+    Without this the sweep committed only aggregates, so a question like "is
+    Jev's 0% HIGH coverage real calibration, or are we reading the wrong
+    confidence field?" could not be answered without paying for another live
+    batch. The raw answer carries both ``confidence`` and the per-option
+    ``probabilities``, which are what the band policy chooses between.
+    """
+
+    def __init__(self, judge: Any) -> None:
+        self._judge = judge
+        self.last_raw: dict | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._judge, name)
+
+    def choice(self, state, instruction, **kwargs):
+        self.last_raw = None
+        answer = self._judge.choice(state, instruction, **kwargs)
+        self.last_raw = answer if isinstance(answer, dict) else None
+        return answer
+
+
 def run_sweep(advisor_name: str, judge: Any, turns: list[dict], *, repeats: int) -> list[dict]:
     """Runs ``JevPolicy(judge)`` over every turn, ``repeats`` times, and
     returns one ``judgment``-shaped record per (turn, repeat) -- the exact
     shape ``sentinel.shadow_eval.score`` consumes."""
-    policy = JevPolicy(judge)
+    recorder = RecordingJudge(judge)
+    policy = JevPolicy(recorder)
     records = []
     for repeat in range(repeats):
         for turn in turns:
@@ -208,8 +233,23 @@ def run_sweep(advisor_name: str, judge: Any, turns: list[dict], *, repeats: int)
                     "label": decision.label, "confidence": decision.confidence, "band": decision.band,
                     "model": decision.model, "latency_ms": latency_ms, "error": decision.error,
                 }},
+                # Raw judge output, so every aggregate below can be re-derived
+                # and re-scored offline (different bands, different confidence
+                # field) without another paid batch.
+                "raw_answer": recorder.last_raw,
+                "legal_labels": [c.label for c in legal.candidates],
             })
     return records
+
+
+def write_records(path: Path, records: list[dict]) -> None:
+    """Append-only raw per-call rows, one JSON object per line."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records), encoding="utf-8")
+
+
+def read_records(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def render_report(advisor_name: str, report: dict, *, n_turns: int, repeats: int) -> str:
@@ -259,6 +299,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.out is not None:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(text, encoding="utf-8")
+        # The raw rows are the evidence; the report is only a view of them.
+        # Committing aggregates alone makes a promotion claim unauditable and
+        # un-rescorable except by paying for the batch again.
+        write_records(args.out.with_suffix(".jsonl"), records)
     print(text)
     return 0
 
