@@ -103,7 +103,10 @@ def test_fail_closed_on_blank_frames(tmp_path, caplog):
     assert client.video_enabled is False
     assert latest_pose(conn, "t1") is None
     assert isinstance(events, list)
-    assert "fail-closed" in caplog.text
+    # no per-frame spam for tag-less frames; one summary line instead
+    assert caplog.text.count("fail-closed") == 0
+    assert caplog.text.count("no detectable tag") == 1
+    assert "3 of 3" in caplog.text
 
 
 def test_success_path_persists_synthetic_mapped_tag(tmp_path):
@@ -299,3 +302,13 @@ def test_negative_altitude_reading_is_dropped_not_persisted(tmp_path):
     )
     assert reports[0].altitude_m is None
     assert latest_pose(conn, "r")["pose"]["pose"]["altitude_m"] is None
+
+
+def test_unmapped_tag_frames_still_warn_per_frame(tmp_path, caplog):
+    conn = _make_db(tmp_path)
+    frame = _render_mapped_tag(4)
+    tm = load_tag_map(TAG_MAP)
+    tm._by_id.pop(4)  # tag becomes unknown -> a different, noteworthy failure
+    client = FakeClient([frame, frame])
+    run_pose_stream(client, tm, conn, run_id="u1", max_frames=2)
+    assert caplog.text.count("fail-closed (no pose persisted)") == 2

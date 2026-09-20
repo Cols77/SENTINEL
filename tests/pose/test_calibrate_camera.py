@@ -144,3 +144,24 @@ def test_square_size_is_required(board_dir, tmp_path):
     # a silently wrong default square size would scale every distance
     with pytest.raises(SystemExit):
         cal.main([str(board_dir), "--tag-map", str(FIXTURE), "--out", str(tmp_path / "o.json")])
+
+
+def test_near_frontal_views_are_rejected(tmp_path):
+    # tilt-poor data leaves focal length ill-conditioned even when RMS is tiny
+    d = tmp_path / "frontal"
+    d.mkdir()
+    ts = [(-0.09, -0.06, 0.6), (-0.05, -0.04, 0.5), (-0.12, -0.07, 0.7),
+          (-0.07, -0.02, 0.55), (-0.10, -0.08, 0.65), (-0.06, -0.06, 0.6)]
+    for i, t in enumerate(ts):
+        cv2.imwrite(str(d / f"f{i}.png"), _render((0.0, 0.0, 0.0), t))
+    with pytest.raises(cal.CalibrationError, match="tilt"):
+        cal.calibrate(d, PATTERN, SQUARE_M)
+
+
+def test_quality_gate_can_be_relaxed(tmp_path):
+    d = tmp_path / "frontal2"
+    d.mkdir()
+    for i, t in enumerate([(-0.09, -0.06, 0.6), (-0.05, -0.04, 0.5), (-0.12, -0.07, 0.7),
+                           (-0.07, -0.02, 0.55), (-0.10, -0.08, 0.65), (-0.06, -0.06, 0.6)]):
+        cv2.imwrite(str(d / f"f{i}.png"), _render((0.0, 0.0, 0.0), t))
+    cal.calibrate(d, PATTERN, SQUARE_M, min_tilt_deg=0.0, max_half_disagreement=1e9)

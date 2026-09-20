@@ -19,7 +19,7 @@ from typing import Callable
 import numpy as np
 
 from sentinel.contracts.pose import DronePoseReport
-from sentinel.pose.detector import estimate_pose
+from sentinel.pose.detector import NoTagDetected, estimate_pose
 from sentinel.pose.persistence import append_pose_event
 from sentinel.video import VideoReadTimeout
 
@@ -132,10 +132,11 @@ def run_pose_stream(
 
     reports: list[DronePoseReport] = []
     timeouts = 0
+    no_tag_frames = 0
+    i = 0
     deadline = time.monotonic() + duration_s if duration_s is not None else None
     client.start_video()
     try:
-        i = 0
         while max_frames is None or i < max_frames:
             if deadline is not None and time.monotonic() >= deadline:
                 break
@@ -171,6 +172,10 @@ def run_pose_stream(
                     report_id=str(uuid.uuid4()),
                     source_kind=source_kind,
                 )
+            except NoTagDetected:
+                no_tag_frames += 1
+                logger.debug("frame %d: no tag detected (no pose persisted)", i)
+                continue
             except ValueError as exc:
                 logger.warning("frame %d fail-closed (no pose persisted): %s", i, exc)
                 continue
@@ -192,4 +197,9 @@ def run_pose_stream(
             )
     finally:
         client.stop_video()
+        if no_tag_frames:
+            logger.warning(
+                "%d of %d frame(s) had no detectable tag (skipped, no pose persisted)",
+                no_tag_frames, i,
+            )
     return reports

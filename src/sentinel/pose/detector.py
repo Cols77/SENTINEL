@@ -13,6 +13,10 @@ from sentinel.pose.tagmap import TagMap
 ROOM_SCALE_M_PER_UNIT = 0.1  # metres per room unit
 
 
+class NoTagDetected(ValueError):
+    """No AprilTag at all in the frame (routine; not worth a per-frame warning)."""
+
+
 def _report_point(rvec, tvec, tag, scale: float):
     """Compose a PnP solution into the drone's room position and heading.
 
@@ -80,7 +84,7 @@ def _solve_mapped_tags(frame, tag_map: TagMap):
     )
     corners, ids, _ = detector.detectMarkers(frame)
     if ids is None or len(ids) == 0:
-        raise ValueError("no AprilTag markers detected: pose fails closed")
+        raise NoTagDetected("no AprilTag markers detected: pose fails closed")
 
     mapped = [i for i, mid in enumerate(ids.flatten()) if tag_map.has_tag(int(mid))]
     if not mapped:

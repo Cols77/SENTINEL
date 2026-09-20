@@ -22,13 +22,16 @@ import numpy as np
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp"}
 MIN_IMAGES = 5
 DEFAULT_MAX_RMS_PX = 0.5
+DEFAULT_MIN_TILT_DEG = 25.0        # steepest board tilt needed to pin down the focal length
+DEFAULT_MAX_HALF_DISAGREEMENT = 0.05  # two random halves must agree on fx within 5%
 
 
 class CalibrationError(Exception):
     pass
 
 
-def calibrate(image_dir, pattern, square_m):
+def calibrate(image_dir, pattern, square_m, *, min_tilt_deg=DEFAULT_MIN_TILT_DEG,
+              max_half_disagreement=DEFAULT_MAX_HALF_DISAGREEMENT):
     """Return (K, dist, rms, (width, height)). Raises CalibrationError if unusable."""
     image_dir = pathlib.Path(image_dir)
     paths = sorted(p for p in image_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS) if image_dir.is_dir() else []
@@ -55,7 +58,31 @@ def calibrate(image_dir, pattern, square_m):
     if len(obj_pts) < MIN_IMAGES:
         raise CalibrationError(
             f"only {len(obj_pts)} usable checkerboard image(s) of {len(paths)}; need >= {MIN_IMAGES}")
-    rms, K, dist, _, _ = cv2.calibrateCamera(obj_pts, img_pts, size, None, None)
+    rms, K, dist, rvecs, _ = cv2.calibrateCamera(obj_pts, img_pts, size, None, None)
+    tilts = [float(np.degrees(np.arccos(min(1.0, abs(cv2.Rodrigues(r)[0][2, 2]))))) for r in rvecs]
+    if max(tilts) < min_tilt_deg:
+        raise CalibrationError(
+            f"board tilt too small (max {max(tilts):.0f} deg, need >= {min_tilt_deg:.0f}): "
+            "the focal length is not determined by near-frontal views. Re-record with the "
+            "board tilted 30-45 deg both ways.")
+    order = np.random.RandomState(0).permutation(len(obj_pts))
+    half = len(order) // 2
+    fxs = []
+    for part in (order[:half], order[half:]):
+        _, Kh, _, _, _ = cv2.calibrateCamera(
+            [obj_pts[k] for k in part], [img_pts[k] for k in part], size, None, None)
+        fxs.append(Kh[0, 0])
+    disagreement = abs(fxs[0] - fxs[1]) / ((fxs[0] + fxs[1]) / 2)
+    if disagreement > max_half_disagreement:
+        raise CalibrationError(
+            f"unstable calibration: two halves of the frames disagree on focal length "
+            f"({fxs[0]:.0f} vs {fxs[1]:.0f} px, {disagreement:.0%} > {max_half_disagreement:.0%}). "
+            "Record more varied views (tilt, distance, whole image area).")
+    xs = np.concatenate([p.reshape(-1, 2) for p in img_pts])
+    print(f"views: {len(obj_pts)}, max tilt {max(tilts):.0f} deg, corners span "
+          f"x {xs[:, 0].min():.0f}-{xs[:, 0].max():.0f} of {size[0]}, "
+          f"y {xs[:, 1].min():.0f}-{xs[:, 1].max():.0f} of {size[1]}, "
+          f"half-split fx agreement {disagreement:.1%}")
     return K, dist.reshape(-1), float(rms), size
 
 
@@ -77,6 +104,8 @@ def main(argv=None):
     ap.add_argument("--tag-map", required=True, help="input tag-map v1 JSON (read only)")
     ap.add_argument("--out", required=True, help="new output tag-map path")
     ap.add_argument("--pattern", default="7x6", help="inner corners COLSxROWS")
+    ap.add_argument("--min-tilt-deg", type=float, default=DEFAULT_MIN_TILT_DEG,
+                    help="reject if the steepest board tilt is below this (degrees)")
     ap.add_argument("--square-m", type=float, required=True,
                     help="measured side of one printed square, in metres (sets the scale)")
     ap.add_argument("--max-rms", type=float, default=DEFAULT_MAX_RMS_PX,
@@ -95,7 +124,8 @@ def main(argv=None):
         print(f"unsupported tag map: {doc.get('schema_version')!r}", file=sys.stderr)
         return 2
     try:
-        K, dist, rms, size = calibrate(args.image_dir, (cols, rows), args.square_m)
+        K, dist, rms, size = calibrate(args.image_dir, (cols, rows), args.square_m,
+                                   min_tilt_deg=args.min_tilt_deg)
     except CalibrationError as e:
         print(f"calibration failed: {e}", file=sys.stderr)
         return 1
