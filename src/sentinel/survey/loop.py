@@ -41,6 +41,7 @@ from typing import Any
 
 from .candidates import (ESCALATE_LABEL, MAX_FLIGHTS, REPORT_LABEL, propose_candidates,
                          review_candidates)
+from .consent import ConsentMissing, consent_policy
 from .context import SurveyContext
 from .merge import merge_sightings
 from .proposer import chosen_label
@@ -152,7 +153,22 @@ def _write_report(writer, results) -> tuple[str | None, ReportMismatch | None]:
 
 def run_survey(*, store, run_id: str, request_text: str, options, policy,
                flight, detector, on_approval, writer,
+               location: str | None = None, consent_date: str | None = None,
                max_flights: int = MAX_FLIGHTS) -> dict[str, Any]:
+    """rev 3 R5 (Task 8): when ``location`` is given, filming consent is
+    gated *before anything else happens* -- before ``store.create_run``,
+    before any sweep, before the detector is ever touched. Absent consent,
+    the run ends ``CONSENT_REQUIRED`` and nothing downstream runs at all.
+    ``location`` defaults to ``None`` so hermetic/replay runs over
+    already-consented frames (design spec 13.4) are unaffected by the gate,
+    matching every test written before this parameter existed."""
+    if location is not None:
+        try:
+            consent_policy(store, location, consent_date)
+        except ConsentMissing as missing:
+            return {"status": "CONSENT_REQUIRED", "flights": 0, "counts": {}, "report": None,
+                    "escalations": [{"point": "CONSENT", "error": str(missing)}]}
+
     store.create_run(run_id, request_text)
     request = {"run_id": run_id, "request_text": request_text, "site": get_site(options)}
     escalations: list[dict] = []

@@ -28,6 +28,7 @@ import math
 import pytest
 
 from sentinel.survey.candidates import ESCALATE_LABEL, REPORT_LABEL
+from sentinel.survey.consent import record_consent
 from sentinel.survey.detector import ScriptedDetector
 from sentinel.survey.envelope import SweepEnvelope
 from sentinel.survey.flight import FlightFrame
@@ -255,3 +256,45 @@ def test_get_results_is_the_function_the_loop_routes_through(tmp_path):
     results = get_results(store, "RUN1", OPTIONS)
     assert results["flights_used"] == 1
     assert any(c["class"] == "computer" and c["confirmed"] == 1 for c in results["class_counts"])
+
+
+def test_without_recorded_consent_the_run_ends_and_the_detector_is_never_called(tmp_path):
+    """rev 3 R5 (Task 8): absent consent, the run ends CONSENT_REQUIRED
+    before any capture is written, and the detector is never called."""
+    class _BoomDetector:
+        def detect(self, image_path, classes):
+            raise AssertionError("the detector must never be called without consent")
+
+    store = SurveyStore.open(tmp_path / "s.sqlite3")
+    flight = _StaticFlight()
+    outcome = run_survey(store=store, run_id="RUN1", request_text="count",
+                         options=OPTIONS, policy=RuleProposer(), flight=flight,
+                         detector=_BoomDetector(), on_approval=lambda call: True,
+                         writer=_writer([]), location="garden", consent_date="2026-09-21")
+    assert outcome["status"] == "CONSENT_REQUIRED"
+    assert outcome["flights"] == 0
+    assert flight.flights == 0
+
+
+def test_recorded_consent_lets_a_provider_backed_run_proceed_normally(tmp_path):
+    store = SurveyStore.open(tmp_path / "s.sqlite3")
+    record_consent(store, "garden", "2026-09-21", recorded_by="operator")
+    outcome = run_survey(store=store, run_id="RUN1", request_text="count",
+                         options=OPTIONS, policy=RuleProposer(), flight=_StaticFlight(),
+                         detector=ScriptedDetector(_one_computer_script()),
+                         on_approval=lambda call: True, writer=_writer([]),
+                         location="garden", consent_date="2026-09-21")
+    assert outcome["status"] == "REPORTED"
+    assert outcome["counts"]["computer"]["confirmed"] == 1
+
+
+def test_a_run_with_no_location_given_is_unaffected_by_the_consent_gate(tmp_path):
+    """Design spec 13.4: hermetic/replay runs over already-consented frames
+    proceed without touching this gate. Every test above this one in this
+    file relies on exactly this default."""
+    store = SurveyStore.open(tmp_path / "s.sqlite3")
+    outcome = run_survey(store=store, run_id="RUN1", request_text="count",
+                         options=OPTIONS, policy=RuleProposer(), flight=_StaticFlight(),
+                         detector=ScriptedDetector(_one_computer_script()),
+                         on_approval=lambda call: True, writer=_writer([]))
+    assert outcome["status"] == "REPORTED"
