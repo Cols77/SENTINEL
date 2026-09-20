@@ -88,10 +88,9 @@ checks, `rtk proxy uv run pytest tests/test_survey_eval.py -q` passed all 17 tes
 in 0.36 seconds. These are evaluator unit tests, not the survey production suite.
 Survey production HEAD was rechecked at `73846e4`; no model calls or flights ran.
 
-**Production F/E/J acceptance is BLOCKED.** The evaluator compares explicitly
-supplied evidence only. No completed production survey loop adapter or measured
-F/E/J survey comparison exists in these assets. Passing synthetic arithmetic
-tests is not evidence that any production proposer chose a useful flight.
+At the earlier `73846e4` inspection, production F/E/J acceptance was blocked by
+the absent loop. See the newer integration update below. Passing synthetic
+arithmetic tests is not evidence that a live model chose a useful flight.
 
 Review correction: selected_option_ids now requires complete replay and scopes
 observed precision/recall to independently visible, resolvable, unoccluded truth.
@@ -108,3 +107,44 @@ Review-fix verification: RED reproduced eight scoring/fixture defects (18 other
 tests passed); after corrections the evaluator suite passed all 28 tests in
 0.43 seconds. This remains synthetic evaluator evidence only, not production
 F/E/J acceptance or real-frame provider evidence.
+
+## Production dependency recheck and scripted bridge
+
+Survey advanced to `96413ac` (consent), with `966b141` supplying the production
+loop. Loop, report, flight and consent dependencies are now available. The loop
+calls real get_site/get_results and explicitly decodes bbox_json before merge;
+the previously documented store-normalization integration blocker is bridged.
+It still hardcodes DELTA_Z_CM=55 instead of forwarding per-frame surface height.
+The independent runner rejects scenes incompatible with that fixed height or
+with production camera calibration; it does not silently adjust ground truth.
+
+`scripts/survey_sweep.py --survey-root PATH --scene SCENE --output OUTPUT
+--approve-sweeps --max-flights 2` runs the actual external production loop,
+SurveyStore, ScriptedDetector, FlightFrame port and F/E/J proposer classes in an
+isolated subprocess. E/J advisor responses remain explicit deterministic doubles.
+This is production-loop integration evidence, not live-model quality or flight
+evidence. No production files are edited or merged, and there are no paid calls,
+hardware flights or claims about real filming consent. Without the explicit
+synthetic approval flag each arm refuses its proposed sweep.
+
+The output records commit, dirty state and source-file hashes before/after,
+decision calls, real get_site/get_results invocation counts, per-sweep approvals,
+flight budget, persisted counts and report consistency. A changed source snapshot
+marks the run SOURCE_CHANGED. A selected missing/unanalysed observation is
+UNEVALUABLE; a missing option not selected does not invalidate another arm.
+
+An additional current production defect is exposed in approval evidence:
+REVIEW_RESULTS candidate labels are follow_up:ID, but chosen_label returns the
+raw option ID. _approval_call therefore cannot find the candidate description
+for a follow-up. The runner retains the blank rendered description and marks
+approval_descriptions_complete false; its scripted approval is never presented
+as a successful human-readable approval UX test.
+
+Quality/integration verification: RED reproduced 13 expected defects/missing
+runner failures; after implementation, `rtk proxy uv run pytest
+tests/test_survey_eval.py tests/test_survey_sweep.py -q` passed 43 tests in 6.87
+seconds, including subprocess execution of all three production proposer modes.
+Hypothesis absence now leaves recall/localisation unset, duplicate class-count
+rows are rejected, malformed report payloads receive no completion/validity
+credit, and prediction coordinates require finite non-boolean numbers (None
+remains a legitimate unlocalized hypothesis).

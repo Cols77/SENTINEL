@@ -166,7 +166,7 @@ def score_episode(scene: Scene, outcome: dict, *, reported_objects=None, class_c
     if _number(match_radius_cm) <= 0:
         raise ValueError('matching radius must be positive')
     report = outcome.get('report')
-    report_present = report is not None
+    report_present = isinstance(report, dict)
     completed = report_present and outcome.get('status') in {'REPORTED', 'REPORT_SUBMITTED', 'COMPLETE'}
     if isinstance(report, dict):
         if reported_objects is None:
@@ -175,6 +175,10 @@ def score_episode(scene: Scene, outcome: dict, *, reported_objects=None, class_c
             class_counts = report.get('class_counts')
     object_evidence = reported_objects is not None
     reported_objects = tuple(reported_objects or ())
+    for row in reported_objects:
+        for key in ('x_cm', 'y_cm'):
+            if row.get(key) is not None:
+                _number(row[key])
     whole_matched, whole_duplicates = _matching(scene.objects, reported_objects, match_radius_cm)
     observed_coverage = coverage(scene, selected_option_ids) if selected_option_ids is not None else None
     observed_truth = ([o for o in scene.objects if o['object_id'] in observed_coverage['visible_resolvable_ids']]
@@ -194,6 +198,8 @@ def score_episode(scene: Scene, outcome: dict, *, reported_objects=None, class_c
                 confirmed = sum(r.get('band') == 'CONFIRMED' for r in rows)
                 counts.append({'class': name, 'lower': confirmed, 'upper': len(rows)})
         for row in counts:
+            if row['class'] in bounds:
+                raise ValueError('duplicate class count row')
             lower, upper = row['lower'], row.get('upper')
             if _number(lower) < 0 or int(lower) != lower or upper is not None and (_number(upper) < lower or int(upper) != upper):
                 raise ValueError('invalid count interval')
@@ -207,17 +213,18 @@ def score_episode(scene: Scene, outcome: dict, *, reported_objects=None, class_c
     return {'scene_id': scene.scene_id, 'provenance': scene.provenance, 'status': outcome.get('status'),
             'report_present': report_present, 'report_completed': completed,
             'report_valid': outcome.get('report_valid') if report_present and (bool(report) or count_evidence) else None,
-            'escalated': outcome.get('status') == 'ESCALATED',
+            'escalated': outcome.get('status') == 'ESCALATED' or bool(outcome.get('escalations')),
             'count_error': errors if count_evidence else None, 'count_bounds': bounds,
-            'matched_objects': matched, 'duplicate_count': duplicates,
+            'matched_objects': matched if object_evidence else None,
+            'duplicate_count': duplicates if object_evidence else None,
             'unique_count_error': exact_total,
             'precision': matched / len(reported_objects) if reported_objects else None,
-            'recall': matched / len(evaluation_truth) if evaluation_truth else None,
-            'localisation': matched / len(evaluation_truth) if evaluation_truth else None,
+            'recall': matched / len(evaluation_truth) if object_evidence and evaluation_truth else None,
+            'localisation': matched / len(evaluation_truth) if object_evidence and evaluation_truth else None,
             'evaluation_scope': 'observed_truth' if observed_truth is not None else 'whole_scene_hypotheses',
-            'observed_recall': matched / len(observed_truth) if observed_truth else None,
+            'observed_recall': matched / len(observed_truth) if object_evidence and observed_truth else None,
             'whole_scene_coverage': observed_coverage['whole_scene_fraction'] if observed_coverage is not None else None,
-            'whole_scene_localisation': whole_matched / len(scene.objects) if scene.objects else None,
+            'whole_scene_localisation': whole_matched / len(scene.objects) if object_evidence and scene.objects else None,
             'flights': outcome.get('flights'), 'illegal_calls': outcome.get('illegal_calls'),
             'decision_quality': outcome.get('decision_quality')}
 

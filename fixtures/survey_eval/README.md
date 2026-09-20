@@ -53,3 +53,16 @@ unset; this cannot be used as production observed-recall evidence.
 `compare_modes(scene, episodes)` scores explicitly supplied episode payloads.
 It does not run F/E/J policies or integrate the pending production survey loop.
 Callers must gather those payloads and retain the real run's status/evidence.
+
+The separate scripts/survey_sweep.py bridge now runs an explicitly supplied
+external production survey checkout with these scenes. It requires
+--approve-sweeps for scripted offline approval, uses the actual production loop
+and proposer classes with scripted E/J advisors, and records source snapshots.
+It does not call a live model or fly hardware. See the evaluation handoff for
+the command and remaining production defects.
+
+Scoring treats absent hypothesis evidence differently from an explicit empty
+list. Missing evidence leaves recall/localisation unset. Count classes must be
+unique; predicted coordinates must be finite non-boolean numbers or explicit
+None. Report evidence must be a structured dictionary; a production text report
+is bridged as {body, objects, class_counts} after production consistency checks.

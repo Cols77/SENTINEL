@@ -210,3 +210,38 @@ def test_explicit_empty_report_objects_are_exact_evidence(tmp_path):
 def test_rotated_elevated_fixture_is_observable():
     s = api().load_scene('fixtures/survey_eval/synthetic-rotated-elevated-surface.json')
     assert api().coverage(s, ['east'])['visible_resolvable_ids'] == ['elevated-computer']
+
+
+def test_missing_hypotheses_are_not_scored_as_misses(tmp_path):
+    missing = api().score_episode(scene(tmp_path), {'status': 'ESCALATED'})
+    assert missing['recall'] is None
+    assert missing['localisation'] is None
+    empty = api().score_episode(scene(tmp_path), {'status': 'ESCALATED'}, reported_objects=[])
+    assert empty['recall'] == 0
+
+
+def test_duplicate_count_classes_are_rejected(tmp_path):
+    with pytest.raises(ValueError, match='duplicate'):
+        api().score_episode(scene(tmp_path), {'status': 'REPORTED', 'report': {}},
+            class_counts=[{'class': 'phone', 'lower': 99, 'upper': 99},
+                          {'class': 'phone', 'lower': 1, 'upper': 1}])
+
+
+@pytest.mark.parametrize('report', [False, [], 'arbitrary text'])
+def test_malformed_report_payload_gets_no_credit(tmp_path, report):
+    result = api().score_episode(scene(tmp_path), {'status': 'COMPLETE', 'report': report, 'report_valid': True})
+    assert result['report_present'] is False
+    assert result['report_completed'] is False
+    assert result['report_valid'] is None
+
+
+@pytest.mark.parametrize('coordinate', [float('nan'), float('inf'), True, '150'])
+def test_malformed_hypothesis_coordinates_are_rejected(tmp_path, coordinate):
+    with pytest.raises(ValueError):
+        api().score_episode(scene(tmp_path), {}, reported_objects=[{'class': 'phone', 'x_cm': coordinate, 'y_cm': 600}])
+
+
+def test_reported_episode_can_retain_review_escalation(tmp_path):
+    result = api().score_episode(scene(tmp_path), {'status': 'REPORTED', 'report': {'objects': []},
+                                                 'escalations': [{'point': 'REVIEW_RESULTS'}]})
+    assert result['escalated'] is True
