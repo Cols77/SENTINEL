@@ -4,6 +4,8 @@ import sqlite3
 
 import pytest
 
+from sentinel.coordinator.errors import CoordinatorError
+
 from .p3_helpers import LEFT_MID, RIGHT_MID, P3Run
 
 ROUTE, FULL = "PLAN_ROUTE_ONLY_2_ZONE", "PLAN_MARKER_VERIFIED_6"
@@ -53,10 +55,25 @@ def test_proposed_catalogue_entries_are_listed(run):
     assert run.state().proposed_catalogue_plan_ids == (ROUTE, FULL)
 
 
-def test_characterization_reproposing_an_entry_raises_a_raw_integrity_error(run):
-    """Blocker A9 (proposal item P-6). When P-6 is granted this test flips; do not 'fix' it here."""
+def test_reproposing_an_entry_raises_a_typed_gateway_error(run):
+    """Blocker A9, formerly proposal item P-6 — now **resolved**.
+
+    This was a characterization test asserting the raw ``sqlite3.IntegrityError``
+    that escaped ``CommandGateway.submit`` and killed the run by bypassing every
+    caller's ``CoordinatorError`` handling, ``AgentLoop``'s included. The
+    operator released the gateway to the P1/P2 session for that one defect; the
+    fix landed (``1ba6bfb``) and reached this branch when P3 merged into master,
+    so the test flipped here exactly as the plan scheduled it.
+
+    It now pins the *fixed* behaviour: a typed, greppable error code rather than
+    a raw database exception. The narrow catch matters — only
+    ``sqlite3.IntegrityError`` is translated, and a non-plans constraint keeps
+    its own distinct ``STATE_CONSTRAINT_VIOLATION`` code, so the next constraint
+    bug still surfaces instead of blending into ordinary rejections."""
     run.approve_route_plan()
     run.propose_plan(FULL)
     run.decide_latest_plan("REJECT")
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(CoordinatorError) as caught:
         run.propose_plan(FULL)
+    assert caught.value.code == "PLAN_ALREADY_PROPOSED"
+    assert not isinstance(caught.value, sqlite3.IntegrityError)
