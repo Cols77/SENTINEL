@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sentinel.contracts import AgentModelResult, AgentRequest
+from sentinel.contracts import AgentModelResult, AgentRequest, AgentToolCall
 from sentinel.coordinator import LlmProposer
 from sentinel.coordinator.decision_state import DecisionState
 from sentinel.coordinator.legal_tools import EVIDENCE_GATE, SELECT_PLAN, Candidate, LegalSet
@@ -104,6 +104,11 @@ class FakeAdapter:
 
     def forget(self, agent_run_id: str) -> None:
         self.forgotten.append(agent_run_id)
+
+
+class RaisingAdapter:
+    def propose(self, request: AgentRequest, context: PolicyContext):
+        raise RuntimeError("provider unavailable")
 
 
 def _assert_local_escalation(result: dict) -> None:
@@ -241,6 +246,51 @@ def test_malformed_multi_and_no_call_results_are_coerced_to_local_escalation():
         _assert_local_escalation(result)
 
 
+def test_adapter_exception_and_non_mapping_output_are_coerced_to_local_escalation():
+    for adapter in (RaisingAdapter(), FakeAdapter(["not", "an", "agent_result"])):
+        result = LlmProposer(adapter, MemoryAuditSink()).decide(
+            _request(), _select_plan_context()
+        )
+        _assert_local_escalation(result)
+
+
+def test_forged_agent_model_result_is_revalidated_and_coerced_to_local_escalation():
+    forged = AgentModelResult(
+        agent_run_id=AGENT_RUN_ID,
+        status="TOOL_CALLS",
+        tool_calls=[AgentToolCall(
+            tool_name="inspection.propose_plan",
+            arguments={"catalogue_plan_id": [PLAN_ID], "reason": "not schema-valid"},
+        )],
+    )
+
+    result = LlmProposer(FakeAdapter(forged), MemoryAuditSink()).decide(
+        _request(), _select_plan_context()
+    )
+
+    _assert_local_escalation(result)
+
+
+def test_current_plan_membership_uses_canonical_candidate_label():
+    context = _select_plan_context()
+    divergent = Candidate(
+        "inspection.propose_plan",
+        {"catalogue_plan_id": "STALE_PAYLOAD_ID"},
+        PLAN_ID,
+        PLAN_DESCRIPTION,
+    )
+    context = PolicyContext(context.state, LegalSet(SELECT_PLAN, (divergent,)))
+    adapter = FakeAdapter(_result(
+        "inspection.propose_plan",
+        {"catalogue_plan_id": PLAN_ID, "reason": "canonical current label"},
+    ))
+
+    result = LlmProposer(adapter, MemoryAuditSink()).decide(_request(), context)
+
+    assert result["tool_calls"][0]["tool_name"] == "inspection.propose_plan"
+    assert result["tool_calls"][0]["arguments"]["catalogue_plan_id"] == PLAN_ID
+
+
 def test_adapter_is_not_called_outside_select_plan():
     adapter = FakeAdapter(_result(
         "inspection.propose_plan",
@@ -283,3 +333,10 @@ def test_forget_is_a_noop_when_adapter_has_no_forget_hook():
             )
 
     LlmProposer(AdapterWithoutForget(), MemoryAuditSink()).forget(AGENT_RUN_ID)
+
+
+def test_forget_is_a_noop_when_adapter_forget_attribute_is_not_callable():
+    class AdapterWithNonCallableForget:
+        forget = "not callable"
+
+    LlmProposer(AdapterWithNonCallableForget(), MemoryAuditSink()).forget(AGENT_RUN_ID)

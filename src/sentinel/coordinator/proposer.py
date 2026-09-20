@@ -1,6 +1,7 @@
 """Approval-gated LLM plan proposer for architecture E."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from sentinel.contracts import AgentModelResult, AgentRequest
@@ -32,7 +33,10 @@ class LlmProposer:
         typed_request = AgentRequest.from_dict(narrowed)
         # The adapter's legacy `read_tools` parameter intentionally carries
         # PolicyContext so its prompt can render the current decision packet.
-        model_result = self.adapter.propose(typed_request, context)
+        try:
+            model_result = self.adapter.propose(typed_request, context)
+        except Exception:  # noqa: BLE001 -- the adapter boundary is fail-closed
+            return self._escalate(request)
         document = self._as_dict(model_result)
         if document is None or document.get("status") != "TOOL_CALLS":
             return self._escalate(request)
@@ -54,7 +58,7 @@ class LlmProposer:
         reason = reason.strip()[:512]
 
         candidates = {
-            candidate.arguments.get("catalogue_plan_id"): candidate
+            candidate.label: candidate
             for candidate in context.legal.candidates
             if candidate.tool_name == "inspection.propose_plan"
         }
@@ -89,14 +93,16 @@ class LlmProposer:
 
     @staticmethod
     def _as_dict(result: Any) -> dict[str, Any] | None:
-        if isinstance(result, AgentModelResult):
-            return result.to_dict()
-        if isinstance(result, dict):
-            try:
-                return AgentModelResult.from_dict(result).to_dict()
-            except (TypeError, ValueError, KeyError):
+        try:
+            if isinstance(result, AgentModelResult):
+                document = result.to_dict()
+            elif isinstance(result, Mapping):
+                document = dict(result)
+            else:
                 return None
-        return None
+            return AgentModelResult.from_dict(document).to_dict()
+        except Exception:  # noqa: BLE001 -- untrusted adapter output is fail-closed
+            return None
 
     @staticmethod
     def _escalate(request: dict[str, Any]) -> dict[str, Any]:
@@ -108,7 +114,7 @@ class LlmProposer:
 
     def forget(self, agent_run_id: str) -> None:
         forget = getattr(self.adapter, "forget", None)
-        if forget is not None:
+        if callable(forget):
             forget(agent_run_id)
 
 
