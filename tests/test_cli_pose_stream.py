@@ -235,3 +235,46 @@ def test_pose_score_cli(tmp_path, capsys):
     # nominal calibration is rejected even when the errors are within thresholds
     assert main(["pose-score", "--db", str(db), "--truth", str(good), *tm]) == 1
     assert "nominal" in capsys.readouterr().out.lower()
+
+
+def test_pose_score_parser_accepts_min_samples(tmp_path):
+    args = build_parser().parse_args(
+        ["pose-score", "--db", str(tmp_path / "d.db"), "--truth", str(tmp_path / "t.json"),
+         "--tag-map", "docs/superpowers/specs/contracts/fixtures/tag-map-v1.valid.json",
+         "--min-samples", "30"]
+    )
+    assert args.min_samples == 30
+
+
+def test_pose_score_cli_min_samples_flips_exit_code(tmp_path, capsys):
+    import json
+    from datetime import datetime, timezone
+    from sentinel.contracts.pose import DronePoseReport, TagObservation
+    from sentinel.pose.persistence import append_pose_event, ensure_schema
+
+    db = tmp_path / "s.db"
+    conn = sqlite3.connect(db)
+    ensure_schema(conn)
+    for i in range(2):
+        append_pose_event(conn, DronePoseReport(
+            report_id=f"00000000-0000-4000-8000-{i:012d}", run_id="p1",
+            observed_at=datetime.now(timezone.utc), source_kind="SIMULATED",
+            point=(1.0, 2.0), heading_deg=10.0, altitude_m=None,
+            method="APRILTAG_36H11_PNP",
+            tag_observations=(TagObservation(tag_id=0, zone_id="Z", distance_m=0.5,
+                                             reprojection_error_px=0.5),),
+            reprojection_error_px=0.5))
+    conn.close()
+    truth = tmp_path / "truth.json"
+    truth.write_text(json.dumps({"p1": {"x": 1.0, "y": 2.0, "heading_deg": 10.0}}))
+    tm = ["--tag-map", "docs/superpowers/specs/contracts/fixtures/tag-map-v1.valid.json"]
+
+    assert main(["pose-score", "--db", str(db), "--truth", str(truth), *tm,
+                 "--allow-nominal"]) == 0
+    capsys.readouterr()
+
+    rc = main(["pose-score", "--db", str(db), "--truth", str(truth), *tm,
+               "--allow-nominal", "--min-samples", "3"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "below min_samples=3" in out

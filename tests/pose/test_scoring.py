@@ -10,7 +10,13 @@ import pytest
 from sentinel.contracts.pose import DronePoseReport, TagObservation
 from sentinel.pose.detector import estimate_all, flag_tag_disagreement
 from sentinel.pose.persistence import append_pose_event, ensure_schema
-from sentinel.pose.scoring import Thresholds, heading_error_deg, load_truth, score_runs
+from sentinel.pose.scoring import (
+    Thresholds,
+    heading_delta_deg,
+    heading_error_deg,
+    load_truth,
+    score_runs,
+)
 from sentinel.pose.tagmap import TagMap
 
 K = np.array([[547.0, 0, 480.0], [0, 547.0, 360.0], [0, 0, 1]])
@@ -45,6 +51,15 @@ def test_heading_error_wraps():
     assert heading_error_deg(179.0, -179.0) == pytest.approx(2.0)
     assert heading_error_deg(-179.0, 179.0) == pytest.approx(2.0)
     assert heading_error_deg(10.0, 350.0) == pytest.approx(20.0)
+
+
+def test_heading_delta_deg_sign_and_wrap():
+    # measured -170 vs truth 179 -> +11, not -11 (wrap-safe, signed)
+    assert heading_delta_deg(-170.0, 179.0) == pytest.approx(11.0)
+    # reverse: measured 179 vs truth -170 -> -11
+    assert heading_delta_deg(179.0, -170.0) == pytest.approx(-11.0)
+    assert heading_delta_deg(10.0, 350.0) == pytest.approx(20.0)
+    assert heading_delta_deg(350.0, 10.0) == pytest.approx(-20.0)
 
 
 def test_load_truth(tmp_path):
@@ -104,6 +119,90 @@ def test_custom_thresholds(tmp_path):
     res = score_runs(db, {"r1": {"x": 10.0, "y": 10.0, "heading_deg": 90.0}},
                      Thresholds(p95_cm=25.0, heading_deg=5.0))
     assert res["passed"] is True
+
+
+def test_signed_bias_reported_separately_from_spread(tmp_path):
+    # Test A shape: constant offset (dx=-3.2cm, dy=+2.9cm, dheading=+4.2deg),
+    # no scatter at all -> large bias, ~zero spread.
+    db = _db(tmp_path, {"r1": [(9.68, 10.29, 94.2)] * 3})
+    res = score_runs(db, {"r1": {"x": 10.0, "y": 10.0, "heading_deg": 90.0}}, Thresholds())
+    r = res["runs"]["r1"]
+    assert r["bias_dx_cm"] == pytest.approx(-3.2)
+    assert r["bias_dy_cm"] == pytest.approx(2.9)
+    assert r["bias_heading_deg"] == pytest.approx(4.2)
+    assert r["spread_p95_cm"] == pytest.approx(0.0, abs=1e-9)
+    assert r["heading_spread_p95_deg"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_spread_is_large_for_a_scattered_run(tmp_path):
+    poses = [(9.9, 10.0, 89.0), (10.1, 10.0, 91.0), (10.0, 9.9, 88.0), (10.0, 10.1, 92.0)]
+    db = _db(tmp_path, {"r1": poses})
+    res = score_runs(db, {"r1": {"x": 10.0, "y": 10.0, "heading_deg": 90.0}}, Thresholds())
+    r = res["runs"]["r1"]
+    assert r["spread_p95_cm"] >= 0.5
+    assert r["heading_spread_p95_deg"] >= 0.5
+
+
+def test_spread_is_measured_from_run_median_not_truth(tmp_path):
+    # Median differs from truth (large bias) but scatter around that median is
+    # small: spread must stay small (centroid-based), only bias is large. A
+    # truth-vs-centroid mix-up would inflate spread_p95_cm/heading_spread_p95_deg
+    # to match the bias instead.
+    poses = [(9.60, 10.29, 94.0), (9.68, 10.21, 94.0), (9.68, 10.29, 93.9),
+             (9.76, 10.29, 94.1)]
+    db = _db(tmp_path, {"r1": poses})
+    res = score_runs(db, {"r1": {"x": 10.0, "y": 10.0, "heading_deg": 90.0}}, Thresholds())
+    r = res["runs"]["r1"]
+    assert r["bias_dx_cm"] == pytest.approx(-3.2)
+    assert r["bias_dy_cm"] == pytest.approx(2.9)
+    assert r["spread_p95_cm"] < 1.0
+    assert r["heading_spread_p95_deg"] < 1.0
+
+
+def test_heading_spread_wrap_safe_at_boundary(tmp_path):
+    # Headings jitter under 1 degree around ~180/-180 (the wrap boundary). A
+    # raw (non-circular) median of the measured headings would land near 0,
+    # producing a bogus ~179 degree spread.
+    poses = [(10.0, 10.0, 179.0), (10.0, 10.0, -179.0), (10.0, 10.0, 178.5),
+             (10.0, 10.0, -178.5)]
+    db = _db(tmp_path, {"r1": poses})
+    res = score_runs(db, {"r1": {"x": 10.0, "y": 10.0, "heading_deg": 179.0}}, Thresholds())
+    r = res["runs"]["r1"]
+    assert r["heading_spread_p95_deg"] == pytest.approx(1.5)
+
+
+def test_min_samples_default_zero_changes_nothing(tmp_path):
+    db = _db(tmp_path, {"r1": [(10.0, 10.0, 90.0), (10.05, 10.0, 91.0)]})
+    res = score_runs(db, {"r1": {"x": 10.0, "y": 10.0, "heading_deg": 90.0}}, Thresholds())
+    r = res["runs"]["r1"]
+    assert r["n"] == 2
+    assert r["enough_samples"] is True
+    assert r["passed"] is True and res["passed"] is True
+    assert res["thresholds"]["min_samples"] == 0
+
+
+def test_min_samples_fails_short_run_and_passes_long_enough_run(tmp_path):
+    truth = {"r1": {"x": 10.0, "y": 10.0, "heading_deg": 90.0}}
+    short_db = _db(tmp_path, {"r1": [(10.0, 10.0, 90.0), (10.0, 10.0, 90.0)]})
+    short_res = score_runs(short_db, truth, Thresholds(min_samples=3))
+    assert short_res["runs"]["r1"]["enough_samples"] is False
+    assert short_res["runs"]["r1"]["passed"] is False
+    assert short_res["passed"] is False
+
+    long_db = _db(tmp_path, {"r1": [(10.0, 10.0, 90.0)] * 3})
+    long_res = score_runs(long_db, truth, Thresholds(min_samples=3))
+    assert long_res["runs"]["r1"]["enough_samples"] is True
+    assert long_res["runs"]["r1"]["passed"] is True
+    assert long_res["passed"] is True
+    assert long_res["thresholds"]["min_samples"] == 3
+
+
+def test_missing_run_keeps_existing_shape_with_min_samples(tmp_path):
+    db = _db(tmp_path, {"r1": [(10.0, 10.0, 0.0)]})
+    truth = {"r1": {"x": 10.0, "y": 10.0, "heading_deg": 0.0},
+             "r2": {"x": 0.0, "y": 0.0, "heading_deg": 0.0}}
+    res = score_runs(db, truth, Thresholds(min_samples=5))
+    assert res["runs"]["r2"] == {"n": 0, "passed": False}
 
 
 # ---- cross-tag consistency ----

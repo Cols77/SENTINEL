@@ -20,11 +20,17 @@ class Thresholds:
     p95_cm: float = 10.0
     heading_deg: float = 5.0
     room_scale_m_per_unit: float = ROOM_SCALE_M_PER_UNIT
+    min_samples: int = 0
 
 
 def heading_error_deg(measured: float, truth: float) -> float:
     """Smallest absolute angular difference in degrees, wrap-safe."""
     return abs((float(measured) - float(truth) + 180.0) % 360.0 - 180.0)
+
+
+def heading_delta_deg(measured: float, truth: float) -> float:
+    """Signed smallest angular difference in degrees, wrapped into [-180, 180]."""
+    return (float(measured) - float(truth) + 180.0) % 360.0 - 180.0
 
 
 def load_truth(path: str) -> dict[str, dict[str, float]]:
@@ -86,21 +92,43 @@ def score_runs(db_path: str, truth: dict[str, dict[str, float]],
             if not poses:
                 runs[run_id] = {"n": 0, "passed": False}
                 continue
+            xs = [x for x, _, _ in poses]
+            ys = [y for _, y, _ in poses]
+            hs = [h for _, _, h in poses]
             pos_err = [math.hypot(x - t["x"], y - t["y"]) for x, y, _ in poses]
             head_err = [heading_error_deg(h, t["heading_deg"]) for _, _, h in poses]
             p95_units = _percentile(pos_err, 0.95)
             med_units = statistics.median(pos_err)
             head_p95 = _percentile(head_err, 0.95)
+
+            median_x = statistics.median(xs)
+            median_y = statistics.median(ys)
+            heading_deltas_from_first = [heading_delta_deg(h, hs[0]) for h in hs]
+            median_heading = (hs[0] + statistics.median(heading_deltas_from_first)
+                              + 180.0) % 360.0 - 180.0
+            centroid_dist = [math.hypot(x - median_x, y - median_y) for x, y in zip(xs, ys)]
+            heading_spread = [abs(heading_delta_deg(h, median_heading)) for h in hs]
+
+            n = len(poses)
+            enough_samples = n >= thresholds.min_samples
             runs[run_id] = {
-                "n": len(poses),
+                "n": n,
                 "median_error_units": med_units,
                 "p95_error_units": p95_units,
                 "median_error_cm": med_units * cm_per_unit,
                 "p95_error_cm": p95_units * cm_per_unit,
                 "heading_median_deg": statistics.median(head_err),
                 "heading_p95_deg": head_p95,
+                "bias_dx_cm": (median_x - t["x"]) * cm_per_unit,
+                "bias_dy_cm": (median_y - t["y"]) * cm_per_unit,
+                "bias_heading_deg": statistics.median(
+                    [heading_delta_deg(h, t["heading_deg"]) for h in hs]),
+                "spread_p95_cm": _percentile(centroid_dist, 0.95) * cm_per_unit,
+                "heading_spread_p95_deg": _percentile(heading_spread, 0.95),
+                "enough_samples": enough_samples,
                 "passed": bool(p95_units * cm_per_unit <= thresholds.p95_cm
-                               and head_p95 <= thresholds.heading_deg),
+                               and head_p95 <= thresholds.heading_deg
+                               and enough_samples),
             }
     finally:
         conn.close()
@@ -109,6 +137,7 @@ def score_runs(db_path: str, truth: dict[str, dict[str, float]],
         "passed": bool(runs) and calibration_ok and all(r["passed"] for r in runs.values()),
         "calibration_source": calibration_source,
         "calibration_ok": calibration_ok,
-        "thresholds": {"p95_cm": thresholds.p95_cm, "heading_deg": thresholds.heading_deg},
+        "thresholds": {"p95_cm": thresholds.p95_cm, "heading_deg": thresholds.heading_deg,
+                       "min_samples": thresholds.min_samples},
         "runs": runs,
     }

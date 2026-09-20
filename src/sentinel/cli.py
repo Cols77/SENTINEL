@@ -159,6 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pose_score.add_argument("--p95-cm", type=float, default=Thresholds.p95_cm)
     pose_score.add_argument("--heading-deg", type=float, default=Thresholds.heading_deg)
+    pose_score.add_argument("--min-samples", type=int, default=Thresholds.min_samples)
 
     emergency = subparsers.add_parser(
         "emergency", help="send an immediate motor-stop command"
@@ -532,7 +533,8 @@ def _run_pose_score(args: Any) -> int:
         result = score_runs(
             str(args.db),
             truth,
-            Thresholds(p95_cm=args.p95_cm, heading_deg=args.heading_deg),
+            Thresholds(p95_cm=args.p95_cm, heading_deg=args.heading_deg,
+                       min_samples=args.min_samples),
             calibration_source=tag_map.calibration_source,
             allow_nominal=args.allow_nominal,
         )
@@ -543,20 +545,30 @@ def _run_pose_score(args: Any) -> int:
         if run["n"] == 0:
             print(f"{run_id}: FAIL (no stored poses)")
             continue
-        print(
+        line = (
             f"{run_id}: {'PASS' if run['passed'] else 'FAIL'} n={run['n']} "
             f"median={run['median_error_cm']:.1f}cm p95={run['p95_error_cm']:.1f}cm "
             f"heading_p95={run['heading_p95_deg']:.1f}deg"
+        )
+        metrics_ok = (run["p95_error_cm"] <= args.p95_cm
+                      and run["heading_p95_deg"] <= args.heading_deg)
+        if metrics_ok and not run["enough_samples"]:
+            line += f" (n={run['n']} below min_samples={args.min_samples})"
+        print(line)
+        print(
+            f"    bias dx={run['bias_dx_cm']:+.1f}cm dy={run['bias_dy_cm']:+.1f}cm "
+            f"dheading={run['bias_heading_deg']:+.1f}deg "
+            f"spread p95={run['spread_p95_cm']:.1f}cm/{run['heading_spread_p95_deg']:.1f}deg"
         )
     if not result["calibration_ok"]:
         print(
             "pose-score: FAIL - tag map camera calibration is nominal (uncalibrated); "
             "calibrate the camera or pass --allow-nominal."
         )
-    print(
-        f"pose-score: {'PASS' if result['passed'] else 'FAIL'} "
-        f"(p95<={args.p95_cm}cm, heading<={args.heading_deg}deg)"
-    )
+    threshold_desc = f"p95<={args.p95_cm}cm, heading<={args.heading_deg}deg"
+    if args.min_samples > 0:
+        threshold_desc += f", n>={args.min_samples}"
+    print(f"pose-score: {'PASS' if result['passed'] else 'FAIL'} ({threshold_desc})")
     return 0 if result["passed"] else 1
 
 
