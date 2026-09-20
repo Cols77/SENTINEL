@@ -162,5 +162,51 @@ measured to a few mm, or a truth-free method.
 **The truth-free method is cross-tag disagreement.** With two or more tags in
 view, each tag independently estimates the camera position and they must
 agree; disagreement isolates map/geometry error with no tape measure involved.
-`estimate_all` and `flag_tag_disagreement` already implement this and are not
-yet exercised outside unit tests.
+`estimate_all` and `flag_tag_disagreement` implement this. Result below.
+
+## Cross-tag disagreement (2026-09-20, truth-free)
+
+Tags 4 and 1 mounted coplanar on the same wall, tag 1 exactly 30.1 cm above
+tag 4 (centre to centre, measured on the wall to ~2 mm). Camera at 31 cm,
+80 cm from the wall, square-on. 25 of 44 frames saw both tags. Each tag's
+pose was solved independently from the same frame, so lighting, motion,
+calibration and timing are identical between them - only viewing geometry
+differs.
+
+| tag | centre height | obliquity | x spread | corr(x, heading) |
+|---|---|---|---|---|
+| 1 (upper) | 40.6 cm | 6.8 deg | 8.66 cm | +0.9963 |
+| 4 (lower) | 10.5 cm | 14.4 deg | 1.45 cm | +0.8553 |
+
+Disagreement over the 25 shared frames: **median 2.31 cm**, p95 5.62 cm;
+heading median 1.54 deg. Decomposed: **lateral +2.42 cm, depth +0.37 cm.**
+
+**Depth geometry is validated without a tape measure.** Two tags at different
+heights, solved independently, agree on camera depth to 3.7 mm. The tag map's
+relative geometry and the PnP depth solution are both sound.
+
+**The lateral disagreement is a conditioning artifact, not map error.** It
+tracks the degenerate tag: tag 1, viewed at 6.8 deg obliquity, carries
+corr(x, heading) = +0.9963 and six times the scatter of tag 4 at 14.4 deg.
+Obliquity is the control variable, and this is a controlled measurement of it
+- the two tags share everything except viewing angle.
+
+Combined with the 111 cm run (4.9 deg obliquity, corr +0.9999, 24 cm spread),
+the relationship is monotonic: **lateral precision collapses as the view
+approaches fronto-parallel.**
+
+### Deployment consequence
+
+**Mount tags so the drone views them at >= 15 deg obliquity across the whole
+operating envelope.** A tag mounted at flight altitude is viewed nearly
+fronto-parallel and is the worst case - precisely the intuitive placement.
+Offsetting tags vertically from the flight path is the cheapest fix, and it
+costs nothing at deployment time.
+
+### What this test cannot see
+
+A constant lens-to-reference offset shifts both tags identically and so
+produces no disagreement. The residual 1.5-2 cm depth bias measured against
+tape therefore remains either tape error or a common-mode lens offset; this
+method rules out map error and per-tag geometry error, which is what it was
+designed to do.
