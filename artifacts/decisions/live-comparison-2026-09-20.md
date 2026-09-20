@@ -37,7 +37,27 @@ Models: `typesafe/jev-1.13-20260917`, `z-ai/glm-5.3-flash`, both via OpenRouter.
 > including 6 turns the deterministic rule itself calls unambiguous. Jev's
 > acting half is **unmeasured, not refuted**. Raw per-call rows are now
 > committed by `shadow_sweep.py`, so a re-sweep can be re-banded offline at any
-> threshold; `judge_label` (the raw pick in the aggregates) is still to come.
+> threshold; `judge_label` (the raw pick in the aggregates) landed on the P3
+> branch (7bd7e66).
+>
+> **Second correction, same class, found while building it:** `agreement` was
+> policy-level too. It scored the fallback label against truth, so a
+> MID-confidence *correct* pick counted as a disagreement. Both headline columns
+> in the Jev table describe operator load, not judgement. The new
+> `judge_agreement` / `judge_escalation_rate` sit beside them and report "not
+> recorded" rather than 0.0 for this batch, because the raw picks were never stored.
+>
+> **Third confound, found by adversarial review (fixed in 546ff8c):** the
+> `EVIDENCE_GATE` instruction asserted as fact that the detection duplicates an
+> open task and lies inside the approved plan — false on 24 of 24 and 12 of 24
+> v1 turns respectively. Jev was asked to reason from premises its own packet
+> contradicted. The LLM arm received the identical contradiction and still
+> reached 0.958 coverage, so this is not the whole explanation, but it is a live
+> candidate for suppressed confidence.
+>
+> A re-sweep is worth paying for only after all four are in place: corrected
+> instruction, raw-row logging, judge-level metrics, and a fixture whose labels
+> are not 75% `escalate`.
 
 - **Jev's confidence stayed below the acting threshold.** It cleared `act_at`
   once in 144 turns. Its 0.75
