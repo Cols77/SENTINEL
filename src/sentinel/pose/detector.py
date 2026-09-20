@@ -1,5 +1,6 @@
-"""AprilTag 36h11 detector + single-tag PnP pose estimation (fail-closed)."""
+"""AprilTag 36h11 detector + single-tag and joint multi-tag PnP pose estimation (fail-closed)."""
 import itertools
+import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -7,8 +8,12 @@ from datetime import datetime, timezone
 import cv2
 import numpy as np
 
-from sentinel.contracts.pose import DronePoseReport, SourceKind, TagObservation
+from sentinel.contracts.pose import (
+    MAX_REPROJECTION_ERROR_PX, DronePoseReport, SourceKind, TagObservation,
+)
 from sentinel.pose.tagmap import TagMap
+
+logger = logging.getLogger(__name__)
 
 ROOM_SCALE_M_PER_UNIT = 0.1  # metres per room unit
 
@@ -70,12 +75,46 @@ class TagPose:
     reprojection_error_px: float
 
 
+def _reprojection_error(obj, image, rvec, tvec, tag_map: TagMap) -> float:
+    proj, _ = cv2.projectPoints(obj, rvec, tvec, tag_map.K, tag_map.dist)
+    return float(np.mean(np.linalg.norm(proj.reshape(-1, 2) - image.reshape(-1, 2), axis=1)))
+
+
+def _solve_one(tag, corners, tag_map: TagMap):
+    """PnP-solve one tag; ``(err, rvec, tvec)`` or ``None`` when it fails its gates."""
+    obj = _tag_object_points(tag.size_m)
+    image = corners.astype(np.float64)
+    ok, rvs, tvs, _ = cv2.solvePnPGeneric(
+        obj, image, tag_map.K, tag_map.dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+    if not ok:
+        return None
+    # IPPE_SQUARE has a two-fold planar ambiguity; on frontal tags OpenCV 5.0
+    # can return a front/back solution whose reprojection does not match the
+    # detected corners. Pick the best candidate by actual reprojection error,
+    # falling back to ITERATIVE when every candidate exceeds the gate.
+    best = None
+    for rvec_c, tvec_c in zip(rvs, tvs):
+        err_c = _reprojection_error(obj, image, rvec_c, tvec_c, tag_map)
+        if best is None or err_c < best[0]:
+            best = (err_c, rvec_c, tvec_c)
+    if best[0] > MAX_REPROJECTION_ERROR_PX:
+        ok, rvec_i, tvec_i = cv2.solvePnP(obj, image, tag_map.K, tag_map.dist)
+        if ok:
+            err_i = _reprojection_error(obj, image, rvec_i, tvec_i, tag_map)
+            if err_i < best[0]:
+                best = (err_i, rvec_i, tvec_i)
+    if best[0] > MAX_REPROJECTION_ERROR_PX:
+        return None
+    return best
+
+
 def _solve_mapped_tags(frame, tag_map: TagMap):
     """Detect tags and PnP-solve every mapped one.
 
-    Returns ``[(err, tag, rvec, tvec), ...]`` in detection order. Fail-closed:
-    raises ValueError when no tags are detected, only unknown tags are
-    detected, or any mapped tag fails PnP / the reprojection gate.
+    Returns ``[(err, tag, rvec, tvec, corners), ...]`` in detection order,
+    ``corners`` being the 4x2 image points of that tag. A mapped tag that fails
+    PnP or the reprojection gate is dropped. Fail-closed: raises when no tags
+    are detected, only unknown tags are detected, or every mapped tag is dropped.
     """
     aruco = cv2.aruco
     detector = aruco.ArucoDetector(
@@ -93,46 +132,64 @@ def _solve_mapped_tags(frame, tag_map: TagMap):
 
     solved = []
     for i in mapped:
-        tag_id = int(ids.flatten()[i])
-        tag = tag_map.tag(tag_id)
-        obj = _tag_object_points(tag.size_m)
-        ok, rvs, tvs, _ = cv2.solvePnPGeneric(
-            obj, corners[i].astype(np.float64), tag_map.K, tag_map.dist,
-            flags=cv2.SOLVEPNP_IPPE_SQUARE)
-        if not ok:
-            raise ValueError(f"PnP failed for tag {tag_id}: pose fails closed")
-        # IPPE_SQUARE has a two-fold planar ambiguity; on frontal tags OpenCV 5.0
-        # can return a front/back solution whose reprojection does not match the
-        # detected corners. Pick the best candidate by actual reprojection error,
-        # falling back to ITERATIVE when every candidate exceeds the gate.
-        best_tag = None
-        for rvec_c, tvec_c in zip(rvs, tvs):
-            proj, _ = cv2.projectPoints(obj, rvec_c, tvec_c, tag_map.K, tag_map.dist)
-            err_c = float(np.mean(np.linalg.norm(
-                proj.reshape(-1, 2) - corners[i].reshape(-1, 2), axis=1)))
-            if best_tag is None or err_c < best_tag[0]:
-                best_tag = (err_c, rvec_c, tvec_c)
-        if best_tag[0] > 2.0:
-            ok, rvec_i, tvec_i = cv2.solvePnP(
-                obj, corners[i].astype(np.float64), tag_map.K, tag_map.dist)
-            if not ok:
-                raise ValueError(f"PnP failed for tag {tag_id}: pose fails closed")
-            proj, _ = cv2.projectPoints(obj, rvec_i, tvec_i, tag_map.K, tag_map.dist)
-            err_i = float(np.mean(np.linalg.norm(
-                proj.reshape(-1, 2) - corners[i].reshape(-1, 2), axis=1)))
-            if err_i < best_tag[0]:
-                best_tag = (err_i, rvec_i, tvec_i)
-        err, rvec, tvec = best_tag
-        if err > 2.0:
-            raise ValueError(f"reprojection error {err:.2f}px exceeds 2.0px: pose fails closed")
-        solved.append((err, tag, rvec, tvec))
+        tag = tag_map.tag(int(ids.flatten()[i]))
+        one = _solve_one(tag, corners[i], tag_map)
+        if one is None:
+            logger.debug("tag %d dropped: PnP failed or reprojection gate", tag.tag_id)
+            continue
+        err, rvec, tvec = one
+        solved.append((err, tag, rvec, tvec, corners[i].reshape(-1, 2)))
+    if not solved:
+        raise ValueError("no mapped tag passed the PnP gates: pose fails closed")
     return solved
+
+
+def _room_corners(tag, scale: float) -> np.ndarray:
+    """Four tag corners in room metres (same frame composition as _report_point)."""
+    yaw = np.deg2rad(tag.yaw_deg)
+    R_room_tag = np.array([
+        [np.sin(yaw), 0.0, np.cos(yaw)],
+        [-np.cos(yaw), 0.0, np.sin(yaw)],
+        [0.0, -1.0, 0.0],
+    ])
+    tag_pos = np.array([tag.x_units, tag.y_units, 0.0]) * scale + np.array([0.0, 0.0, tag.z_units])
+    return (R_room_tag @ _tag_object_points(tag.size_m).T).T + tag_pos
+
+
+def _solve_joint(solved, tag_map: TagMap):
+    """One PnP over the corners of every solved tag, in the room frame.
+
+    Returns ``(err, point, heading, distances)`` or ``None`` when the solve
+    fails or its reprojection error exceeds the gate (a tag-map error symptom).
+    """
+    scale = tag_map.room_scale_m_per_unit
+    obj = np.vstack([_room_corners(tag, scale) for _, tag, _, _, _ in solved])
+    image = np.vstack([pts for _, _, _, _, pts in solved]).astype(np.float64)
+    ok, rvec, tvec = cv2.solvePnP(obj, image, tag_map.K, tag_map.dist, flags=cv2.SOLVEPNP_SQPNP)
+    if not ok:
+        return None
+    ok, rvec, tvec = cv2.solvePnP(
+        obj, image, tag_map.K, tag_map.dist, rvec=rvec, tvec=tvec,
+        useExtrinsicGuess=True, flags=cv2.SOLVEPNP_ITERATIVE)
+    if not ok:
+        return None
+    err = _reprojection_error(obj, image, rvec, tvec, tag_map)
+    if err > MAX_REPROJECTION_ERROR_PX:
+        return None
+    R_cam_room, _ = cv2.Rodrigues(rvec)
+    cam_pos = (-R_cam_room.T @ tvec).flatten()
+    fwd = R_cam_room.T[:, 2]  # camera +z axis in the room = viewing direction
+    heading = float(np.degrees(np.arctan2(fwd[1], fwd[0])) % 360.0)
+    point = (round(float(cam_pos[0] / scale), 3), round(float(cam_pos[1] / scale), 3))
+    distances = [float(np.linalg.norm(_room_corners(tag, scale).mean(axis=0) - cam_pos))
+                 for _, tag, _, _, _ in solved]
+    return err, point, heading, distances
 
 
 def estimate_all(frame, tag_map: TagMap) -> list[TagPose]:
     """Per-mapped-tag poses for every simultaneously visible tag (fail-closed)."""
     out = []
-    for err, tag, rvec, tvec in _solve_mapped_tags(frame, tag_map):
+    for err, tag, rvec, tvec, _ in _solve_mapped_tags(frame, tag_map):
         point, heading = _report_point(rvec, tvec, tag, tag_map.room_scale_m_per_unit)
         out.append(TagPose(
             tag_id=tag.tag_id,
@@ -169,19 +226,26 @@ def estimate_pose(
     run_id: str,
     report_id: str,
     source_kind: SourceKind = "SIMULATED",
+    joint: bool = True,
 ) -> DronePoseReport:
-    """Detect AprilTag 36h11 tags, PnP-solve mapped ones, emit the best report.
+    """Detect AprilTag 36h11 tags, PnP-solve the mapped ones, emit one report.
 
-    Fail-closed: raises ValueError when no tags are detected or only unknown
-    tags are detected.
+    With two or more solved tags the pose comes from one joint PnP over all of
+    their corners (``joint=False`` forces the single best tag). Fail-closed:
+    raises ValueError when no tags are detected, only unknown tags are
+    detected, or every mapped tag fails its gates.
     """
-    best = None
-    for err, tag, rvec, tvec in _solve_mapped_tags(frame, tag_map):
-        if best is None or err < best[0]:
-            best = (err, tag, rvec, tvec)
-
-    err, tag, rvec, tvec = best
-    point, heading = _report_point(rvec, tvec, tag, tag_map.room_scale_m_per_unit)
+    solved = _solve_mapped_tags(frame, tag_map)
+    joint_solution = _solve_joint(solved, tag_map) if joint and len(solved) >= 2 else None
+    if joint_solution is None:
+        if joint and len(solved) >= 2:
+            logger.warning("joint PnP rejected (tag-map residual?); using the best single tag")
+        err, tag, rvec, tvec, _ = min(solved, key=lambda item: item[0])
+        point, heading = _report_point(rvec, tvec, tag, tag_map.room_scale_m_per_unit)
+        used = [(tag, float(np.linalg.norm(tvec)), err)]
+    else:
+        err, point, heading, distances = joint_solution
+        used = [(tag, dist, tag_err) for (tag_err, tag, _, _, _), dist in zip(solved, distances)]
     return DronePoseReport(
         report_id=report_id,
         run_id=run_id,
@@ -191,12 +255,12 @@ def estimate_pose(
         heading_deg=round(normalize_heading_deg(heading), 2),
         altitude_m=None,
         method="APRILTAG_36H11_PNP",
-        tag_observations=(TagObservation(
+        tag_observations=tuple(TagObservation(
             tag_id=tag.tag_id,
             zone_id=tag.zone_id,
-            distance_m=round(float(np.linalg.norm(tvec)), 4),
-            reprojection_error_px=round(err, 4),
-        ),),
+            distance_m=round(dist, 4),
+            reprojection_error_px=round(tag_err, 4),
+        ) for tag, dist, tag_err in used),
         reprojection_error_px=round(err, 4),
     )
 
