@@ -177,6 +177,15 @@ def build_parser() -> argparse.ArgumentParser:
                           help="existing tag map whose camera_calibration is reused")
     site_map.add_argument("--out", type=Path, required=True)
 
+    layout = subparsers.add_parser(
+        "cube-layout-check", help="predict pose accuracy over the cube for a site file")
+    layout.add_argument("--site", type=Path, required=True)
+    layout.add_argument("--calibration-from", type=Path, required=True)
+    layout.add_argument("--alt", type=float, action="append",
+                        help="altitude in metres; repeatable (default 1.0 1.4 1.8)")
+    layout.add_argument("--step", type=float, default=0.5)
+    layout.add_argument("--trials", type=int, default=60)
+
     emergency = subparsers.add_parser(
         "emergency", help="send an immediate motor-stop command"
     )
@@ -627,6 +636,41 @@ def _run_cube_site_map(args: Any) -> int:
     return 0
 
 
+def _run_cube_layout_check(args: Any) -> int:
+    from .pose.layout import predict_grid
+    from .pose.tagmap import TagMap
+
+    try:
+        site = load_site(args.site)
+        calibration = json.loads(
+            args.calibration_from.read_text(encoding="utf-8"))["camera_calibration"]
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"cube-layout-check failed: {exc}", flush=True)
+        return 1
+    env = site.envelope()
+
+    def span(lo_cm: int, hi_cm: int) -> list[float]:
+        count = max(1, int((hi_cm - lo_cm) / (args.step * 100.0)))
+        return [round((lo_cm + i * (hi_cm - lo_cm) / count) / 100.0, 2) for i in range(count + 1)]
+
+    xs, ys = span(env.min_x_cm, env.max_x_cm), span(env.min_y_cm, env.max_y_cm)
+    alts = args.alt or [1.0, 1.4, 1.8]
+    cells = predict_grid(TagMap(site.tag_map_doc(calibration)), xs, ys, alts, trials=args.trials)
+    print("cube-layout-check: predicted real p95 horizontal error in cm (simulation x 2.5); "
+          "'--' = no tag fully in frame")
+    blind = 0
+    for alt in alts:
+        print(f" altitude {alt:.1f} m, standoff from the tag line shown per row")
+        print("          " + "".join(f"x={x:<5.2f}" for x in xs))
+        for y in reversed(ys):
+            row = [c for c in cells if c["alt_m"] == alt and c["y_m"] == y]
+            blind += sum(1 for c in row if c["p95_cm"] is None)
+            text = "".join(f"{'--' if c['p95_cm'] is None else c['p95_cm']:<7}" for c in row)
+            print(f"   {site.line_y_m - y:4.2f} m  {text}")
+    print(f" {blind} blind cell(s): stops there need \"localise\": false")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -675,6 +719,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_pose_map_check(args)
     if args.command == "cube-site-map":
         return _run_cube_site_map(args)
+    if args.command == "cube-layout-check":
+        return _run_cube_layout_check(args)
 
     if args.real and not args.confirm:
         print("Real mode requires --confirm after the physical preflight.")
