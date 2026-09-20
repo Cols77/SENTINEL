@@ -15,12 +15,12 @@ import hashlib
 import json
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, Protocol, Sequence, runtime_checkable
 
-from .legal_tools import ADVISORY_POINTS
+from .legal_tools import ADVISORY_POINTS, needs_judgment
 from .policies import Decision
 from .policy import ContextualPolicy, PolicyContext
 
@@ -129,7 +129,11 @@ class ShadowLadder:
 
     def decide(self, request: dict[str, Any], context: PolicyContext) -> dict[str, Any]:
         decision_point = context.legal.decision_point
-        if decision_point in ADVISORY_POINTS:
+        # Shadow the declared advisory points unconditionally (P2b), plus any
+        # turn that no rule settled -- P3's duplicate detections and near-tie
+        # rankings are judgment points only *sometimes*, so membership in a
+        # static set cannot express them. See ADVISORY_POINTS in legal_tools.
+        if decision_point in ADVISORY_POINTS or needs_judgment(context.legal):
             return self._judgment_step(request, context, decision_point)
         return self._rule_step(request, context, decision_point)
 
@@ -151,17 +155,32 @@ class ShadowLadder:
     # shadow first, executor (rule or operator escalation) still wins --
 
     def _judgment_step(self, request: dict[str, Any], context: PolicyContext, decision_point: str) -> dict[str, Any]:
-        advisor_entries = {
-            name: self._run_advisor(advisor, request, context)
+        # Non-interference is about LATENCY as well as outcome. Advisors are
+        # submitted to their pools first but NOT waited on: submission is
+        # O(1), so the executor runs essentially immediately and its latency
+        # no longer depends on any advisor. Previously each advisor was
+        # awaited in turn *before* the executor ran, so N advisors could
+        # delay execution by N x advisor_timeout_s.
+        started = [
+            (name, advisor, self._pool_for(advisor).submit(advisor.decide, request, context), time.perf_counter())
             for name, advisor in self.advisors
-        }
+        ]
 
         # The executor's own decide() is the only call whose result is ever
-        # returned -- it runs after (and regardless of) the advisors above,
-        # so nothing an advisor does (including raising or hanging) can
-        # reach it.
+        # returned, and nothing an advisor does -- raising, hanging, or
+        # simply being slow -- can reach it or delay it.
         result = self.executor.decide(request, context)
         executor_decision = self.executor.last
+
+        # Collect the advisors against ONE shared deadline, so the audit
+        # record costs at most a single advisor_timeout_s in total rather
+        # than one per advisor. They ran concurrently (a pool per advisor
+        # instance), so this usually costs nothing at all.
+        deadline = time.monotonic() + self.advisor_timeout_s
+        advisor_entries = {
+            name: self._collect_advisor(advisor, future, start, deadline)
+            for name, advisor, future, start in started
+        }
 
         packet = context.state.to_packet()
         self.sink.write({
@@ -179,18 +198,15 @@ class ShadowLadder:
         })
         return result
 
-    def _run_advisor(self, advisor: ContextualPolicy, request: dict[str, Any], context: PolicyContext) -> dict:
-        start = time.perf_counter()
-        pool = self._pool_for(advisor)
+    def _collect_advisor(self, advisor: ContextualPolicy, future: "Future", start: float, deadline: float) -> dict:
+        """Wait for one already-submitted advisor, bounded by the shared
+        ``deadline``. Never blocks on a hung advisor thread: the job stays on
+        that advisor's own persistent single-worker pool, so a later call on
+        the same instance queues strictly behind the straggler instead of
+        racing it for ``.last`` (see ``_pool_for``)."""
         error: str | None = None
-        # Never block on a hung advisor thread: a timeout must return
-        # immediately. The job stays queued/running on this advisor's own
-        # persistent pool regardless -- it is not torn down -- so that a
-        # later call on the same advisor instance queues strictly behind it
-        # instead of running concurrently with it (see `_pool_for`).
-        future = pool.submit(advisor.decide, request, context)
         try:
-            future.result(timeout=self.advisor_timeout_s)
+            future.result(timeout=max(0.0, deadline - time.monotonic()))
         except FutureTimeoutError:
             error = f"advisor timed out after {self.advisor_timeout_s:.3f}s"
         except Exception as exc:  # noqa: BLE001 -- any advisor failure is swallowed here
@@ -198,6 +214,31 @@ class ShadowLadder:
         latency_ms = int((time.perf_counter() - start) * 1000)
         decision = None if error is not None else getattr(advisor, "last", None)
         return _advisor_entry(decision, fallback_latency_ms=latency_ms, error=error)
+
+    def close(self) -> None:
+        """Release the advisor pools without joining their threads, so queued
+        work cannot accumulate across a long-lived ladder and an idle pool is
+        not held open.
+
+        **Honest limit:** `shutdown(wait=False)` cannot kill a thread that is
+        already running -- Python has no such primitive -- and
+        `ThreadPoolExecutor` workers are non-daemon, so a genuinely wedged
+        advisor call still blocks interpreter exit via the stdlib's atexit
+        join. Bounding that needs isolation the thread pool cannot give
+        (a subprocess, or an advisor transport with its own hard timeout).
+        This method removes the accumulation, not that last case."""
+        with self._advisor_pools_lock:
+            pools = list(self._advisor_pools.values())
+            self._advisor_pools = {}
+        for pool in pools:
+            pool.shutdown(wait=False, cancel_futures=True)
+
+    def __enter__(self) -> "ShadowLadder":
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        self.close()
+        return False
 
 
 __all__ = ["AuditSink", "JsonlAuditSink", "MemoryAuditSink", "ShadowLadder"]

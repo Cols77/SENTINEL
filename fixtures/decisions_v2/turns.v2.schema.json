@@ -1,0 +1,125 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://sentinel.local/fixtures/decisions_v2/turns.v2.schema.json",
+  "title": "SENTINEL decision-turn fixture record (turns.v2)",
+  "description": "One line of fixtures/decisions_v2/turns.v2.jsonl: a decision point captured from the real coordinator gateway, with a draft label pending operator approval at gate G-labels-v2 (P3a Task 10). Adds packet.v2 (queue/detection/assignment facts) and rule_choice on top of turns.v1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["turn_id", "decision_point", "packet", "candidates", "label", "label_source", "rationale", "generator_revision", "rule_choice"],
+  "properties": {
+    "turn_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "decision_point": {
+      "type": "string",
+      "enum": ["SELECT_PLAN", "EVIDENCE_GATE", "WAIT_APPROVAL", "WAIT_OBSERVATION", "EVIDENCE_VETO", "RANK", "ASSIGN"]
+    },
+    "packet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["context_version", "run", "operator_request", "facts", "queue", "detection", "assignment"],
+      "properties": {
+        "context_version": { "const": "decision_packet.v2" },
+        "run": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "phase"],
+          "properties": {
+            "status": { "type": "string" },
+            "phase": { "type": "string" }
+          }
+        },
+        "operator_request": {
+          "type": ["string", "null"]
+        },
+        "facts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "plan_exists", "plan_mode", "plan_station_count", "plan_approved",
+            "detection_present", "detection_status", "detection_score_band", "detection_class",
+            "detection_inside_plan", "detection_duplicates_open_task",
+            "task_exists", "task_status", "patrollers_ranked"
+          ],
+          "properties": {
+            "plan_exists": { "type": "boolean" },
+            "plan_mode": { "type": ["string", "null"] },
+            "plan_station_count": { "type": ["integer", "null"] },
+            "plan_approved": { "type": "boolean" },
+            "detection_present": { "type": "boolean" },
+            "detection_status": { "type": ["string", "null"] },
+            "detection_score_band": { "type": ["string", "null"] },
+            "detection_class": { "type": ["string", "null"] },
+            "detection_inside_plan": { "type": ["boolean", "null"] },
+            "detection_duplicates_open_task": { "type": ["boolean", "null"] },
+            "task_exists": { "type": "boolean" },
+            "task_status": { "type": ["string", "null"] },
+            "patrollers_ranked": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "queue": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pending_detections", "open_tasks"],
+          "properties": {
+            "pending_detections": { "type": "integer", "minimum": 0 },
+            "open_tasks": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "detection": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["score_band", "inside_plan", "duplicates_open_task", "repeat_of_handled"],
+          "properties": {
+            "score_band": { "type": ["string", "null"] },
+            "inside_plan": { "type": ["boolean", "null"] },
+            "duplicates_open_task": { "type": "boolean" },
+            "repeat_of_handled": { "type": "boolean" }
+          }
+        },
+        "assignment": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["patrollers_ranked", "rank_gap_band", "near_tie"],
+          "properties": {
+            "patrollers_ranked": { "type": "integer", "minimum": 0 },
+            "rank_gap_band": { "type": "string" },
+            "near_tie": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "candidates": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "description"],
+        "properties": {
+          "label": { "type": "string", "minLength": 1 },
+          "description": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "label": {
+      "type": ["string", "null"]
+    },
+    "label_source": {
+      "type": "string",
+      "enum": ["hand", "rule", "operator_pending"]
+    },
+    "rationale": {
+      "type": ["string", "null"]
+    },
+    "generator_revision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "rule_choice": {
+      "type": ["string", "null"]
+    }
+  }
+}
