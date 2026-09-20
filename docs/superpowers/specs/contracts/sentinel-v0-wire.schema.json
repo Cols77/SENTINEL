@@ -3135,7 +3135,28 @@
               "maxItems": 32,
               "items": {
                 "type": "object",
-                "additionalProperties": false
+                "additionalProperties": false,
+                "required": [
+                  "sequence_no",
+                  "event_type",
+                  "summary"
+                ],
+                "properties": {
+                  "sequence_no": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "event_type": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "summary": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  }
+                }
               }
             }
           }
