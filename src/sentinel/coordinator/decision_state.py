@@ -57,6 +57,7 @@ class DecisionState:
     ranked_patrollers: tuple[str, ...] = field(default_factory=tuple)
     detections: tuple[DetectionView, ...] = field(default_factory=tuple)
     tasks: tuple[TaskView, ...] = field(default_factory=tuple)
+    proposed_catalogue_plan_ids: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def current_task(self) -> TaskView | None:
@@ -121,9 +122,18 @@ def read_decision_state(repository, run_id: str) -> DecisionState:
     events = repository.read_events(run_id, 0, 256)
     request_text = next((e["payload"].get("request_text") for e in events
                          if e["event_type"] == "USER_MESSAGE_RECEIVED"), None)
-    plan = c.execute("SELECT plan_id, mode, station_ids_json FROM plans WHERE run_id = ? "
-                     "ORDER BY created_at DESC LIMIT 1", (run_id,)).fetchone()
-    approved = any(e["event_type"] == "PLAN_APPROVED" for e in events)
+    plan_rows = c.execute(
+        """SELECT p.plan_id, p.mode, p.station_ids_json,
+                  (SELECT pa.action FROM plan_approvals pa
+                   WHERE pa.run_id = p.run_id AND pa.plan_id = p.plan_id
+                   ORDER BY pa.created_at DESC, pa.rowid DESC LIMIT 1) AS action
+           FROM plans p WHERE p.run_id = ? ORDER BY p.created_at, p.rowid""", (run_id,)).fetchall()
+    confirmed = [r for r in plan_rows if r["action"] == "CONFIRM"]
+    undecided = [r for r in plan_rows if r["action"] is None]
+    plan = confirmed[-1] if confirmed else (undecided[-1] if undecided else None)
+    approved = bool(confirmed)
+    proposed = tuple(e["payload"]["catalogue_plan_id"] for e in events
+                     if e["event_type"] == "PLAN_PROPOSED" and "catalogue_plan_id" in e["payload"])
     open_stations = tuple(r["station_id"] for r in c.execute(
         "SELECT station_id FROM tasks WHERE run_id = ? AND status NOT IN ('CLOSED','REJECTED')", (run_id,)))
     det_rows = c.execute("""SELECT pr.result_id, pr.artifact_id, pr.result_json, o.station_id
@@ -157,4 +167,5 @@ def read_decision_state(repository, run_id: str) -> DecisionState:
         plan_approved=approved, detection=detection, open_task_station_ids=open_stations,
         task_id=current.task_id if current else None, task_status=current.status if current else None,
         ranked_patrollers=current.ranked_patrollers if current else (),
-        detections=tuple(detections), tasks=tuple(tasks))
+        detections=tuple(detections), tasks=tuple(tasks),
+        proposed_catalogue_plan_ids=proposed)
