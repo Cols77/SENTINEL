@@ -1,5 +1,13 @@
 # WP5 Cube Positioning Implementation Plan
 
+> **STALE AGAINST SPEC REV 2 (2026-09-20).** The spec moved from six V-panels with
+> yaw-multiplexed localisation to a single flat tag line the drone always faces. Tasks **2, 3, 4,
+> 5 and 7 remain valid as written.** Tasks **1** (panels), **6** (protocol text), **8**
+> (navigator), **9–10** (mission/CLI) and **11** (observe) are superseded and must be rewritten
+> once the operator approves rev 2. Do not execute the superseded tasks. Note that the test
+> fixtures of Tasks 2 and 5 import Task 1's `panel_tags`; the rewrite replaces those with
+> explicit tag dictionaries.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Host binding (operator preference): on Claude Code run it through the `Workflow` tool as dev → review → fix per task, on Sonnet; physical gates stay with the operator.
 
 **Goal:** Position the Tello at commanded `(x, y)` points inside a 3.0 × 2.5 × 2.0 m operating cube and measure arrival error, using rigid two-tag panels, joint multi-tag PnP, stationary localisation bursts, and an SR-063-compliant open-loop mission with shadow correction.
