@@ -1,0 +1,27 @@
+{
+  "source_filename": "SENTINEL LOGO.jpg",
+  "source_sha256": "9a66df77b79d843a482a81db6d294f9605c840cda62c441997662e920ad9a8e1",
+  "source_dimensions": [
+    1024,
+    1024
+  ],
+  "method": "Two-color source-mask spline trace; lettering is outlined, not retyped.",
+  "tracer": "vtracer 0.6.15",
+  "master_status": "Reconstructed candidate for user visual acceptance",
+  "brand_center": "#A40722",
+  "source_ink": "#1D2A32",
+  "sample_rect": [
+    497,
+    443,
+    526,
+    472
+  ],
+  "intentional_differences": [
+    "JPEG noise and edge antialiasing removed",
+    "Solid ink/red colors normalized from interior samples",
+    "Whitespace trimmed with clear space in usable masters",
+    "Compact symbol simplifies internal aperture/ring details"
+  ],
+  "symbol_viewbox": "242.5 188 538 538",
+  "logo_viewbox": "176 185 673 654"
+}

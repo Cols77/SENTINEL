@@ -10,4 +10,4 @@ artifacts/*
 !artifacts/wp1
 docs/.obsidian/
 .env
-
+.env.local

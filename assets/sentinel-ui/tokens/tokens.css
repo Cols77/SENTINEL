@@ -1,0 +1,36 @@
+/* Generated from tokens.json. */
+:root {
+  --surface-canvas: #101820;
+  --surface-panel: #1B2733;
+  --surface-raised: #243442;
+  --border-default: #344653;
+  --border-control: #8296A8;
+  --text-primary: #F3F6F8;
+  --text-secondary: #A9BAC8;
+  --text-on-accent: #101820;
+  --accent-primary: #47D7C8;
+  --status-warning: #F2BA55;
+  --status-emergency: #F06565;
+  --brand-center: #A40722;
+  --brand-ink: #1D2A32;
+  --focus-color: #47D7C8;
+  --focus-width: 2px;
+  --focus-offset: 3px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --radius-panel: 8px;
+  --radius-pill: 999px;
+  --icon-size: 24px;
+  --icon-stroke: 2px;
+  --font-body: system-ui, sans-serif;
+  --font-mono: ui-monospace, monospace;
+  --type-body: 16px;
+  --type-metadata: 14px;
+  --type-section: 24px;
+  --type-mission: 32px;
+}

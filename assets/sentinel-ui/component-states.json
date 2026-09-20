@@ -1,0 +1,83 @@
+{
+  "kind": "illustrative-state-inventory",
+  "not_wire_fixtures": true,
+  "components": {
+    "Header / source": [
+      "Loading",
+      "LIVE",
+      "SIMULATED",
+      "REPLAYED",
+      "STALE",
+      "Marker mode",
+      "Route-only"
+    ],
+    "Telemetry": [
+      "Unavailable",
+      "Stale",
+      "Low battery \u00b7 supplied warning"
+    ],
+    "Operator": [
+      "Idle",
+      "Submitting",
+      "Pending",
+      "Rejected",
+      "Failed",
+      "Emergency disabled"
+    ],
+    "Approval": [
+      "Proposed",
+      "Required facts missing",
+      "Eligible",
+      "Submitting",
+      "Approved",
+      "Dispatched",
+      "Rejected event",
+      "Version conflict",
+      "Expired",
+      "Evidence unavailable",
+      "IN_DOUBT",
+      "Emergency disabled"
+    ],
+    "Evidence": [
+      "Empty",
+      "Loading",
+      "Available",
+      "NOT_FOUND",
+      "FORBIDDEN",
+      "Expired / revoked",
+      "Stale",
+      "IN_DOUBT"
+    ],
+    "Preflight": [
+      "Unknown",
+      "Checking",
+      "Passed",
+      "Failed",
+      "Stale report",
+      "Ineligible",
+      "Emergency disabled"
+    ],
+    "Video": [
+      "STARTING",
+      "LIVE",
+      "DEGRADED",
+      "UNAVAILABLE",
+      "STOPPED"
+    ],
+    "Emergency": [
+      "Ordinary",
+      "Request pending",
+      "Latch acknowledged",
+      "Acknowledgement unavailable"
+    ],
+    "Events": [
+      "Empty",
+      "Populated",
+      "Loading older",
+      "Gap / refresh pending",
+      "Fault",
+      "Emergency",
+      "Marker missing"
+    ]
+  }
+}
