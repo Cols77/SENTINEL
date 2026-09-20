@@ -19,6 +19,7 @@ from sentinel.coordinator.legal_tools import (
     LegalSet,
     load_catalogue_plans,
 )
+from sentinel.coordinator.operator_choice import submit_choice
 from sentinel.coordinator.policies import Decision, RulePolicy
 from sentinel.coordinator.policy import PolicyContext, bind_context
 from sentinel.coordinator.shadow import JsonlAuditSink, MemoryAuditSink, ShadowLadder
@@ -29,6 +30,7 @@ from .harness import (
     RESULT_ID,
     RUN_ID,
     CoordinatorBoundary,
+    FakeWorker,
     close,
     envelope,
     open_harness,
@@ -68,13 +70,15 @@ def _select_plan_legal() -> LegalSet:
     return LegalSet(SELECT_PLAN, plans + (escalate,))
 
 
-def _evidence_gate_legal() -> LegalSet:
+def _evidence_gate_legal(rule_choice: str | None = "create_task") -> LegalSet:
+    """Defaults to the rule already having decided ``create_task`` (Task A:
+    0.99, in-plan), matching the harness's own default perception fixture."""
     create = Candidate("task.create", {"perception_result_id": RESULT_ID, "section_id": "LEFT_ALLEY_MIDDLE",
                                         "evidence_artifact_id": ARTIFACT_ID}, "create_task",
                         "create a patrol task for this detection")
     escalate = Candidate("finish", {"status": "NEEDS_REVIEW", "summary": "review"}, ESCALATE_LABEL,
                           "hand the decision to the operator with the reason")
-    return LegalSet(EVIDENCE_GATE, (create, escalate))
+    return LegalSet(EVIDENCE_GATE, (create, escalate), rule_choice=rule_choice)
 
 
 _TASK_ID = "77777777-7777-4777-8777-777777777777"
@@ -281,6 +285,7 @@ def test_advisors_called_only_at_judgment_points_and_audit_records():
     select_plan_record = sink.records[0]
     assert select_plan_record["decision_point"] == SELECT_PLAN
     assert select_plan_record["operator_choice"] is None
+    assert select_plan_record["rule_choice"] is None  # SELECT_PLAN: no rule computes one
     assert set(select_plan_record["advisors"]) == {"jev", "llm"}
     assert select_plan_record["advisors"]["jev"]["label"] == "PLAN_ROUTE_ONLY_2_ZONE"
     assert select_plan_record["advisors"]["jev"]["error"] is None
@@ -292,6 +297,10 @@ def test_advisors_called_only_at_judgment_points_and_audit_records():
     evidence_gate_record = sink.records[1]
     assert evidence_gate_record["decision_point"] == EVIDENCE_GATE
     assert evidence_gate_record["advisors"]["llm"]["label"] == "create_task"
+    # Task A: the rule already decided create_task (fixture is 0.99, in-plan)
+    # -- RulePolicy acts on it directly, chooser RULE, not OPERATOR.
+    assert evidence_gate_record["rule_choice"] == "create_task"
+    assert evidence_gate_record["executor"] == {"chooser": "RULE", "label": "create_task"}
 
     rule_record = sink.records[2]
     assert rule_record == {
@@ -299,6 +308,66 @@ def test_advisors_called_only_at_judgment_points_and_audit_records():
         "decision_point": RANK, "label": "rank",
     }
     assert "advisors" not in rule_record
+
+
+# --- Task A: full flow -- RulePolicy completes without an operator choice
+# at EVIDENCE_GATE, advisors are still consulted there and recorded --------
+
+def test_full_one_station_flow_with_shadow_ladder_reaches_task_creation_without_an_evidence_gate_choice(tmp_path):
+    repo, gateway = open_harness(tmp_path)
+    try:
+        gateway.submit(envelope("RUN_CREATE", {"request_text": "inspect one station"}, sequence=1, actor_type="OPERATOR"))
+        boundary = CoordinatorBoundary(repo, gateway)
+        catalogue = load_catalogue_plans()
+        sink = MemoryAuditSink()
+        jev = _CountingAdvisor("create_task")
+        llm = _CountingAdvisor("create_task")
+        ladder = ShadowLadder(RulePolicy(), [("jev", jev), ("llm", llm)], sink, advisor_timeout_s=1.0)
+        policy = bind_context(ladder, repo, catalogue)
+
+        # SELECT_PLAN still escalates -- 2 catalogue plans, no rule_choice.
+        result = AgentLoop(boundary, policy, max_turns=2, repository=repo, catalogue=catalogue).run(
+            RUN_ID, AGENT_RUN_ID, "inspect one station")
+        assert result["status"] == "NEEDS_REVIEW"
+
+        submit_choice(repo, gateway, RUN_ID, "PLAN_ROUTE_ONLY_2_ZONE", catalogue=catalogue, sink=sink)
+        plan = repo.connection.execute("SELECT * FROM plans").fetchone()
+        reference = {
+            "plan_id": plan["plan_id"], "catalogue_id": plan["catalogue_id"],
+            "catalogue_revision": plan["catalogue_revision"], "plan_sha256": plan["plan_sha256"],
+            "station_ids": json.loads(plan["station_ids_json"]),
+        }
+        gateway.submit(envelope("OPERATOR_DECIDE", {
+            "decision": "CONFIRM", "target": {"kind": "PLAN", "plan_reference": reference},
+        }, sequence=10, actor_type="OPERATOR", expected=repo.read_state(RUN_ID).to_dict()["state_version"]))
+
+        worker = FakeWorker(gateway)
+        worker.preflight(RUN_ID, reference["plan_id"], reference["plan_sha256"])
+        worker.dispatch(RUN_ID, reference["plan_id"], "LEFT_ALLEY_MIDDLE", repo.read_state(RUN_ID).to_dict()["state_version"])
+        worker.capture_and_perceive(RUN_ID, reference["plan_id"], reference["plan_sha256"])  # 0.99, in-plan
+
+        # EVIDENCE_GATE, RANK, ASSIGN all act automatically -- the rule
+        # decides create_task on its own; no operator choice is needed.
+        result = AgentLoop(boundary, policy, max_turns=4, repository=repo, catalogue=catalogue).run(
+            RUN_ID, AGENT_RUN_ID, "inspect one station")
+        assert result["error_code"] == "WAITING_FOR_APPROVAL"
+
+        task = repo.connection.execute("SELECT task_id, status FROM tasks").fetchone()
+        assert task is not None and task["status"] == "ASSIGNMENT_PROPOSED"
+
+        operator_choice_records = [r for r in sink.records if r["record"] == "operator_choice"]
+        assert [r["decision_point"] for r in operator_choice_records] == [SELECT_PLAN]  # never EVIDENCE_GATE
+
+        judgment_records = [r for r in sink.records if r["record"] == "judgment"]
+        evidence_gate_records = [r for r in judgment_records if r["decision_point"] == EVIDENCE_GATE]
+        assert len(evidence_gate_records) == 1  # advisors are still called at EVIDENCE_GATE, exactly once
+        assert evidence_gate_records[0]["rule_choice"] == "create_task"
+        assert evidence_gate_records[0]["executor"] == {"chooser": "RULE", "label": "create_task"}
+        assert evidence_gate_records[0]["advisors"]["jev"]["label"] == "create_task"
+        assert evidence_gate_records[0]["advisors"]["llm"]["label"] == "create_task"
+        assert evidence_gate_records[0]["operator_choice"] is None
+    finally:
+        close(repo)
 
 
 # --- (d) packet_sha256 --------------------------------------------------

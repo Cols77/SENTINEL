@@ -169,9 +169,46 @@ def test_pending_decision_is_none_outside_a_judgment_point(tmp_path):
         close(repo)
 
 
-# --- (g) end-to-end: RulePolicy loop + operator choices + approvals -------
+# --- (Task A) EVIDENCE_GATE is no longer a judgment point -----------------
 
-def test_end_to_end_rule_loop_with_operator_choices_reaches_completed(tmp_path):
+def test_submit_choice_rejects_a_label_at_evidence_gate(tmp_path):
+    """EVIDENCE_GATE is now decided by a deterministic rule (Task A), not
+    the operator -- pending_decision no longer surfaces it, and a choice
+    submitted there is rejected exactly like any other non-judgment point."""
+    repo, gateway = open_harness(tmp_path)
+    try:
+        _create_run(repo, gateway)
+        catalogue = load_catalogue_plans()
+        sink = MemoryAuditSink()
+
+        submit_choice(repo, gateway, RUN_ID, "PLAN_ROUTE_ONLY_2_ZONE", catalogue=catalogue, sink=sink)
+        reference = _plan_reference(repo)
+        gateway.submit(envelope("OPERATOR_DECIDE", {
+            "decision": "CONFIRM", "target": {"kind": "PLAN", "plan_reference": reference},
+        }, sequence=10, actor_type="OPERATOR", expected=repo.read_state(RUN_ID).to_dict()["state_version"]))
+
+        worker = FakeWorker(gateway)
+        worker.preflight(RUN_ID, reference["plan_id"], reference["plan_sha256"])
+        worker.dispatch(RUN_ID, reference["plan_id"], "LEFT_ALLEY_MIDDLE",
+                         repo.read_state(RUN_ID).to_dict()["state_version"])
+        worker.capture_and_perceive(RUN_ID, reference["plan_id"], reference["plan_sha256"])
+
+        assert pending_decision(repo, RUN_ID, catalogue) is None  # EVIDENCE_GATE: not a judgment point any more
+
+        with pytest.raises(CoordinatorError) as caught:
+            submit_choice(repo, gateway, RUN_ID, "create_task", catalogue=catalogue, sink=sink)
+        assert caught.value.code == "INVALID_OPERATOR_CHOICE"
+    finally:
+        close(repo)
+
+
+# --- (g) end-to-end: RulePolicy loop + operator choice at SELECT_PLAN only,
+# EVIDENCE_GATE decided by the rule (Task A) -------------------------------
+
+def test_end_to_end_rule_loop_reaches_completed_with_operator_choice_only_at_select_plan(tmp_path):
+    """The operator is asked to choose only at SELECT_PLAN. At EVIDENCE_GATE
+    RulePolicy now acts on legal.rule_choice on its own (0.99, in-plan ->
+    create_task) -- no submit_choice happens there, and none is needed."""
     repo, gateway = open_harness(tmp_path)
     try:
         _create_run(repo, gateway)
@@ -195,15 +232,12 @@ def test_end_to_end_rule_loop_with_operator_choices_reaches_completed(tmp_path):
         worker.dispatch(RUN_ID, reference["plan_id"], "LEFT_ALLEY_MIDDLE", repo.read_state(RUN_ID).to_dict()["state_version"])
         worker.capture_and_perceive(RUN_ID, reference["plan_id"], reference["plan_sha256"])
 
-        result = AgentLoop(boundary, policy, max_turns=2, repository=repo, catalogue=catalogue).run(
-            RUN_ID, AGENT_RUN_ID, "inspect one station")
-        assert result["status"] == "NEEDS_REVIEW"  # escalates: EVIDENCE_GATE has 2 candidates
+        assert pending_decision(repo, RUN_ID, catalogue) is None  # EVIDENCE_GATE is rule-decided, not asked
 
-        submit_choice(repo, gateway, RUN_ID, "create_task", catalogue=catalogue, sink=sink)
-
-        result = AgentLoop(boundary, policy, max_turns=3, repository=repo, catalogue=catalogue).run(
+        # EVIDENCE_GATE, RANK, ASSIGN all act automatically now.
+        result = AgentLoop(boundary, policy, max_turns=4, repository=repo, catalogue=catalogue).run(
             RUN_ID, AGENT_RUN_ID, "inspect one station")
-        assert result["error_code"] == "WAITING_FOR_APPROVAL"  # RANK, ASSIGN acted on automatically
+        assert result["error_code"] == "WAITING_FOR_APPROVAL"
 
         task_id = repo.connection.execute("SELECT task_id FROM tasks").fetchone()[0]
         gateway.submit(envelope("OPERATOR_DECIDE", {
@@ -220,9 +254,16 @@ def test_end_to_end_rule_loop_with_operator_choices_reaches_completed(tmp_path):
             "PATROLLER_ASSIGNMENT_PROPOSED", "PATROLLER_ASSIGNMENT_CONFIRMED",
         ]
         by_type = {event["event_type"]: event for event in events}
-        for event_type in ("PLAN_PROPOSED", "PLAN_CREATED", "AGENT_INTENT_PROPOSED", "TASK_CREATED"):
+        for event_type in ("PLAN_PROPOSED", "PLAN_CREATED", "AGENT_INTENT_PROPOSED"):
             assert by_type[event_type]["actor_type"] == "OPERATOR", event_type
-        # everything else is unchanged from the P1 flow: still WORKER/AGENT/OPERATOR as before
+        # TASK_CREATED is now the rule's own decision (through AgentLoop's
+        # normal policy path), not an operator choice.
+        assert by_type["TASK_CREATED"]["actor_type"] == "AGENT"
         assert by_type["PATROLLER_ASSIGNMENT_PROPOSED"]["actor_type"] == "AGENT"
+
+        # Only one operator_choice record -- SELECT_PLAN. EVIDENCE_GATE is
+        # never one, even though it still writes its own audit trail
+        # elsewhere (ShadowLadder, exercised in test_shadow.py).
+        assert [r["decision_point"] for r in sink.records if r["record"] == "operator_choice"] == [SELECT_PLAN]
     finally:
         close(repo)

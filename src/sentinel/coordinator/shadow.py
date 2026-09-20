@@ -20,7 +20,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, Protocol, Sequence, runtime_checkable
 
-from .legal_tools import JUDGMENT_POINTS
+from .legal_tools import ADVISORY_POINTS
 from .policies import Decision
 from .policy import ContextualPolicy, PolicyContext
 
@@ -84,13 +84,15 @@ def _advisor_entry(decision: Decision | None, *, fallback_latency_ms: int, error
 class ShadowLadder:
     """Wraps an ``executor`` (P1's ``RulePolicy``) that decides what is
     executed, and a list of ``(name, advisor)`` shadow advisors that are
-    called only at judgment points (``JUDGMENT_POINTS``), never at RULE
-    points and never in a way that can affect ``decide``'s return value.
+    called only at advisory points (``ADVISORY_POINTS`` -- ``SELECT_PLAN``,
+    which the operator decides, and ``EVIDENCE_GATE``, which a deterministic
+    rule decides but still shadows advisors), never at RULE points and
+    never in a way that can affect ``decide``'s return value.
 
     Every call writes exactly one audit record through ``sink`` before
-    returning: a ``judgment`` record (with both the executor's decision and
-    every advisor's decision, or its error) at a judgment point, or a
-    ``rule`` record everywhere else.
+    returning: a ``judgment`` record (with the executor's decision, every
+    advisor's decision or error, and the rule's own ``rule_choice`` where one
+    was computed) at an advisory point, or a ``rule`` record everywhere else.
     """
 
     def __init__(self, executor: ContextualPolicy, advisors: Sequence[tuple[str, ContextualPolicy]],
@@ -127,7 +129,7 @@ class ShadowLadder:
 
     def decide(self, request: dict[str, Any], context: PolicyContext) -> dict[str, Any]:
         decision_point = context.legal.decision_point
-        if decision_point in JUDGMENT_POINTS:
+        if decision_point in ADVISORY_POINTS:
             return self._judgment_step(request, context, decision_point)
         return self._rule_step(request, context, decision_point)
 
@@ -145,7 +147,8 @@ class ShadowLadder:
         })
         return result
 
-    # -- judgment points: advisors run in shadow first, executor still wins --
+    # -- advisory points (SELECT_PLAN, EVIDENCE_GATE): advisors run in
+    # shadow first, executor (rule or operator escalation) still wins --
 
     def _judgment_step(self, request: dict[str, Any], context: PolicyContext, decision_point: str) -> dict[str, Any]:
         advisor_entries = {
@@ -168,6 +171,7 @@ class ShadowLadder:
             "decision_point": decision_point,
             "packet_sha256": _canonical_sha256(packet),
             "legal_labels": list(context.legal.labels),
+            "rule_choice": context.legal.rule_choice,
             "executor": ({"chooser": executor_decision.chooser, "label": executor_decision.label}
                          if executor_decision is not None else None),
             "advisors": advisor_entries,
