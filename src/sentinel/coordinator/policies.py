@@ -25,9 +25,9 @@ from .policy import PolicyContext, one_call
 INSTRUCTIONS: dict[str, str] = {
     "SELECT_PLAN": "Choose the survey plan that fully satisfies the operator request with the fewest stations and "
                    "least verification burden. Choose 'escalate' if no plan fits or the request is contradictory.",
-    "EVIDENCE_GATE": "The detection already passed the static score threshold. Choose 'create_task' if it warrants a "
-                     "patrol task. Choose 'escalate' if it duplicates an open task, lies outside the approved plan, "
-                     "or otherwise needs operator review.",
+    "EVIDENCE_GATE": "The detection passed the score rules and lies inside the approved plan, but a task already "
+                     "exists at the same station. Choose 'create_task' if this is a second, distinct hazard. Choose "
+                     "'escalate' if it is the same hazard seen again or you cannot tell.",
 }
 
 
