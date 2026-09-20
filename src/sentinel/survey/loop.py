@@ -1,0 +1,202 @@
+# src/sentinel/survey/loop.py
+"""The survey run.
+
+Eight steps, two decision points, at most two flights (design spec 3.3).
+The policy chooses among pre-built candidate calls; this module submits
+nothing the operator has not approved and writes no number the store does
+not hold.
+
+Rev-3/rev-4 corrections against the plan body's original code (see the
+plan's "Rev 3 amendments" and "Rev 4 amendments" sections -- this module
+implements those, not the task bodies' original code):
+
+R3: the plan body's ``_fly_and_ingest`` set ``row["band"] = "high"`` on
+every sighting read back from the store, so the non-low-band CONFIRM gate
+in ``merge.py`` was only ever exercised in unit tests, never through a real
+ingest. The band is stored at ingest time (``detector.normalise`` already
+returns it alongside each detection -- see ``DetectionBatch.bands``) and
+read back unchanged, never overwritten.
+
+R7: ``on_approval`` receives the full rendered ``Candidate.description``
+(stops, extent, range, resolvable classes, duration) alongside the tool
+call, not just ``{option_id, reason}``. Approving a bare token is not
+approval.
+
+R4: the writer gets exactly one rewrite attempt before ``REPORT_REJECTED``.
+
+V8a: ``class_counts`` (in ``report.py``) already derives its range from the
+sweeps this run actually flew; nothing here re-derives it separately.
+
+V8b: rev 3's R5 (consent.py, wired in by Task 8) means there is no longer
+any non-retain path that calls the provider at all, so ``batch.raw`` is
+always stored -- never conditioned on a retention flag.
+
+V8f: ``survey.get_site`` and ``survey.get_results`` are implemented here as
+real functions, and ``run_survey`` routes through ``get_results`` itself
+rather than a private duplicate of the same query.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from .candidates import (ESCALATE_LABEL, MAX_FLIGHTS, REPORT_LABEL, propose_candidates,
+                         review_candidates)
+from .context import SurveyContext
+from .merge import merge_sightings
+from .proposer import chosen_label
+from .report import ReportMismatch, check_report, class_counts
+
+#: The camera's altitude above the plane its subjects rest on (design spec
+#: 5.2's worked example: Delta_z = 55 cm, D = 3 m -> v ~ 125 px). Fixed for
+#: every frame in this replay-driven system; a future measured-altitude
+#: flight port would carry its own per-frame value instead.
+DELTA_Z_CM = 55.0
+
+
+def get_site(options) -> dict[str, Any]:
+    """rev 4 V8f: the tool surface the spec (section 3.3, step 2) advertises
+    but the plan body never implemented -- the perimeter every offered
+    option's stops actually span, plus each option's own metrics."""
+    xs = [x for option in options for x, _y in option.stops]
+    ys = [y for option in options for _x, y in option.stops]
+    zs = [option.z_cm for option in options]
+    perimeter = {
+        "min_x_cm": min(xs) if xs else None, "max_x_cm": max(xs) if xs else None,
+        "min_y_cm": min(ys) if ys else None, "max_y_cm": max(ys) if ys else None,
+        "min_z_cm": min(zs) if zs else None, "max_z_cm": max(zs) if zs else None,
+    }
+    return {
+        "perimeter": perimeter,
+        "options": [
+            {"option_id": option.option_id, "description": option.description,
+             "stops": len(option.stops), "z_cm": option.z_cm,
+             "viewed_width_cm": option.viewed_width_cm,
+             "estimated_seconds": option.estimated_seconds,
+             "resolvable_classes": list(option.resolvable_classes),
+             "range_cm": option.range_cm}
+            for option in options
+        ],
+    }
+
+
+def get_results(store, run_id: str, options) -> dict[str, Any]:
+    """rev 4 V8f: counts with bands and methods, the uncertain objects, the
+    unanalysed-frame count, and per-class observability (design spec 3.3,
+    step 6) -- a real function, not private logic the loop alone can see."""
+    objects = [dict(row) for row in store.connection.execute(
+        "SELECT * FROM objects WHERE run_id = ?", (run_id,))]
+    return {
+        "counts": store.counts(run_id),
+        "class_counts": class_counts(store, run_id, options),
+        "uncertain_objects": [o for o in objects if o["band"] == "UNCERTAIN"],
+        "unanalysed": store.unanalysed_count(run_id),
+        "flights_used": store.flights_used(run_id),
+    }
+
+
+def _fly_and_ingest(store, run_id, option, flight, detector) -> None:
+    sweep_id = store.add_sweep(run_id, option.option_id, len(option.stops))
+    for frame in flight.fly(option):
+        frame_id = store.add_frame(
+            sweep_id, stop_index=frame.stop_index, look_deg=frame.look_deg,
+            x_cm=frame.x_cm, y_cm=frame.y_cm, z_cm=frame.z_cm,
+            heading_deg=frame.heading_deg, position_kind=frame.position_kind,
+            artifact_id=frame.artifact_id, sha256=frame.sha256,
+            image_path=frame.image_path, delta_z_cm=DELTA_Z_CM)
+        batch = detector.detect(frame.image_path, option.resolvable_classes)
+        store.set_frame_analysis(frame_id, "OK" if batch.status == "OK" else batch.status)
+        # R3: the band detector.normalise attached to each detection is
+        # stored as-is -- never overwritten to a fixed value.
+        # V8b: batch.raw is always stored; rev 3's R5 leaves no path that
+        # calls the provider without also being a retain path.
+        bands = batch.bands or ("low",) * len(batch.detections)
+        for detection, band in zip(batch.detections, bands):
+            store.add_sighting(frame_id, detection, band, raw_response=batch.raw)
+    store.set_sweep_status(sweep_id, "FLOWN")
+
+    rows = store.sightings(run_id)
+    import json as _json
+    for row in rows:
+        row["bbox"] = _json.loads(row["bbox_json"]) if row["bbox_json"] else None
+    store.set_objects(run_id, merge_sightings(rows, delta_z_cm=DELTA_Z_CM))
+
+
+def _approval_call(context: SurveyContext, result: dict, label: str) -> dict[str, Any]:
+    """R7: the operator sees the candidate's full rendered description --
+    stops, extent, range, resolvable classes, duration -- not just the bare
+    tool call. Approving a token alone is not approval."""
+    call = dict(result["tool_calls"][0])
+    try:
+        call["description"] = context.legal.by_label(label).description
+    except StopIteration:
+        call["description"] = ""
+    return call
+
+
+def _write_report(writer, results) -> tuple[str | None, ReportMismatch | None]:
+    """R4: the writer is allowed exactly one rewrite before the run gives
+    up and reports REPORT_REJECTED."""
+    body = writer(results)
+    try:
+        check_report(body, results["class_counts"])
+        return body, None
+    except ReportMismatch as mismatch:
+        retry_results = {**results, "rejected_report": body, "rejection_reason": str(mismatch)}
+        body = writer(retry_results)
+        try:
+            check_report(body, results["class_counts"])
+            return body, None
+        except ReportMismatch as second_mismatch:
+            return None, second_mismatch
+
+
+def run_survey(*, store, run_id: str, request_text: str, options, policy,
+               flight, detector, on_approval, writer,
+               max_flights: int = MAX_FLIGHTS) -> dict[str, Any]:
+    store.create_run(run_id, request_text)
+    request = {"run_id": run_id, "request_text": request_text, "site": get_site(options)}
+    escalations: list[dict] = []
+
+    legal = propose_candidates(options)
+    result = policy.decide(request, SurveyContext(run_id, legal, {}))
+    label = chosen_label(result)
+    if label == ESCALATE_LABEL or label is None:
+        escalations.append({"point": legal.decision_point, "label": ESCALATE_LABEL,
+                            "result": result})
+        return {"status": "ESCALATED", "flights": 0, "counts": {}, "report": None,
+                "escalations": escalations}
+
+    context = SurveyContext(run_id, legal, {})
+    while True:
+        call = _approval_call(context, result, label)
+        if not on_approval(call):
+            return {"status": "REFUSED", "flights": store.flights_used(run_id),
+                    "counts": store.counts(run_id), "report": None,
+                    "escalations": escalations}
+
+        option = next(o for o in options if o.option_id == call["arguments"]["option_id"])
+        _fly_and_ingest(store, run_id, option, flight, detector)
+
+        results = get_results(store, run_id, options)
+        if results["flights_used"] >= max_flights:
+            break
+        review = review_candidates(results, options)
+        context = SurveyContext(run_id, review, results)
+        result = policy.decide(request, context)
+        label = chosen_label(result)
+        if label is None or label == REPORT_LABEL:
+            break
+        if label == ESCALATE_LABEL:
+            escalations.append({"point": review.decision_point, "label": ESCALATE_LABEL,
+                                "result": result})
+            break
+
+    results = get_results(store, run_id, options)
+    body, mismatch = _write_report(writer, results)
+    if mismatch is not None:
+        return {"status": "REPORT_REJECTED", "flights": results["flights_used"],
+                "counts": results["counts"], "report": None,
+                "escalations": escalations + [{"point": "REPORT", "error": str(mismatch)}]}
+    store.add_report(run_id, body, results["class_counts"])
+    return {"status": "REPORTED", "flights": results["flights_used"],
+            "counts": results["counts"], "report": body, "escalations": escalations}
