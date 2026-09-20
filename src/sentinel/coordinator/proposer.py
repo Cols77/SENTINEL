@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
+import math
 from typing import Any
 
 from sentinel.contracts import AgentModelResult, AgentRequest
@@ -12,6 +14,135 @@ from .shadow import AuditSink
 
 _PROPOSER_TOOLS = ["inspection.propose_plan", "finish"]
 _ESCALATION_SUMMARY = "plan proposal needs operator review"
+
+
+@dataclass(frozen=True)
+class JevProposalGates:
+    """Acceptance thresholds for a Jev plan recommendation."""
+
+    act_at: float = 0.60
+    min_margin: float = 0.15
+
+
+class JevProposer:
+    """Let Jev select one complete legal plan call, pending operator approval."""
+
+    def __init__(
+        self,
+        judge: Any,
+        sink: AuditSink,
+        gates: JevProposalGates = JevProposalGates(),
+    ) -> None:
+        self.judge = judge
+        self.sink = sink
+        self.gates = gates
+
+    def decide(self, request: dict[str, Any], context: PolicyContext) -> dict[str, Any]:
+        if context.legal.decision_point != SELECT_PLAN:
+            return self._escalate(request)
+
+        candidates = {
+            candidate.label: candidate
+            for candidate in context.legal.candidates
+            if candidate.tool_name == "inspection.propose_plan"
+        }
+        if not candidates:
+            return self._escalate(request)
+
+        criteria = {
+            label: candidate.description for label, candidate in candidates.items()
+        }
+        try:
+            answer = self.judge.choice(
+                state=context.state.to_packet(),
+                instruction=(
+                    "At SELECT_PLAN, choose the one catalogue plan that best satisfies "
+                    "the operator request. Use only the supplied criteria."
+                ),
+                criteria=criteria,
+                name="select_plan",
+            )
+            accepted = self._accepted_answer(answer, tuple(candidates))
+        except Exception:  # noqa: BLE001 -- provider boundary is fail-closed
+            return self._escalate(request)
+        if accepted is None:
+            return self._escalate(request)
+
+        label, confidence, probabilities, margin = accepted
+        candidate = candidates[label]
+        reason = f"{context.legal.decision_point}: {candidate.description}"[:512]
+        arguments = {**candidate.arguments, "reason": reason}
+        result = one_call(request, candidate.tool_name, arguments)
+        self.sink.write(
+            {
+                "record": "proposal_recommendation",
+                "run_id": context.state.run_id,
+                "state_version": context.state.state_version,
+                "decision_point": context.legal.decision_point,
+                "label": label,
+                "reason": reason,
+                "facts": {
+                    "operator_request": context.state.request_text,
+                    "candidate_description": candidate.description,
+                },
+                "advisor": "jev",
+                "judge_label": label,
+                "policy_label": label,
+                "confidence": confidence,
+                "probabilities": probabilities,
+                "margin": margin,
+            }
+        )
+        return AgentModelResult.from_dict(result).to_dict()
+
+    def _accepted_answer(
+        self, answer: Any, labels: tuple[str, ...]
+    ) -> tuple[str, float, dict[str, float], float] | None:
+        if not isinstance(answer, Mapping):
+            return None
+        label = answer.get("value")
+        confidence = self._probability(answer.get("confidence"))
+        raw_probabilities = answer.get("probabilities")
+        if (
+            not isinstance(label, str)
+            or label not in labels
+            or confidence is None
+            or not isinstance(raw_probabilities, Mapping)
+            or set(raw_probabilities) != set(labels)
+        ):
+            return None
+
+        probabilities: dict[str, float] = {}
+        for candidate_label in labels:
+            probability = self._probability(raw_probabilities.get(candidate_label))
+            if probability is None:
+                return None
+            probabilities[candidate_label] = probability
+        if max(probabilities, key=probabilities.get) != label:
+            return None
+
+        runners_up = [value for key, value in probabilities.items() if key != label]
+        margin = probabilities[label] - (max(runners_up) if runners_up else 0.0)
+        if confidence < self.gates.act_at or margin < self.gates.min_margin:
+            return None
+        return label, confidence, probabilities, margin
+
+    @staticmethod
+    def _probability(value: Any) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        resolved = float(value)
+        if not math.isfinite(resolved) or not 0.0 <= resolved <= 1.0:
+            return None
+        return resolved
+
+    @staticmethod
+    def _escalate(request: dict[str, Any]) -> dict[str, Any]:
+        return one_call(
+            request,
+            "finish",
+            {"status": "NEEDS_REVIEW", "summary": _ESCALATION_SUMMARY[:256]},
+        )
 
 
 class LlmProposer:
@@ -118,4 +249,4 @@ class LlmProposer:
             forget(agent_run_id)
 
 
-__all__ = ["LlmProposer"]
+__all__ = ["JevProposalGates", "JevProposer", "LlmProposer"]
