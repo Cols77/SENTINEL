@@ -7,6 +7,7 @@ __pycache__/
 artifacts/*
 !artifacts/jev
 !artifacts/decisions
+!artifacts/wp1
 docs/.obsidian/
 .env
 
