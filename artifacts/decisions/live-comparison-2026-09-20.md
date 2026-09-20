@@ -26,7 +26,21 @@ Models: `typesafe/jev-1.13-20260917`, `z-ai/glm-5.3-flash`, both via OpenRouter.
 
 **Neither arm passes the promotion criteria, for opposite reasons.**
 
-- **Jev abstains.** It was confident enough to act once in 144 turns. Its 0.75
+> **CORRECTION 2026-09-20 (found by the P3 session):** the rows below record
+> `JevPolicy`'s *fallback* pick, not Jev's. `JevPolicy.decide` sets
+> `Decision.label` to the escalate candidate for any non-HIGH answer, so a
+> MID-confidence **correct** pick is logged as an escalation and Jev's own
+> `answer["value"]` was never recorded. `escalation_rate = 1.0` therefore does
+> **not** mean Jev abstained 144 times, and "Jev abstains" below is not
+> supported by this batch. What the batch does establish is that Jev's
+> *confidence* stayed under `act_at = 0.80` on essentially every turn --
+> including 6 turns the deterministic rule itself calls unambiguous. Jev's
+> acting half is **unmeasured, not refuted**. Raw per-call rows are now
+> committed by `shadow_sweep.py`, so a re-sweep can be re-banded offline at any
+> threshold; `judge_label` (the raw pick in the aggregates) is still to come.
+
+- **Jev's confidence stayed below the acting threshold.** It cleared `act_at`
+  once in 144 turns. Its 0.75
   agreement is not evidence of judgement: 18 of 24 labels at each point are
   `escalate`, so an advisor that always escalates scores exactly 0.75. This
   repeats J5, where `human_review_needed` came back `True` for every case.
