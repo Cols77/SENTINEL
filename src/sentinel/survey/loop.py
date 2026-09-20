@@ -34,6 +34,27 @@ always stored -- never conditioned on a retention flag.
 V8f: ``survey.get_site`` and ``survey.get_results`` are implemented here as
 real functions, and ``run_survey`` routes through ``get_results`` itself
 rather than a private duplicate of the same query.
+
+R8/V8c: ``decision_quality`` was specified in three places (this module's
+docstring, the design spec, and ``eval.score_episode``) and computed in
+none of them -- ``score_episode`` read an ``outcome["decision_quality"]``
+key this module never set, so the metric was always ``None``. It is now
+recorded at every ``REVIEW_RESULTS`` turn: the uncertain set at that turn,
+the ``addresses`` list of the candidate the policy chose, and the
+``addresses`` list of whichever candidate addressed the most uncertain
+objects (the ``review_candidates`` are already built with that ``addresses``
+argument -- see ``candidates.py``). A turn scores ``1.0`` when the chosen
+candidate addresses at least as many uncertain objects as the best
+available one did (which subsumes "addresses every uncertain object"), and
+``0.0`` when a follow-up was available that addressed strictly more.
+Turns with no uncertain objects contribute nothing. The run's
+``decision_quality`` is the minimum over every scored turn, or ``None`` if
+no review turn ever had an uncertain object to resolve.
+
+R8: ``dropped_labels`` (``detector.normalise``'s untraceable-label list, rev
+3 R6) is accumulated across every frame this run ingests and returned on
+the outcome, so ``eval.score_episode`` can attribute an undercount to "the
+provider used a label the class map does not know" rather than guessing.
 """
 from __future__ import annotations
 
@@ -96,8 +117,13 @@ def get_results(store, run_id: str, options) -> dict[str, Any]:
     }
 
 
-def _fly_and_ingest(store, run_id, option, flight, detector) -> None:
+def _fly_and_ingest(store, run_id, option, flight, detector) -> tuple[str, ...]:
+    """Returns every raw label this sweep's frames could not map to a known
+    class (rev 3 R6's ``dropped``), in the order seen, duplicates included --
+    the caller (``run_survey``) accumulates these across the whole run for
+    R8's ``dropped_labels`` attribution signal."""
     sweep_id = store.add_sweep(run_id, option.option_id, len(option.stops))
+    dropped: list[str] = []
     for frame in flight.fly(option):
         frame_id = store.add_frame(
             sweep_id, stop_index=frame.stop_index, look_deg=frame.look_deg,
@@ -114,12 +140,14 @@ def _fly_and_ingest(store, run_id, option, flight, detector) -> None:
         bands = batch.bands or ("low",) * len(batch.detections)
         for detection, band in zip(batch.detections, bands):
             store.add_sighting(frame_id, detection, band, raw_response=batch.raw)
+        dropped.extend(batch.dropped)
     store.set_sweep_status(sweep_id, "FLOWN")
 
     rows = store.sightings(run_id)
     for row in rows:
         row["bbox"] = json.loads(row["bbox_json"]) if row["bbox_json"] else None
     store.set_objects(run_id, merge_sightings(rows, delta_z_cm=DELTA_Z_CM))
+    return tuple(dropped)
 
 
 def _approval_call(context: SurveyContext, result: dict, label: str) -> dict[str, Any]:
@@ -132,6 +160,26 @@ def _approval_call(context: SurveyContext, result: dict, label: str) -> dict[str
     except StopIteration:
         call["description"] = ""
     return call
+
+
+def _review_decision_quality(review, uncertain: list[dict], label: str | None) -> float | None:
+    """R8/V8c. ``review`` is the ``REVIEW_RESULTS`` ``LegalSet`` the policy
+    just decided over -- its ``survey.propose_sweep`` candidates each carry
+    an ``addresses`` argument (``candidates._addresses``: the uncertain
+    ``object_id``s that follow-up would actually view). ``None`` when
+    nothing was uncertain at this turn, since there is nothing to score;
+    otherwise ``1.0`` when the chosen candidate addresses at least as many
+    uncertain objects as the best-available follow-up did, ``0.0`` when a
+    follow-up was available that addressed strictly more (submitting the
+    report, escalating, or picking a weaker follow-up while a stronger one
+    was on the table)."""
+    if not uncertain:
+        return None
+    follow_ups = [c for c in review.candidates if c.tool_name == "survey.propose_sweep"]
+    best_addressed = max((len(c.arguments.get("addresses", ())) for c in follow_ups), default=0)
+    chosen = next((c for c in follow_ups if c.label == label), None)
+    chosen_addressed = len(chosen.arguments.get("addresses", ())) if chosen is not None else 0
+    return 1.0 if chosen_addressed >= best_addressed else 0.0
 
 
 def _write_report(writer, results) -> tuple[str | None, ReportMismatch | None]:
@@ -167,11 +215,17 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
             consent_policy(store, location, consent_date)
         except ConsentMissing as missing:
             return {"status": "CONSENT_REQUIRED", "flights": 0, "counts": {}, "report": None,
-                    "escalations": [{"point": "CONSENT", "error": str(missing)}]}
+                    "escalations": [{"point": "CONSENT", "error": str(missing)}],
+                    "decision_quality": None, "dropped_labels": ()}
 
     store.create_run(run_id, request_text)
     request = {"run_id": run_id, "request_text": request_text, "site": get_site(options)}
     escalations: list[dict] = []
+    # R8/V8c: one entry per REVIEW_RESULTS turn that had an uncertain object
+    # to resolve -- see _review_decision_quality. R8: every dropped label
+    # (rev 3 R6) seen across every frame this run ingests.
+    decision_qualities: list[float] = []
+    dropped_labels: list[str] = []
 
     legal = propose_candidates(options)
     result = policy.decide(request, SurveyContext(run_id, legal, {}))
@@ -180,7 +234,7 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
         escalations.append({"point": legal.decision_point, "label": ESCALATE_LABEL,
                             "result": result})
         return {"status": "ESCALATED", "flights": 0, "counts": {}, "report": None,
-                "escalations": escalations}
+                "escalations": escalations, "decision_quality": None, "dropped_labels": ()}
 
     context = SurveyContext(run_id, legal, {})
     while True:
@@ -188,10 +242,12 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
         if not on_approval(call):
             return {"status": "REFUSED", "flights": store.flights_used(run_id),
                     "counts": store.counts(run_id), "report": None,
-                    "escalations": escalations}
+                    "escalations": escalations,
+                    "decision_quality": min(decision_qualities) if decision_qualities else None,
+                    "dropped_labels": tuple(dict.fromkeys(dropped_labels))}
 
         option = next(o for o in options if o.option_id == call["arguments"]["option_id"])
-        _fly_and_ingest(store, run_id, option, flight, detector)
+        dropped_labels.extend(_fly_and_ingest(store, run_id, option, flight, detector))
 
         results = get_results(store, run_id, options)
         if results["flights_used"] >= max_flights:
@@ -200,6 +256,9 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
         context = SurveyContext(run_id, review, results)
         result = policy.decide(request, context)
         label = chosen_label(result)
+        quality = _review_decision_quality(review, results["uncertain_objects"], label)
+        if quality is not None:
+            decision_qualities.append(quality)
         if label is None or label == REPORT_LABEL:
             break
         if label == ESCALATE_LABEL:
@@ -207,12 +266,16 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
                                 "result": result})
             break
 
+    decision_quality = min(decision_qualities) if decision_qualities else None
+    dropped = tuple(dict.fromkeys(dropped_labels))
     results = get_results(store, run_id, options)
     body, mismatch = _write_report(writer, results)
     if mismatch is not None:
         return {"status": "REPORT_REJECTED", "flights": results["flights_used"],
                 "counts": results["counts"], "report": None,
-                "escalations": escalations + [{"point": "REPORT", "error": str(mismatch)}]}
+                "escalations": escalations + [{"point": "REPORT", "error": str(mismatch)}],
+                "decision_quality": decision_quality, "dropped_labels": dropped}
     store.add_report(run_id, body, results["class_counts"])
     return {"status": "REPORTED", "flights": results["flights_used"],
-            "counts": results["counts"], "report": body, "escalations": escalations}
+            "counts": results["counts"], "report": body, "escalations": escalations,
+            "decision_quality": decision_quality, "dropped_labels": dropped}
