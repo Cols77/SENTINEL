@@ -132,3 +132,46 @@ built. The amendment shipped in the schema and the loop but never reached the mo
 
 The next paid run of this scenario is therefore the first one whose failure, if any, can be read
 rather than guessed. It still needs fresh consent.
+
+---
+
+# Addendum 2 -- third run, and the first one that could be read
+
+**Batch:** `2026-09-20-operator-grant-3` (consent C-17). **Master:** `ab3097b`. **Model:** `z-ai/glm-5.3`.
+**Spend:** 6 model calls. **Raw record:** `artifacts/wp1/live-runs/2026-09-20-operator-grant-3-qualifying_evidence_to_task.{json,sqlite3}`
+-- every request, every model result with its arguments, and the run database.
+
+**Result: fail on the turn budget -- and the cause is now a fact, not a guess.**
+
+| Turn | Model call | Gateway |
+|---|---|---|
+| 1 | `task.create` -- all three ids correct, plus a `reason` | **REJECTED `INVALID_CONTRACT`** |
+| 2 | `task.create` -- same, `reason` reworded | **REJECTED `INVALID_CONTRACT`** |
+| 3 | `state.get_summary` | accepted |
+| 4 | `state.get_recent_events` -- nine typed items returned | accepted |
+| 5 | `task.create` -- same ids, **no `reason`** | **ACCEPTED**, task created |
+| 6 | `patroller.rank_for_task` with the typed `task_id` it had just been given | turn budget exhausted |
+
+**The defect.** The wire contract defines each mutating tool twice. `AgentTaskCreateArguments` lets the
+model pass an optional `reason`; `CommandTaskCreatePayload` has `additionalProperties: false` and no
+`reason`. `agent_loop.command_for` copied the arguments into the payload verbatim, so a model that used a
+documented optional argument was told its correct call violated the contract. The same mismatch exists for
+`patroller.rank_for_task` and `inspection.propose_plan`. The rejection text shown to the model is a dump of
+the envelope truncated at 512 characters, which ends before the part that names the offending field -- the
+model found the fix by trial.
+
+**This very probably explains all three runs.** Run 1 ("repeated `task.create` until the correction budget
+was exhausted") and run 2 ("`task.create`, two reads, `task.create`") both fit a model retrying a call that
+was correct and being rejected for its `reason`. Neither kept its arguments, so this stays an inference for
+those two; for run 3 it is recorded.
+
+**What the earlier fixes did do.** Turn 6 used the typed `task_id` straight from the previous result, which
+the model could not see before `_bounded_previous` was fixed; turn 4 returned real events. Both worked as
+intended. Neither was the blocker.
+
+**Fixed on `fix/command-payload-keys`, no gate involved** (no schema edit, no gateway edit): `command_for`
+passes only the keys the command payload admits. A test derives that key list from the schema itself, so an
+amendment cannot put the two definitions out of step again, and another replays this run's recorded turn-1
+call through the real loop: three calls, no rejection, `WAITING_FOR_APPROVAL`.
+
+**Still open, not fixed here:** the rejection message. A model should be told *which field* was refused.

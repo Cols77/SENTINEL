@@ -84,6 +84,14 @@ def _event_summary(event: dict) -> dict:
     return {"sequence_no": event.get("sequence_no", 0), "event_type": event_type[:64], "summary": summary or event_type[:64] or "EVENT"}
 
 
+_PAYLOAD_KEYS = {
+    "inspection.propose_plan": ("catalogue_plan_id",),
+    "task.create": ("perception_result_id", "section_id", "evidence_artifact_id"),
+    "patroller.rank_for_task": ("task_id",),
+    "assignment.propose": ("task_id", "patroller_id", "reason"),
+}
+
+
 def command_for(tool_name: str, arguments: dict[str, Any], run_id: str, actor_type: str, actor_id: str,
                  key: str) -> dict[str, Any] | None:
     """Build the ``command_envelope`` for one legal-candidate tool call: the
@@ -100,7 +108,17 @@ def command_for(tool_name: str, arguments: dict[str, Any], run_id: str, actor_ty
     command_type = _COMMAND_TYPES.get(tool_name)
     if command_type is None:
         return None
-    payload = dict(arguments)
+    # A tool's argument schema and its command's payload schema are two
+    # definitions in the same wire contract, and they disagree: the model may
+    # pass an optional `reason` to inspection.propose_plan, task.create and
+    # patroller.rank_for_task, and none of those command payloads admits one.
+    # Copying the arguments verbatim made every call that used the documented
+    # optional argument fail as INVALID_CONTRACT (found in the consented live
+    # run of 2026-09-20, grant-3: two correct task.create calls rejected, the
+    # third -- identical but for `reason` -- accepted). Only the keys the command
+    # payload admits cross over; the model's reason stays in its own recorded
+    # tool call.
+    payload = {name: arguments[name] for name in _PAYLOAD_KEYS[tool_name] if name in arguments}
     if tool_name == "inspection.propose_plan":
         payload = {"intent": "REQUEST_OPERATOR_APPROVAL", **payload}
     return {
