@@ -33,6 +33,13 @@ def heading_delta_deg(measured: float, truth: float) -> float:
     return (float(measured) - float(truth) + 180.0) % 360.0 - 180.0
 
 
+def circular_median_deg(values) -> float:
+    """Median heading in [-180, 180), safe across the +/-180 wrap."""
+    values = [float(v) for v in values]
+    deltas = [heading_delta_deg(v, values[0]) for v in values]
+    return (values[0] + statistics.median(deltas) + 180.0) % 360.0 - 180.0
+
+
 def load_truth(path: str) -> dict[str, dict[str, float]]:
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
@@ -103,9 +110,7 @@ def score_runs(db_path: str, truth: dict[str, dict[str, float]],
 
             median_x = statistics.median(xs)
             median_y = statistics.median(ys)
-            heading_deltas_from_first = [heading_delta_deg(h, hs[0]) for h in hs]
-            median_heading = (hs[0] + statistics.median(heading_deltas_from_first)
-                              + 180.0) % 360.0 - 180.0
+            median_heading = circular_median_deg(hs)
             centroid_dist = [math.hypot(x - median_x, y - median_y) for x, y in zip(xs, ys)]
             heading_spread = [abs(heading_delta_deg(h, median_heading)) for h in hs]
 
