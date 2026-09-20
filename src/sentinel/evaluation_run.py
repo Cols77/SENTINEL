@@ -201,6 +201,17 @@ def normalized_request(value):
 
     def normalize(item, key=None):
         if isinstance(item, dict):
+            if key == "event_context":
+                event_type, summary = item.get("event_type"), item.get("summary")
+                if isinstance(event_type, str) and event_type and isinstance(summary, str) and summary.startswith(event_type + ": "):
+                    try:
+                        payload = json.loads(summary[len(event_type) + 2:])
+                    except (ValueError, TypeError):
+                        payload = None
+                    if isinstance(payload, dict):
+                        # Only coordinator event summaries encode structured data.
+                        # User prose and truncated/non-JSON summaries stay exact.
+                        item = {**item, "summary": {"event_type": event_type, "payload": payload}}
             return {k: normalize(v, k) for k, v in sorted(item.items())}
         if isinstance(item, (tuple, list)):
             return [normalize(v, key) for v in item]

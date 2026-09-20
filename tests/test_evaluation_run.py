@@ -140,3 +140,16 @@ def test_replay_uuid_text_is_semantic_and_reference_relationships_are_preserved(
     first, second = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
     assert normalized_request({"user_request": first}) != normalized_request({"user_request": second})
     assert normalized_request({"run_id": first, "previous": {"run_id": first}}) != normalized_request({"run_id": first, "previous": {"run_id": second}})
+
+
+def test_replay_event_summary_remaps_ids_and_preserves_semantics():
+    from sentinel.evaluation_run import normalized_request
+    first, second = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+    def request(identifier, label="PLAN_A", event_type="PLAN_PROPOSED"):
+        payload = json.dumps({"plan_id": identifier, "catalogue_plan_id": label})
+        return {"event_context": [{"event_type": event_type, "summary": f"{event_type}: {payload}"}]}
+    assert normalized_request(request(first)) == normalized_request(request(second))
+    assert normalized_request(request(first)) != normalized_request(request(second, "PLAN_B"))
+    assert normalized_request(request(first)) != normalized_request(request(second, event_type="PLAN_REJECTED"))
+    # An arbitrary dictionary with summary text is not a coordinator event.
+    assert normalized_request({"summary": first}) != normalized_request({"summary": second})
