@@ -45,7 +45,14 @@ A third operator message: **"merge and push the fix branch, then run the paid sc
 | C-16 | Merge `fix/model-visible-results` into `master` and push | merge `ab3097b`, pushed 2026-09-20. |
 | C-17 | One more paid run of `qualifying_evidence_to_task` on `z-ai/glm-5.3`, stated beforehand as "about 6-12 calls, under $0.05" | batch id `2026-09-20-operator-grant-3`, 6 calls, run once. Raw record kept under `artifacts/wp1/live-runs/`. **The batch is closed.** |
 
-Not covered by any of the above: merging `fix/command-payload-keys`, any further push, any further paid call.
+A fourth operator message: **"proceed with your recommendations, I'll hold codex until it's merged"**.
+
+| # | Scope | Effect |
+|---|---|---|
+| C-18 | Merge `fix/command-payload-keys` into `master` and push | merge `02428dc`, pushed 2026-09-20. |
+| C-19 | One more paid run of `qualifying_evidence_to_task`, stated beforehand as "6-12 calls, under $0.05" | batch id `2026-09-20-operator-grant-4`, 3 calls, run once, **passed**. **The batch is closed.** |
+
+Not covered by any of the above: any further push, any further paid call, G-amend-rest, any promotion.
 
 ### Earlier the same day
 
