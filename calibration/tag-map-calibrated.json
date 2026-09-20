@@ -83,6 +83,6 @@
       -0.001529887885873445,
       2.8219232481195857
     ],
-    "calibration_source": "calibrated"
+    "calibration_source": "chessboard"
   }
 }

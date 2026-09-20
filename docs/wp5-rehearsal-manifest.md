@@ -48,7 +48,7 @@ the flight itself.
 
 1. **Calibrate the camera first.** Run `scripts/calibrate_camera.py` on
    checkerboard images from the Tello camera; it writes K + distortion into
-   the tag map with `calibration_source: "calibrated"`, and rejects (writes nothing) if the RMS reprojection error exceeds `--max-rms` (default 0.5 px). `pose-stream` refuses
+   the tag map with `calibration_source: "chessboard"`, and rejects (writes nothing) if the RMS reprojection error exceeds `--max-rms` (default 0.5 px). `pose-stream` refuses
    a `nominal` map unless `--allow-nominal` is passed (synthetic/replay only).
 2. **Tape 6-10 floor points** across the alley, measured in the tag-map room
    frame (record x, y in room units, and the camera heading in degrees). Vary

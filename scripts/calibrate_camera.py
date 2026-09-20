@@ -6,7 +6,7 @@ Usage:
 
 --pattern is the number of INNER corners (columns x rows). The input tag map is
 never modified; K and dist_coeffs are copied into a new file with
-calibration_source "calibrated". A calibration whose RMS reprojection error
+calibration_source "chessboard". A calibration whose RMS reprojection error
 exceeds --max-rms (pixels) is rejected and nothing is written.
 """
 
@@ -93,7 +93,7 @@ def build_calibrated_doc(doc, K, dist, size):
         "fx": float(K[0, 0]), "fy": float(K[1, 1]),
         "cx": float(K[0, 2]), "cy": float(K[1, 2]),
         "dist_coeffs": [float(x) for x in dist],
-        "calibration_source": "calibrated",
+        "calibration_source": "chessboard",
     }
     return out
 

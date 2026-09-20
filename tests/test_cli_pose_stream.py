@@ -146,7 +146,7 @@ def test_pose_stream_refuses_nominal_calibration_without_flag(monkeypatch, tmp_p
 def test_pose_stream_accepts_calibrated_map_without_flag(monkeypatch, tmp_path, capsys):
     import json
     doc = json.load(open(TAG_MAP, encoding="utf-8"))
-    doc["camera_calibration"]["calibration_source"] = "calibrated"
+    doc["camera_calibration"]["calibration_source"] = "chessboard"
     tm = tmp_path / "tm.json"
     tm.write_text(json.dumps(doc))
     _fake_real(monkeypatch, lambda *a, **k: [])

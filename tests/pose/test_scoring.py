@@ -188,7 +188,7 @@ def test_nominal_calibration_fails_run(tmp_path):
     res = score_runs(db, truth, Thresholds(), calibration_source="nominal")
     assert res["passed"] is False and res["calibration_ok"] is False
     assert res["runs"]["r1"]["passed"] is True  # errors are fine; the calibration is not
-    ok = score_runs(db, truth, Thresholds(), calibration_source="calibrated")
+    ok = score_runs(db, truth, Thresholds(), calibration_source="chessboard")
     assert ok["passed"] is True and ok["calibration_ok"] is True
     allowed = score_runs(db, truth, Thresholds(), calibration_source="nominal", allow_nominal=True)
     assert allowed["passed"] is True

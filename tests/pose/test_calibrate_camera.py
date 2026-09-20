@@ -97,7 +97,7 @@ def test_main_writes_calibrated_tag_map_and_leaves_fixture_alone(board_dir, tmp_
     assert rc == 0
     assert FIXTURE.read_bytes() == before
     m = load_tag_map(str(out))
-    assert m.calibration_source == "calibrated"
+    assert m.calibration_source == "chessboard"
     assert m.K[0, 0] == pytest.approx(600.0, rel=0.03)
     doc = json.loads(out.read_text())
     assert doc["camera_calibration"]["width"] == W and doc["camera_calibration"]["height"] == H
@@ -123,8 +123,8 @@ def test_tagmap_calibration_source_defaults_to_nominal():
     assert TagMap(doc).calibration_source == "nominal"
     del doc["camera_calibration"]["calibration_source"]
     assert TagMap(doc).calibration_source == "nominal"
-    doc["camera_calibration"]["calibration_source"] = "calibrated"
-    assert TagMap(doc).calibration_source == "calibrated"
+    doc["camera_calibration"]["calibration_source"] = "chessboard"
+    assert TagMap(doc).calibration_source == "chessboard"
 
 
 def test_main_rejects_calibration_above_max_rms_and_writes_nothing(board_dir, tmp_path, capsys):
@@ -165,3 +165,13 @@ def test_quality_gate_can_be_relaxed(tmp_path):
                            (-0.07, -0.02, 0.55), (-0.10, -0.08, 0.65), (-0.06, -0.06, 0.6)]):
         cv2.imwrite(str(d / f"f{i}.png"), _render((0.0, 0.0, 0.0), t))
     cal.calibrate(d, PATTERN, SQUARE_M, min_tilt_deg=0.0, max_half_disagreement=1e9)
+
+
+def test_written_tag_map_validates_against_tag_map_schema(board_dir, tmp_path):
+    from jsonschema import Draft202012Validator
+    schema = json.loads((ROOT / "docs/superpowers/specs/contracts/tag-map-v1.schema.json").read_text())
+    out = tmp_path / "o.json"
+    assert cal.main([str(board_dir), "--tag-map", str(FIXTURE), "--out", str(out),
+                     "--pattern", "7x5", "--square-m", str(SQUARE_M)]) == 0
+    errors = [e.message for e in Draft202012Validator(schema).iter_errors(json.loads(out.read_text()))]
+    assert not errors, errors
