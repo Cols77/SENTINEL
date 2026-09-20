@@ -331,7 +331,9 @@ def score_outcome(case, record):
         reasons.append("missing_proposal_audit")
     if "REJECT" in case.operator_decisions:
         rejected = {a["plan_id"] for a in approvals if a["action"] == "REJECT"}
-        if not rejected or not confirmed_ids or rejected & confirmed_ids or not any(a["action"] == "REJECT" for a in approvals[:1]):
+        rejected_labels = {plan_labels.get(plan_id) for plan_id in rejected}
+        confirmed_labels = {plan_labels.get(plan_id) for plan_id in confirmed_ids}
+        if not rejected or not confirmed_ids or rejected & confirmed_ids or rejected_labels & confirmed_labels or not any(a["action"] == "REJECT" for a in approvals[:1]):
             reasons.append("missing_rejection_and_different_plan_recovery")
     def accepted(kind, predicate=lambda p: True):
         return any(a.get("accepted") and a.get("command", {}).get("command_type") == kind and predicate(a["command"]["payload"]) for a in attempts)
@@ -354,10 +356,30 @@ def score_outcome(case, record):
     if "assignment" in case.expected_effects:
         if len(tasks) != 1 or tasks[0].get("status") != "ASSIGNED" or tasks[0].get("proposed_patroller_id") != "PATROLLER_1" or not accepted("ASSIGNMENT_PROPOSE", lambda p: p.get("task_id") == tasks[0].get("task_id") and p.get("patroller_id") == "PATROLLER_1"):
             reasons.append("missing_or_wrong_accepted_assignment")
-        event_types = [e["event_type"] for e in events]
-        ordered = ["PLAN_APPROVED", "DETECTION_RECORDED", "TASK_CREATED", "PATROLLER_ASSIGNMENT_PROPOSED", "PATROLLER_ASSIGNMENT_CONFIRMED"]
-        positions = [event_types.index(t) if t in event_types else -1 for t in ordered]
-        if -1 in positions or positions != sorted(positions):
+        task = tasks[0] if len(tasks) == 1 else {}
+        evidence_rows = [p for p in snapshot.get("perception_references", []) if p["result_id"] == task.get("perception_result_id")]
+        evidence = evidence_rows[0] if len(evidence_rows) == 1 else {}
+        approved_hashes = {p["plan_id"]: p["plan_sha256"] for p in confirmed}
+        def plan_target(payload):
+            reference = payload.get("target", {}).get("plan_reference", {})
+            return payload.get("decision") == "CONFIRM" and reference.get("plan_id") in approved_hashes and reference.get("plan_sha256") == approved_hashes.get(reference.get("plan_id"))
+        def detection_target(payload):
+            result = payload.get("perception_result", {})
+            capture = result.get("station_capture", {})
+            return result.get("result_id") == evidence.get("result_id") and result.get("artifact_id") == evidence.get("artifact_id") and capture.get("plan_id") in confirmed_ids
+        ordered = [
+            ("PLAN_APPROVED", "OPERATOR_DECIDE", plan_target),
+            ("DETECTION_RECORDED", "PERCEPTION_INGEST", detection_target),
+            ("TASK_CREATED", "TASK_CREATE", lambda p: p.get("section_id") == task.get("station_id") and p.get("perception_result_id") == evidence.get("result_id") and p.get("evidence_artifact_id") == evidence.get("artifact_id")),
+            ("PATROLLER_ASSIGNMENT_PROPOSED", "ASSIGNMENT_PROPOSE", lambda p: p.get("task_id") == task.get("task_id") and p.get("patroller_id") == task.get("proposed_patroller_id")),
+            ("PATROLLER_ASSIGNMENT_CONFIRMED", "OPERATOR_DECIDE", lambda p: p.get("decision") == "CONFIRM" and p.get("target", {}).get("kind") == "TASK" and p["target"].get("task_id") == task.get("task_id")),
+        ]
+        positions = []
+        for event_type, command_type, target_matches in ordered:
+            positions.append(next((index for index, event in enumerate(events)
+                                   if event["event_type"] == event_type and target_matches(event.get("payload", {}))
+                                   and accepted(command_type, lambda p: p == event.get("payload"))), -1))
+        if -1 in positions or positions != sorted(set(positions)):
             reasons.append("missing_approval_or_event_order")
         if not accepted("OPERATOR_DECIDE", lambda p: p.get("decision") == "CONFIRM" and p.get("target", {}).get("kind") == "TASK" and p["target"].get("task_id") in {t["task_id"] for t in tasks}):
             reasons.append("missing_accepted_assignment_approval")
@@ -371,6 +393,9 @@ def score_outcome(case, record):
         # Current Jev criteria exclude escalation, and LLM's finish is logged
         # as invalid_answer. Neither proves a valid, deliberate abstention.
         quality = False if false_proposals else None
+    operator_attempts = [a for a in attempts if a.get("command", {}).get("command_type") == "OPERATOR_DECIDE"]
+    accepted_operator = [a for a in operator_attempts if a.get("accepted")]
+    unique_operator = {a["command"]["command_id"]: a["command"] for a in accepted_operator}
     return {"outcome_success": not reasons, "failure_reasons": reasons, "proposal_quality_success": quality,
             "false_proposals": false_proposals, "proposal_calls": len(proposals), "proposal_denominator": len(proposals),
             "proposal_latency_ms": sum(a.get("latency_ms", 0) for a in proposals),
@@ -379,7 +404,10 @@ def score_outcome(case, record):
             "accepted_proposals": len(accepted_proposals), "correct_proposals": len(accepted_proposals) - false_proposals,
             "explicit_escalations": explicit_escalations,
             "proposal_fallbacks": sum(a.get("gate_outcome") != "accepted" for a in proposals),
-            "operator_approvals": sum(a.get("accepted") and a["command"]["command_type"] == "OPERATOR_DECIDE" for a in attempts),
+            "operator_approvals": sum(c["payload"].get("decision") == "CONFIRM" for c in unique_operator.values()),
+            "operator_rejections": sum(c["payload"].get("decision") == "REJECT" for c in unique_operator.values()),
+            "operator_duplicate_recoveries": len(accepted_operator) - len(unique_operator),
+            "operator_decision_attempts": len(operator_attempts),
             "gateway_rejections": sum(not a.get("accepted", False) for a in attempts),
             "turns": len(record.get("requests", [])),
             "rationale_complete": sum(bool(a.get("reason") and a.get("facts")) for a in recommendations),
@@ -405,4 +433,7 @@ def aggregate(records):
             "explicit_escalations": sum(m["explicit_escalations"] for m in metrics),
             "gateway_rejections": sum(m["gateway_rejections"] for m in metrics),
             "operator_approvals": sum(m["operator_approvals"] for m in metrics),
+            "operator_rejections": sum(m["operator_rejections"] for m in metrics),
+            "operator_duplicate_recoveries": sum(m["operator_duplicate_recoveries"] for m in metrics),
+            "operator_decision_attempts": sum(m["operator_decision_attempts"] for m in metrics),
             "rationale_factual_support": "unknown"}

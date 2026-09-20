@@ -94,3 +94,34 @@ def test_import_preserves_hand_reference_and_reports_exclusions(tmp_path):
     assert cases[0].expected_escalation
     assert cases[0].request == "Count computers"
     assert excluded == [{"case_id": "draft-1", "reason": "draft_or_unlabelled_reference"}]
+
+
+def test_ordered_events_must_match_accepted_targets(tmp_path):
+    case = load_cases()[0]
+    successful = run_case(case, "F", tmp_path)
+    for event_type, mutate in [
+        ("TASK_CREATED", lambda p: p.update(perception_result_id="WRONG")),
+        ("TASK_CREATED", lambda p: p.update(evidence_artifact_id="WRONG")),
+        ("PLAN_APPROVED", lambda p: p["target"]["plan_reference"].update(plan_id="WRONG")),
+        ("PATROLLER_ASSIGNMENT_CONFIRMED", lambda p: p["target"].update(task_id="WRONG")),
+    ]:
+        record = deepcopy(successful)
+        event = next(e for e in record["events"] if e["event_type"] == event_type)
+        mutate(event["payload"])
+        assert not score_outcome(case, record)["outcome_success"], event_type
+
+
+def test_operator_metrics_distinguish_unique_confirmations(tmp_path):
+    case = load_cases()[0]
+    record = run_case(case, "F", tmp_path)
+    approval = next(a for a in record["tool_attempts"] if a["command"]["command_type"] == "OPERATOR_DECIDE")
+    record["tool_attempts"].append(deepcopy(approval))
+    rejection = deepcopy(approval)
+    rejection["command"]["command_id"] = "different-command"
+    rejection["command"]["payload"]["decision"] = "REJECT"
+    record["tool_attempts"].append(rejection)
+    metrics = score_outcome(case, record)
+    assert metrics["operator_approvals"] == 2
+    assert metrics["operator_rejections"] == 1
+    assert metrics["operator_duplicate_recoveries"] == 1
+    assert metrics["operator_decision_attempts"] == 4
