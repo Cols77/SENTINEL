@@ -298,3 +298,59 @@ def test_a_run_with_no_location_given_is_unaffected_by_the_consent_gate(tmp_path
                          detector=ScriptedDetector(_one_computer_script()),
                          on_approval=lambda call: True, writer=_writer([]))
     assert outcome["status"] == "REPORTED"
+
+
+def _single_stop_script(target_y=RAIL.range_cm, band="high"):
+    """One detection at the first stop only, so ``merge.py``'s
+    ``CONFIRM_MIN_STOPS`` gate (3) leaves a single, *positioned*
+    UNCERTAIN object at the REVIEW_RESULTS turn -- unlike the
+    unpositioned "no box" case Task 4 already covers, this one carries a
+    real ``x_cm``/``y_cm`` a follow-up option can actually ``address``."""
+    return {"f0.png": [_raw_item(0.0, target_y, -112.5, band=band)]}
+
+
+def test_review_decision_quality_is_zero_when_the_report_is_chosen_over_a_stronger_follow_up(tmp_path):
+    """rev 4 V8c: no test anywhere in this suite ever drove
+    ``_review_decision_quality`` through a real uncertain object at
+    REVIEW_RESULTS (every fixture before this one produces only CONFIRMED
+    objects), so ``outcome["decision_quality"]`` was untested for any value
+    other than None. ``RuleProposer`` always picks the first actionable
+    candidate, which ``review_candidates`` orders as ``report`` before any
+    follow-up (``candidates.review_candidates``): it addresses nothing,
+    while a follow-up that would view the single uncertain object here was
+    on offer. decision_quality must be 0.0, not None and not 1.0."""
+    store = SurveyStore.open(tmp_path / "s.sqlite3")
+    outcome = run_survey(store=store, run_id="RUN1", request_text="count",
+                         options=OPTIONS, policy=RuleProposer(), flight=_StaticFlight(),
+                         detector=ScriptedDetector(_single_stop_script()),
+                         on_approval=lambda call: True, writer=_writer([]))
+    assert outcome["counts"].get("computer", {}).get("confirmed", 0) == 0
+    assert outcome["decision_quality"] == 0.0
+
+
+def test_review_decision_quality_is_one_when_the_best_addressing_follow_up_is_chosen(tmp_path):
+    """Same single-stop, UNCERTAIN, positioned object as above, but the
+    policy chooses the follow-up whose ``addresses`` list actually names
+    it: decision_quality must be 1.0."""
+    class _AddressBestFollowUp:
+        """Picks whichever propose_sweep candidate addresses the most
+        uncertain objects. At PROPOSE_SWEEP no candidate carries an
+        ``addresses`` argument at all, so every candidate ties at 0 and
+        the first (``RAIL_MID_HEIGHT``, matching this scene's geometry)
+        is kept; at REVIEW_RESULTS this is the real decision under test."""
+
+        def decide(self, request, context):
+            from sentinel.survey.proposer import _call, _escalate
+            sweeps = [c for c in context.legal.candidates
+                     if c.tool_name == "survey.propose_sweep"]
+            if not sweeps:
+                return _escalate(context, "no sweep candidate offered")
+            best = max(sweeps, key=lambda c: len(c.arguments.get("addresses", ())))
+            return _call(context, best.label, "addresses the uncertain object")
+
+    store = SurveyStore.open(tmp_path / "s.sqlite3")
+    outcome = run_survey(store=store, run_id="RUN1", request_text="count",
+                         options=OPTIONS, policy=_AddressBestFollowUp(), flight=_StaticFlight(),
+                         detector=ScriptedDetector(_single_stop_script()),
+                         on_approval=lambda call: True, writer=_writer([]))
+    assert outcome["decision_quality"] == 1.0

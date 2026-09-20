@@ -177,7 +177,15 @@ def _review_decision_quality(review, uncertain: list[dict], label: str | None) -
         return None
     follow_ups = [c for c in review.candidates if c.tool_name == "survey.propose_sweep"]
     best_addressed = max((len(c.arguments.get("addresses", ())) for c in follow_ups), default=0)
-    chosen = next((c for c in follow_ups if c.label == label), None)
+    # ``label`` is ``chosen_label``'s bare ``option_id`` (it reads
+    # ``arguments["option_id"]`` for every ``survey.propose_sweep`` call, at
+    # both decision points -- see ``proposer.chosen_label``). A follow-up
+    # candidate's own ``.label`` is prefixed ``follow_up:<option_id>``
+    # (``candidates.review_candidates``), so matching on ``c.label`` here
+    # never finds the chosen candidate and silently forces every follow-up
+    # choice to score as if nothing were addressed. Match on the bare
+    # ``option_id`` each candidate actually carries in its arguments instead.
+    chosen = next((c for c in follow_ups if c.arguments.get("option_id") == label), None)
     chosen_addressed = len(chosen.arguments.get("addresses", ())) if chosen is not None else 0
     return 1.0 if chosen_addressed >= best_addressed else 0.0
 
