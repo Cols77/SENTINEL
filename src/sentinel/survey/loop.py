@@ -37,6 +37,7 @@ rather than a private duplicate of the same query.
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .candidates import (ESCALATE_LABEL, MAX_FLIGHTS, REPORT_LABEL, propose_candidates,
@@ -116,9 +117,8 @@ def _fly_and_ingest(store, run_id, option, flight, detector) -> None:
     store.set_sweep_status(sweep_id, "FLOWN")
 
     rows = store.sightings(run_id)
-    import json as _json
     for row in rows:
-        row["bbox"] = _json.loads(row["bbox_json"]) if row["bbox_json"] else None
+        row["bbox"] = json.loads(row["bbox_json"]) if row["bbox_json"] else None
     store.set_objects(run_id, merge_sightings(rows, delta_z_cm=DELTA_Z_CM))
 
 
