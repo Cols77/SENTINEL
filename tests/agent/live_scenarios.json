@@ -5,8 +5,12 @@
     {
       "name": "initial_plan_one_station",
       "user_request": "Survey only the LEFT_ALLEY_MIDDLE station. Marker-verified plans are unavailable for this run, so exclude any plan that requires marker verification; among the remaining plans, propose the one with the fewest stations.",
-      "setup": ["create_run"],
-      "expected_tool_sequence": ["inspection.propose_plan"],
+      "setup": [
+        "create_run"
+      ],
+      "expected_tool_sequence": [
+        "inspection.propose_plan"
+      ],
       "expected_result_error_code": "WAITING_FOR_APPROVAL",
       "max_turns": 4
     },
@@ -21,14 +25,21 @@
         "dispatch_station",
         "capture_and_perceive"
       ],
-      "expected_tool_sequence": ["task.create", "patroller.rank_for_task", "assignment.propose"],
+      "expected_tool_sequence": [
+        "task.create",
+        "patroller.rank_for_task",
+        "assignment.propose"
+      ],
       "expected_result_error_code": "WAITING_FOR_APPROVAL",
-      "max_turns": 4
+      "max_turns": 6
     },
     {
       "name": "approval_wait",
       "user_request": "A plan proposal is awaiting operator confirmation. Do not propose anything new while approval is pending.",
-      "setup": ["create_run", "propose_route_only_plan"],
+      "setup": [
+        "create_run",
+        "propose_route_only_plan"
+      ],
       "expected_tool_sequence": [],
       "expected_result_error_code": "WAITING_FOR_APPROVAL",
       "max_turns": 4

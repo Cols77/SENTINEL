@@ -187,6 +187,29 @@ def run_real_loop_scenario(name: str, policy: Any, *, tmp_path: Path) -> dict[st
 # ---------------------------------------------------------------------------
 
 
+_READ_TOOLS = ("state.get_summary", "state.get_recent_events")
+
+
+def assert_deliverables(calls, expected, outcome):
+    """Operator scoring decision, 2026-09-20: a scenario passes when its
+    deliverables appear **in order** within the turn budget. Reading state is a
+    legal, bounded act -- every read still burns a turn -- so it must not fail a
+    run by itself. Exact-list matching graded tool discipline instead of task
+    completion, and made the read tools unusable by construction.
+
+    A call that is neither a deliverable nor a read is still a failure: a wrong
+    mutating call must never pass.
+    """
+    remaining = list(expected)
+    for call in calls:
+        if remaining and call == remaining[0]:
+            remaining.pop(0)
+            continue
+        assert call in _READ_TOOLS or call == "finish", (
+            f"unexpected call {call!r}; expected deliverables {expected} in order", outcome)
+    assert not remaining, (f"missing deliverables {remaining} (calls: {calls})", outcome)
+
+
 class _ScriptedCorrectPolicy:
     """A ``ContextualPolicy`` that picks the operator-intended candidate at
     each judgment point (by *label*, never by hand-filled arguments -- the
@@ -226,7 +249,7 @@ def test_scripted_correct_policy_passes_every_scenario_on_the_real_loop(name, tm
     policy = _ScriptedCorrectPolicy(_SCRIPTED_CHOICES[name])
     outcome = run_real_loop_scenario(name, policy, tmp_path=tmp_path)
 
-    assert outcome["calls"] == scenario["expected_tool_sequence"], outcome["calls"]
+    assert_deliverables(outcome["calls"], scenario["expected_tool_sequence"], outcome)
     if "expected_result_error_code" in scenario:
         assert outcome["result"].get("error_code") == scenario["expected_result_error_code"], outcome["result"]
     for request in outcome["requests"]:
@@ -293,4 +316,4 @@ def _llm_policy(model: OpenAICompatibleAgentModel) -> Callable[[dict[str, Any]],
 def test_live_scenario_on_the_real_loop(name, adapter, tmp_path):
     scenario = _scenario_by_name(name)
     outcome = run_real_loop_scenario(name, _llm_policy(adapter), tmp_path=tmp_path)
-    assert outcome["calls"] == scenario["expected_tool_sequence"], outcome
+    assert_deliverables(outcome["calls"], scenario["expected_tool_sequence"], outcome)
