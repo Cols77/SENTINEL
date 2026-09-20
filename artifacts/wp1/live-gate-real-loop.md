@@ -88,17 +88,28 @@ What the run database shows (`artifacts/wp1/evidence/2026-09-20-grant-2-qualifyi
   anything. This run is *not* "a successful `task.create` repeated"; the model never got a task made.
 - `INVALID_ARGUMENTS` is raised by the adapter's own argument parser
   (`src/sentinel/adapter/llm/parser.py`), before the gateway is involved.
-- `task.create` requires three arguments the model has to find for itself: `perception_result_id`
-  (uuid), `evidence_artifact_id` (uuid) and `section_id`. They exist only inside the
-  `DETECTION_RECORDED` event payload. The model went looking — two `state.get_recent_events` reads —
-  and that tool returns `"events": []` with a truncated, redacted prose summary (the `event_list`
-  schema defect). It then retried `task.create` with arguments that did not parse.
+- `task.create` requires three arguments: `perception_result_id` (uuid), `evidence_artifact_id` (uuid)
+  and `section_id`.
+
+> **CORRECTION, same day.** This addendum first said the model "cannot read the ids it is required to
+> pass". A free offline replay of the scenario's first request shows that is wrong as stated: **all three
+> ids were in the first request**, in `evidence_context` -- `artifact_id` as a typed field, but
+> `perception_result_id` only as `result_id=...` inside a prose summary, and `section_id` as `station=...`.
+> The model could have built a correct call on turn one. What is established is narrower:
+>
+> - no task was created, so the **first** `task.create` was rejected -- and *why* is unknown, because the
+>   harness recorded tool names only, never the model's arguments nor the rejection it was shown;
+> - the two reads that followed could not help it: `state.get_recent_events` returned `"events": []`, and
+>   all nine events shared one 512-character `safe_summary`, which cut off `DETECTION_RECORDED` -- the
+>   newest event and the only relevant one. Even uncut, the event summary's redaction keeps
+>   `station_capture` and drops `result_id`;
+> - the name mismatch (`result_id` vs `perception_result_id`, `station` vs `section_id`) is a plausible
+>   cause of the first rejection. It is a hypothesis, not a finding.
 
 **What this does and does not establish.**
 
 - It does **not** test typed result ids: no id is returned until a task exists.
-- It makes the `event_list` defect the leading explanation for this scenario's failure, not a side
-  issue: the model's only way to read the ids it must pass is the tool that cannot return them.
+- It shows the recovery path was closed: once a call is rejected, the model's read tools gave it nothing.
 - The first run's reading ("created the task correctly, then repeated it") was inferred from the call
   list and **was not checked against the database**. It may have been the same failure. That run's
   database was not kept, so this cannot be settled; treat the earlier sentence as unverified.
@@ -109,6 +120,15 @@ result into what the model is shown. The typed ids that WP0 §5 added (`plan_id`
 ranking/assignment ids) are validated, returned by `AgentLoop` — and then dropped before the prompt is
 built. The amendment shipped in the schema and the loop but never reached the model.
 
-**Do not pay for this scenario again until both are fixed**: the `event_list` items (Coherence-gated
-schema edit, proposal `2026-09-21_wp0-proposal-event-list-items.md`) and the `_bounded_previous`
-whitelist (plain code fix, no gate).
+**Fixed on `fix/model-visible-results` (2026-09-20), all without a paid call:**
+
+1. `event_list` items carry `sequence_no` / `event_type` / `summary` (wire schema; operator Coherence
+   consent C-12) and the loop returns one typed item per event.
+2. `_bounded_previous` renders the typed ids, `patroller_ids` and the event items.
+3. The evidence summary names each id by the `task.create` argument it fills.
+4. The live gate now writes every request, every model result **with its arguments**, and a copy of the
+   run database to `artifacts/wp1/live-runs/<batch>-<scenario>.*` before it scores the run
+   (`SENTINEL_LIVE_BATCH_ID` names the batch).
+
+The next paid run of this scenario is therefore the first one whose failure, if any, can be read
+rather than guessed. It still needs fresh consent.

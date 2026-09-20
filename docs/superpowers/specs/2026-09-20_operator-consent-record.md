@@ -29,7 +29,16 @@ The operator was shown five recommendations with their reasoning and answered
 | C-10 | Architecture E's operator experience is **propose, then confirm** (two operator actions per clean run) | the "hide the suggestion until expanded" mechanics in P3b1 Tasks 4-5 are to be replaced by measuring rejection rate and time-to-confirm. |
 | C-11 | The `event_list` fix should ride in the **same wire-schema revision** as the rest of the WP0 amendment | sequencing only. **This is not Coherence consent for the schema edit**: gate G-amend-rest (amendment sections 2-4 and 6) and the `event_list` item itself remain open. |
 
-Not covered by that sentence: merging `feat/p4-architecture-switch`, any push, any further paid call.
+A second operator message the same evening granted four more, in these words:
+
+| # | Scope | Recorded words | Effect |
+|---|---|---|---|
+| C-12 | Coherence consent for the `event_list` fix | "I give my coherence consent for the event_list fix" | wire-schema edit limited to the `event_list` item shape (`sequence_no`, `event_type`, `summary`). `summary` is capped at 512, the loop's existing `_SUMMARY_MAX`, not the proposal's 256, so no summary the loop already produces is truncated further. Implemented on `fix/model-visible-results`. **Does not open G-amend-rest.** Supersedes C-11. |
+| C-13 | Merge `feat/p4-architecture-switch` into `master` | "I would do it" | merged; both architectures rehearsed on `master` afterwards. |
+| C-14 | Push `master` | "I would push to master too" | `b302636..7450443` pushed 2026-09-20. Covers that push only. |
+| C-15 | The `_bounded_previous` fix is assigned to this session | "you take the _bounded_previous fix" | done on `fix/model-visible-results`. Merging that branch is a separate gate. |
+
+Not covered by any of the above: merging `fix/model-visible-results`, any further push, any further paid call.
 
 ### Earlier the same day
 
