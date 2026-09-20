@@ -34,34 +34,45 @@ except ImportError:  # pragma: no cover - temporary clean-baseline state
     FlightTestRunner = None  # type: ignore[assignment,misc]
 
 
+def _add_flight_arguments(parser: argparse.ArgumentParser) -> None:
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--real", action="store_true")
+    parser.add_argument("--log", type=Path, default=Path("artifacts/run.jsonl"))
+    parser.add_argument("--progress-log", type=Path)
+    parser.add_argument("--tello-ip", default="192.168.10.1")
+    parser.add_argument("--timeout", type=float, default=7.0)
+    parser.add_argument("--video-path", type=Path,
+                        help="record the raw H.264 stream and retain video through the run")
+    parser.add_argument("--video-only", action="store_true",
+                        help="capture video without takeoff or movement (requires --real)")
+    parser.add_argument("--video-duration", type=float, default=30.0)
+    parser.add_argument("--local-ip")
+    parser.add_argument("--interface-name")
+    parser.add_argument("--interface-index", type=int)
+    parser.add_argument("--min-battery", type=int, default=40)
+    parser.add_argument("--confirm", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sentinel")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run = subparsers.add_parser("run", help="run the approved command sequence")
-    mode = run.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--dry-run", action="store_true")
-    mode.add_argument("--real", action="store_true")
-    run.add_argument("--log", type=Path, default=Path("artifacts/run.jsonl"))
-    run.add_argument("--progress-log", type=Path)
-    run.add_argument("--tello-ip", default="192.168.10.1")
-    run.add_argument("--timeout", type=float, default=7.0)
-    run.add_argument(
-        "--video-path",
-        type=Path,
-        help="record the raw H.264 stream and retain video through the run",
-    )
-    run.add_argument(
-        "--video-only",
-        action="store_true",
-        help="capture video without takeoff or movement (requires --real)",
-    )
-    run.add_argument("--video-duration", type=float, default=30.0)
-    run.add_argument("--local-ip")
-    run.add_argument("--interface-name")
-    run.add_argument("--interface-index", type=int)
-    run.add_argument("--min-battery", type=int, default=40)
-    run.add_argument("--confirm", action="store_true")
+    _add_flight_arguments(run)
+
+    cube_run = subparsers.add_parser(
+        "cube-run", help="fly a waypoint mission inside the operating cube")
+    _add_flight_arguments(cube_run)
+    cube_run.add_argument("--site", type=Path, required=True)
+    cube_run.add_argument("--mission", type=Path, required=True)
+    cube_run.add_argument("--pose", choices=("off", "passive", "reanchor"), default="off")
+    cube_run.add_argument("--sr063-amended", action="store_true",
+                          help="assert that SR-063 has been amended to permit re-anchoring")
+    cube_run.add_argument("--tag-map", type=Path)
+    cube_run.add_argument("--db", type=Path, default=Path("artifacts/pose.db"))
+    cube_run.add_argument("--mission-log", type=Path, default=Path("artifacts/cube-mission.jsonl"))
+    cube_run.add_argument("--capture-dir", type=Path)
 
     scan = subparsers.add_parser(
         "yaw-scan",
@@ -735,6 +746,19 @@ def main(argv: list[str] | None = None) -> int:
         print("--video-duration must not be negative.")
         return 1
 
+    cube_conn: sqlite3.Connection | None = None
+    if args.command == "cube-run":
+        if args.video_only:
+            print("cube-run does not support --video-only.")
+            return 1
+        if args.pose == "reanchor" and not args.sr063_amended:
+            print("--pose reanchor lets pose correct motion, which SR-063 forbids as written. "
+                  "Amend SR-063 first, then pass --sr063-amended.")
+            return 1
+        if args.pose != "off" and args.tag_map is None:
+            print(f"--pose {args.pose} requires --tag-map.")
+            return 1
+
     progress: ProgressLogger | None = None
     if args.real:
         progress = ProgressLogger(
@@ -758,7 +782,11 @@ def main(argv: list[str] | None = None) -> int:
                 f"selected adapter {client._sentinel_adapter.local_ip}",
             )
 
-        if FlightTestRunner is None:
+        if args.command == "cube-run":
+            from .cube.mission import CubeMissionRunner, load_mission
+
+            runner_type = CubeMissionRunner
+        elif FlightTestRunner is None:
             from .runner import FlightTestRunner as runner_type
         else:
             runner_type = FlightTestRunner
@@ -776,6 +804,23 @@ def main(argv: list[str] | None = None) -> int:
                 "video_only": args.video_only,
                 "video_only_duration_s": args.video_duration,
             }
+        if args.command == "cube-run":
+            for key in ("retain_video_stream", "video_only", "video_only_duration_s"):
+                runner_kwargs.pop(key, None)
+            tag_map = None
+            if args.pose != "off":
+                tag_map = load_tag_map(str(args.tag_map))
+                if args.real and tag_map.calibration_source == "nominal":
+                    raise RuntimeError("cube-run --real refuses a nominal (uncalibrated) tag map")
+                args.db.parent.mkdir(parents=True, exist_ok=True)
+                cube_conn = sqlite3.connect(args.db)
+                ensure_schema(cube_conn)
+            runner_kwargs.update({
+                "mission": load_mission(args.mission), "site": load_site(args.site),
+                "pose_mode": args.pose, "tag_map": tag_map, "conn": cube_conn,
+                "run_id": str(uuid.uuid4()), "mission_log": args.mission_log,
+                "capture_dir": args.capture_dir,
+            })
         runner = runner_type(
             client,
             "dry-run" if args.dry_run else "real",
@@ -838,3 +883,5 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if progress is not None:
             progress.close()
+        if cube_conn is not None:
+            cube_conn.close()
