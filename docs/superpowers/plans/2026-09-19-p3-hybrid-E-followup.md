@@ -20,6 +20,11 @@
 2. **G-amend granted.** Tasks 1, 4, 5 and 6 need the amended schema. If it is refused, only Tasks 2–3 can run, and escalation keeps the P2 CLI path.
 3. The P2 shadow data exists: the live sweep plus the rehearsals.
 
+**Known gaps carried in from P2 (recorded 2026-09-20 — read before scoping Tasks 1–3):**
+
+- **One task per run.** P1's `DecisionState`/`legal_tools` model one task per run, not one task per station: a run reaches `EVIDENCE_GATE` only while `task_id is None` (`legal_tools.legal_set()`), and once a task exists for the run it never returns to `EVIDENCE_GATE` again. A run with an open task therefore never re-reaches the evidence gate, so "duplicate detection at an already-tasked station" is untestable against the real gateway, and real multi-detection patrols (several detections surfacing within one run) are unmodelled by V0. Any P3 evaluation or promotion work that assumes repeat `EVIDENCE_GATE` visits per run, or scores a "duplicate" fact, needs a `DecisionState`/`legal_tools` change first (see `fixtures/decisions/README.md`'s "Deviation from the plan" section, which hit the same wall building the P2 fixture).
+- **`EVIDENCE_GATE` promotion is now a rule-agreement measurement, not a judgment benchmark.** Per the operator's 2026-09-20 decision recorded in the P2 plan ("Make it a rule, keep shadow"), `legal_tools.legal_set()` decides `create_task`/`escalate` deterministically at `EVIDENCE_GATE` (`LegalSet.rule_choice`), and the P2 fixture's `EVIDENCE_GATE` hand labels were relabelled to mirror that rule exactly (0.75 score cut, inside-plan check). `shadow_eval.score` at `EVIDENCE_GATE` therefore measures whether an advisor agrees with a rule that is correct by construction, not independent judgment skill — on its own it cannot justify Task 2/3 promoting a policy to *decide* `EVIDENCE_GATE`, since a promoted policy would only be re-deriving the existing rule. `SELECT_PLAN` has no `rule_choice`, so it is the only decision point in V0 where an advisor could add judgment beyond the deterministic rule; Tasks 2–4's promotion scope should be read with that in mind.
+
 ## Promotion criteria (pre-registered here, before any P3 data is read)
 
 A policy is promoted to **act** at a decision point only if all six hold, computed by `shadow_eval.score` over the P2 shadow data plus a fresh consented sweep:
