@@ -209,8 +209,14 @@ def test_evidence_task_score_is_075_and_distinct_from_the_static_veto_threshold(
 
 
 def test_judgment_points_is_select_plan_only_and_advisory_points_is_the_superset():
+    # JUDGMENT_POINTS is pinned exactly: widening it adds operator actions and
+    # would break the operator's "approvals only" load target (2026-09-20).
     assert JUDGMENT_POINTS == frozenset({SELECT_PLAN})
-    assert ADVISORY_POINTS == frozenset({SELECT_PLAN, EVIDENCE_GATE})
+    # ADVISORY_POINTS is only pinned as a superset, as this test's name says:
+    # shadowing more decision points is safe (advisors never act) and P3 adds
+    # ASSIGN near-ties and REPLAN. Every judgment point must be shadowed.
+    assert ADVISORY_POINTS >= frozenset({SELECT_PLAN, EVIDENCE_GATE})
+    assert JUDGMENT_POINTS <= ADVISORY_POINTS
 
 
 @pytest.mark.parametrize("raw_score", [0.51, 0.6, 0.74])
