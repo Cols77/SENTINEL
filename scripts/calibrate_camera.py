@@ -2,7 +2,7 @@
 
 Usage:
     uv run python scripts/calibrate_camera.py IMAGE_DIR --tag-map IN.json --out OUT.json \
-        [--pattern 9x6] [--square-m 0.025] [--max-rms 0.5]
+        --square-m 0.025 [--pattern 7x6] [--max-rms 0.5]
 
 --pattern is the number of INNER corners (columns x rows). The input tag map is
 never modified; K and dist_coeffs are copied into a new file with
@@ -76,8 +76,9 @@ def main(argv=None):
     ap.add_argument("image_dir")
     ap.add_argument("--tag-map", required=True, help="input tag-map v1 JSON (read only)")
     ap.add_argument("--out", required=True, help="new output tag-map path")
-    ap.add_argument("--pattern", default="9x6", help="inner corners COLSxROWS")
-    ap.add_argument("--square-m", type=float, default=0.025)
+    ap.add_argument("--pattern", default="7x6", help="inner corners COLSxROWS")
+    ap.add_argument("--square-m", type=float, required=True,
+                    help="measured side of one printed square, in metres (sets the scale)")
     ap.add_argument("--max-rms", type=float, default=DEFAULT_MAX_RMS_PX,
                     help="reject the calibration if RMS reprojection error (px) exceeds this")
     args = ap.parse_args(argv)
@@ -88,7 +89,7 @@ def main(argv=None):
     try:
         cols, rows = (int(v) for v in args.pattern.lower().split("x"))
     except ValueError:
-        ap.error("--pattern must look like 9x6")
+        ap.error("--pattern must look like 7x6")
     doc = json.loads(src.read_text(encoding="utf-8"))
     if doc.get("schema_version") != "tag-map-v1":
         print(f"unsupported tag map: {doc.get('schema_version')!r}", file=sys.stderr)

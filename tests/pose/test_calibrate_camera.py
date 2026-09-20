@@ -114,7 +114,7 @@ def test_main_returns_nonzero_when_calibration_fails(tmp_path):
     d = tmp_path / "empty"
     d.mkdir()
     out = tmp_path / "o.json"
-    assert cal.main([str(d), "--tag-map", str(FIXTURE), "--out", str(out)]) != 0
+    assert cal.main([str(d), "--tag-map", str(FIXTURE), "--out", str(out), "--square-m", "0.024"]) != 0
     assert not out.exists()
 
 
@@ -138,3 +138,9 @@ def test_main_rejects_calibration_above_max_rms_and_writes_nothing(board_dir, tm
 
 def test_main_default_max_rms_is_half_pixel():
     assert cal.DEFAULT_MAX_RMS_PX == 0.5
+
+
+def test_square_size_is_required(board_dir, tmp_path):
+    # a silently wrong default square size would scale every distance
+    with pytest.raises(SystemExit):
+        cal.main([str(board_dir), "--tag-map", str(FIXTURE), "--out", str(tmp_path / "o.json")])
