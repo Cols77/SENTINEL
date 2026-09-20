@@ -31,6 +31,7 @@ FIXTURE = Path(__file__).resolve().parents[2] / "fixtures/decisions/turns.v1.jso
 # appear inside a conditional clause, never as a bare statement of fact.
 _FACT_DEPENDENT = (
     "already exists",
+    "already open",
     "same station",
     "inside the approved plan",
     "passed the score",
@@ -55,18 +56,45 @@ def _sentences(text: str) -> list[str]:
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
 
 
-@pytest.mark.parametrize("point", _UNCONDITIONALLY_CONSULTED)
-def test_no_instruction_asserts_a_fact_dependent_premise(point: str):
-    """Every fact-dependent phrase must sit inside a conditional clause."""
-    assert point in INSTRUCTIONS
-    for sentence in _sentences(INSTRUCTIONS[point]):
+def _renderings(point: str) -> list[tuple[str, str]]:
+    """Every string a decision point can actually send, labelled. A plain
+    instruction has one; a fact-derived one has a rendering per branch, and
+    EVERY branch must satisfy the invariant -- checking only the default would
+    miss exactly the wording that caused the defect."""
+    value = INSTRUCTIONS[point]
+    if not callable(value):
+        return [("static", value)]
+    return [
+        ("no-duplicate", value({"detection_duplicates_open_task": False})),
+        ("duplicate", value({"detection_duplicates_open_task": True})),
+        ("facts-missing", value({})),
+    ]
+
+
+def _assert_no_bare_premise(point: str, branch: str, text: str) -> None:
+    for sentence in _sentences(text):
         lowered = sentence.lower()
         mentioned = [p for p in _FACT_DEPENDENT if p in lowered]
         if not mentioned:
             continue
+        if branch == "duplicate" and mentioned == ["already open"]:
+            continue  # true by construction: this branch is only sent when it holds
         assert any(re.search(rf"\b{w}\b", lowered) for w in _CONDITIONAL), (
-            f"{point}: this sentence states a packet-dependent condition as fact, "
-            f"with no conditional marker: {sentence!r} (mentions {mentioned})")
+            f"{point} [{branch}]: this sentence states a packet-dependent condition as "
+            f"fact, with no conditional marker: {sentence!r} (mentions {mentioned})")
+
+
+@pytest.mark.parametrize("point", _UNCONDITIONALLY_CONSULTED)
+def test_no_instruction_asserts_a_fact_dependent_premise(point: str):
+    """Every fact-dependent phrase must sit inside a conditional clause, in
+    every rendering the point can produce.
+
+    One exception is principled: a fact-DERIVED instruction may state the very
+    fact it branched on, because it is true by construction in that branch.
+    The duplicate rendering is only ever sent when a duplicate exists."""
+    assert point in INSTRUCTIONS
+    for branch, text in _renderings(point):
+        _assert_no_bare_premise(point, branch, text)
 
 
 def test_evidence_gate_turns_the_advisor_sees_mostly_contradict_the_old_premises():
@@ -82,9 +110,27 @@ def test_evidence_gate_turns_the_advisor_sees_mostly_contradict_the_old_premises
 
 
 def test_evidence_gate_instruction_still_offers_both_candidates_by_name():
-    """Accuracy must not cost the advisor its options: both labels stay named."""
-    text = INSTRUCTIONS["EVIDENCE_GATE"]
-    assert "'create_task'" in text and "'escalate'" in text
+    """Accuracy must not cost the advisor its options: both labels stay named
+    in every branch."""
+    for _branch, text in _renderings("EVIDENCE_GATE"):
+        assert "'create_task'" in text and "'escalate'" in text
+
+
+def test_evidence_gate_branches_describe_different_decisions():
+    """The point of deriving from facts: a duplicate turn asks "same hazard or
+    a second one?", a plain turn asks "does this warrant a task at all?". If
+    the two renderings were identical the callable would be pointless."""
+    by_branch = dict(_renderings("EVIDENCE_GATE"))
+    assert by_branch["duplicate"] != by_branch["no-duplicate"]
+    assert "second, distinct hazard" in by_branch["duplicate"]
+    assert "same hazard seen again" in by_branch["duplicate"]
+    assert "outside the approved plan" in by_branch["no-duplicate"]
+
+
+def test_absent_facts_fall_back_to_the_non_duplicate_wording():
+    """A packet without the duplicate fact must not claim one exists."""
+    by_branch = dict(_renderings("EVIDENCE_GATE"))
+    assert by_branch["facts-missing"] == by_branch["no-duplicate"]
 
 
 def test_assign_instruction_is_only_sent_on_near_ties_so_may_state_it():
