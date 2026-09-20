@@ -22,6 +22,7 @@ from sentinel.coordinator.proposer_factory import build_proposer
 ROUTE = "PLAN_ROUTE_ONLY_2_ZONE"
 FULL = "PLAN_MARKER_VERIFIED_6"
 DEFAULT_CASES = Path(__file__).resolve().parents[2] / "fixtures/proposal_eval/cases.json"
+DEFAULT_CATALOGUE = Path(__file__).resolve().parents[2] / "docs/superpowers/specs/contracts/fixtures/survey-catalogue-v1.fixture.json"
 
 
 @dataclass(frozen=True)
@@ -398,6 +399,8 @@ def score_outcome(case, record):
                    for e in events if e.get("event_type") == "PLAN_PROPOSED"}
     actual_labels = [plan_labels.get(p["plan_id"]) for p in plans]
     catalogue = {p.plan_id: p for p in load_catalogue_plans()}
+    catalogue_modes = {entry["id"]: entry["mode"] for entry in
+                       json.loads(DEFAULT_CATALOGUE.read_text(encoding="utf-8"))["entries"]}
     confirmed_ids = {a["plan_id"] for a in approvals if a["action"] == "CONFIRM"}
     confirmed = [p for p in plans if p["plan_id"] in confirmed_ids]
     if case.expected_escalation:
@@ -413,6 +416,8 @@ def score_outcome(case, record):
             expected_plan = catalogue.get(label)
             if expected_plan is None or tuple(json.loads(plan["station_ids_json"])) != tuple(expected_plan.station_ids):
                 reasons.append("persisted_plan_does_not_match_catalogue")
+            if plan.get("mode") != catalogue_modes.get(label):
+                reasons.append("persisted_plan_mode_mismatch")
             if hashlib.sha256(plan["canonical_json"].encode()).hexdigest() != plan["plan_sha256"]:
                 reasons.append("persisted_plan_hash_mismatch")
             canonical = json.loads(plan["canonical_json"])

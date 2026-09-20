@@ -187,7 +187,7 @@ def main(argv=None):
         manifest["case_ids"] = [c.case_id for c in cases]
         manifest["case_definitions"] = [asdict(c) for c in cases]
         manifest["excluded_cases"] = excluded
-        manifest["maximum_fresh_provider_calls"] = maximum if args.mode == "live" else 0
+        manifest["maximum_fresh_provider_calls"] = min(maximum, budget_limit) if args.mode == "live" else 0
         captured, captured_identities = defaultdict(list), defaultdict(list)
         if args.recording:
             captured, captured_identities, source_manifest = _load_recording(args.recording, manifest, cases, arms, args.repeats)

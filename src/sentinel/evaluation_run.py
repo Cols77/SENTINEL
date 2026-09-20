@@ -80,10 +80,10 @@ def build_manifest(*, root: Path, fixture: Path, catalogue: Path, arms: list[str
 def sanitized(value: Any) -> Any:
     """Exclude credential fields, known credential values, and non-JSON objects."""
     secret_names = {"authorization", "proxyauthorization", "apikey", "xapikey", "accesstoken", "refreshtoken", "credential", "credentials", "password", "cookie", "setcookie"}
-    if is_dataclass(value):
-        value = asdict(value)
-    elif hasattr(value, "to_dict"):
+    if callable(getattr(value, "to_dict", None)):
         value = value.to_dict()
+    elif is_dataclass(value):
+        value = asdict(value)
     if isinstance(value, dict):
         return {sanitized(str(k)): sanitized(v) for k, v in value.items()
                 if str(k).lower().replace("_", "").replace("-", "") not in secret_names}
@@ -212,7 +212,17 @@ def normalized_request(value):
                         # Only coordinator event summaries encode structured data.
                         # User prose and truncated/non-JSON summaries stay exact.
                         item = {**item, "summary": {"event_type": event_type, "payload": payload}}
-            return {k: normalize(v, k) for k, v in sorted(item.items())}
+            normalized = {k: normalize(v, k) for k, v in sorted(item.items())}
+            # A plan hash includes its generated UUID. Remap only a complete,
+            # internally valid reference; arbitrary hashes remain strict inputs.
+            plan_fields = ("plan_id", "catalogue_id", "catalogue_revision", "station_ids")
+            if key == "plan_reference" and all(field in item for field in plan_fields):
+                source_plan = {field: item[field] for field in plan_fields}
+                source_hash = hashlib.sha256(json.dumps(source_plan, separators=(",", ":")).encode()).hexdigest()
+                if (item.get("plan_sha256") == source_hash
+                        and normalized["plan_id"] != item["plan_id"]):
+                    normalized["plan_sha256"] = manifest_digest({field: normalized[field] for field in plan_fields})
+            return normalized
         if isinstance(item, (tuple, list)):
             return [normalize(v, key) for v in item]
         if key == "deadline":

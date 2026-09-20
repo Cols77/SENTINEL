@@ -14,6 +14,14 @@ def test_dry_run_validates_and_prints_budget_without_artifacts(tmp_path, capsys)
     assert not out.exists()
 
 
+def test_live_dry_run_reports_budgeted_maximum_fresh_calls(capsys):
+    from scripts.proposal_sweep import main
+    assert main(["--mode", "live", "--arms", "jev", "--dry-run", "--max-calls", "5"]) == 0
+    manifest = json.loads(capsys.readouterr().out)["manifest"]
+    assert manifest["maximum_possible_calls"] > 5
+    assert manifest["maximum_fresh_provider_calls"] == 5
+
+
 def test_live_refuses_before_initializing_provider_or_artifacts(tmp_path, monkeypatch):
     from scripts import proposal_sweep
     monkeypatch.delenv("SENTINEL_PROPOSAL_EVAL_CONSENT", raising=False)
@@ -110,3 +118,25 @@ def test_live_jev_preserves_malformed_http_body(monkeypatch):
     responses = [r for r in records if r["record"] == "provider_wire_result"]
     assert responses and responses[0]["http_status"] == 200
     assert "upstream failure" in json.dumps(responses[0])
+
+
+def test_recorded_rejection_and_reproposal_preserves_request_integrity(tmp_path):
+    from dataclasses import asdict
+    from sentinel.proposal_eval import load_cases
+    from scripts.proposal_sweep import main
+    case = next(c for c in load_cases() if c.case_id == "reject_then_different_plan")
+    fixture = tmp_path / "cases.json"
+    fixture.write_text(json.dumps({"version": "proposal-outcomes.v1", "cases": [asdict(case)]}))
+    source, replay = tmp_path / "source", tmp_path / "replay"
+    common = ["--fixtures", str(fixture), "--execute", "--arms", "llm", "jev", "--repeats", "1"]
+    assert main([*common, "--output", str(source)]) == 0
+    assert main([*common, "--mode", "recorded", "--recording", str(source / "raw.jsonl"), "--output", str(replay)]) == 0
+    for arm in ("llm", "jev"):
+        before = json.loads((source / f"repeat-1/{case.case_id}/{arm}/final-outcome.json").read_text())
+        after = json.loads((replay / f"repeat-1/{case.case_id}/{arm}/final-outcome.json").read_text())
+        assert before["metrics"]["outcome_success"]
+        assert after["error"] is None
+        assert after["metrics"]["outcome_success"]
+        assert after["metrics"]["accepted_proposals"] == before["metrics"]["accepted_proposals"]
+        if arm == "llm":
+            assert after["metrics"]["accepted_proposals"] == 2

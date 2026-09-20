@@ -38,6 +38,17 @@ def test_raw_records_append_and_redact_secrets(tmp_path, monkeypatch):
     assert [json.loads(line)["record"] for line in text.splitlines()] == ["request", "result"]
 
 
+def test_sanitized_typed_result_preserves_wire_contract():
+    from sentinel.contracts import AgentModelResult
+    from sentinel.coordinator.policy import one_call
+    from sentinel.evaluation_run import sanitized
+    result = AgentModelResult.from_dict(one_call(
+        {"agent_run_id": "11111111-1111-4111-8111-111111111111"},
+        "inspection.propose_plan", {"catalogue_plan_id": "PLAN_ROUTE_ONLY_2_ZONE"}))
+    assert sanitized(result) == result.to_dict()
+    assert AgentModelResult.from_dict(sanitized(result)).to_dict() == result.to_dict()
+
+
 def test_recorded_failure_replays_without_network(tmp_path):
     from sentinel.evaluation_run import RecordedTransport
     transport = RecordedTransport("jev", [{"error_category": "provider_error"}])
@@ -153,3 +164,23 @@ def test_replay_event_summary_remaps_ids_and_preserves_semantics():
     assert normalized_request(request(first)) != normalized_request(request(second, event_type="PLAN_REJECTED"))
     # An arbitrary dictionary with summary text is not a coordinator event.
     assert normalized_request({"summary": first}) != normalized_request({"summary": second})
+
+
+def test_replay_validates_plan_hash_before_remapping_runtime_identity():
+    import hashlib
+    from sentinel.evaluation_run import normalized_request
+    def reference(identifier, stations=("LEFT_ALLEY_MIDDLE",)):
+        payload = {"plan_id": identifier, "catalogue_id": "SURVEY_CATALOGUE_V1",
+                   "catalogue_revision": "REV_1", "station_ids": list(stations)}
+        return {**payload, "plan_sha256": hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()}
+    first = reference("11111111-1111-4111-8111-111111111111")
+    second = reference("22222222-2222-4222-8222-222222222222")
+    assert normalized_request({"plan_reference": first}) == normalized_request({"plan_reference": second})
+    altered = {**second, "plan_sha256": "0" * 64}
+    assert normalized_request({"plan_reference": first}) != normalized_request({"plan_reference": altered})
+    altered = reference(second["plan_id"], ("RIGHT_ALLEY_MIDDLE",))
+    assert normalized_request({"plan_reference": first}) != normalized_request({"plan_reference": altered})
+    altered = {**second, "catalogue_revision": "REV_2"}
+    assert normalized_request({"plan_reference": first}) != normalized_request({"plan_reference": altered})
+    assert normalized_request({"plan_reference": first, "model": "model-a"}) != normalized_request({"plan_reference": second, "model": "model-b"})
+    assert normalized_request({"plan_sha256": first["plan_sha256"]}) != normalized_request({"plan_sha256": second["plan_sha256"]})

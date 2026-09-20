@@ -218,3 +218,11 @@ def test_extra_rejected_task_command_is_failure_even_with_valid_effects(tmp_path
     rejected["accepted"] = False
     record["tool_attempts"].append(rejected)
     assert not score_outcome(case, record)["outcome_success"]
+
+
+def test_scorer_rejects_persisted_plan_with_wrong_execution_mode(tmp_path):
+    case = next(c for c in load_cases() if c.case_id == "marker_complete")
+    record = run_case(case, "F", tmp_path)
+    assert record["metrics"]["outcome_success"]
+    record["snapshot"]["plans"][0]["mode"] = "ROUTE_ONLY_2_ZONE"
+    assert not score_outcome(case, record)["outcome_success"]
