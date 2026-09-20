@@ -6,6 +6,7 @@ filming-consent claims are involved. Source snapshots detect concurrent changes.
 from __future__ import annotations
 
 import argparse
+import copy
 from contextlib import nullcontext
 import hashlib
 import importlib.util
@@ -78,6 +79,8 @@ def execute(args):
     retained_directory = Path(tempfile.mkdtemp(prefix='survey-run-', dir=output_parent))
     append_stream = retained_directory / 'episodes.jsonl'
     result = {'evidence_kind': 'synthetic_production_loop_with_scripted_advisors',
+              'read_dispatch_supported': False,
+              'read_dispatch_evidence': 'source_reviewed_not_dispatched',
               'option_generation': 'independent_manifest_adapter_not_production_generate_options',
               'artifact_directory': str(retained_directory), 'append_stream_path': str(append_stream),
               'manifest': {'scene_path': str(Path(args.scene).resolve()), 'survey_root': str(root),
@@ -110,6 +113,8 @@ def execute(args):
                     return next((label for label in labels if label.startswith('follow_up:')
                                  and label.split(':', 1)[1] not in flown), 'report')
                 def choice(self, state, instruction, *, criteria, name):
+                    routes.append(copy.deepcopy({'record': 'scripted_judge_request', 'state': state,
+                        'instruction': instruction, 'criteria': criteria, 'name': name}))
                     chosen = self.label(criteria)
                     return {'value': chosen, 'confidence': 0.95,
                             'probabilities': {label: 0.95 if label == chosen else 0.01 for label in criteria}}
@@ -126,8 +131,14 @@ def execute(args):
                       'J': lambda: JevProposer(Advisor(), Sink())}[mode]()
             class RecordedPolicy:
                 def decide(self, request, context):
+                    packet = copy.deepcopy({'request': request, 'context': {
+                        'run_id': context.run_id, 'decision_point': context.legal.decision_point,
+                        'results': context.results,
+                        'legal_candidates': [{'label': c.label, 'tool_name': c.tool_name,
+                            'arguments': c.arguments, 'description': c.description}
+                            for c in context.legal.candidates]}})
                     output = policy.decide(request, context)
-                    decisions.append({'point': context.legal.decision_point, 'result': output,
+                    decisions.append({**packet, 'point': context.legal.decision_point, 'result': copy.deepcopy(output),
                         'legal_tool_names': sorted({c.tool_name for c in context.legal.candidates}),
                         'site_in_request': 'site' in request})
                     return output

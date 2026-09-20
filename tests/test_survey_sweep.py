@@ -81,3 +81,24 @@ def test_final_databases_and_append_evidence_survive_runner_exit(tmp_path):
     stream = Path(report['append_stream_path']).read_text().splitlines()
     assert json.loads(stream[0])['mode'] == 'F'
     assert report['option_generation'] == 'independent_manifest_adapter_not_production_generate_options'
+
+
+def test_review_records_actual_request_and_fresh_results(tmp_path):
+    report = run(tmp_path, '--approve-sweeps', '--modes', 'E')
+    decisions = report['modes']['E']['decisions']
+    assert decisions[0]['request']['request_text'] == 'Count the scene objects'
+    assert decisions[0]['request']['site']['options']
+    review = next(d for d in decisions if d['point'] == 'REVIEW_RESULTS')
+    assert review['context']['results']['flights_used'] == 1
+    assert review['context']['results']['counts']['phone']['uncertain'] == 1
+    assert review['context']['results']['unanalysed'] == 0
+    assert review['context']['legal_candidates']
+
+
+def test_automatic_reads_are_not_claimed_as_dispatchable_tools(tmp_path):
+    report = run(tmp_path, '--approve-sweeps', '--modes', 'F')
+    assert report['read_dispatch_supported'] is False
+    assert report['read_dispatch_evidence'] == 'source_reviewed_not_dispatched'
+    assert report['modes']['F']['reads']['get_site'] > 0
+    assert all('survey.get_site' not in d['legal_tool_names'] and 'survey.get_results' not in d['legal_tool_names']
+               for d in report['modes']['F']['decisions'])

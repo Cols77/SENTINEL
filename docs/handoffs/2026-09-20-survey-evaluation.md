@@ -2,7 +2,28 @@
 
 Read-only survey source inspection at 73846e4 (feat/survey-counting), following f8d0f61 (candidates), 341eaa1 (geometry/merge), and 4eb271d (detector). Handoff resides on P3b1, inspected at f13568b. No survey production file was modified. No tests, model calls, flight, or capture were run for this review. Reproductions below are deterministic proposed checks and source-derived expected outcomes, not claimed execution results.
 
-## Landed and missing
+## Latest dependency recheck — 2026-09-21
+
+Read-only source recheck at **`a59a3af`**, with a clean survey working tree. The
+only change from `96413ac` is moving the loop's json import to module scope;
+functional findings remain unchanged. No tests or baseline were run for this
+documentation recheck. The parent-run baseline's recorded before/after source
+snapshots are authoritative for its measured results.
+
+Actual production-loop replay is available through the external-checkout bridge.
+Authentic camera/provider quality and live E/J reasoning remain unmeasured.
+Production option generation is not exercised by that bridge. Historical
+absent-loop claims below describe `73846e4`, not current dependencies.
+
+Still source-reviewed at `a59a3af`: fictitious close-look range improvement;
+axial depth treated as radial range; missing same-frame merge exclusion;
+overstated follow-up footprint and ignored depth; raw range-spread degradation;
+fixed 55 cm surface height; malformed advisor result handling; and missing
+follow-up approval descriptions. These are not repaired by evaluator work.
+The bbox_json-to-bbox integration gap is now bridged by the actual loop;
+get_site and get_results are real functions invoked by that loop.
+
+## Landed and missing at the original inspection
 
 Present: envelope/options/observability, detector doubles, geometry/merge, store, candidates/context, F/E/J proposers and corresponding unit test files. Absent at inspected HEAD: survey/loop.py, report.py, consent.py, eval.py, cube bridge and the Task 9 episode harness. Consequently Scene, load_scene, score_episode, and compare_modes remain plan interfaces, not callable production APIs.
 
@@ -159,3 +180,20 @@ The bridge uses independently constructed manifest-derived SweepOption objects.
 It exercises the production loop/store/detector/proposer seams, but does not run
 production generate_options. Close-look range and generated-option geometry
 findings remain source-reviewed, not exercised or corrected by this replay.
+
+Read-tool limitation at `a59a3af`: get_site/get_results are automatically called
+Python functions inside run_survey. They are absent from legal candidate tool
+names, and chosen_label/run_survey has no dispatch branch for model-issued
+survey.get_site or survey.get_results calls. Invocation counters therefore
+prove automatic reads only, not tool dispatch coverage. The bridge reports
+read_dispatch_supported=false and source-reviewed, not-dispatched evidence.
+Model-issued read-tool dispatch remains blocked pending production work.
+
+Decision evidence now retains deep copies of the full policy request, context
+results, run/decision IDs, legal candidate calls/descriptions and returned calls.
+The scripted Jev input additionally retains its actual state, instruction,
+criteria and decision name. A regression checks that the review decision sees
+one flown sweep, the newly stored uncertain phone and zero unanalysed frames.
+The two focused regressions first failed on missing evidence fields, then
+passed in 2.61 seconds after the recording change. They prove freshness at the
+automatic review boundary; they do not prove dispatch of advertised read tools.
