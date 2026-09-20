@@ -66,3 +66,49 @@ Whole batch (this gate plus both shadow arms, including the re-runs after each
 fix): **$0.40**, against a consent-time estimate of "under $0.10". The estimate
 was carried over from J5's much smaller payloads and was not refreshed before
 the re-runs.
+
+---
+
+# Addendum — re-run of `qualifying_evidence_to_task` against typed result ids
+
+**Batch:** `2026-09-20-operator-grant-2` (consent C-9). **Master:** `b8af3b9`. **Model:** `z-ai/glm-5.3`.
+**Spend:** 4 model calls, one scenario. **Command:**
+
+    SENTINEL_RUN_LIVE_LLM_ACCEPTANCE=1 uv run python -m pytest \
+        tests/agent/test_live_gate_real_loop.py -k qualifying_evidence_to_task -q -o addopts=''
+
+**Result: fail — and the hypothesis it was run to test was never reached.**
+
+Calls: `task.create` → `state.get_recent_events` → `state.get_recent_events` → `task.create`;
+final result `FAILED / INVALID_ARGUMENTS`.
+
+What the run database shows (`artifacts/wp1/evidence/2026-09-20-grant-2-qualifying_evidence_to_task.sqlite3`):
+
+- **The `tasks` table is empty and there is no `TASK_CREATED` event.** Neither `task.create` created
+  anything. This run is *not* "a successful `task.create` repeated"; the model never got a task made.
+- `INVALID_ARGUMENTS` is raised by the adapter's own argument parser
+  (`src/sentinel/adapter/llm/parser.py`), before the gateway is involved.
+- `task.create` requires three arguments the model has to find for itself: `perception_result_id`
+  (uuid), `evidence_artifact_id` (uuid) and `section_id`. They exist only inside the
+  `DETECTION_RECORDED` event payload. The model went looking — two `state.get_recent_events` reads —
+  and that tool returns `"events": []` with a truncated, redacted prose summary (the `event_list`
+  schema defect). It then retried `task.create` with arguments that did not parse.
+
+**What this does and does not establish.**
+
+- It does **not** test typed result ids: no id is returned until a task exists.
+- It makes the `event_list` defect the leading explanation for this scenario's failure, not a side
+  issue: the model's only way to read the ids it must pass is the tool that cannot return them.
+- The first run's reading ("created the task correctly, then repeated it") was inferred from the call
+  list and **was not checked against the database**. It may have been the same failure. That run's
+  database was not kept, so this cannot be settled; treat the earlier sentence as unverified.
+
+**A second defect found while reading the code (not exercised by this run, no paid call needed to see it):**
+`prompt._bounded_previous` copies only `kind`, `run_status`, `phase` and `state_version` from a tool
+result into what the model is shown. The typed ids that WP0 §5 added (`plan_id`, `task_id`, and the
+ranking/assignment ids) are validated, returned by `AgentLoop` — and then dropped before the prompt is
+built. The amendment shipped in the schema and the loop but never reached the model.
+
+**Do not pay for this scenario again until both are fixed**: the `event_list` items (Coherence-gated
+schema edit, proposal `2026-09-21_wp0-proposal-event-list-items.md`) and the `_bounded_previous`
+whitelist (plain code fix, no gate).

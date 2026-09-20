@@ -16,6 +16,21 @@ may touch, and any consent not written here has not been given.
 | C-5 | Coherence consent for the three pending proposals (see below) | "proceed with all" | registration may proceed; **implementation still follows the normal review path** |
 | C-6 | Paid live runs: the LLM gate on the fixed loop (≤72 calls, `z-ai/glm-5.3`) and the shadow sweep (288 calls, `typesafe/jev-1.13-20260917` and `z-ai/glm-5.3-flash`, estimated under $0.10) | "proceed with all" | batch id `2026-09-20-operator-grant-1`, run 2026-09-20 |
 
+### Later the same day — session that reconciled the two handoffs and executed P4
+
+The operator was shown five recommendations with their reasoning and answered
+**"proceed with your recommendations"**. That sentence covers exactly these, and nothing else:
+
+| # | Scope | Effect |
+|---|---|---|
+| C-7 | Merge `fix/astra-evidence-and-coverage` into `master` locally | merge `b8af3b9`. Not pushed. |
+| C-8 | **Defer** the Jev re-sweep (144 calls) | no spend. Reason: no decision point exists where Jev could be promoted, so the result has no consumer. Revisit with proposal item P-9 (pose quality). |
+| C-9 | One paid re-run of the live gate scenario `qualifying_evidence_to_task` on `z-ai/glm-5.3`, stated beforehand as "about 3 calls, a few cents", refreshed to "6-12 calls at most, under $0.05" before spending | batch id `2026-09-20-operator-grant-2`, 4 calls made, run once. Result in `artifacts/wp1/live-gate-real-loop.md` (addendum). **The batch is closed**: a further re-run needs fresh consent. |
+| C-10 | Architecture E's operator experience is **propose, then confirm** (two operator actions per clean run) | the "hide the suggestion until expanded" mechanics in P3b1 Tasks 4-5 are to be replaced by measuring rejection rate and time-to-confirm. |
+| C-11 | The `event_list` fix should ride in the **same wire-schema revision** as the rest of the WP0 amendment | sequencing only. **This is not Coherence consent for the schema edit**: gate G-amend-rest (amendment sections 2-4 and 6) and the `event_list` item itself remain open. |
+
+Not covered by that sentence: merging `feat/p4-architecture-switch`, any push, any further paid call.
+
 ### Earlier the same day
 
 | # | Scope | Recorded words |
