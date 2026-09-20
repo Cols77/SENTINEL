@@ -86,9 +86,16 @@ file a report (code-checked). §12 records the convergence intent.
 | `survey.loop` | The eight-step run; enforces the two-flight cap and the report check. | all of the above |
 | `survey.eval` | Episode harness: replay a scene, score the run against ground truth. | `survey.loop` |
 
-Reused unchanged: the model adapter, the `ContextualPolicy` seam (so architecture F/E selection and
-Codex's `LlmProposer` both work here), the raw-record persistence pattern from the live gate, and
+Reused unchanged: `coordinator.legal_tools.Candidate` and `LegalSet` (both fully generic), the model
+adapter, `coordinator.shadow.AuditSink`, the raw-record persistence pattern from the live gate, and
 the WP5 mission runner.
+
+**Not** reusable, verified 2026-09-20: `coordinator.policy.PolicyContext` types its `state` field to
+the alley's `DecisionState`, so P3b1's `LlmProposer` cannot take a survey context. The survey flow
+defines its own `SurveyContext` and `SurveyPolicy` with the same method shape. What transfers from
+P3b1 is the **validation pattern** — exactly one call, a legal tool, a legal label, a non-blank
+reason, fail closed on anything else — not the class. An earlier revision of this spec claimed the
+class plugged in unchanged; that was wrong.
 
 ### 3.3 The run, step by step
 
@@ -174,8 +181,9 @@ second flight would be theatre.
 
 ### 5.2 Triangulation
 
-Each sighting yields a **bearing** from the box's horizontal centre: `θ = atan((u − 320)/f)` in the
-drone frame, plus the frame's position and heading. Two sightings may be the same object when they
+Each sighting yields a **bearing** from the box's horizontal centre: `θ = atan((u − 480)/f)` in the
+drone frame, plus the frame's position and heading. The principal point is 480, half of the 960 px
+frame width. Two sightings may be the same object when they
 share a class, come from different stops, and their rays cross in front of both at 0.5–12 m.
 Crossing points are clustered; tolerance grows with distance.
 
