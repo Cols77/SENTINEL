@@ -15,7 +15,7 @@
       "y_units": 23.6,
       "z_units": 1.52,
       "yaw_deg": 180.0,
-      "size_m": 0.20,
+      "size_m": 0.192,
       "mounting": "WALL"
     },
     {
@@ -25,7 +25,7 @@
       "y_units": 28.9,
       "z_units": 0.38,
       "yaw_deg": -90.0,
-      "size_m": 0.20,
+      "size_m": 0.192,
       "mounting": "WALL"
     },
     {
@@ -35,7 +35,7 @@
       "y_units": 0.0,
       "z_units": 1.2,
       "yaw_deg": 90.0,
-      "size_m": 0.20,
+      "size_m": 0.192,
       "mounting": "WALL"
     },
     {
@@ -45,7 +45,7 @@
       "y_units": 6.5,
       "z_units": 1.02,
       "yaw_deg": 0.0,
-      "size_m": 0.20,
+      "size_m": 0.192,
       "mounting": "WALL"
     },
     {
@@ -55,7 +55,7 @@
       "y_units": 28.9,
       "z_units": 0.52,
       "yaw_deg": -90.0,
-      "size_m": 0.20,
+      "size_m": 0.192,
       "mounting": "WALL"
     },
     {
@@ -65,7 +65,7 @@
       "y_units": 0.0,
       "z_units": 0.55,
       "yaw_deg": 90.0,
-      "size_m": 0.20,
+      "size_m": 0.192,
       "mounting": "WALL"
     }
   ],
