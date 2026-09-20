@@ -70,10 +70,18 @@ The current offline results are published separately in the
 The inspection report distinguishes execution from subsequent scoring revisions;
 the original artifacts remain historical and unchanged.
 
-Final integration verification: **857 passed, 3 skipped** in the serial pytest
+Initial implementation verification: **857 passed, 3 skipped** in the serial pytest
 suite on 2026-09-21. The retained local log is
 `artifacts/proposal-eval/full-pytest.log`; offline capability outcomes and
 production survey limits remain distinct from regression test results.
+
+The subsequent [integration review](reports/2026-09-21-evaluation-integration-review.md)
+records corrected replay, validation and failure-retention boundaries plus the
+current verification. The [12 generated approved-catalogue requests](../fixtures/proposal_eval/generated-requests-v1.md)
+can be selected with `--fixtures fixtures/proposal_eval/generated-requests-v1.json`.
+The separate [24 completed v2 requests](../fixtures/decisions_v2/README.md)
+retain generated provenance and depend on the draft catalogue; they are not
+eligible for the current production inspection benchmark.
 
 `sentinel.survey_eval` owns independent synthetic truth, projection, matching and
 strict option-specific replay. Its arithmetic tests do not prove production
