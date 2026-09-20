@@ -13,6 +13,7 @@ from .emergency import EmergencyHotkey, EmergencySender
 from .models import RunReport
 from .reporting import ProgressLogger, write_report, write_video_manifest
 from .safe_tools import FixedPositionYawTools, ToolRefusal, YawCommand
+from .pose.mapcheck import compare_frames
 from .pose.persistence import ensure_schema
 from .pose.preview import Preview
 from .pose.replay import FrameRecorder, ReplayClient
@@ -160,6 +161,12 @@ def build_parser() -> argparse.ArgumentParser:
     pose_score.add_argument("--p95-cm", type=float, default=Thresholds.p95_cm)
     pose_score.add_argument("--heading-deg", type=float, default=Thresholds.heading_deg)
     pose_score.add_argument("--min-samples", type=int, default=Thresholds.min_samples)
+
+    map_check = subparsers.add_parser(
+        "pose-map-check", help="offline: single-tag vs joint PnP spread and per-stand residual")
+    map_check.add_argument("--frames", type=Path, required=True,
+                           help="directory of recorded PNG frames")
+    map_check.add_argument("--tag-map", type=Path, required=True)
 
     emergency = subparsers.add_parser(
         "emergency", help="send an immediate motor-stop command"
@@ -572,6 +579,27 @@ def _run_pose_score(args: Any) -> int:
     return 0 if result["passed"] else 1
 
 
+def _run_pose_map_check(args: Any) -> int:
+    import cv2
+
+    paths = sorted(args.frames.glob("*.png"))
+    if not paths:
+        print(f"pose-map-check: no .png frames in {args.frames}", flush=True)
+        return 1
+    result = compare_frames((cv2.imread(str(p)) for p in paths), load_tag_map(str(args.tag_map)))
+    print(f"pose-map-check: {result['multi_tag_frames']} of {result['frames']} frames saw 2+ tags")
+    for name in ("single", "joint"):
+        row = result[name]
+        if row["n"]:
+            print(f"  {name:<6} n={row['n']} spread p95={row['spread_p95_cm']:.2f}cm "
+                  f"median=({row['median_x_units']:.2f}, {row['median_y_units']:.2f}) units")
+    for zone, row in result["zones"].items():
+        flag = "  <- re-measure this stand" if row["median_joint_reprojection_px"] > 1.0 else ""
+        print(f"  {zone}: joint reprojection median "
+              f"{row['median_joint_reprojection_px']:.2f}px over {row['n']} frames{flag}")
+    return 0 if result["multi_tag_frames"] else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -615,6 +643,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "pose-score":
         return _run_pose_score(args)
+
+    if args.command == "pose-map-check":
+        return _run_pose_map_check(args)
 
     if args.real and not args.confirm:
         print("Real mode requires --confirm after the physical preflight.")

@@ -278,3 +278,10 @@ def test_pose_score_cli_min_samples_flips_exit_code(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 1
     assert "below min_samples=3" in out
+
+
+def test_pose_map_check_fails_cleanly_on_an_empty_directory(tmp_path, capsys):
+    from sentinel.cli import main
+    code = main(["pose-map-check", "--frames", str(tmp_path),
+                 "--tag-map", "calibration/tag-map-calibrated.json"])
+    assert code == 1 and "no .png frames" in capsys.readouterr().out
