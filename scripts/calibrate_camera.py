@@ -44,7 +44,9 @@ def calibrate(image_dir, pattern, square_m):
         if size is not None and this_size != size:
             raise CalibrationError(f"mixed image sizes: {p.name} is {this_size}, expected {size}")
         size = this_size
-        found, corners = cv2.findChessboardCorners(gray, pattern)
+        found, corners = cv2.findChessboardCorners(
+            gray, pattern,
+            cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE + cv2.CALIB_CB_FAST_CHECK)
         if not found:
             continue
         corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), crit)
