@@ -354,3 +354,99 @@ def test_submit_plan_review_does_not_audit_failed_gateway_submission(tmp_path):
         assert sink.records == []
     finally:
         run.close()
+
+
+def test_lost_gateway_response_is_recovered_on_retry_without_resubmission(tmp_path):
+    run = P3Run(tmp_path, "proposal-review-lost-response")
+    sink = MemoryAuditSink()
+    real_gateway = CommandGateway(run.repo)
+    submissions = 0
+
+    class LostResponseGateway:
+        def submit(self, command):
+            nonlocal submissions
+            submissions += 1
+            real_gateway.submit(command)
+            raise ConnectionError("response lost after commit")
+
+    class MustNotSubmitGateway:
+        def submit(self, command):
+            raise AssertionError("retry must recover the committed result")
+
+    try:
+        run.propose_plan(ROUTE_PLAN)
+        with pytest.raises(ConnectionError, match="response lost"):
+            submit_plan_review(
+                run.repo, LostResponseGateway(), run.run_id, "CONFIRM", sink=sink,
+                clock=lambda: FIXED_REVIEW_TIME,
+            )
+
+        result = submit_plan_review(
+            run.repo, MustNotSubmitGateway(), run.run_id, "CONFIRM", sink=sink,
+            clock=lambda: FIXED_REVIEW_TIME,
+        )
+
+        assert result["status"] == "COMPLETED"
+        assert submissions == 1
+        assert len(sink.records) == 1
+    finally:
+        run.close()
+
+
+def test_audit_failure_after_commit_is_recoverable_and_retry_is_deduplicated(tmp_path):
+    run = P3Run(tmp_path, "proposal-review-audit-recovery")
+
+    class FailOnceSink(MemoryAuditSink):
+        def __init__(self):
+            super().__init__()
+            self.fail = True
+
+        def write(self, record):
+            if self.fail:
+                self.fail = False
+                raise OSError("audit disk unavailable")
+            super().write(record)
+
+    sink = FailOnceSink()
+    try:
+        run.propose_plan(ROUTE_PLAN)
+        with pytest.raises(OSError, match="audit disk unavailable"):
+            submit_plan_review(
+                run.repo, run.gateway, run.run_id, "REJECT", sink=sink,
+                clock=lambda: FIXED_REVIEW_TIME,
+            )
+
+        first_recovery = submit_plan_review(
+            run.repo, run.gateway, run.run_id, "REJECT", sink=sink,
+            clock=lambda: FIXED_REVIEW_TIME,
+        )
+        repeated_recovery = submit_plan_review(
+            run.repo, run.gateway, run.run_id, "REJECT", sink=sink,
+            clock=lambda: FIXED_REVIEW_TIME,
+        )
+
+        assert first_recovery == repeated_recovery
+        assert len(sink.records) == 1
+        assert sink.records[0]["decision"] == "REJECT"
+    finally:
+        run.close()
+
+
+def test_opposite_decision_cannot_recover_a_prior_review(tmp_path):
+    run = P3Run(tmp_path, "proposal-review-opposite")
+    sink = MemoryAuditSink()
+    try:
+        run.propose_plan(ROUTE_PLAN)
+        submit_plan_review(
+            run.repo, run.gateway, run.run_id, "CONFIRM", sink=sink,
+            clock=lambda: FIXED_REVIEW_TIME,
+        )
+
+        with pytest.raises(CoordinatorError, match="already reviewed as CONFIRM"):
+            submit_plan_review(
+                run.repo, run.gateway, run.run_id, "REJECT", sink=sink,
+                clock=lambda: FIXED_REVIEW_TIME,
+            )
+        assert len(sink.records) == 1
+    finally:
+        run.close()

@@ -109,3 +109,42 @@ def test_review_plan_cli_reports_no_pending_plan(tmp_path, capsys):
 
     assert exit_code == 2
     assert "review-plan failed" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("bad_line", ["{", "[]"])
+def test_pending_rejects_invalid_audit_jsonl_with_line_number(
+    tmp_path, capsys, bad_line
+):
+    db_path, run_id, audit_path = _pending_run(tmp_path)
+    with audit_path.open("a", encoding="utf-8") as handle:
+        handle.write(bad_line + "\n")
+
+    exit_code = main([
+        "pending", "--db", str(db_path), "--run-id", run_id,
+        "--audit", str(audit_path),
+    ])
+
+    assert exit_code == 2
+    out = capsys.readouterr().out
+    assert "audit line 2" in out
+    assert "Traceback" not in out
+
+
+def test_pending_escapes_audit_control_characters(tmp_path, capsys):
+    db_path, run_id, audit_path = _pending_run(tmp_path)
+    records = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    records[0]["reason"] = "safe\nproposed_plan: SPOOF\x1b[31m"
+    records[0]["facts"] = {"citation": "ok\rother_plans: SPOOF\x00"}
+    audit_path.write_text(json.dumps(records[0]) + "\n", encoding="utf-8")
+
+    exit_code = main([
+        "pending", "--db", str(db_path), "--run-id", run_id,
+        "--audit", str(audit_path),
+    ])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "safe\\nproposed_plan: SPOOF\\u001b[31m" in out
+    assert "ok\\rother_plans: SPOOF\\u0000" in out
+    assert "\x1b" not in out
+    assert "\x00" not in out

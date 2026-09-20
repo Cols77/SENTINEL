@@ -396,11 +396,20 @@ def _run_pending(args: Any) -> int:
 
     audit_records = []
     if args.audit and args.audit.exists():
-        audit_records = [
-            json.loads(line)
-            for line in args.audit.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        for line_number, line in enumerate(
+            args.audit.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                print(f"pending failed: audit line {line_number} is invalid JSON: {exc.msg}")
+                return 2
+            if not isinstance(record, dict):
+                print(f"pending failed: audit line {line_number} must be a JSON object")
+                return 2
+            audit_records.append(record)
     repository = CoordinatorRepository.open(args.db)
     try:
         catalogue = load_catalogue_plans()
@@ -421,7 +430,7 @@ def _run_pending(args: Any) -> int:
         print(f"proposed_plan: {proposed['label']}: {proposed['description']}")
         recommendation = proposed["recommendation"]
         if recommendation is not None:
-            print(f"  reason: {recommendation['reason']}")
+            print(f"  reason: {json.dumps(recommendation['reason'])}")
             print(f"  facts: {json.dumps(recommendation['facts'], sort_keys=True)}")
         print("other_plans:")
         for plan in proposal["other_plans"]:
