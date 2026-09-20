@@ -241,3 +241,28 @@ Commit `docs(specs): proposal — event_list items need properties`.
 | G-merge-p4 | merge `feat/p4-architecture-switch` into `master` (the operator may hold this until after the 2026-09-25 freeze; default-F makes it safe either way) |
 | G-coherence-event-list | the schema edit Task 7 proposes |
 | paid batches | the one-scenario live gate re-run, the Jev re-sweep, any live E run |
+
+---
+
+## Results
+
+Task 5 (Full-suite gate) executed from `C:/coding/sentinel/.worktrees/p4-arch-switch` on branch
+`feat/p4-architecture-switch`.
+
+- Branch tip sha: `a5993acbeb63795a4be6b5b9a98015121be72e81`
+- Command: `rtk proxy uv run python -m pytest tests/ -q -o addopts='' -p no:cacheprovider`
+- Pytest summary line: `636 passed, 3 skipped, 3 warnings in 318.68s (0:05:18)`
+- `git -C C:/coding/sentinel/.worktrees/p4-arch-switch diff --name-only 150978a..HEAD`:
+
+```
+docs/superpowers/plans/2026-09-20-p4-one-loop-two-architectures.md
+docs/superpowers/specs/2026-09-21_wp0-proposal-event-list-items.md
+scripts/rehearsal_run.py
+src/sentinel/coordinator/architecture.py
+src/sentinel/coordinator/boundary.py
+src/sentinel/coordinator/driver.py
+tests/coordinator/harness.py
+tests/coordinator/test_architecture.py
+tests/coordinator/test_boundary.py
+tests/test_rehearsal_architecture.py
+```
