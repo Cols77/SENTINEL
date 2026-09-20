@@ -95,6 +95,11 @@ def needs_judgment(legal: LegalSet) -> bool:
 class CataloguePlan:
     plan_id: str
     description: str
+    # Which stations this plan covers. Filled by `load_catalogue_plans`; the
+    # default keeps every pre-P3a construction of a `CataloguePlan` valid.
+    # Used only by `replan.covering_plans`, which is not wired into
+    # `legal_set` -- see the module docstring in replan.py.
+    station_ids: tuple[str, ...] = ()
 
 
 def load_catalogue_plans(path: Path | None = None) -> tuple[CataloguePlan, ...]:
@@ -108,6 +113,7 @@ def load_catalogue_plans(path: Path | None = None) -> tuple[CataloguePlan, ...]:
             entry["id"],
             f"mode={mode}; stations={len(stations)} ({', '.join(map(str, stations))}); "
             f"marker verification={'required' if 'MARKER' in str(mode) else 'not required'}",
+            station_ids=tuple(stations),
         ))
     return tuple(plans)
 
