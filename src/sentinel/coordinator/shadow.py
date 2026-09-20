@@ -24,8 +24,8 @@ from .legal_tools import ADVISORY_POINTS, needs_judgment
 from .policies import Decision
 from .policy import ContextualPolicy, PolicyContext
 
-_EMPTY_ADVISOR_ENTRY = {"label": None, "confidence": None, "band": None, "model": None,
-                        "latency_ms": None, "error": None}
+_EMPTY_ADVISOR_ENTRY = {"label": None, "confidence": None, "band": None, "judge_label": None,
+                        "model": None, "latency_ms": None, "error": None}
 
 
 @runtime_checkable
@@ -75,6 +75,10 @@ def _advisor_entry(decision: Decision | None, *, fallback_latency_ms: int, error
                 "error": "advisor returned without recording a decision"}
     return {
         "label": decision.label, "confidence": decision.confidence, "band": decision.band,
+        # The judge's own pick, alongside what the policy did with it. These
+        # differ on every non-HIGH answer, and recording only the former is
+        # what made the 2026-09-20 sweep read as "Jev abstained on every turn".
+        "judge_label": decision.judge_label,
         "model": decision.model,
         "latency_ms": decision.latency_ms if decision.latency_ms is not None else fallback_latency_ms,
         "error": decision.error,
@@ -173,9 +177,13 @@ class ShadowLadder:
         executor_decision = self.executor.last
 
         # Collect the advisors against ONE shared deadline, so the audit
-        # record costs at most a single advisor_timeout_s in total rather
+        # record costs at most a single advisor_timeout_s of *waiting* rather
         # than one per advisor. They ran concurrently (a pool per advisor
-        # instance), so this usually costs nothing at all.
+        # instance), so this usually costs nothing at all. The deadline starts
+        # after the executor returns, so an advisor's total budget is the
+        # executor's own time plus advisor_timeout_s -- more generous to the
+        # advisor, and it leaves executor latency independent of advisors,
+        # which is the property that matters.
         deadline = time.monotonic() + self.advisor_timeout_s
         advisor_entries = {
             name: self._collect_advisor(advisor, future, start, deadline)

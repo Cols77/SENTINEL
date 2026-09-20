@@ -75,12 +75,21 @@ def _score_group(rows: Sequence[tuple[dict[str, Any], dict[str, Any], str]]) -> 
     high_correct = 0
     latencies: list[float] = []
     labels_by_turn: dict[Any, list[Any]] = {}
+    # Judge-level counters, kept strictly separate from the policy-level ones
+    # above. ``label`` is what the POLICY did; ``judge_label`` is what the JUDGE
+    # said. They differ on every non-HIGH answer, and scoring only the former
+    # is what made the 2026-09-20 sweep read as "Jev abstained on every turn"
+    # when in truth its own picks were never recorded.
+    judge_n = 0
+    judge_correct = 0
+    judge_escalate = 0
 
     for record, entry, truth_label in rows:
         label = entry.get("label")
         band = entry.get("band")
         error = entry.get("error")
         latency_ms = entry.get("latency_ms")
+        judge_label = entry.get("judge_label")
 
         if error is not None:
             error_count += 1
@@ -88,6 +97,12 @@ def _score_group(rows: Sequence[tuple[dict[str, Any], dict[str, Any], str]]) -> 
             correct += 1
         if label == ESCALATE_LABEL:
             escalate_count += 1
+        if judge_label is not None:
+            judge_n += 1
+            if judge_label == truth_label:
+                judge_correct += 1
+            if judge_label == ESCALATE_LABEL:
+                judge_escalate += 1
         if band == HIGH_BAND:
             high_total += 1
             if label == truth_label:
@@ -108,7 +123,17 @@ def _score_group(rows: Sequence[tuple[dict[str, Any], dict[str, Any], str]]) -> 
         "coverage_high": (high_total / n) if n else 0.0,
         "selective_accuracy": (high_correct / high_total) if high_total else 0.0,
         "false_act": false_act,
+        # POLICY-level: how often the policy escalated, and how often its final
+        # action matched the truth label. Operationally real -- this is the
+        # operator load -- but it is NOT a measurement of the judge.
         "escalation_rate": (escalate_count / n) if n else 0.0,
+        # JUDGE-level: the same two questions asked of the judge's own pick.
+        # ``None`` rather than 0.0 when no row carries a judge_label, so a
+        # report rendered from a sweep predating that field says "not
+        # recorded" instead of silently claiming the judge never escalated.
+        "judge_labels_recorded": judge_n,
+        "judge_agreement": (judge_correct / judge_n) if judge_n else None,
+        "judge_escalation_rate": (judge_escalate / judge_n) if judge_n else None,
         "error_rate": (error_count / n) if n else 0.0,
         "latency_ms_median": statistics.median(latencies) if latencies else None,
         "stability": (1 - flipped_turns / distinct_turns) if distinct_turns else 1.0,
