@@ -2,7 +2,7 @@
 
 **Written:** 2026-09-20 by the Claude session that reconciled the two 2026-09-20 handoffs, reviewed
 your plan `docs/superpowers/plans/2026-09-21-p3b1-approval-gated-E.md`, and built P4.
-**For:** Codex, before you execute P3b1. **Master:** `7450443`, pushed. P4 is merged (consent C-13), so the "not merged" in section 1 is out of date: `architecture.py`, `driver.py` and `boundary.py` are on `master`, and your Task 3 should use them.
+**For:** Codex, before you execute P3b1. **Master:** `ab3097b`, pushed; P4 and `fix/model-visible-results` are merged. `fix/command-payload-keys` (section 6b) may not be yet -- check.
 
 Read this first. It changes three of your tasks, fixes two that cannot run as written, and tells you
 which files are yours.
@@ -11,10 +11,8 @@ which files are yours.
 
 ## 1. What exists now that your plan does not know about
 
-**P4 — one agent loop, two selectable architectures.** Branch `feat/p4-architecture-switch`, worktree
-`.worktrees/p4-arch-switch`, 6 commits, full suite 636 passed / 3 skipped / 0 failed. **Not merged into
-`master`** — the operator has not decided when. Plan and results:
-`docs/superpowers/plans/2026-09-20-p4-one-loop-two-architectures.md` on that branch.
+**P4 — one agent loop, two selectable architectures.** Merged into `master` (consent C-13). Plan and
+results: `docs/superpowers/plans/2026-09-20-p4-one-loop-two-architectures.md`.
 
 | File (P4 owns these) | What it is |
 |---|---|
@@ -40,10 +38,9 @@ Your Task 2 pins `LlmProposer(adapter, sink).decide(request, context) -> agent_r
 changes when your class lands.** What remains is P4 Task 6, which is *mine to do after your Task 2 merges*:
 a `--proposer llm` option that lazy-imports your class behind a consent gate (every live E run is a paid call).
 
-Consequence for your Task 3: once P4 is on `master`, prove the lifecycle through
+Consequence for your Task 3: P4 is on `master`, so prove the lifecycle through
 `build_policy("E", proposer=LlmProposer(...))` and `drive_run`, not through a bare
-`bind_context(LlmProposer(...))`. If P4 is not merged when you get there, write it as your plan says and
-leave a note; do not copy P4's files into your branch.
+`bind_context(LlmProposer(...))`.
 
 ## 3. File ownership — assign files, not tasks
 
@@ -60,7 +57,7 @@ Two collisions happened on 2026-09-20 because sessions shared tasks. So:
 
 ## 4. Operator decisions taken on 2026-09-20 that change your plan
 
-Authoritative record: `docs/superpowers/specs/2026-09-20_operator-consent-record.md`, entries C-7 to C-11.
+Authoritative record: `docs/superpowers/specs/2026-09-20_operator-consent-record.md`, entries C-7 to C-17.
 
 **C-10 — E's operator experience is "propose, then confirm". Rework Tasks 4 and 5.**
 Your Tasks 4–5 (and the brief they came from) hide the model's suggestion behind
@@ -90,9 +87,8 @@ own Task 11 Step 1 already states: no decision point is eligible for promotion, 
 consumer. Task 9 and Task 10 Steps 1–4 (offline tooling) may still be built, but they are now low priority —
 do them last or not at all, and say which.
 
-**C-11 — the `event_list` fix rides in your Task 7's schema revision.** Proposal:
-`docs/superpowers/specs/2026-09-21_wp0-proposal-event-list-items.md` (on the P4 branch). This is sequencing,
-**not consent**: G-amend-rest is still closed. §6 explains why this item just became important.
+**C-12 — the `event_list` fix is granted and already done** (it superseded C-11). It is on `master`; your
+Task 7 no longer carries it. See section 6.
 
 ## 5. Defects in your plan as written
 
@@ -146,6 +142,30 @@ same lines:**
 | `src/sentinel/coordinator/agent_loop.py` | only the `state.get_recent_events` branch of `_execute` (returns typed items) and the evidence-summary string (ids named by the argument they fill). Your Task 7 edits elsewhere in this file; rebase onto this branch once it is on `master`. |
 | `src/sentinel/adapter/llm/prompt.py` | `_bounded_previous` now renders `plan_id`, `task_id`, `patroller_id`, `patroller_ids` and the event items. It used to drop all of them, so WP0 section 5 never reached the model. Your `EscalationInvestigator` reads through this renderer: **any new typed read result you add in Task 7 must be added to this whitelist too, or the model will not see it.** |
 | `tests/agent/test_live_gate_real_loop.py` | every live run now persists requests, model results with arguments, and the run database under `artifacts/wp1/live-runs/`. Set `SENTINEL_LIVE_BATCH_ID`. Do the same in your `scripts/proposal_sweep.py`: raw rows first, aggregates second. |
+
+### 6b. A defect that would have broken your `LlmProposer` on every live call
+
+Found by the third paid run (batch grant-3), the first whose model arguments were recorded; write-up in
+`artifacts/wp1/live-gate-real-loop.md`, Addendum 2.
+
+`AgentPlanProposalArguments` lets the model pass an optional `reason`. `CommandAgentIntentProposePayload`
+does not admit one. `agent_loop.command_for` copied arguments into the payload verbatim, so **any
+`inspection.propose_plan` call carrying a `reason` was rejected as `INVALID_CONTRACT`** -- and your Task 2
+*requires* a non-blank `reason` on every proposal. Architecture E with a live proposer would have been
+rejected by the gateway on every run and fallen back to F, looking like a weak model. `task.create` and
+`patroller.rank_for_task` had the same mismatch, and it is what failed the live gate three times.
+
+Fixed on branch `fix/command-payload-keys` (mine; it touches `command_for` and adds `_PAYLOAD_KEYS` in
+`agent_loop.py`): only the keys the command payload admits cross over. **Check that branch is on `master`
+before you run Task 3**; if it is not, your lifecycle test will fail at the gateway and the failure is not
+yours. Keep requiring the `reason` -- it lives in your `proposal_recommendation` audit record, which is the
+right place for it.
+
+Two things this teaches, both relevant to your Task 6 sweep:
+- a scripted test policy never sends optional arguments, so the hermetic suite could not see this. Give your
+  fake adapter a case that fills **every** optional argument the schema allows;
+- persist raw rows before scoring. Three paid runs were needed here only because the first two kept tool
+  names and nothing else.
 
 ## 7. Gates — unchanged, and none of this handoff opens one
 

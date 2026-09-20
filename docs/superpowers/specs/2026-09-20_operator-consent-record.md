@@ -38,7 +38,14 @@ A second operator message the same evening granted four more, in these words:
 | C-14 | Push `master` | "I would push to master too" | `b302636..7450443` pushed 2026-09-20. Covers that push only. |
 | C-15 | The `_bounded_previous` fix is assigned to this session | "you take the _bounded_previous fix" | done on `fix/model-visible-results`. Merging that branch is a separate gate. |
 
-Not covered by any of the above: merging `fix/model-visible-results`, any further push, any further paid call.
+A third operator message: **"merge and push the fix branch, then run the paid scenario"**.
+
+| # | Scope | Effect |
+|---|---|---|
+| C-16 | Merge `fix/model-visible-results` into `master` and push | merge `ab3097b`, pushed 2026-09-20. |
+| C-17 | One more paid run of `qualifying_evidence_to_task` on `z-ai/glm-5.3`, stated beforehand as "about 6-12 calls, under $0.05" | batch id `2026-09-20-operator-grant-3`, 6 calls, run once. Raw record kept under `artifacts/wp1/live-runs/`. **The batch is closed.** |
+
+Not covered by any of the above: merging `fix/command-payload-keys`, any further push, any further paid call.
 
 ### Earlier the same day
 
