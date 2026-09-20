@@ -141,7 +141,9 @@ def test_e_proposal_crosses_agent_loop_and_gateway_before_two_operator_approvals
         assert len(approval_states) == 2
         assert len(adapter.calls) == 1
         assert adapter.calls[0][1].legal.decision_point == SELECT_PLAN
-        recommendation, route = sink.records[:2]
+        attempt, recommendation, route = sink.records[:3]
+        assert attempt["record"] == "proposal_attempt"
+        assert attempt["gate_outcome"] == "accepted"
         assert recommendation["record"] == "proposal_recommendation"
         assert recommendation["label"] == ROUTE_PLAN
         assert route["record"] == "architecture_route"

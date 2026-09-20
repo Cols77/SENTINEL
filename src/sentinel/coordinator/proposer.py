@@ -4,16 +4,48 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 import math
+import time
 from typing import Any
 
 from sentinel.contracts import AgentModelResult, AgentRequest
 
-from .legal_tools import SELECT_PLAN
+from .legal_tools import Candidate, SELECT_PLAN
 from .policy import PolicyContext, one_call
 from .shadow import AuditSink
 
 _PROPOSER_TOOLS = ["inspection.propose_plan", "finish"]
 _ESCALATION_SUMMARY = "plan proposal needs operator review"
+
+
+def _write_attempt(
+    sink: AuditSink, context: PolicyContext, *, advisor: str, started: float,
+    raw_choice: Any = None, gate_outcome: str, confidence: float | None = None,
+    probabilities: dict[str, float] | None = None, margin: float | None = None,
+) -> None:
+    """Keep provider attempts separate from reviewable recommendations.
+
+    Record only a string choice and finite metrics, never provider payloads or
+    exception messages. Error categories are fixed boundary outcomes.
+    """
+    label = raw_choice if isinstance(raw_choice, str) else None
+    sink.write({
+        "record": "proposal_attempt",
+        "run_id": context.state.run_id,
+        "state_version": context.state.state_version,
+        "decision_point": context.legal.decision_point,
+        "advisor": advisor,
+        "raw_choice": label,
+        "judge_label": label,
+        "policy_label": label if gate_outcome == "accepted" else "escalate",
+        "gate_outcome": gate_outcome,
+        "confidence": confidence,
+        "probabilities": probabilities,
+        "margin": margin,
+        "latency_ms": max(0, int((time.perf_counter() - started) * 1000)),
+        "error_category": gate_outcome if gate_outcome in {
+            "provider_error", "invalid_answer",
+        } else None,
+    })
 
 
 @dataclass(frozen=True)
@@ -52,6 +84,7 @@ class JevProposer:
         criteria = {
             label: candidate.description for label, candidate in candidates.items()
         }
+        started = time.perf_counter()
         try:
             answer = self.judge.choice(
                 state=context.state.to_packet(),
@@ -62,13 +95,22 @@ class JevProposer:
                 criteria=criteria,
                 name="select_plan",
             )
-            accepted = self._accepted_answer(answer, tuple(candidates))
         except Exception:  # noqa: BLE001 -- provider boundary is fail-closed
+            _write_attempt(self.sink, context, advisor="jev", started=started,
+                           gate_outcome="provider_error")
             return self._escalate(request)
-        if accepted is None:
+        try:
+            assessment = self._assess_answer(answer, tuple(candidates))
+        except Exception:  # noqa: BLE001 -- untrusted answer is fail-closed
+            assessment = {"gate_outcome": "invalid_answer"}
+        _write_attempt(self.sink, context, advisor="jev", started=started, **assessment)
+        if assessment["gate_outcome"] != "accepted":
             return self._escalate(request)
 
-        label, confidence, probabilities, margin = accepted
+        label = assessment["raw_choice"]
+        confidence = assessment["confidence"]
+        probabilities = assessment["probabilities"]
+        margin = assessment["margin"]
         candidate = candidates[label]
         reason = f"{context.legal.decision_point}: {candidate.description}"[:512]
         arguments = {**candidate.arguments, "reason": reason}
@@ -95,43 +137,63 @@ class JevProposer:
         )
         return AgentModelResult.from_dict(result).to_dict()
 
-    def _accepted_answer(
+    def _assess_answer(
         self, answer: Any, labels: tuple[str, ...]
-    ) -> tuple[str, float, dict[str, float], float] | None:
+    ) -> dict[str, Any]:
+        assessment: dict[str, Any] = {"gate_outcome": "invalid_answer"}
         if not isinstance(answer, Mapping):
-            return None
+            return assessment
         label = answer.get("value")
-        confidence = self._probability(answer.get("confidence"))
+        assessment["raw_choice"] = label
+        raw_confidence = answer.get("confidence")
+        confidence = self._probability(raw_confidence)
+        assessment["confidence"] = confidence
         raw_probabilities = answer.get("probabilities")
+        probabilities: dict[str, float] = {}
+        if isinstance(raw_probabilities, Mapping):
+            for key, value in raw_probabilities.items():
+                probability = self._probability(value)
+                if isinstance(key, str) and probability is not None:
+                    probabilities[key] = probability
+            assessment["probabilities"] = probabilities
         if (
             not isinstance(label, str)
             or label not in labels
-            or confidence is None
             or not isinstance(raw_probabilities, Mapping)
             or set(raw_probabilities) != set(labels)
+            or set(probabilities) != set(labels)
         ):
-            return None
+            return assessment
 
-        probabilities: dict[str, float] = {}
-        for candidate_label in labels:
-            probability = self._probability(raw_probabilities.get(candidate_label))
-            if probability is None:
-                return None
-            probabilities[candidate_label] = probability
+        # Jev's optional confidence is commonly present as None. Only absent
+        # or None values fall back; explicitly malformed values stay invalid.
+        if raw_confidence is None:
+            confidence = probabilities[label]
+            assessment["confidence"] = confidence
+        if confidence is None:
+            return assessment
         if max(probabilities, key=probabilities.get) != label:
-            return None
+            return assessment
 
         runners_up = [value for key, value in probabilities.items() if key != label]
         margin = probabilities[label] - (max(runners_up) if runners_up else 0.0)
-        if confidence < self.gates.act_at or margin < self.gates.min_margin:
-            return None
-        return label, confidence, probabilities, margin
+        assessment["margin"] = margin
+        if confidence < self.gates.act_at:
+            assessment["gate_outcome"] = "low_confidence"
+        elif margin < self.gates.min_margin:
+            assessment["gate_outcome"] = "low_margin"
+        else:
+            assessment["gate_outcome"] = "accepted"
+        return assessment
 
     @staticmethod
     def _probability(value: Any) -> float | None:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
-        resolved = float(value)
+        try:
+            resolved = float(value)
+        except (OverflowError, ValueError):
+            return None
         if not math.isfinite(resolved) or not 0.0 <= resolved <= 1.0:
             return None
         return resolved
@@ -164,38 +226,40 @@ class LlmProposer:
         typed_request = AgentRequest.from_dict(narrowed)
         # The adapter's legacy `read_tools` parameter intentionally carries
         # PolicyContext so its prompt can render the current decision packet.
+        started = time.perf_counter()
         try:
             model_result = self.adapter.propose(typed_request, context)
         except Exception:  # noqa: BLE001 -- the adapter boundary is fail-closed
+            _write_attempt(self.sink, context, advisor="llm", started=started,
+                           gate_outcome="provider_error")
             return self._escalate(request)
-        document = self._as_dict(model_result)
-        if document is None or document.get("status") != "TOOL_CALLS":
+        raw_choice = None
+        gate_outcome = "invalid_answer"
+        try:
+            raw_document = (model_result.to_dict() if isinstance(model_result, AgentModelResult)
+                            else model_result)
+            if isinstance(raw_document, Mapping):
+                raw_calls = raw_document.get("tool_calls")
+                if isinstance(raw_calls, list) and len(raw_calls) == 1:
+                    raw_call = raw_calls[0]
+                    if isinstance(raw_call, Mapping):
+                        raw_arguments = raw_call.get("arguments")
+                        if isinstance(raw_arguments, Mapping):
+                            raw_choice = raw_arguments.get("catalogue_plan_id")
+            accepted = self._accepted_proposal(model_result, context)
+            if accepted is not None:
+                gate_outcome = "accepted"
+            else:
+                document = self._as_dict(model_result)
+                if document is not None and document.get("status") == "UNAVAILABLE":
+                    gate_outcome = "provider_error"
+        except Exception:  # noqa: BLE001 -- untrusted adapter output is fail-closed
+            accepted = None
+        _write_attempt(self.sink, context, advisor="llm", started=started,
+                       raw_choice=raw_choice, gate_outcome=gate_outcome)
+        if accepted is None:
             return self._escalate(request)
-
-        calls = document.get("tool_calls")
-        if not isinstance(calls, list) or len(calls) != 1:
-            return self._escalate(request)
-        call = calls[0]
-        if not isinstance(call, dict) or call.get("tool_name") != "inspection.propose_plan":
-            return self._escalate(request)
-
-        arguments = call.get("arguments")
-        if not isinstance(arguments, dict):
-            return self._escalate(request)
-        plan_id = arguments.get("catalogue_plan_id")
-        reason = arguments.get("reason")
-        if not isinstance(reason, str) or not reason.strip():
-            return self._escalate(request)
-        reason = reason.strip()[:512]
-
-        candidates = {
-            candidate.label: candidate
-            for candidate in context.legal.candidates
-            if candidate.tool_name == "inspection.propose_plan"
-        }
-        candidate = candidates.get(plan_id)
-        if candidate is None:
-            return self._escalate(request)
+        plan_id, reason, candidate = accepted
 
         result = one_call(
             request,
@@ -221,6 +285,39 @@ class LlmProposer:
             }
         )
         return AgentModelResult.from_dict(result).to_dict()
+
+    def _accepted_proposal(
+        self, model_result: Any, context: PolicyContext,
+    ) -> tuple[str, str, Candidate] | None:
+        document = self._as_dict(model_result)
+        if document is None or document.get("status") != "TOOL_CALLS":
+            return None
+
+        calls = document.get("tool_calls")
+        if not isinstance(calls, list) or len(calls) != 1:
+            return None
+        call = calls[0]
+        if not isinstance(call, dict) or call.get("tool_name") != "inspection.propose_plan":
+            return None
+
+        arguments = call.get("arguments")
+        if not isinstance(arguments, dict):
+            return None
+        plan_id = arguments.get("catalogue_plan_id")
+        reason = arguments.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            return None
+        reason = reason.strip()[:512]
+
+        candidates = {
+            candidate.label: candidate
+            for candidate in context.legal.candidates
+            if candidate.tool_name == "inspection.propose_plan"
+        }
+        candidate = candidates.get(plan_id)
+        if candidate is None:
+            return None
+        return plan_id, reason, candidate
 
     @staticmethod
     def _as_dict(result: Any) -> dict[str, Any] | None:

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
+
 from sentinel.contracts import AgentModelResult, AgentRequest, AgentToolCall
 from sentinel.coordinator import LlmProposer
 from sentinel.coordinator.decision_state import DecisionState
 from sentinel.coordinator.legal_tools import EVIDENCE_GATE, SELECT_PLAN, Candidate, LegalSet
 from sentinel.coordinator.policy import ContextualPolicy, PolicyContext
-from sentinel.coordinator.shadow import MemoryAuditSink
+from sentinel.coordinator.proposer import JevProposer
+from sentinel.coordinator.shadow import JsonlAuditSink, MemoryAuditSink
 
 from .harness import AGENT_RUN_ID, RUN_ID
 
@@ -154,7 +157,7 @@ def test_valid_current_proposal_preserves_optional_reason_and_writes_exact_audit
         "catalogue_plan_id": PLAN_ID,
         "reason": "best coverage for the operator request",
     }
-    assert sink.records == [
+    assert [r for r in sink.records if r["record"] == "proposal_recommendation"] == [
         {
             "record": "proposal_recommendation",
             "run_id": RUN_ID,
@@ -248,10 +251,20 @@ def test_malformed_multi_and_no_call_results_are_coerced_to_local_escalation():
 
 def test_adapter_exception_and_non_mapping_output_are_coerced_to_local_escalation():
     for adapter in (RaisingAdapter(), FakeAdapter(["not", "an", "agent_result"])):
-        result = LlmProposer(adapter, MemoryAuditSink()).decide(
+        sink = MemoryAuditSink()
+        result = LlmProposer(adapter, sink).decide(
             _request(), _select_plan_context()
         )
         _assert_local_escalation(result)
+        assert len(sink.records) == 1
+        attempt = sink.records[0]
+        assert attempt["record"] == "proposal_attempt"
+        assert attempt["advisor"] == "llm"
+        assert attempt["policy_label"] == "escalate"
+        assert attempt["gate_outcome"] in {"provider_error", "invalid_answer"}
+        assert attempt["error_category"] == attempt["gate_outcome"]
+        assert attempt["latency_ms"] >= 0
+        assert "provider unavailable" not in str(attempt)
 
 
 def test_forged_agent_model_result_is_revalidated_and_coerced_to_local_escalation():
@@ -340,3 +353,44 @@ def test_forget_is_a_noop_when_adapter_forget_attribute_is_not_callable():
         forget = "not callable"
 
     LlmProposer(AdapterWithNonCallableForget(), MemoryAuditSink()).forget(AGENT_RUN_ID)
+
+
+def test_shared_jsonl_sink_preserves_failed_and_accepted_attempts(tmp_path):
+    path = tmp_path / "audit.jsonl"
+
+    class FailedJudge:
+        def choice(self, **kwargs):
+            raise RuntimeError("secret provider payload")
+
+    JevProposer(FailedJudge(), JsonlAuditSink(path)).decide(
+        _request(), _select_plan_context()
+    )
+    LlmProposer(FakeAdapter(_result("inspection.propose_plan", {
+        "catalogue_plan_id": PLAN_ID, "reason": "current plan",
+    })), JsonlAuditSink(path)).decide(_request(), _select_plan_context())
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [r["record"] for r in records] == [
+        "proposal_attempt", "proposal_attempt", "proposal_recommendation",
+    ]
+    assert records[0]["raw_choice"] is None
+    assert records[0]["gate_outcome"] == "provider_error"
+    assert records[1]["raw_choice"] == PLAN_ID
+    assert records[1]["policy_label"] == PLAN_ID
+    assert records[1]["gate_outcome"] == "accepted"
+    assert "secret provider payload" not in path.read_text()
+
+
+def test_typed_unavailable_result_records_provider_failure_without_diagnostic():
+    unavailable = AgentModelResult.from_dict({
+        "contract_version": "sentinel.v0", "wire_type": "agent_result",
+        "agent_run_id": AGENT_RUN_ID, "status": "UNAVAILABLE",
+        "diagnostic": "private provider diagnostic",
+    })
+    sink = MemoryAuditSink()
+    _assert_local_escalation(LlmProposer(FakeAdapter(unavailable), sink).decide(
+        _request(), _select_plan_context()
+    ))
+    attempt, = sink.records
+    assert attempt["gate_outcome"] == "provider_error"
+    assert attempt["error_category"] == "provider_error"
+    assert "private provider diagnostic" not in str(attempt)

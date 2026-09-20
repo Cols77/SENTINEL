@@ -91,7 +91,7 @@ def test_accepts_top_ranked_answer_and_preserves_arguments_with_derived_reason_a
         "catalogue_plan_id": ROUTE,
         "reason": "SELECT_PLAN: route-only plan",
     }
-    assert sink.records == [{
+    assert [r for r in sink.records if r["record"] == "proposal_recommendation"] == [{
         "record": "proposal_recommendation",
         "run_id": RUN_ID,
         "state_version": 4,
@@ -112,6 +112,7 @@ def test_accepts_top_ranked_answer_and_preserves_arguments_with_derived_reason_a
 
 
 @pytest.mark.parametrize("answer", [
+    ["invalid"],
     {},
     {"value": "UNKNOWN", "confidence": 0.9, "probabilities": {ROUTE: 0.1, FULL: 0.9}},
     {"value": ROUTE, "confidence": 0.59, "probabilities": {ROUTE: 0.8, FULL: 0.2}},
@@ -121,27 +122,80 @@ def test_accepts_top_ranked_answer_and_preserves_arguments_with_derived_reason_a
     {"value": ROUTE, "confidence": 0.9, "probabilities": {ROUTE: math.inf, FULL: 0.2}},
     {"value": ROUTE, "confidence": 0.9, "probabilities": {ROUTE: 0.8}},
     {"value": ROUTE, "confidence": 0.9, "probabilities": {ROUTE: 0.8, FULL: 0.2, "extra": 0.0}},
+    {"value": ROUTE, "probabilities": {ROUTE: 0.59, FULL: 0.41}},
+    {"value": ROUTE, "confidence": None, "probabilities": {ROUTE: 0.55, FULL: 0.45}},
+    {"value": ROUTE, "probabilities": {ROUTE: True, FULL: 0.2}},
 ])
-def test_invalid_or_below_gate_answers_fail_closed_without_audit(answer) -> None:
+def test_invalid_or_below_gate_answers_fail_closed_with_attempt_audit(answer) -> None:
     sink = MemoryAuditSink()
     judge = Judge(answer=answer)
 
     result = JevProposer(judge, sink).decide(_request(), _context())
 
     _assert_escalation(result)
-    assert sink.records == []
+    assert len(sink.records) == 1
+    assert sink.records[0]["record"] == "proposal_attempt"
+    assert sink.records[0]["policy_label"] == "escalate"
+    assert sink.records[0]["gate_outcome"] in {"invalid_answer", "low_confidence", "low_margin"}
+    assert sink.records[0]["raw_choice"] == (answer.get("value") if isinstance(answer, dict) else None)
 
 
-def test_provider_error_and_non_select_plan_fail_closed_without_call_or_audit() -> None:
+def test_provider_error_is_audited_but_non_select_plan_does_not_attempt() -> None:
     sink = MemoryAuditSink()
     raising = Judge(error=TimeoutError("late"))
     _assert_escalation(JevProposer(raising, sink).decide(_request(), _context()))
-    assert sink.records == []
+    assert len(sink.records) == 1
+    assert sink.records[0]["gate_outcome"] == "provider_error"
+    assert sink.records[0]["error_category"] == "provider_error"
 
     untouched = Judge()
     _assert_escalation(JevProposer(untouched, sink).decide(_request(), _context(EVIDENCE_GATE)))
     assert untouched.calls == []
-    assert sink.records == []
+    assert len(sink.records) == 1
+
+
+@pytest.mark.parametrize("confidence", [None, "absent"])
+def test_optional_confidence_uses_selected_probability(confidence):
+    answer = {"value": ROUTE, "probabilities": {ROUTE: 0.8, FULL: 0.2}}
+    if confidence != "absent":
+        answer["confidence"] = confidence
+    sink = MemoryAuditSink()
+    result = JevProposer(Judge(answer), sink).decide(_request(), _context())
+    assert result["tool_calls"][0]["tool_name"] == "inspection.propose_plan"
+    attempt, recommendation = sink.records
+    assert attempt["record"] == "proposal_attempt"
+    assert attempt["judge_label"] == attempt["policy_label"] == ROUTE
+    assert attempt["confidence"] == recommendation["confidence"] == 0.8
+    assert attempt["gate_outcome"] == "accepted"
+    assert attempt["error_category"] is None
+    assert attempt["latency_ms"] >= 0
+
+
+@pytest.mark.parametrize("confidence", ["0.8", True, float("inf"), -0.1])
+def test_explicit_malformed_confidence_does_not_fall_back(confidence):
+    sink = MemoryAuditSink()
+    answer = {"value": ROUTE, "confidence": confidence,
+              "probabilities": {ROUTE: 0.8, FULL: 0.2}}
+    _assert_escalation(JevProposer(Judge(answer), sink).decide(_request(), _context()))
+    assert sink.records[0]["gate_outcome"] == "invalid_answer"
+    assert sink.records[0]["judge_label"] == ROUTE
+    assert sink.records[0]["probabilities"] == {ROUTE: 0.8, FULL: 0.2}
+
+
+@pytest.mark.parametrize("confidence, probabilities, outcome", [
+    (0.59, {ROUTE: 0.8, FULL: 0.2}, "low_confidence"),
+    (0.9, {ROUTE: 0.55, FULL: 0.45}, "low_margin"),
+])
+def test_rejected_attempt_preserves_gate_metrics(confidence, probabilities, outcome):
+    sink = MemoryAuditSink()
+    answer = {"value": ROUTE, "confidence": confidence, "probabilities": probabilities}
+    _assert_escalation(JevProposer(Judge(answer), sink).decide(_request(), _context()))
+    attempt, = sink.records
+    assert attempt["gate_outcome"] == outcome
+    assert attempt["error_category"] is None
+    assert attempt["confidence"] == confidence
+    assert attempt["probabilities"] == probabilities
+    assert attempt["margin"] == pytest.approx(probabilities[ROUTE] - probabilities[FULL])
 
 
 def test_gates_are_frozen_and_have_the_approved_defaults() -> None:
