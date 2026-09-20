@@ -58,11 +58,18 @@ Each item: the change, the files that change on consent, and what must be re-ver
 - Unblocks: the `dismiss_duplicate` candidate, clearing vetoed/escalated detections (fixes A7 head-of-line blocking), `keep_current_plan` at REPLAN.
 - Files: wire schema (command + event enums, two payload defs), `command_gateway.py`, a `detection_dispositions` table (DDL + manifest), `decision_state.py` (exclude disposed detections).
 
-### P-5 Mid-run operator message — schema
+### P-5 Mid-run operator message — schema  ⬅ **now the only viable replan trigger**
 - New command `OPERATOR_MESSAGE {request_text}` → appends `USER_MESSAGE_RECEIVED`. Unblocks the message-triggered REPLAN.
+- **Raised in priority by a P3a finding (2026-09-20, commit `8248355`).** P3a tried to deliver replanning without this, using the only trigger today's gateway allows: an out-of-plan detection with a covering catalogue plan. It was implemented as specified and then dropped, for three reasons, each pinned by a test in `tests/coordinator/test_replan.py`:
+  1. **It degenerates.** `PLAN_MARKER_VERIFIED_6` holds all six stations, so it is a superset of every station set; `covering_plans()` is non-empty for *every* real out-of-plan station. Adopting the rich catalogue (P-3) does **not** fix it — `PLAN_VERIFIED_FULL_SITE` is a superset too. Any future covering-set rule needs a tighter criterion: smallest covering plan, a bound on added stations, or an explicit instruction.
+  2. **It contradicts an approved label.** Out-of-plan detections are labelled `escalate` in the v1 fixture, approved 2026-09-20. Wiring the trigger broke the frozen golden fixture (1 failure → 10 errors) in a P2-owned file now merged to master, which would have altered the demo path before the 2026-09-25 freeze.
+  3. **It is the wrong trigger on the merits.** `INSPECTION_DISPATCH` is plan-gated, so an out-of-plan detection is an anomaly in the evidence rather than a change of intent. Answering an unexpected artifact by proposing a *larger* mission is silent scope growth; escalating to a human is safer.
+- The gateway half already works: a mid-run `AGENT_INTENT_PROPOSE` is accepted, and Task 3's read model keeps the old plan in force until the new one is confirmed. **What is missing is only a legitimate trigger, i.e. this item.** Granting P-5 is therefore what actually delivers "replan mid-run", one of the four capabilities the operator selected on 2026-09-20.
 
-### P-6 Re-proposal after rejection — code only
-- Make `plan_id` unique per proposal (`uuid5(run_id:entry_id:state_version)`) or map the integrity error to `CoordinatorError("INVALID_STATE_TRANSITION")`. Fixes A9.
+### P-6 Re-proposal after rejection — ✅ RESOLVED ELSEWHERE, no longer requested here
+- The operator released the gateway for this one defect and the P1/P2 session implemented it (`1ba6bfb`, branch `fix/gateway-integrity-error`, **unmerged** as of 2026-09-20). `CommandGateway.submit` now catches `sqlite3.IntegrityError` only — no bare except — mapping the plans-table case to `CoordinatorError("PLAN_ALREADY_PROPOSED")` and anything else to a distinct `STATE_CONSTRAINT_VIOLATION`.
+- **That release was granted to that session for that defect. It does not extend to P3, which still treats `CommandGateway` as untouchable.**
+- **Scheduled test flip:** P3a Task 3's `test_characterization_reproposing_an_entry_raises_a_raw_integrity_error` asserts the *raw* `sqlite3.IntegrityError`. It is correct today and becomes wrong the moment `1ba6bfb` reaches a branch P3 builds on. Flip it to expect `CoordinatorError("PLAN_ALREADY_PROPOSED")` at that point — not before, or the two branches assert contradictory behaviour.
 
 ### P-7 Closer look — needs an operator answer first (gate G-closer-look)
 - Question: does a revisit choreography exist, or is it wanted, given WP5 (pose) is pending?

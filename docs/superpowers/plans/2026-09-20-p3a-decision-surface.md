@@ -4,7 +4,7 @@
 >
 > **Rev 2 (2026-09-20)** replaces rev 1. Rev 1 left five "verify first" steps to the executor; they were all resolved by a code reading plus a gateway probe, and the answers changed the task list. A dev subagent sees **only its own task** plus "Global Constraints" and "Ground truth": everything it needs is written there. Do not re-investigate what "Ground truth" already states.
 
-**Goal:** Extend the coordinator so a run contains decisions that rules cannot settle — several detections per run, duplicate detections, near-tie patroller rankings, and replanning on an out-of-plan detection — while the operator's load stays at "approvals only", and without touching `CommandGateway` or any contract.
+**Goal:** Extend the coordinator so a run contains decisions that rules cannot settle — several detections per run, duplicate detections, and near-tie patroller rankings — while the operator's load stays at "approvals only", and without touching `CommandGateway` or any contract.
 
 **Architecture:** Every new decision is added the way P1/P2 added the existing ones: `read_decision_state` exposes facts, `legal_set` enumerates fully-argued candidates, a rule settles what facts can settle (`rule_choice`), and only the remainder is a judgment point executed by rules + operator while Jev and the LLM answer in shadow. **P3a gives no model any authority** (that is P3b, behind the promotion criteria in `2026-09-19-p3-hybrid-E-followup.md`). Whatever the gateway cannot do today is **not built**: it is pinned by a characterization test and listed in one consolidated proposal.
 
@@ -934,7 +934,21 @@ Also add `ASSIGN` to `ADVISORY_POINTS` in `legal_tools.py`. Without it, `JevPoli
   - Extend the non-interference proof: copy the pattern of `tests/coordinator/test_shadow.py`'s "advisor cannot change execution" test for a near-tie `ASSIGN` turn (an advisor that picks `assign_rank_1` while the executor escalates ⇒ the result is the executor's).
 - [ ] **Step 2:** FAIL. **Step 3:** Implement. `INSTRUCTIONS["ASSIGN"]`: *"Two or more patrollers are ranked within a near-tie. Choose 'assign_rank_1' if the top-ranked patroller is an acceptable assignment. Choose 'escalate' if the operator should pick."* **Step 4:** PASS + suite gate. **Step 5:** Commit `feat(coordinator): near-tie rankings become a judgment point; no re-proposal of a proposed plan`.
 
-### Task 9: `REPLAN` on a qualifying out-of-plan detection
+### Task 9: `REPLAN` — ⛔ ATTEMPTED, DROPPED, DEFERRED TO P3a-2 (commit `8248355`)
+
+**Do not implement the design below. It was implemented exactly as written and it does not work.** The full reasoning is in the module docstring of `src/sentinel/coordinator/replan.py`; every claim is pinned by a test in `tests/coordinator/test_replan.py`. In short:
+
+1. **It degenerates.** `PLAN_MARKER_VERIFIED_6` holds all six stations, so it is a superset of every station set: `covering_plans()` is non-empty for *every* real out-of-plan station, and the "narrow" rule becomes the general case. The rich catalogue does not fix this — `PLAN_VERIFIED_FULL_SITE` is a superset too.
+2. **It overrides an operator-approved decision.** Out-of-plan detections are labelled `escalate` in the v1 fixture (approved 2026-09-20), and the frozen turn generator encodes that for a third of its `EVIDENCE_GATE` variants. Wiring `REPLAN` broke the golden fixture — 1 failure cascading into 10 errors — in a Never-edit, P2-owned file now merged to master.
+3. **It is the wrong trigger.** `INSPECTION_DISPATCH` is plan-gated, so an out-of-plan detection is an anomaly in the evidence, not a workflow event. Proposing a *larger* mission in response to an unexpected artifact is silent scope growth; escalating to a human is safer and already approved.
+
+**What shipped instead:** `replan.covering_plans` as a pure tested helper for P3a-2, `CataloguePlan.station_ids`, characterization tests for today's behaviour, and a test showing the gateway half (mid-run proposal → `WAITING_FOR_APPROVAL`, old plan still in force) already works — so a future attempt knows the mechanism is not what is missing.
+
+**Where it goes:** P3a-2, behind proposal item **P-5** (`OPERATOR_MESSAGE`), which is the trigger the operator actually asked for. A viable rule also needs a tighter criterion than "some plan covers it" — smallest covering plan, a bound on added stations, or an explicit instruction. Prefer the last.
+
+<details><summary>Original Task 9 design (superseded — kept for the record)</summary>
+
+#### `REPLAN` on a qualifying out-of-plan detection
 
 **Files:**
 - Create: `src/sentinel/coordinator/replan.py`
@@ -949,6 +963,8 @@ Also add `ASSIGN` to `ADVISORY_POINTS` in `legal_tools.py`. Without it, `JevPoli
 
 - [ ] **Step 1: Failing tests:** `covering_plans` unit cases (v1 catalogue: `LEFT_FRONT` over the route plan → only `PLAN_MARKER_VERIFIED_6`; after that entry was proposed → empty; draft catalogue → `PLAN_VERIFIED_FULL_SITE` is the only superset of both middles + `LEFT_ALLEY_FRONT`); out-of-plan 0.90 → `REPLAN`, labels `("PLAN_MARKER_VERIFIED_6", "escalate")`; choosing the plan through `AgentLoop` → `WAITING_FOR_APPROVAL` **and `run.state().plan_station_ids` is still the two middle stations**; `CONFIRM` → the same detection is now `EVIDENCE_GATE` with `rule_choice == "create_task"`; `REJECT` → the detection escalates by rule (no covering plan left) and the old plan is still approved; out-of-plan 0.62 → never `REPLAN`. **Update** Task 7's `test_out_of_plan_detection_escalates_by_rule` to use score 0.62 (this is the one sanctioned edit of a P3 test).
 - [ ] **Step 2:** FAIL. **Step 3:** Implement. **Step 4:** PASS + suite gate. **Step 5:** Commit `feat(coordinator): replanning as an approval-gated proposal on an out-of-plan detection`.
+
+</details>
 
 ### Task 10: Decision-turn fixture v2
 
@@ -967,12 +983,12 @@ Same method as v1 (`tests/coordinator/turn_generator.py`, `test_turn_fixture.py`
 ❗ **The rich catalogue flips the v1 single-station labels, and that is the headline result.** P2b's `4df8770` relabelled v1 `sp-001..006` (single-station requests) to **`escalate`**, operator-approved 2026-09-20, because no v1 plan covers exactly one station. Against the draft catalogue the same requests have an exact `PLAN_ROUTE_<STATION>` match, so their correct label becomes that plan. Say this explicitly in the v2 rationale strings and put it in front of the operator at **G-labels-v2**: it is the sharpest evidence that proposal item P-3 (the rich catalogue) deletes a whole class of escalation, which is the "approvals only" argument in one line.
 | `EVIDENCE_GATE` duplicate (`rule_choice is None`) | new-detection score {0.78, 0.90, 0.99} × station {L-mid, R-mid} × earlier task {unranked, ranked} × another pending detection {no, yes} | ≤ 24; keep the distinct ones |
 | `ASSIGN` near-tie | gaps {0.00, 0.02, 0.06} × patrollers {2, 3} via `SimulatedPatroller.rank_for_task` | ≤ 6 |
-| `REPLAN` | outside station {4 non-middle stations} × score {0.78, 0.90, 0.99} | ≤ 12; keep the distinct ones |
+| ~~`REPLAN`~~ | **Omit entirely.** Task 9 was dropped; `REPLAN` is not a decision point in this branch. Generating turns for it is impossible and asserting a count for it would fail. | 0 |
 | RULE turns (`label_source: "rule"`, label = `rule_choice`) | one per rule outcome: clean create, out-of-plan low, in-plan < 0.75, veto, rank, clear-gap assign, wait ×2 | 8 |
 
-Draft labels: `SELECT_PLAN` → the named plan / `escalate`; duplicate → `escalate` (rationale: "no fact in the packet distinguishes a second hazard from a repeat sighting"); near-tie → `assign_rank_1`; `REPLAN` → the covering plan. Every hand label has a rationale.
+Draft labels: `SELECT_PLAN` → the named plan / `escalate`; duplicate → `escalate` (rationale: "no fact in the packet distinguishes a second hazard from a repeat sighting"); near-tie → `assign_rank_1`. Every hand label has a rationale. There are no `REPLAN` turns: Task 9 was dropped.
 
-- [ ] **Step 1:** Failing tests: schema validity; label ∈ candidates; rationale on hand labels; uniqueness of the triple; per-point minimums (`SELECT_PLAN` ≥ 56 scored, duplicates ≥ 8, near-tie ≥ 4, `REPLAN` ≥ 4); no UUID in any packet; golden regeneration; pending slots flagged and excluded.
+- [ ] **Step 1:** Failing tests: schema validity; label ∈ candidates; rationale on hand labels; uniqueness of the triple; per-point minimums (`SELECT_PLAN` ≥ 56 scored, duplicates ≥ 8, near-tie ≥ 4; **no `REPLAN` minimum — that point does not exist**); no UUID in any packet; golden regeneration; pending slots flagged and excluded.
 - [ ] **Step 2:** FAIL. **Step 3:** Implement, generate, write the README (counts actually achieved, the A12 limit, the 24 pending slots). **Step 4:** PASS + suite gate. Commit `feat(fixtures): decision turns v2 (draft labels; distinct reachable states only)`.
 - [ ] **Step 5 — gate G-labels-v2 (parent):** the operator approves/edits labels and writes the 24 request texts. Tell the operator plainly: with this many distinct turns, P3b's "n ≥ 60 HIGH picks per point" is reachable for `SELECT_PLAN` only; the other points need repeats across seeds (criterion 1 allows that) or richer facts (P-8).
 
@@ -982,7 +998,7 @@ Draft labels: `SELECT_PLAN` → the named plan / `escalate`; duplicate → `esca
 - Create: `scripts/operator_load_report.py`, `artifacts/p3/operator-load.md`
 - Test: `tests/test_operator_load_report.py`
 
-Scripted rehearsals, no live advisor: `ShadowLadder(RulePolicy(), advisors=[], sink=MemoryAuditSink())` under `AgentLoop`, a scripted operator who confirms every approval and answers each escalation with a fixed label through `submit_choice`. Scenarios: clean single detection; clean two detections (stops at A1 — report the stranded task as a finding, not a failure); duplicate; near-tie; replan. For each: `operator_touches(...)`, whether it meets "approvals only", and `broken_by`. The test asserts the clean single-detection scenario yields `{"approvals": 2, "choices": 0, "escalations": 0}` and that the duplicate scenario is `broken_by == ["EVIDENCE_GATE"]`.
+Scripted rehearsals, no live advisor: `ShadowLadder(RulePolicy(), advisors=[], sink=MemoryAuditSink())` under `AgentLoop`, a scripted operator who confirms every approval and answers each escalation with a fixed label through `submit_choice`. Scenarios: clean single detection; clean two detections (stops at A1 — report the stranded task as a finding, not a failure); duplicate; near-tie. (No replan scenario — Task 9 was dropped.) For each: `operator_touches(...)`, whether it meets "approvals only", and `broken_by`. The test asserts the clean single-detection scenario yields `{"approvals": 2, "choices": 0, "escalations": 0}` and that the duplicate scenario is `broken_by == ["EVIDENCE_GATE"]`.
 
 - [ ] Steps: failing test → implement → generate `artifacts/p3/operator-load.md` → suite gate → commit `feat(eval): operator-load report against the approvals-only target`.
 
@@ -999,6 +1015,6 @@ Scripted rehearsals, no live advisor: `ShadowLadder(RulePolicy(), advisors=[], s
 
 ## Self-review
 
-- **Operator's four decision types:** multi-detection (T2, T7), patroller choice (T4, T8 — judgment exists, the alternative patrollers wait for P-2), replanning (T3, T9 — detection trigger; message trigger waits for P-5), closer look (proposal P-7 + G-closer-look; nothing buildable today). Rich catalogue: T1 content, P-3 adoption. Approvals-only: T5, T11.
+- **Operator's four decision types:** multi-detection (T2, T7), patroller choice (T4, T8 — judgment exists, the alternative patrollers wait for P-2), replanning (**not delivered** — T9's detection trigger was implemented, found to degenerate and to override an operator-approved label, and dropped; the whole capability waits for P-5 in P3a-2), closer look (proposal P-7 + G-closer-look; nothing buildable today). Rich catalogue: T1 content, P-3 adoption. Approvals-only: T5, T11.
 - **Differences from rev 1, all forced by Ground truth:** no `DETECTION_TRIAGE` rename; `to_packet()` frozen, `to_packet_v2()` added; no `RUN_WRAP_UP`, no `finish(COMPLETED)`; no rank-2/3 candidates; no `keep_current_plan`; fixture sizes are what is distinct and reachable; five per-task proposals became one document; the read-model bug A13 became a task.
 - **Type consistency:** `DetectionView`, `TaskView`, `current_task`, `detection_facts`, `to_packet_v2`, `proposed_catalogue_plan_ids`, `assignment_facts`, `needs_judgment`, `covering_plans`, `P3Run`, `DRAFT_CATALOGUE_PATH` are each defined in exactly one task and used under the same name afterwards.

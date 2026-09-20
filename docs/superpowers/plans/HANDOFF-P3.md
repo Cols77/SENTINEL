@@ -31,6 +31,19 @@ Measured in `C:/coding/sentinel/.worktrees/p3-decision-surface` (after `uv sync 
 
 The 3 skipped are the opt-in live LLM gate. Every task's suite gate is measured against the current row.
 
+## Wave 2 result (2026-09-20)
+
+Tasks 7 and 8 landed; **Task 9 was attempted and deliberately dropped**; Tasks 10-11 follow.
+
+- `a1942ba` Task 7 — oldest-first detection queue, duplicates become the judgment point.
+- `87b3622` Task 8 — near-tie ASSIGN, SELECT_PLAN omits already-proposed entries, `needs_judgment` at the operator surface. Authored by the parent after the task halted on a P2-owned exact-equality assertion on `ADVISORY_POINTS`; approved afterwards by an independent skeptical review. **`ADVISORY_POINTS` is NOT extended by P3** — `ShadowLadder`/`JevPolicy` shadow when `decision_point in ADVISORY_POINTS or needs_judgment(legal)`. The P2 session has since endorsed that rule and relaxed their assertion anyway (`4e7d2b5`, now on master), but the dynamic rule stays: `ADVISORY_POINTS` means "always shadowed", `needs_judgment` covers the sometimes-case.
+- `8248355` Task 9 — **REPLAN dropped, not delivered.** Implemented as specified, then removed: the covering-plan trigger degenerates (`PLAN_MARKER_VERIFIED_6` is a superset of every station set), it contradicts the operator-approved `escalate` label for out-of-plan detections and broke the frozen golden fixture, and it is the wrong trigger on the merits (dispatch is plan-gated, so an out-of-plan detection is an anomaly, not a change of intent). Shipped instead: `covering_plans` as an unwired tested helper, plus characterization tests. Replanning now depends entirely on proposal item **P-5**.
+
+### Two scheduled conflicts a future session must handle
+
+1. **`P-6` / the gateway `IntegrityError`.** The operator released the gateway to the P1/P2 session for that one defect; the fix is `1ba6bfb` on `fix/gateway-integrity-error`, **unmerged**. When it reaches a branch P3 builds on, `test_characterization_reproposing_an_entry_raises_a_raw_integrity_error` (Task 3) must flip from the raw `sqlite3.IntegrityError` to `CoordinatorError("PLAN_ALREADY_PROPOSED")`. Not before.
+2. **"CommandGateway is untouchable" now has one exception.** That release was granted to that session for that defect and **does not extend to P3**. If you find master's gateway differs from this plan's Global Constraints, that is why — it is not licence to edit it.
+
 ## Wave 1 result (2026-09-20)
 
 5/5 tasks, each implemented then reviewed by a fresh agent that re-ran the suite itself; **zero fix rounds** — every task approved on first review. Commits after the rebase: `da5a828` (draft catalogue), `fa34518` (multi-detection state), `0890a08` (confirmed-plan fix, A13), `b2f03a7` (near-tie facts), `e6d557a` (operator-touch counting).
