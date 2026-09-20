@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any, Mapping
@@ -52,7 +53,27 @@ class CommandGateway:
     def _catalogue_fixture() -> Path:
         return Path(__file__).resolve().parents[3] / "docs" / "superpowers" / "specs" / "contracts" / "fixtures" / "survey-catalogue-v1.fixture.json"
 
+    @staticmethod
+    def _raise_typed_integrity_error(exc: sqlite3.IntegrityError) -> None:
+        """Translate a database constraint violation into the gateway's own
+        error type. A raw sqlite3 error escaping submit() bypasses every caller's
+        CoordinatorError handling -- AgentLoop's included -- and kills the run."""
+        message = str(exc)
+        if "plans." in message or "plans " in message:
+            raise CoordinatorError(
+                "PLAN_ALREADY_PROPOSED",
+                "this catalogue plan has already been proposed in this run",
+            ) from exc
+        raise CoordinatorError("STATE_CONSTRAINT_VIOLATION", message) from exc
+
     def submit(self, command: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            return self._submit(command)
+        except sqlite3.IntegrityError as exc:
+            self._raise_typed_integrity_error(exc)
+            raise  # unreachable; _raise_typed_integrity_error always raises
+
+    def _submit(self, command: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(command, Mapping):
             raise CoordinatorError("INVALID_CONTRACT", "command must be an object")
         # Idempotency is checked before payload validation so a reused scope is
