@@ -55,6 +55,11 @@ def bind_context(
         legal = legal_set(state, catalogue)
         return policy.decide(request, PolicyContext(state, legal))
 
+    # AgentLoop clears adapter state at every return, including approval waits.
+    # Preserve that optional lifecycle hook across the contextual binding.
+    forget = getattr(policy, "forget", None)
+    if callable(forget):
+        setattr(_policy, "forget", forget)
     return _policy
 
 

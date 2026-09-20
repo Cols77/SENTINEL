@@ -204,3 +204,22 @@ def test_gates_are_frozen_and_have_the_approved_defaults() -> None:
     assert gates.min_margin == 0.15
     with pytest.raises(FrozenInstanceError):
         gates.act_at = 0.1
+
+
+@pytest.mark.parametrize("probabilities", [
+    {ROUTE: True, FULL: False},
+    {ROUTE: "0.9", FULL: "0.1"},
+])
+def test_real_judge_transport_cannot_coerce_invalid_probability_types(monkeypatch, probabilities):
+    from sentinel.judgment import JevJudge
+
+    monkeypatch.setenv("TEST_JEV_KEY", "offline-test-only")
+    judge = JevJudge(api_key_env="TEST_JEV_KEY", transport=lambda payload: {
+        "answers": {"select_plan": {
+            "choice": ROUTE, "confidence": None, "probabilities": probabilities,
+        }},
+    })
+    sink = MemoryAuditSink()
+    result = JevProposer(judge, sink).decide(_request(), _context())
+    _assert_escalation(result)
+    assert sink.records[0]["gate_outcome"] != "accepted"

@@ -157,7 +157,13 @@ class JevJudge:
                     criteria = q["criteria"] or {}
                     if value not in criteria:
                         raise JudgeUnavailable(f"{name}: choice {value!r} not in criteria")
-                    answers[name] = {"value": value, "probabilities": {k: float(v) for k, v in answer["probabilities"].items()},
+                    probabilities = answer["probabilities"]
+                    if not isinstance(probabilities, Mapping) or any(
+                        isinstance(probability, bool) or not isinstance(probability, (int, float))
+                        for probability in probabilities.values()
+                    ):
+                        raise JudgeUnavailable(f"{name}: choice probabilities must be JSON numbers")
+                    answers[name] = {"value": value, "probabilities": {k: float(v) for k, v in probabilities.items()},
                                      "confidence": answer.get("confidence")}
                 elif kind == "score":
                     answers[name] = {"value": float(answer["score"]),

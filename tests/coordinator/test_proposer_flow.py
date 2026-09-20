@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
+
+import pytest
 
 from sentinel.contracts import AgentModelResult, AgentRequest
 from sentinel.coordinator import LlmProposer
@@ -19,6 +22,54 @@ from .p3_helpers import P3Run
 ROUTE_PLAN = "PLAN_ROUTE_ONLY_2_ZONE"
 FULL_PLAN = "PLAN_MARKER_VERIFIED_6"
 CATALOGUE = load_catalogue_plans()
+
+
+@pytest.mark.parametrize("max_turns", [1, 8])
+def test_real_e_loop_clears_adapter_memory_at_return_boundaries(tmp_path, max_turns):
+    from sentinel.adapter.llm.config import load_config
+    from sentinel.adapter.llm.openai_compatible import OpenAICompatibleAgentModel
+    from sentinel.adapter.llm.parser import wire_tool_name
+    from sentinel.coordinator.agent_loop import AgentLoop
+    from sentinel.coordinator.boundary import CoordinatorBoundary
+    from sentinel.coordinator.policy import bind_context
+
+    env = {
+        "SENTINEL_LLM_PROVIDER": "openrouter",
+        "SENTINEL_LLM_MODEL": "test-model",
+        "SENTINEL_LLM_TIMEOUT_MS": "1000",
+        "SENTINEL_LLM_PROMPT_REVISION": "test-prompt",
+        "SENTINEL_LLM_TOOL_POLICY_REVISION": "test-tools",
+        "SENTINEL_LLM_API_KEY_ENV": "TEST_API_KEY",
+        "TEST_API_KEY": "offline-test-only",
+    }
+    response = {"choices": [{"message": {"tool_calls": [{
+        "type": "function", "function": {
+            "name": wire_tool_name("inspection.propose_plan"),
+            "arguments": json.dumps({"catalogue_plan_id": ROUTE_PLAN, "reason": "route coverage"}),
+        },
+    }]}}]}
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        create=lambda **kwargs: response,
+    )))
+    adapter = OpenAICompatibleAgentModel(
+        load_config(env), client_factory=lambda **kwargs: client, environ=env,
+    )
+    sink = MemoryAuditSink()
+    policy = build_policy("E", advisors=[], sink=sink, proposer=LlmProposer(adapter, sink))
+    run = P3Run(tmp_path, "proposer-cleanup")
+    try:
+        result = AgentLoop(
+            CoordinatorBoundary(run.repo, run.gateway),
+            bind_context(policy, run.repo, CATALOGUE),
+            max_turns=max_turns, repository=run.repo, catalogue=CATALOGUE,
+        ).run(run.run_id, AGENT_RUN_ID, "inspect the route")
+        assert run.state().run_status == "WAITING_FOR_APPROVAL"
+        assert result["error_code"] == ("MAX_TURNS" if max_turns == 1 else "WAITING_FOR_APPROVAL")
+        assert adapter._pending == {}
+        assert adapter._history == {}
+    finally:
+        policy.close()
+        run.close()
 
 
 class _LegalProposalAdapter:
