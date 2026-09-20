@@ -174,7 +174,12 @@ class _RecoveringSink:
             try:
                 self.primary.write(record)
             except OSError:
-                self.fallback.write({"record": "audit_write_permanent_failure"})
+                permanent = {"record": "audit_write_permanent_failure", "retained_record_type": record.get("record")}
+                # ArchitectureRouter may catch the raised exception and recover
+                # through F. The audit failure remains independently fatal to
+                # evaluation even if coordinator execution later completes.
+                self.records.append(permanent)
+                self.fallback.write(permanent)
                 raise
             self.recoveries += 1
             recovery = {"record": "audit_write_recovery", "retained_record_type": record.get("record")}
@@ -376,6 +381,8 @@ def score_outcome(case, record):
     plans, tasks = snapshot.get("plans", []), snapshot.get("tasks", [])
     approvals = snapshot.get("plan_approvals", [])
     reasons = []
+    if any(a.get("record") == "audit_write_permanent_failure" for a in record.get("audit", [])):
+        reasons.append("permanent_audit_failure")
     if not record.get("report_complete") or not snapshot.get("runs") or not events:
         reasons.append("missing_persisted_report")
     if record.get("error") or len(record.get("requests", [])) > case.turn_limit:

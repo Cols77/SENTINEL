@@ -170,3 +170,16 @@ def test_real_audit_write_failure_is_retained(permanent, tmp_path):
     assert any(a["record"] == "audit_write_failure" for a in record["audit"])
     assert record["metrics"]["outcome_success"] is (not permanent)
     assert (tmp_path / "route_complete/f/recovery.jsonl").exists()
+
+
+def test_permanent_proposal_audit_failure_cannot_be_hidden_by_router(tmp_path):
+    from sentinel.proposal_eval import _Sink
+    class FailingProposalSink(_Sink):
+        def write(self, record):
+            if record.get("record") == "proposal_attempt":
+                raise OSError("persistent proposal audit failure")
+            super().write(record)
+    record = run_case(load_cases()[0], "llm", tmp_path, sink_factory=FailingProposalSink)
+    assert record["final_state"]["run_status"] == "COMPLETED"
+    assert not record["metrics"]["outcome_success"]
+    assert "permanent_audit_failure" in record["metrics"]["failure_reasons"]
