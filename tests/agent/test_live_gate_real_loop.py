@@ -23,7 +23,9 @@ from this module without it):
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -48,6 +50,7 @@ from tests.coordinator.harness import (
 
 GATE_FLAG = "SENTINEL_RUN_LIVE_LLM_ACCEPTANCE"
 SCENARIOS_PATH = Path(__file__).resolve().parent / "live_scenarios.json"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 _MINIMAL_SCENARIO_KEYS = {
     "name", "user_request", "setup", "expected_tool_sequence",
@@ -163,10 +166,18 @@ def run_real_loop_scenario(name: str, policy: Any, *, tmp_path: Path) -> dict[st
 
         calls: list[str] = []
         requests: list[dict[str, Any]] = []
+        model_results: list[dict[str, Any]] = []
 
         def recording_policy(request: dict[str, Any]) -> dict[str, Any]:
             requests.append(request)
-            result = base_policy(request)
+            try:
+                result = base_policy(request)
+            except Exception as exc:
+                # The arguments of a call the adapter's own parser refuses are
+                # exactly what a post-mortem needs, and they never become a result.
+                model_results.append({"raised": type(exc).__name__, "message": str(exc)[:512]})
+                raise
+            model_results.append(result)
             if result.get("status") == "TOOL_CALLS" and result.get("tool_calls"):
                 calls.append(result["tool_calls"][0]["tool_name"])
             return result
@@ -176,7 +187,8 @@ def run_real_loop_scenario(name: str, policy: Any, *, tmp_path: Path) -> dict[st
             repository=repo, catalogue=catalogue,
         )
         result = loop.run(RUN_ID, AGENT_RUN_ID, scenario["user_request"])
-        return {"calls": calls, "requests": requests, "result": result}
+        return {"calls": calls, "requests": requests, "model_results": model_results, "result": result,
+                "db_path": str(tmp_path / "one-station.sqlite3")}
     finally:
         close(repo)
 
@@ -303,6 +315,29 @@ def adapter() -> OpenAICompatibleAgentModel:
     return OpenAICompatibleAgentModel(config)
 
 
+LIVE_RUNS_DIR = REPO_ROOT / "artifacts" / "wp1" / "live-runs"
+BATCH_ENV = "SENTINEL_LIVE_BATCH_ID"
+
+
+def _persist_live_outcome(name: str, outcome: dict[str, Any], directory: Path | None = None) -> Path:
+    """Keep what a paid run saw and said. Two live runs on 2026-09-20 were read
+    from their call lists alone; the second showed the first reading could not
+    be checked, because neither the model's arguments nor the run database had
+    been kept. Every request, every model result (tool-call arguments included)
+    and a copy of the run database are written before the scenario is scored."""
+    directory = directory or LIVE_RUNS_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    batch = re.sub(r"[^A-Za-z0-9._-]", "_", os.environ.get(BATCH_ENV, "unlabelled"))[:64]
+    stem = f"{batch}-{name}"
+    record = {key: outcome.get(key) for key in ("calls", "model_results", "requests", "result")}
+    target = directory / f"{stem}.json"
+    target.write_text(json.dumps(record, indent=1, sort_keys=True, default=str), encoding="utf-8")
+    db = Path(str(outcome.get("db_path", "")))
+    if db.is_file():
+        shutil.copyfile(db, directory / f"{stem}.sqlite3")
+    return target
+
+
 def _llm_policy(model: OpenAICompatibleAgentModel) -> Callable[[dict[str, Any]], dict[str, Any]]:
     def _policy(request: dict[str, Any]) -> dict[str, Any]:
         result = model.propose(AgentRequest.from_dict(request))
@@ -316,4 +351,5 @@ def _llm_policy(model: OpenAICompatibleAgentModel) -> Callable[[dict[str, Any]],
 def test_live_scenario_on_the_real_loop(name, adapter, tmp_path):
     scenario = _scenario_by_name(name)
     outcome = run_real_loop_scenario(name, _llm_policy(adapter), tmp_path=tmp_path)
+    _persist_live_outcome(name, outcome)  # before the assertion: a failing run is the one worth reading
     assert_deliverables(outcome["calls"], scenario["expected_tool_sequence"], outcome)

@@ -1,5 +1,10 @@
 # Proposal: give `event_list` items a real schema
 
+> **Status 2026-09-20: GRANTED (consent C-12) and implemented on `fix/model-visible-results`**, as its own
+> small schema edit rather than inside the WP0 amendment revision, because a paid run showed it blocks the
+> LLM loop. One deviation from the text below: `summary` is capped at **512**, the loop's existing
+> `_SUMMARY_MAX`, not 256 -- 256 would have truncated summaries the loop already produces.
+
 Status: proposal only. No schema, code, or test file has been touched to produce this
 document. Gate: **Coherence consent from the operator** (see plan gate
 `G-coherence-event-list`, P4 Task 7). Sequencing: if accepted, this should ride in the

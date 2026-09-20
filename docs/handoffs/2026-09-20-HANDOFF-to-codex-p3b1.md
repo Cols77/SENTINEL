@@ -2,7 +2,7 @@
 
 **Written:** 2026-09-20 by the Claude session that reconciled the two 2026-09-20 handoffs, reviewed
 your plan `docs/superpowers/plans/2026-09-21-p3b1-approval-gated-E.md`, and built P4.
-**For:** Codex, before you execute P3b1. **Master:** `b8af3b9` (local; origin is at `b302636`).
+**For:** Codex, before you execute P3b1. **Master:** `7450443`, pushed. P4 is merged (consent C-13), so the "not merged" in section 1 is out of date: `architecture.py`, `driver.py` and `boundary.py` are on `master`, and your Task 3 should use them.
 
 Read this first. It changes three of your tasks, fixes two that cannot run as written, and tells you
 which files are yours.
@@ -56,7 +56,7 @@ Two collisions happened on 2026-09-20 because sessions shared tasks. So:
   `scripts/proposal_sweep.py`, `scripts/reband_shadow.py`, `scripts/build_acting_fixture.py`, and their tests.
 - **Mine:** the four P4 files above, plus `tests/coordinator/test_architecture.py`,
   `tests/coordinator/test_boundary.py`, `tests/test_rehearsal_architecture.py`.
-- **Unowned, and someone must take it — see §6:** `src/sentinel/adapter/llm/prompt.py`.
+- **Also mine, see §6:** `src/sentinel/adapter/llm/prompt.py`, and the `event_list` lines of the wire schema and of `agent_loop._execute`.
 
 ## 4. Operator decisions taken on 2026-09-20 that change your plan
 
@@ -118,26 +118,34 @@ do them last or not at all, and say which.
    and `test_shadow.py::test_non_interference_opposite_raising_and_timeout_advisors` failed once when two
    pytest processes ran at the same time, and pass alone. Never run two suites concurrently.
 
-## 6. New evidence from a paid run today — read before touching the agent loop
+## 6. New evidence from a paid run today -- and what I changed because of it
+
+> **This section was rewritten on 2026-09-20.** Its first version said the model "cannot read the ids it
+> is required to pass" and asked whether you would take the `prompt.py` fix. The first claim was wrong as
+> stated and the fix is done. Read this version.
 
 One consented re-run of `qualifying_evidence_to_task` (batch `2026-09-20-operator-grant-2`, 4 calls).
-Full write-up: the addendum in `artifacts/wp1/live-gate-real-loop.md`; the run's database is kept at
+Write-up with its correction: the addendum in `artifacts/wp1/live-gate-real-loop.md`; run database:
 `artifacts/wp1/evidence/2026-09-20-grant-2-qualifying_evidence_to_task.sqlite3`.
 
-- It failed, and **no task was ever created** — the `tasks` table is empty. The model called
-  `task.create`, read events twice, called `task.create` again, and the adapter's parser raised
-  `INVALID_ARGUMENTS`. `task.create` needs `perception_result_id`, `evidence_artifact_id` and `section_id`;
-  those live only in the `DETECTION_RECORDED` payload, and `state.get_recent_events` returns
-  `"events": []` plus truncated prose because of the `event_list` schema defect. **The model cannot read
-  the ids it is required to pass.** The earlier claim that it "created the task, then repeated it" was
-  never checked against a database and should be treated as unverified.
-- **Unowned defect, found by reading:** `prompt._bounded_previous` whitelists only `kind`, `run_status`,
-  `phase`, `state_version`. The typed ids WP0 §5 added (`plan_id`, `task_id`, ranking and assignment ids)
-  are dropped before the prompt is built — the amendment never reaches the model. This is a plain code
-  fix with no gate, in `src/sentinel/adapter/llm/prompt.py`. **Tell the operator whether you take it;
-  otherwise I will.** Your `EscalationInvestigator` (Task 8) reads through the same renderer, so it is on
-  your path either way.
-- Do not plan another paid run of that scenario until both are fixed.
+- It failed and **no task was ever created**. The first `task.create` was rejected; why is unknown,
+  because the harness never recorded the model's arguments. All three required ids *were* in the first
+  request, but two were labelled differently from the argument they fill (`result_id=` for
+  `perception_result_id`, `station=` for `section_id`).
+- After the rejection the model's reads were useless: `"events": []`, and one 512-character summary
+  shared by nine events, which cut off the only relevant one.
+- The earlier claim that the model "created the task, then repeated it" was never checked against a
+  database. Treat it as unverified.
+
+**Branch `fix/model-visible-results` (mine) -- it edits files from your File Map, so do not touch the
+same lines:**
+
+| File | What changed |
+|---|---|
+| `docs/superpowers/specs/contracts/sentinel-v0-wire.schema.json` | `event_list` items gain `sequence_no`, `event_type`, `summary` (all required, `additionalProperties: false`). Operator Coherence consent C-12, for this item only. **Your Task 7 no longer needs to carry it**; G-amend-rest is still closed for everything else. |
+| `src/sentinel/coordinator/agent_loop.py` | only the `state.get_recent_events` branch of `_execute` (returns typed items) and the evidence-summary string (ids named by the argument they fill). Your Task 7 edits elsewhere in this file; rebase onto this branch once it is on `master`. |
+| `src/sentinel/adapter/llm/prompt.py` | `_bounded_previous` now renders `plan_id`, `task_id`, `patroller_id`, `patroller_ids` and the event items. It used to drop all of them, so WP0 section 5 never reached the model. Your `EscalationInvestigator` reads through this renderer: **any new typed read result you add in Task 7 must be added to this whitelist too, or the model will not see it.** |
+| `tests/agent/test_live_gate_real_loop.py` | every live run now persists requests, model results with arguments, and the run database under `artifacts/wp1/live-runs/`. Set `SENTINEL_LIVE_BATCH_ID`. Do the same in your `scripts/proposal_sweep.py`: raw rows first, aggregates second. |
 
 ## 7. Gates — unchanged, and none of this handoff opens one
 

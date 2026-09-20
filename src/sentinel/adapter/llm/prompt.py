@@ -80,6 +80,9 @@ def _bounded_evidence(evidence: Any) -> list[dict[str, Any]]:
     return bounded
 
 
+_RESULT_ID_FIELDS = ("plan_id", "task_id", "patroller_id")
+
+
 def _bounded_previous(previous: Any) -> dict[str, Any] | None:
     if not isinstance(previous, Mapping):
         return None
@@ -91,6 +94,17 @@ def _bounded_previous(previous: Any) -> dict[str, Any] | None:
         for name in ("run_status", "phase", "state_version"):
             if name in result and isinstance(result[name], (str, int)):
                 safe_result[name] = result[name]
+        # Typed ids (WP0 amendment section 5). These were validated by the wire
+        # schema and returned by AgentLoop, then dropped here, so the amendment
+        # never reached the model. A null id is rendered as null: "no id" and
+        # "field missing" are different facts.
+        for name in _RESULT_ID_FIELDS:
+            if name in result and (result[name] is None or isinstance(result[name], str)):
+                safe_result[name] = None if result[name] is None else _text(result[name], 128)
+        if isinstance(result.get("patroller_ids"), list):
+            safe_result["patroller_ids"] = [_text(item, 64) for item in result["patroller_ids"] if isinstance(item, str)][:16]
+        if isinstance(result.get("events"), list):
+            safe_result["events"] = _bounded_events(result["events"])
     bounded: dict[str, Any] = {}
     for name in ("tool_name", "status", "error_code"):
         value = previous.get(name)
