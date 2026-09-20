@@ -210,3 +210,32 @@ produces no disagreement. The residual 1.5-2 cm depth bias measured against
 tape therefore remains either tape error or a common-mode lens offset; this
 method rules out map error and per-tag geometry error, which is what it was
 designed to do.
+
+## Cube navigation — Stage 1 "stand test" (2026-09-20 design, rev 3)
+
+Design: `docs/superpowers/specs/2026-09-20-wp5-cube-positioning-design.md`. Motors off
+throughout; `pose-stream` never takes off, so this stage needs no G3/G4 approval. It fits a small
+room.
+
+**Setup.** Two vertical supports ("stands") about 0.5 m apart on one straight line, one or two
+tags each, tag faces square to the line. Lay one tape along the line: each stand's `x_m` is a
+tape reading; tag-centre heights by ruler; tag edge length by ruler (printers scale ~96%). Write
+`artifacts/site.json` (`cube-site-v1`) and generate the map:
+
+    uv run sentinel cube-site-map --site artifacts/site.json --calibration-from calibration/tag-map-calibrated.json --out artifacts/cube-map.json
+
+**Capture.** Drone on a support about 1.1 m back from the line, lens facing it: on the centre
+line and about 0.5 m to one side, each at two lens heights (for example 1.0 and 1.4 m). Truth is
+measured to the lens. Per point:
+
+    uv run sentinel pose-stream --real --confirm --tag-map artifacts/cube-map.json --db artifacts/cube_s1.db --duration 20 --record-dir artifacts/frames_s1_<point> --preview
+
+**Score.** `pose-score` against a truth file, ladder p95 <= 15 cm / 10 deg, then 10 / 5, then
+5 / 3, with `--min-samples 15`. Then per recording, the truth-free comparison:
+
+    uv run sentinel pose-map-check --frames artifacts/frames_s1_<point> --tag-map artifacts/cube-map.json
+
+The design claim holds if the joint spread is no worse than the single-tag spread at every point
+and clearly better at the off-centre points. A stand whose joint reprojection median exceeds 1 px
+has been mis-measured: fix the site file, not the detector. Compare the measured spreads with
+`cube-layout-check` for the same site and note the ratio; it recalibrates the 2.5x factor.
