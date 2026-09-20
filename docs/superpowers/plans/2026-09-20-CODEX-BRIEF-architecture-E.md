@@ -33,6 +33,15 @@ Neither needs the promotion criteria at all. The operator gate *is* the safety p
 
 **This is the fastest honest path to E, and your plan should lead with it.**
 
+### Two qualifications that are part of the argument, not caveats on it
+
+The session that owns the promotion criteria reviewed this framing and agreed with the core — the criteria exist to bound the cost of a *wrong autonomous action*, and a proposal that cannot reach the gateway without an operator confirm has a different failure mode. It tightened it in two places, and both are binding on your plan:
+
+1. **Approval-gated is not consequence-free — it is anchoring.** A proposal reorders what the operator considers first; a recommendation attached to `operator.ask` more so. If the proposer ships without the presentation rule enforced and tested, "the operator gate is the safety property" quietly becomes false, because the gate is only as good as the attention behind it. So: no promotion criteria, **but the presentation rule is load-bearing and must be a hard acceptance item, not a nicety.**
+2. **A weak proposer is still a failure, just a different one.** It does not cause an unsafe action; it causes rejections and extra escalations — measurable against the operator's "approvals only" target of two actions per clean run. So the approval-gated half **still needs a quality measurement**, just not the promotion machinery: proposal acceptance rate and operator touches per run (reuse P3a Task 11's `operator_touches`), scored against **held-out request texts the operator wrote**, not generator phrasings. Cheap, and it is the number that says whether the proposer is earning its place.
+
+And one correction for the implementation, which is a safety property rather than a preference: **the investigator's inability to mutate must be enforced by the `legal_tools` set in the request, never by its prompt.** A prompt-only restriction is not a safety property.
+
 ## 4. Why the acting half is currently blocked — do not plan around this, plan a branch point
 
 A consented live sweep (48 judgment turns × 3 repeats) produced:
@@ -50,17 +59,23 @@ Read that carefully:
 - **The LLM has coverage but fails the bar to act**: `false_act` 16 at EVIDENCE_GATE, Wilson lower 0.656 against a 0.93 requirement, and 7.5–9.3 s median latency against a 1500 ms requirement. As an *acting* policy it is out. **As an approval-gated proposer, none of those three bars apply.**
 - **The original target decision no longer exists.** P2b made `EVIDENCE_GATE` a deterministic rule (in the approved plan and score ≥ 0.75 → create the task). There is nothing left to promote there.
 
-**A diagnosis is running now** (Claude workflow, branch `fix/astra-evidence-and-coverage`) to decide whether Jev's 0% coverage is (A) a measurement defect in how confidence is read, (B) real calibration, or (C) a threshold mismatch with `act_at = 0.80`. **Your plan must branch on that verdict rather than assume one.** Write the acting-half tasks as conditional, with the condition stated.
+**The diagnosis has reported** (`artifacts/decisions/jev-coverage-diagnosis.md`, commit `01096a9`; an independent review is in flight). Verdict: **(C) threshold / task-shape mismatch — no code defect.** Jev's confidence field is real, reaches the policy correctly, and clears 0.80 on 19–30% of picks on a comparable question shape (max 0.98) in the already-committed `artifacts/jev/v2-live-jev.jsonl`. On the 2–3-option act-or-defer shape of `SELECT_PLAN`/`EVIDENCE_GATE` it never clears 0.80 — not even on the 6 of 24 `EVIDENCE_GATE` turns the deterministic rule itself finds unambiguous.
+
+**Two measurement artifacts it surfaced change how the table above should be read, and your plan must not repeat the mistake:**
+
+- **`escalation_rate = 1.0` does not mean Jev answered "escalate".** `JevPolicy` records its own *fallback* pick for any non-HIGH answer, so a MID-confidence **correct** pick is counted as an escalation. Jev's raw picks on those 144 calls were never recorded, so its true behaviour is unknown.
+- **The fixture is 75% `escalate` at both points**, which cannot separate a good judge from an abstainer.
+
+So the acting half is **not refuted — it is unmeasured**. The honest next step is one consented re-sweep now that raw-row logging exists (`0275218`): the same paid batch can then be re-banded offline at *any* `act_at`, so the threshold is derived from data against `false_act == 0` rather than assumed. Treat `0.80` as an unvalidated default for this task shape, not a safety bar. That re-run is a paid operator gate — plan it as gated, do not assume it.
 
 ## 5. Hard constraints — these are not style preferences
 
 1. **`CommandGateway` is untouchable.** One narrow exception was granted to another session for one defect; it does not generalise. If a capability needs a gateway or schema change, the plan **produces a proposal and stops at a gate** — it does not build.
 2. **Operator gates are never self-granted.** Any schema or contract-fixture change (Coherence consent), any paid model call, any merge or push, any new hand-labelled fixture, and any promotion of a policy to act. State the gate; stop there.
-3. **Three proposals are already pending the operator** and you must not assume any are granted:
-   - P1's WP0 amendment — `decision_context`, typed read tools, result ids, `operator.ask`, `DECISION_RECORDED`.
-   - The rich survey catalogue (12–15 coverage-named plans).
-   - The consolidated P3a amendment, items P-1…P-5, P-7, P-8, P-9 (`docs/superpowers/specs/2026-09-20_wp0-proposal-p3-decision-surface-amendments.md`).
-   **`EscalationInvestigator` depends on the first of these** (typed reads and `operator.ask`). `LlmProposer` does **not** — plan accordingly, and put the unblocked work first.
+3. **Proposal status, as of 2026-09-20 — check before assuming:**
+   - **P1's WP0 amendment is GRANTED.** The operator approved it and another session is implementing typed result ids now (schema, contracts, `agent_loop`, tests). `EscalationInvestigator` depends on this, so it is unblocked — but it lands *after* that implementation, so plan it as sequenced behind work you do not own, and coordinate rather than duplicating.
+   - **Still pending, do not assume:** the rich survey catalogue (12–15 coverage-named plans), and the consolidated P3a amendment items P-1…P-5, P-7, P-8, P-9 (`docs/superpowers/specs/2026-09-20_wp0-proposal-p3-decision-surface-amendments.md`).
+   - `LlmProposer` depends on **none** of these. Put it first.
 4. **Never edit an existing test to make something pass.** If one fails, that is a finding: stop and surface it.
 5. **Where the platform blocks something, pin the current behaviour with a characterization test** naming the proposal item that would unblock it. This project does that deliberately, and it works: a scheduled conflict fired exactly as documented when two branches merged.
 6. **No live provider call without consent**, with the call count, models and cost estimate stated first.
@@ -84,7 +99,7 @@ Scope it as:
 - **Task group A — `LlmProposer` at `SELECT_PLAN`, approval-gated.** No ungranted dependency; this is the part that can start immediately. It implements `ContextualPolicy` at `SELECT_PLAN` only and escalates elsewhere; emits `inspection.propose_plan` or `escalate` with a required `reason`; the run goes to `WAITING_FOR_APPROVAL`; a rejected proposal returns to `SELECT_PLAN`. Test with a fake adapter that it can never call a tool outside `{inspection.propose_plan, finish}` — enforced in the legal tool set, not the prompt. Evaluate against the v2 decision fixture (`fixtures/decisions_v2/turns.v2.jsonl`: 78 scored turns, 56 of them `SELECT_PLAN`) plus the 24 operator-authored request texts still pending at gate G-labels-v2. Argue explicitly in the plan **why the promotion criteria do not gate this**, so nobody later applies them by reflex.
 - **Task group B — the anti-automation-bias presentation.** Whatever the model recommends, the operator sees options in fixed catalogue order, never reordered by the suggestion; the suggestion appears only behind an explicit "show assistant analysis"; the reason is shown with the facts it cites; and the operator's choice is recorded **together with whether the analysis had been expanded**, so the anchoring effect can be measured later. This is a real requirement, not a nicety — it is what keeps an approval gate meaningful rather than a rubber stamp.
 - **Task group C — `EscalationInvestigator`, conditional on the WP0 amendment.** Mark it clearly as blocked on that consent. Bounded to ≤ 4 typed reads, a 6-turn / 60-second budget, ending in exactly one `operator.ask`; on budget expiry the coordinator sends a templated ask with `suggested = null`.
-- **Task group D — the acting half, conditional on the Jev diagnosis.** Write it as a branch: if the verdict is (A) a measurement defect, the task is to fix it and re-run a consented sweep (a paid gate) before any promotion; if (B) or (C), the task is to re-scope — state plainly which decision points could ever support promotion given that `EVIDENCE_GATE` is now a rule and the remaining judgment points are information-thin.
+- **Task group D — the acting half, gated on a consented re-sweep.** The diagnosis (section 4) already rules out a code defect, so do NOT plan a bug hunt. Plan instead: re-run the sweep with raw-row logging under operator consent; re-band the resulting rows offline across a range of `act_at` values; derive the threshold from the observed distribution against `false_act == 0`; and only then apply the promotion criteria. Also fix the fixture's 75%-`escalate` imbalance first, or the re-run inherits a fixture that cannot distinguish a good judge from an abstainer. State plainly which decision points could support promotion at all, given that `EVIDENCE_GATE` is now a deterministic rule and the remaining judgment points are information-thin.
 
 **Also state, in the plan's own words, what E will NOT be.** P3a's remaining judgment points — duplicate detections and near-tie rankings — yield only 8 and 6 distinct packets respectively, because the decision packet carries coarse bands rather than raw values (blocker A12). No promotion study reaching n ≥ 60 on distinct states is possible there today. The first information-rich judgment point in this system will be pose quality (proposal item P-9: continuous reprojection error, tag geometry, staleness), which the operator has already approved as post-P3 work. Say so, so the next person does not rediscover it.
 
