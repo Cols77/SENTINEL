@@ -64,11 +64,35 @@ from this baseline.
 
 ## Survey scope
 
+The current offline results are published separately in the
+[inspection capability baseline](reports/inspection-capability-baseline.md) and
+[survey readiness/evaluation baseline](reports/survey-readiness-evaluation-baseline.md).
+The inspection report distinguishes execution from subsequent scoring revisions;
+the original artifacts remain historical and unchanged.
+
+Final integration verification: **857 passed, 3 skipped** in the serial pytest
+suite on 2026-09-21. The retained local log is
+`artifacts/proposal-eval/full-pytest.log`; offline capability outcomes and
+production survey limits remain distinct from regression test results.
+
 `sentinel.survey_eval` owns independent synthetic truth, projection, matching and
 strict option-specific replay. Its arithmetic tests do not prove production
 policy quality. Whole-scene coverage, observed-object accuracy, completion,
 escalation and report validity are distinct. Missing reports have no validity
 score; lower bounds do not become exact count errors.
+
+The bridge can run the separate survey worktree's actual loop with synthetic
+frames and scripted advisors, retaining each arm's database and source hashes:
+
+```powershell
+rtk proxy C:\coding\sentinel\.venv\Scripts\python.exe scripts/survey_sweep.py --survey-root C:/coding/sentinel/.worktrees/survey-counting --scene fixtures/survey_eval/synthetic-off-axis-occlusion-closer-followup.json --output artifacts/proposal-eval/my-survey-run.json --approve-sweeps --max-flights 2
+```
+
+This command simulates approval for each replayed sweep. It uses independently
+declared scene options, so it does not validate production option generation.
+Automatic site/results reads are captured and visible to later policy decisions;
+model-issued read-tool dispatch remains blocked coverage. The report records
+dirty source state as well as revision and before/after hashes.
 
 See [the survey handoff](handoffs/2026-09-20-survey-evaluation.md) for source
 revisions, reproduced production limitations and the integration seam. Real
