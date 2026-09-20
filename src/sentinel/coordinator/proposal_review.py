@@ -6,6 +6,7 @@ import json
 import uuid
 from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from .errors import CoordinatorError
@@ -20,7 +21,7 @@ def pending_proposal_review(
 ) -> dict[str, Any] | None:
     """Describe the persisted plan awaiting approval without changing state."""
     run = repository.connection.execute(
-        """SELECT status, pending_approval_kind, pending_approval_id
+        """SELECT state_version, status, pending_approval_kind, pending_approval_id
            FROM runs WHERE run_id = ?""",
         (run_id,),
     ).fetchone()
@@ -81,6 +82,10 @@ def pending_proposal_review(
 
     return {
         "run_id": run_id,
+        "review_identity": {
+            "plan_id": pending_plan_id,
+            "expected_state_version": int(run["state_version"]),
+        },
         "proposed_plan": {
             "label": proposed.plan_id,
             "description": proposed.description,
@@ -106,6 +111,32 @@ def _as_utc(value: datetime) -> datetime:
 
 def _wire_timestamp(value: datetime) -> str:
     return _as_utc(value).isoformat().replace("+00:00", "Z")
+
+
+def read_audit_jsonl(path: str | Path) -> tuple[list[dict[str, Any]], list[str]]:
+    """Read valid object records while preserving malformed lines in place."""
+    records: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    audit_path = Path(path)
+    if not audit_path.exists():
+        return records, warnings
+    for line_number, line in enumerate(
+        audit_path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            warnings.append(
+                f"audit line {line_number} is invalid JSON: {exc.msg}"
+            )
+            continue
+        if not isinstance(record, dict):
+            warnings.append(f"audit line {line_number} must be a JSON object")
+            continue
+        records.append(record)
+    return records, warnings
 
 
 def _proposal_for_plan(
@@ -145,8 +176,10 @@ def _plan_reference(
     }
 
 
-def _review_key(run_id: str, state_version: int, decision: str, actor_id: str) -> str:
-    return f"plan-review-{run_id}-{state_version}-{decision}-{actor_id}"
+def _review_key(
+    run_id: str, plan_id: str, state_version: int, decision: str, actor_id: str
+) -> str:
+    return f"plan-review-{run_id}-{plan_id}-{state_version}-{decision}-{actor_id}"
 
 
 def _review_record(
@@ -154,6 +187,7 @@ def _review_record(
     state_version: int,
     decision: str,
     actor_id: str,
+    plan_id: str,
     proposed_label: str,
     proposed_at_text: str,
     reviewed_at: datetime,
@@ -165,6 +199,7 @@ def _review_record(
         "state_version": state_version,
         "decision": decision,
         "actor_id": actor_id,
+        "plan_id": plan_id,
         "proposed_label": proposed_label,
         "seconds_to_decision": max(
             0.0, (_as_utc(reviewed_at) - _as_utc(proposed_at)).total_seconds()
@@ -173,7 +208,8 @@ def _review_record(
 
 
 _REVIEW_ID_FIELDS = (
-    "record", "run_id", "state_version", "decision", "actor_id", "proposed_label"
+    "record", "run_id", "state_version", "decision", "actor_id", "plan_id",
+    "proposed_label",
 )
 
 
@@ -200,25 +236,39 @@ def _write_review_once(sink: Any, record: dict[str, Any]) -> None:
     ):
         return
     path = getattr(sink, "path", None)
-    if path is not None and path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            existing = json.loads(line)
-            if isinstance(existing, dict) and _same_review(existing, record):
-                return
+    if path is not None:
+        existing_records, _warnings = read_audit_jsonl(path)
+        if any(_same_review(existing, record) for existing in existing_records):
+            return
+        audit_path = Path(path)
+        if audit_path.exists() and audit_path.stat().st_size:
+            with audit_path.open("rb") as handle:
+                handle.seek(-1, 2)
+                terminated = handle.read(1) == b"\n"
+            if not terminated:
+                # Preserve the malformed/truncated bytes and delimit the next
+                # append so the recovered record is independently valid JSONL.
+                with audit_path.open("a", encoding="utf-8") as handle:
+                    handle.write("\n")
     sink.write(record)
 
 
 def _recover_review(
-    repository: Any, run_id: str, decision: str, actor_id: str, sink: Any
+    repository: Any,
+    run_id: str,
+    plan_id: str,
+    expected_state_version: int,
+    decision: str,
+    actor_id: str,
+    sink: Any,
 ) -> dict[str, Any] | None:
     approval = repository.connection.execute(
         """SELECT plan_id, plan_sha256, action, expected_state_version, created_at
            FROM plan_approvals
-           WHERE run_id = ? AND actor_id = ?
+           WHERE run_id = ? AND plan_id = ? AND actor_id = ?
+             AND expected_state_version = ?
            ORDER BY rowid DESC LIMIT 1""",
-        (run_id, actor_id),
+        (run_id, plan_id, actor_id, expected_state_version),
     ).fetchone()
     if approval is None:
         return None
@@ -228,9 +278,9 @@ def _recover_review(
             f"plan was already reviewed as {approval['action']}",
         )
 
-    state_version = int(approval["expected_state_version"])
-    reference = _plan_reference(repository, run_id, approval["plan_id"])
-    proposal = _proposal_for_plan(repository, run_id, approval["plan_id"])
+    state_version = expected_state_version
+    reference = _plan_reference(repository, run_id, plan_id)
+    proposal = _proposal_for_plan(repository, run_id, plan_id)
     if (
         reference is None
         or reference["plan_sha256"] != approval["plan_sha256"]
@@ -242,7 +292,7 @@ def _recover_review(
         "target": {"kind": "PLAN", "plan_reference": reference},
     }
     payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    key = _review_key(run_id, state_version, decision, actor_id)
+    key = _review_key(run_id, plan_id, state_version, decision, actor_id)
     event = repository.connection.execute(
         """SELECT event_id, payload_json FROM events
            WHERE run_id = ? AND state_version = ? AND event_type = ?
@@ -281,7 +331,7 @@ def _recover_review(
     _write_review_once(
         sink,
         _review_record(
-            run_id, state_version, decision, actor_id, proposed_label,
+            run_id, state_version, decision, actor_id, plan_id, proposed_label,
             proposed_at_text, reviewed_at,
         ),
     )
@@ -294,6 +344,8 @@ def submit_plan_review(
     run_id: str,
     decision: str,
     *,
+    plan_id: str,
+    expected_state_version: int,
     sink: Any,
     clock: Callable[[], datetime] = _utc_now,
     actor_id: str = "OPERATOR_1",
@@ -321,19 +373,24 @@ def submit_plan_review(
     ).fetchone()
     if run is None:
         raise CoordinatorError("INVALID_PLAN_REVIEW", "run does not exist")
-    if (
-        run["status"] != "WAITING_FOR_APPROVAL"
-        or run["pending_approval_kind"] != "PLAN"
-        or run["pending_approval_id"] is None
-    ):
-        recovered = _recover_review(repository, run_id, decision, actor_id, sink)
+    exact_pending = (
+        run["status"] == "WAITING_FOR_APPROVAL"
+        and run["pending_approval_kind"] == "PLAN"
+        and run["pending_approval_id"] == plan_id
+        and int(run["state_version"]) == expected_state_version
+    )
+    if not exact_pending:
+        recovered = _recover_review(
+            repository, run_id, plan_id, expected_state_version,
+            decision, actor_id, sink,
+        )
         if recovered is not None:
             return recovered
         raise CoordinatorError(
-            "INVALID_PLAN_REVIEW", "run has no plan awaiting approval"
+            "INVALID_PLAN_REVIEW",
+            "review identity is not the current or an exactly resolved plan review",
         )
 
-    plan_id = run["pending_approval_id"]
     plan_reference = _plan_reference(repository, run_id, plan_id)
     proposal = _proposal_for_plan(repository, run_id, plan_id)
     if plan_reference is None or proposal is None:
@@ -348,9 +405,9 @@ def submit_plan_review(
             "INVALID_PLAN_REVIEW", "pending proposal has no catalogue plan id"
         )
 
-    state_version = int(run["state_version"])
+    state_version = expected_state_version
     reviewed_at = _as_utc(clock())
-    key = _review_key(run_id, state_version, decision, actor_id)
+    key = _review_key(run_id, plan_id, state_version, decision, actor_id)
     command = {
         "contract_version": "sentinel.v0",
         "wire_type": "command_envelope",
@@ -373,11 +430,11 @@ def submit_plan_review(
     _write_review_once(
         sink,
         _review_record(
-            run_id, state_version, decision, actor_id, proposed_label,
+            run_id, state_version, decision, actor_id, plan_id, proposed_label,
             proposed_at_text, reviewed_at,
         ),
     )
     return result
 
 
-__all__ = ["pending_proposal_review", "submit_plan_review"]
+__all__ = ["pending_proposal_review", "read_audit_jsonl", "submit_plan_review"]

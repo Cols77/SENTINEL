@@ -6,6 +6,7 @@ import argparse
 from dataclasses import replace
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
 from .emergency import EmergencyHotkey, EmergencySender
@@ -113,6 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     review_plan.add_argument("--db", type=Path, required=True)
     review_plan.add_argument("--run-id", required=True)
+    review_plan.add_argument("--plan-id", required=True)
+    review_plan.add_argument("--expected-state-version", type=int, required=True)
     review_plan.add_argument(
         "--decision", choices=("CONFIRM", "REJECT"), required=True
     )
@@ -391,25 +394,14 @@ def _run_pending(args: Any) -> int:
     ``pending_decision`` never surfaces advisor output."""
     from .coordinator.legal_tools import load_catalogue_plans
     from .coordinator.operator_choice import pending_decision
-    from .coordinator.proposal_review import pending_proposal_review
+    from .coordinator.proposal_review import pending_proposal_review, read_audit_jsonl
     from .coordinator.repository import CoordinatorRepository
 
     audit_records = []
     if args.audit and args.audit.exists():
-        for line_number, line in enumerate(
-            args.audit.read_text(encoding="utf-8").splitlines(), start=1
-        ):
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as exc:
-                print(f"pending failed: audit line {line_number} is invalid JSON: {exc.msg}")
-                return 2
-            if not isinstance(record, dict):
-                print(f"pending failed: audit line {line_number} must be a JSON object")
-                return 2
-            audit_records.append(record)
+        audit_records, warnings = read_audit_jsonl(args.audit)
+        for warning in warnings:
+            print(f"pending warning: {warning}", file=sys.stderr)
     repository = CoordinatorRepository.open(args.db)
     try:
         catalogue = load_catalogue_plans()
@@ -426,8 +418,11 @@ def _run_pending(args: Any) -> int:
         repository.close()
 
     if proposal is not None:
+        identity = proposal["review_identity"]
         proposed = proposal["proposed_plan"]
         print(f"proposed_plan: {proposed['label']}: {proposed['description']}")
+        print(f"  plan_id: {identity['plan_id']}")
+        print(f"  expected_state_version: {identity['expected_state_version']}")
         recommendation = proposed["recommendation"]
         if recommendation is not None:
             print(f"  reason: {json.dumps(recommendation['reason'])}")
@@ -461,6 +456,8 @@ def _run_review_plan(args: Any) -> int:
                 CommandGateway(repository),
                 args.run_id,
                 args.decision,
+                plan_id=args.plan_id,
+                expected_state_version=args.expected_state_version,
                 sink=JsonlAuditSink(args.audit),
             )
         except CoordinatorError as exc:

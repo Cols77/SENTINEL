@@ -35,12 +35,14 @@ def _pending_run(tmp_path, name="cli-proposal-review"):
     }
     audit_path.write_text(json.dumps(recommendation) + "\n", encoding="utf-8")
     run_id = run.run_id
+    plan_id = run.state().plan_id
+    state_version = run.state().state_version
     run.close()
-    return db_path, run_id, audit_path
+    return db_path, run_id, audit_path, plan_id, state_version
 
 
 def test_pending_prints_actual_plan_reason_facts_then_other_plans(tmp_path, capsys):
-    db_path, run_id, audit_path = _pending_run(tmp_path)
+    db_path, run_id, audit_path, plan_id, state_version = _pending_run(tmp_path)
 
     exit_code = main([
         "pending", "--db", str(db_path), "--run-id", run_id,
@@ -54,6 +56,8 @@ def test_pending_prints_actual_plan_reason_facts_then_other_plans(tmp_path, caps
     facts_at = out.index('"station_count": 2')
     full_at = out.index(FULL_PLAN)
     assert route_at < reason_at < facts_at < full_at
+    assert f"plan_id: {plan_id}" in out
+    assert f"expected_state_version: {state_version}" in out
 
 
 def test_cli_has_no_hidden_analysis_flags_or_fields(tmp_path, capsys):
@@ -71,10 +75,13 @@ def test_cli_has_no_hidden_analysis_flags_or_fields(tmp_path, capsys):
 
 @pytest.mark.parametrize("decision", ["CONFIRM", "REJECT"])
 def test_review_plan_cli_submits_decision_and_writes_audit(tmp_path, capsys, decision):
-    db_path, run_id, audit_path = _pending_run(tmp_path, f"cli-review-{decision}")
+    db_path, run_id, audit_path, plan_id, state_version = _pending_run(
+        tmp_path, f"cli-review-{decision}"
+    )
 
     exit_code = main([
         "review-plan", "--db", str(db_path), "--run-id", run_id,
+        "--plan-id", plan_id, "--expected-state-version", str(state_version),
         "--decision", decision, "--audit", str(audit_path),
     ])
 
@@ -104,6 +111,7 @@ def test_review_plan_cli_reports_no_pending_plan(tmp_path, capsys):
 
     exit_code = main([
         "review-plan", "--db", str(db_path), "--run-id", run_id,
+        "--plan-id", "not-pending", "--expected-state-version", "2",
         "--decision", "CONFIRM", "--audit", str(tmp_path / "audit.jsonl"),
     ])
 
@@ -112,10 +120,10 @@ def test_review_plan_cli_reports_no_pending_plan(tmp_path, capsys):
 
 
 @pytest.mark.parametrize("bad_line", ["{", "[]"])
-def test_pending_rejects_invalid_audit_jsonl_with_line_number(
+def test_pending_warns_and_continues_past_invalid_audit_jsonl(
     tmp_path, capsys, bad_line
 ):
-    db_path, run_id, audit_path = _pending_run(tmp_path)
+    db_path, run_id, audit_path, _plan_id, _state_version = _pending_run(tmp_path)
     with audit_path.open("a", encoding="utf-8") as handle:
         handle.write(bad_line + "\n")
 
@@ -124,14 +132,15 @@ def test_pending_rejects_invalid_audit_jsonl_with_line_number(
         "--audit", str(audit_path),
     ])
 
-    assert exit_code == 2
-    out = capsys.readouterr().out
-    assert "audit line 2" in out
-    assert "Traceback" not in out
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert ROUTE_PLAN in captured.out
+    assert "audit line 2" in captured.err
+    assert "Traceback" not in captured.out + captured.err
 
 
 def test_pending_escapes_audit_control_characters(tmp_path, capsys):
-    db_path, run_id, audit_path = _pending_run(tmp_path)
+    db_path, run_id, audit_path, _plan_id, _state_version = _pending_run(tmp_path)
     records = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
     records[0]["reason"] = "safe\nproposed_plan: SPOOF\x1b[31m"
     records[0]["facts"] = {"citation": "ok\rother_plans: SPOOF\x00"}
@@ -148,3 +157,25 @@ def test_pending_escapes_audit_control_characters(tmp_path, capsys):
     assert "ok\\rother_plans: SPOOF\\u0000" in out
     assert "\x1b" not in out
     assert "\x00" not in out
+
+
+def test_review_plan_appends_valid_audit_after_existing_malformed_line(tmp_path, capsys):
+    db_path, run_id, audit_path, plan_id, state_version = _pending_run(
+        tmp_path, "cli-review-malformed-audit"
+    )
+    with audit_path.open("a", encoding="utf-8") as handle:
+        handle.write('{"partial":\n')
+
+    exit_code = main([
+        "review-plan", "--db", str(db_path), "--run-id", run_id,
+        "--plan-id", plan_id, "--expected-state-version", str(state_version),
+        "--decision", "CONFIRM", "--audit", str(audit_path),
+    ])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "review-plan OK" in captured.out
+    assert "Traceback" not in captured.out + captured.err
+    lines = audit_path.read_text(encoding="utf-8").splitlines()
+    assert lines[-2] == '{"partial":'
+    assert json.loads(lines[-1])["record"] == "plan_review"

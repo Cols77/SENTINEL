@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import inspect
+import json
 
 import pytest
 
@@ -47,6 +48,14 @@ def _recommendation(run: P3Run, label: str, **overrides) -> dict:
     return record
 
 
+def _review_identity(run: P3Run) -> dict:
+    state = run.state()
+    return {
+        "plan_id": state.plan_id,
+        "expected_state_version": state.state_version,
+    }
+
+
 def test_pending_view_identifies_actual_plan_and_lists_other_plans_in_fixture_order(tmp_path):
     run = P3Run(tmp_path, "proposal-review-pending")
     try:
@@ -56,6 +65,10 @@ def test_pending_view_identifies_actual_plan_and_lists_other_plans_in_fixture_or
 
         assert view == {
             "run_id": run.run_id,
+            "review_identity": {
+                "plan_id": run.state().plan_id,
+                "expected_state_version": run.state().state_version,
+            },
             "proposed_plan": {
                 "label": ROUTE_PLAN,
                 "description": CATALOGUE[1].description,
@@ -235,7 +248,7 @@ def test_submit_plan_review_builds_operator_command_and_exact_audit(tmp_path):
 
         result = submit_plan_review(
             run.repo, GatewaySpy(), run.run_id, "CONFIRM", sink=sink,
-            clock=lambda: FIXED_REVIEW_TIME,
+            clock=lambda: FIXED_REVIEW_TIME, **_review_identity(run),
         )
 
         assert result == {"status": "COMPLETED"}
@@ -259,6 +272,7 @@ def test_submit_plan_review_builds_operator_command_and_exact_audit(tmp_path):
             "state_version": state.state_version,
             "decision": "CONFIRM",
             "actor_id": "OPERATOR_1",
+            "plan_id": state.plan_id,
             "proposed_label": ROUTE_PLAN,
             "seconds_to_decision": max(0.0, (FIXED_REVIEW_TIME - proposed_at).total_seconds()),
         }]
@@ -281,7 +295,7 @@ def test_submit_plan_review_confirm_and_reject_through_real_gateway(
 
         submit_plan_review(
             run.repo, CommandGateway(run.repo), run.run_id, decision,
-            sink=sink, clock=lambda: FIXED_REVIEW_TIME,
+            sink=sink, clock=lambda: FIXED_REVIEW_TIME, **_review_identity(run),
         )
 
         state = run.state()
@@ -300,6 +314,7 @@ def test_submit_plan_review_clamps_negative_duration_to_zero(tmp_path):
         submit_plan_review(
             run.repo, run.gateway, run.run_id, "REJECT", sink=sink,
             clock=lambda: datetime(2000, 1, 1, tzinfo=timezone.utc),
+            **_review_identity(run),
         )
         assert sink.records == [{
             **sink.records[0],
@@ -314,9 +329,15 @@ def test_submit_plan_review_rejects_invalid_or_nonpending_review(tmp_path):
     sink = MemoryAuditSink()
     try:
         with pytest.raises(CoordinatorError):
-            submit_plan_review(run.repo, run.gateway, run.run_id, "MAYBE", sink=sink)
+            submit_plan_review(
+                run.repo, run.gateway, run.run_id, "MAYBE", sink=sink,
+                plan_id="not-pending", expected_state_version=run.state().state_version,
+            )
         with pytest.raises(CoordinatorError):
-            submit_plan_review(run.repo, run.gateway, run.run_id, "CONFIRM", sink=sink)
+            submit_plan_review(
+                run.repo, run.gateway, run.run_id, "CONFIRM", sink=sink,
+                plan_id="not-pending", expected_state_version=run.state().state_version,
+            )
         assert sink.records == []
     finally:
         run.close()
@@ -327,13 +348,17 @@ def test_submit_plan_review_rejects_missing_persisted_plan(tmp_path):
     sink = MemoryAuditSink()
     try:
         run.propose_plan(ROUTE_PLAN)
+        identity = _review_identity(run)
         run.repo.connection.execute(
             "UPDATE runs SET pending_approval_id = ? WHERE run_id = ?",
             ("missing-plan-id", run.run_id),
         )
         run.repo.connection.commit()
         with pytest.raises(CoordinatorError):
-            submit_plan_review(run.repo, run.gateway, run.run_id, "CONFIRM", sink=sink)
+            submit_plan_review(
+                run.repo, run.gateway, run.run_id, "CONFIRM", sink=sink,
+                **identity,
+            )
         assert sink.records == []
     finally:
         run.close()
@@ -349,8 +374,12 @@ def test_submit_plan_review_does_not_audit_failed_gateway_submission(tmp_path):
 
     try:
         run.propose_plan(ROUTE_PLAN)
+        identity = _review_identity(run)
         with pytest.raises(CoordinatorError, match="boom"):
-            submit_plan_review(run.repo, FailingGateway(), run.run_id, "REJECT", sink=sink)
+            submit_plan_review(
+                run.repo, FailingGateway(), run.run_id, "REJECT", sink=sink,
+                **identity,
+            )
         assert sink.records == []
     finally:
         run.close()
@@ -375,15 +404,16 @@ def test_lost_gateway_response_is_recovered_on_retry_without_resubmission(tmp_pa
 
     try:
         run.propose_plan(ROUTE_PLAN)
+        identity = _review_identity(run)
         with pytest.raises(ConnectionError, match="response lost"):
             submit_plan_review(
                 run.repo, LostResponseGateway(), run.run_id, "CONFIRM", sink=sink,
-                clock=lambda: FIXED_REVIEW_TIME,
+                clock=lambda: FIXED_REVIEW_TIME, **identity,
             )
 
         result = submit_plan_review(
             run.repo, MustNotSubmitGateway(), run.run_id, "CONFIRM", sink=sink,
-            clock=lambda: FIXED_REVIEW_TIME,
+            clock=lambda: FIXED_REVIEW_TIME, **identity,
         )
 
         assert result["status"] == "COMPLETED"
@@ -410,19 +440,20 @@ def test_audit_failure_after_commit_is_recoverable_and_retry_is_deduplicated(tmp
     sink = FailOnceSink()
     try:
         run.propose_plan(ROUTE_PLAN)
+        identity = _review_identity(run)
         with pytest.raises(OSError, match="audit disk unavailable"):
             submit_plan_review(
                 run.repo, run.gateway, run.run_id, "REJECT", sink=sink,
-                clock=lambda: FIXED_REVIEW_TIME,
+                clock=lambda: FIXED_REVIEW_TIME, **identity,
             )
 
         first_recovery = submit_plan_review(
             run.repo, run.gateway, run.run_id, "REJECT", sink=sink,
-            clock=lambda: FIXED_REVIEW_TIME,
+            clock=lambda: FIXED_REVIEW_TIME, **identity,
         )
         repeated_recovery = submit_plan_review(
             run.repo, run.gateway, run.run_id, "REJECT", sink=sink,
-            clock=lambda: FIXED_REVIEW_TIME,
+            clock=lambda: FIXED_REVIEW_TIME, **identity,
         )
 
         assert first_recovery == repeated_recovery
@@ -437,16 +468,87 @@ def test_opposite_decision_cannot_recover_a_prior_review(tmp_path):
     sink = MemoryAuditSink()
     try:
         run.propose_plan(ROUTE_PLAN)
+        identity = _review_identity(run)
         submit_plan_review(
             run.repo, run.gateway, run.run_id, "CONFIRM", sink=sink,
-            clock=lambda: FIXED_REVIEW_TIME,
+            clock=lambda: FIXED_REVIEW_TIME, **identity,
         )
 
         with pytest.raises(CoordinatorError, match="already reviewed as CONFIRM"):
             submit_plan_review(
                 run.repo, run.gateway, run.run_id, "REJECT", sink=sink,
-                clock=lambda: FIXED_REVIEW_TIME,
+                clock=lambda: FIXED_REVIEW_TIME, **identity,
             )
         assert len(sink.records) == 1
+    finally:
+        run.close()
+
+
+def test_delayed_retry_recovers_exact_review_after_later_same_action(tmp_path):
+    run = P3Run(tmp_path, "proposal-review-delayed")
+    sink = MemoryAuditSink()
+    try:
+        run.propose_plan(ROUTE_PLAN)
+        first = _review_identity(run)
+        first_result = submit_plan_review(
+            run.repo, run.gateway, run.run_id, "REJECT", sink=sink,
+            clock=lambda: FIXED_REVIEW_TIME, **first,
+        )
+        run.propose_plan(FULL_PLAN)
+        second = _review_identity(run)
+        second_result = submit_plan_review(
+            run.repo, run.gateway, run.run_id, "REJECT", sink=sink,
+            clock=lambda: FIXED_REVIEW_TIME, **second,
+        )
+
+        delayed = submit_plan_review(
+            run.repo, run.gateway, run.run_id, "REJECT", sink=sink,
+            clock=lambda: FIXED_REVIEW_TIME, **first,
+        )
+
+        assert delayed == first_result
+        assert delayed != second_result
+        assert [record["state_version"] for record in sink.records] == [
+            first["expected_state_version"], second["expected_state_version"]
+        ]
+    finally:
+        run.close()
+
+
+def test_jsonl_recovery_appends_after_malformed_line_and_then_deduplicates(tmp_path):
+    run = P3Run(tmp_path, "proposal-review-jsonl-recovery")
+    audit_path = tmp_path / "review.jsonl"
+    from sentinel.coordinator.shadow import JsonlAuditSink
+
+    class FailAfterCommitSink:
+        def write(self, record):
+            audit_path.write_text('{"partial":', encoding="utf-8")
+            raise OSError("partial audit write")
+
+    try:
+        run.propose_plan(ROUTE_PLAN)
+        identity = _review_identity(run)
+        with pytest.raises(OSError, match="partial audit write"):
+            submit_plan_review(
+                run.repo, run.gateway, run.run_id, "CONFIRM",
+                sink=FailAfterCommitSink(), clock=lambda: FIXED_REVIEW_TIME,
+                **identity,
+            )
+
+        sink = JsonlAuditSink(audit_path)
+        submit_plan_review(
+            run.repo, run.gateway, run.run_id, "CONFIRM", sink=sink,
+            clock=lambda: FIXED_REVIEW_TIME, **identity,
+        )
+        submit_plan_review(
+            run.repo, run.gateway, run.run_id, "CONFIRM", sink=sink,
+            clock=lambda: FIXED_REVIEW_TIME, **identity,
+        )
+
+        lines = audit_path.read_text(encoding="utf-8").splitlines()
+        assert lines[0] == '{"partial":'
+        valid = [json.loads(line) for line in lines[1:]]
+        assert len(valid) == 1
+        assert valid[0]["plan_id"] == identity["plan_id"]
     finally:
         run.close()
