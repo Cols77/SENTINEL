@@ -75,3 +75,19 @@ metadata; the earlier inspection suite passed its mode-scoring regression. Fixtu
 regeneration passed 16 tests. Only the 24 former pending JSONL lines changed; the
 other 78 lines remained byte-for-byte identical. A second agent checked all 24
 expected labels against the draft catalogue and found no remaining blocker.
+
+Local `master` was fast-forwarded to `5323be5` after those focused checks and
+independent reviews. Both worktrees and existing untracked user files were kept;
+no remote was pushed. The integrated checkout's full serial verification command
+was:
+
+```powershell
+rtk proxy C:/coding/sentinel/.venv/Scripts/python.exe -m pytest -q --tb=short --junitxml=artifacts/proposal-eval/integration-5323be5-pytest.xml
+```
+
+Result: **870 passed, 3 skipped, 3 warnings in 640.65 seconds**, exit status 0.
+The [JUnit evidence](../../artifacts/proposal-eval/integration-5323be5-pytest.xml)
+is retained in the main checkout. Existing warnings concern `jsonschema.RefResolver`
+deprecation and the unregistered `unit` pytest marker. All ten external survey
+bridge tests ran on the integrated checkout; none was skipped by worktree discovery.
+This is regression verification, not a fresh model-capability measurement.
