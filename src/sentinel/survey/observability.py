@@ -12,6 +12,9 @@ FOCAL_PX = 683.0
 IMAGE_WIDTH = 960
 IMAGE_HEIGHT = 720
 PRINCIPAL_X = IMAGE_WIDTH / 2.0
+#: rev 3 R1: ground-plane depth reads the box centre's pixel row against
+#: this line, not against PRINCIPAL_X.
+PRINCIPAL_Y = IMAGE_HEIGHT / 2.0
 
 #: Nominal real width in centimetres, per class.
 NOMINAL_WIDTH_CM = {"person": 50.0, "computer": 35.0, "phone": 15.0, "pen": 1.0}
