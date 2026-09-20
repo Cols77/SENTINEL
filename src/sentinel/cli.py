@@ -14,6 +14,7 @@ from .models import RunReport
 from .reporting import ProgressLogger, write_report, write_video_manifest
 from .safe_tools import FixedPositionYawTools, ToolRefusal, YawCommand
 from .pose.persistence import ensure_schema
+from .pose.preview import Preview
 from .pose.replay import FrameRecorder, ReplayClient
 from .pose.scoring import Thresholds, load_truth, score_runs
 from .pose.stream import run_pose_stream, throttled_altitude_source
@@ -114,6 +115,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--record-dir",
         type=Path,
         help="save raw frames from a live run here for later --replay",
+    )
+    pose_stream.add_argument(
+        "--preview",
+        action="store_true",
+        help="open a live window of what the drone sees (q/Esc stops the stream)",
+    )
+    pose_stream.add_argument(
+        "--preview-board",
+        default="7x6",
+        help="checkerboard inner corners COLSxROWS to detect in the preview",
     )
     pose_stream.add_argument(
         "--allow-nominal",
@@ -437,6 +448,7 @@ def _run_pose_stream(args: Any) -> int:
 
     client: Any | None = None
     conn: sqlite3.Connection | None = None
+    preview = None
     try:
         tag_map = load_tag_map(str(args.tag_map))
         if tag_map.calibration_source == "nominal" and not args.allow_nominal:
@@ -465,6 +477,23 @@ def _run_pose_stream(args: Any) -> int:
                 lambda: client.height_cm(), scale=0.01
             )
         run_id = args.run_id or str(uuid.uuid4())
+
+        def print_report(report) -> None:  # live, as each pose is persisted
+            z = "n/a" if report.altitude_m is None else report.altitude_m
+            print(
+                f"pose x={report.point[0]} y={report.point[1]} "
+                f"z={z} heading={report.heading_deg}",
+                flush=True,
+            )
+
+        preview = None
+        if args.preview:
+            try:
+                cols, rows = (int(v) for v in args.preview_board.lower().split("x"))
+            except ValueError:
+                print("--preview-board must look like 7x6.")
+                return 1
+            preview = Preview(board_pattern=(cols, rows))
         reports = run_pose_stream(
             client,
             tag_map,
@@ -475,14 +504,9 @@ def _run_pose_stream(args: Any) -> int:
             source_kind=source_kind,
             recorder=recorder,
             altitude_source=altitude_source,
+            on_frame=preview,
+            on_report=print_report,
         )
-        for report in reports:
-            z = "n/a" if report.altitude_m is None else report.altitude_m
-            print(
-                f"pose x={report.point[0]} y={report.point[1]} "
-                f"z={z} heading={report.heading_deg}",
-                flush=True,
-            )
         print(f"pose-stream complete: {len(reports)} report(s), run_id={run_id}")
         return 0
     except KeyboardInterrupt:
@@ -492,6 +516,8 @@ def _run_pose_stream(args: Any) -> int:
         print(f"Pose stream failed: {exc}", flush=True)
         return 1
     finally:
+        if preview is not None:
+            preview.close()
         if client is not None:
             client.close()
         if conn is not None:

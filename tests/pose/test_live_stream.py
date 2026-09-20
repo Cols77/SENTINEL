@@ -312,3 +312,45 @@ def test_unmapped_tag_frames_still_warn_per_frame(tmp_path, caplog):
     client = FakeClient([frame, frame])
     run_pose_stream(client, tm, conn, run_id="u1", max_frames=2)
     assert caplog.text.count("fail-closed (no pose persisted)") == 2
+
+
+def test_on_frame_callback_sees_bgr_frames_and_can_stop_the_stream(tmp_path):
+    conn = _make_db(tmp_path)
+    client = FakeClient([_blank_frame() for _ in range(5)])
+    seen = []
+
+    def on_frame(bgr):
+        seen.append(bgr.shape)
+        return len(seen) < 2  # request stop after the 2nd frame
+
+    run_pose_stream(client, load_tag_map(TAG_MAP), conn, run_id="p", max_frames=5,
+                    on_frame=on_frame)
+    assert len(seen) == 2 and seen[0][2] == 3
+    assert client.video_enabled is False
+
+
+def test_on_frame_failure_does_not_break_the_stream(tmp_path):
+    conn = _make_db(tmp_path)
+    client = FakeClient([_blank_frame(), _blank_frame()])
+
+    def boom(bgr):
+        raise RuntimeError("no display")
+
+    run_pose_stream(client, load_tag_map(TAG_MAP), conn, run_id="p", max_frames=2,
+                    on_frame=boom)
+    assert client.frames_read == 2
+
+
+def test_on_report_is_called_live_per_report(tmp_path):
+    conn = _make_db(tmp_path)
+    client = FakeClient([_render_mapped_tag(4), _render_mapped_tag(4)])
+    got = []
+
+    def on_report(r):
+        # called while streaming: the row is already persisted, the stream still running
+        assert client.video_enabled is True
+        got.append(r.report_id)
+
+    reports = run_pose_stream(client, load_tag_map(TAG_MAP), conn, run_id="o", max_frames=2,
+                              on_report=on_report)
+    assert got == [r.report_id for r in reports] and len(got) == 2

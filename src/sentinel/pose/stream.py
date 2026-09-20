@@ -111,6 +111,8 @@ def run_pose_stream(
     max_consecutive_timeouts: int = DEFAULT_MAX_CONSECUTIVE_TIMEOUTS,
     recorder=None,
     altitude_source: Callable[[], float | None] | None = None,
+    on_frame: Callable[[np.ndarray], bool | None] | None = None,
+    on_report: Callable[[DronePoseReport], None] | None = None,
 ) -> list[DronePoseReport]:
     """Stream ``max_frames`` frames from ``client`` and persist good poses.
 
@@ -118,7 +120,9 @@ def run_pose_stream(
     contribute nothing). Isolated ``VideoReadTimeout`` reads are tolerated;
     the stream aborts after ``max_consecutive_timeouts`` in a row or on EOF.
     ``altitude_source`` is an optional read-only callable returning metres
-    (failures yield ``None``); it never issues flight commands. Always calls ``stop_video()`` before returning.
+    (failures yield ``None``); it never issues flight commands.
+    ``on_frame(bgr)`` is an optional display hook called for every frame; returning
+    ``False`` stops the stream, and an exception disables the hook (never the stream). Always calls ``stop_video()`` before returning.
     """
     if max_frames is None and duration_s is None:
         raise ValueError("max_frames or duration_s is required")
@@ -164,9 +168,18 @@ def run_pose_stream(
                     recorder.save(frame)
                 except Exception as exc:  # noqa: BLE001 - recording is best-effort
                     logger.warning("frame %d recording failed: %s", i, exc)
+            bgr = _to_bgr(frame)
+            if on_frame is not None:
+                try:
+                    if on_frame(bgr) is False:
+                        logger.info("stopped by preview window after %d frame(s)", i)
+                        break
+                except Exception as exc:  # noqa: BLE001 - display must never break the stream
+                    logger.warning("preview disabled: %s", exc)
+                    on_frame = None
             try:
                 report = estimate_pose(
-                    _to_bgr(frame),
+                    bgr,
                     tag_map,
                     run_id=run_id,
                     report_id=str(uuid.uuid4()),
@@ -187,6 +200,8 @@ def run_pose_stream(
                     logger.debug("altitude %r rejected: %s", altitude, exc)
             append_pose_event(conn, report)
             reports.append(report)
+            if on_report is not None:
+                on_report(report)
             logger.info(
                 "frame %d pose report_id=%s point=(%s, %s) heading=%.1f deg",
                 i,

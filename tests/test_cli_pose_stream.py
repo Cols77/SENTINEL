@@ -50,13 +50,16 @@ def test_pose_stream_fake_client_persists_and_prints_pose(monkeypatch, tmp_path,
         assert tag_map.has_tag(0)
         assert isinstance(conn, sqlite3.Connection)
         calls.append(("stream", run_id))
-        return [
+        reports = [
             SimpleNamespace(
                 point=(1.25, -0.5),
                 altitude_m=0.8,
                 heading_deg=-90.0,
             )
         ]
+        for r in reports:  # the real stream reports each pose live via on_report
+            kwargs["on_report"](r)
+        return reports
 
     fake_client = FakeClient()
     monkeypatch.setattr("sentinel.cli.build_real_client", lambda _args: fake_client)
@@ -171,7 +174,10 @@ def test_pose_stream_replay_needs_no_confirm_and_marks_replayed(monkeypatch, tmp
     def fake_stream(client, tag_map, conn, **kw):
         seen.update(kw)
         seen["client"] = client
-        return [SimpleNamespace(point=(1.0, 2.0), altitude_m=None, heading_deg=12.5)]
+        reports = [SimpleNamespace(point=(1.0, 2.0), altitude_m=None, heading_deg=12.5)]
+        for r in reports:
+            kw["on_report"](r)
+        return reports
 
     monkeypatch.setattr("sentinel.cli.run_pose_stream", fake_stream)
     monkeypatch.setattr("sentinel.cli.build_real_client",
