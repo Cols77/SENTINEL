@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+from sentinel.coordinator.assignment_policy import assignment_facts
+
 SCORE_BANDS = ((0.9, "very_high"), (0.75, "high"), (0.6, "moderate"), (0.5, "marginal"))
 
 def score_band(score: float | None) -> str | None:
@@ -81,7 +83,9 @@ class DecisionState:
                 "facts": self.facts(),
                 "queue": {"pending_detections": len(self.detections),
                           "open_tasks": sum(1 for t in self.tasks if t.status in _OPEN_TASK)},
-                "detection": self.detection_facts(head) if head else None}
+                "detection": self.detection_facts(head) if head else None,
+                "assignment": (assignment_facts(self.current_task.ranking_scores)
+                               if self.current_task and self.current_task.ranking_scores else None)}
 
     def facts(self) -> dict:
         det = self.detection or {}
