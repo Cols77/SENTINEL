@@ -162,6 +162,16 @@ still legally has zero legal tools — P1 Task 3, D3).
 
 ## 5. Result payload ids
 
+> **STATUS 2026-09-20: GRANTED by the operator and IMPLEMENTED for this section only.**
+> Sections 2-4 (`decision_context`, typed read tools) and 6 (`operator.ask`) remain proposals.
+> **Deviation from the text below, made during implementation:** each id key is *required* but its
+> value is *nullable* (`anyOf: [uuid, null]`). A required non-null value is underivable on the legacy
+> `AgentLoop(port, policy)` path, which has no read model to resolve ids from; making the key always
+> present keeps the guarantee a policy actually needs (look for the id, never parse a string), while
+> `tests/coordinator/test_typed_result_ids.py::test_production_path_never_yields_a_null_id` pins that
+> the real path never returns null. Implemented in `_typed_result` (`agent_loop.py`).
+
+
 Today (`AgentToolResultPayload`, `oneOf` branch 3) `plan`/`task`/`ranking`/`assignment` results carry only
 `{"kind": "..."}` — no id, which is D5's remaining half after P1 Task 3 (P1 puts the id into the *next request's*
 `event_context` summary string; the *result itself*, seen by the policy in the same turn, still has none).

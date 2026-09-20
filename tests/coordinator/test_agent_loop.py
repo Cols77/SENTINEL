@@ -215,4 +215,7 @@ def test_agent_loop_binds_typed_feedback_to_next_request():
     assert requests[1]["state_version"] == 1
     assert requests[1]["event_context"] == [{"sequence_no": 4, "event_type": "TASK_CREATED", "summary": "TASK_CREATED"}]
     assert requests[1]["previous_result"]["status"] == "ACCEPTED"
-    assert requests[1]["previous_result"]["result"] == {"kind": "task"}
+    # WP0 amendment (typed result ids): the id key is always present; it is
+    # null here only because this legacy path runs on a fixed fake port with no
+    # read model to resolve the id from.
+    assert requests[1]["previous_result"]["result"] == {"kind": "task", "task_id": None}

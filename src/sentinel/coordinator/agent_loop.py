@@ -241,6 +241,35 @@ class AgentLoop:
             return True
         return datetime.now(timezone.utc) >= expiry.astimezone(timezone.utc)
 
+    def _typed_result(self, result: dict, tool_name: str, arguments: dict, run_id: str, ids: dict) -> dict:
+        """Fill the amendment's typed id fields for the four mutating kinds.
+
+        Ids come from the read model (`DecisionState.ids()`), or, for values the
+        policy itself supplied, from the call. The key is always present; its
+        value is null only where the loop has no read model to resolve it from
+        (`repository=None`, the legacy fixed-port path). A policy can therefore
+        always *look* for the id, and `test_production_path_never_yields_a_null_id`
+        pins that the real path never gives it a null.
+        """
+        kind = result.get("kind")
+        if kind == "plan":
+            return {"kind": "plan", "plan_id": ids.get("plan_id")}
+        if kind == "task":
+            return {"kind": "task", "task_id": ids.get("task_id")}
+        if kind == "ranking":
+            patrollers: tuple[str, ...] = ()
+            if self.repository is not None:
+                try:
+                    patrollers = read_decision_state(self.repository, run_id).ranked_patrollers
+                except KeyError:
+                    patrollers = ()
+            return {"kind": "ranking", "patroller_ids": list(patrollers[:16])}
+        if kind == "assignment":
+            return {"kind": "assignment",
+                    "task_id": arguments.get("task_id") or ids.get("task_id"),
+                    "patroller_id": arguments.get("patroller_id")}
+        return result
+
     def _legal_tools(self, run_id: str) -> list[str]:
         """D3: the computed legal action set, plus the two always-available reads.
         Without a repository the legacy fixed tool list is kept unchanged."""
@@ -334,15 +363,18 @@ class AgentLoop:
                     "result": {"kind": "empty"},
                 }).to_dict()
             result = {"kind": _RESULT_KINDS.get(tool_name, "empty")}
-            # D5 (within schema): ids stay out of `result` (locked to {"kind"} by
-            # the current wire schema; typed ids are a Task 6 amendment) but do
-            # surface in `safe_summary`, which is a free-form bounded string.
+            # D5, now complete: the WP0 amendment (operator consent 2026-09-20)
+            # gives plan/task/ranking/assignment results typed id fields, so a
+            # policy reads what it just created from the result itself instead
+            # of parsing safe_summary. The live gate's repeated task.create is
+            # the failure this addresses. safe_summary keeps the ids too.
             ids = {}
             if self.repository is not None:
                 try:
                     ids = read_decision_state(self.repository, run_id).ids()
                 except KeyError:
                     ids = {}
+            result = self._typed_result(result, tool_name, arguments, run_id, ids)
             status_word = submit_result.get("status", "COMPLETED") if isinstance(submit_result, dict) else "COMPLETED"
             safe_summary = f"{command_type} {status_word}; ids: {ids}"[:512]
         current = self.port.read_state(run_id)
