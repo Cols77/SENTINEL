@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from sentinel.contracts import AgentModelResult, AgentRequest, AgentToolResult, validate_document
+from sentinel.contracts.schemas import ContractValidationError
 
 from .decision_state import read_decision_state, score_band
 from .errors import CoordinatorError
@@ -187,11 +188,21 @@ class AgentLoop:
                 model_result = AgentModelResult.from_dict(raw_result)
                 if model_result.agent_run_id != agent_run_id:
                     raise ValueError("agent result belongs to a different agent run")
-            except Exception:
+            except Exception as exc:
                 # Bounded corrective feedback: a schema-invalid result earns the
                 # model a REJECTED previous_result for the same turn budget,
-                # up to twice per run, before INVALID_AGENT_RESULT is terminal.
+                # up to twice per run, before the failure becomes terminal.
+                #
+                # A policy that *raises* is not a model that answered badly: a
+                # missing dependency, a provider outage or a harness bug used to
+                # be reported as INVALID_AGENT_RESULT, which is how the
+                # 2026-09-20 live gate hid a missing `openai` package for a
+                # whole run. Keep the two apart, and name the exception type.
+                harness_failure = not isinstance(exc, ContractValidationError)
                 if corrective_retries >= 2:
+                    if harness_failure:
+                        return {"status": "FAILED", "error_code": "AGENT_CALL_FAILED",
+                                "summary": f"agent policy raised {type(exc).__name__}"[:512]}
                     return {"status": "FAILED", "error_code": "INVALID_AGENT_RESULT", "summary": "agent result failed contract validation"}
                 corrective_retries += 1
                 previous = AgentToolResult.from_dict({
@@ -282,7 +293,16 @@ class AgentLoop:
             result = {"kind": "state_summary", "run_status": str(value.get("run_status", "UNKNOWN")), "phase": str(value.get("agent_phase", "UNKNOWN")), "state_version": int(value.get("state_version", 0))}
         elif tool_name == "state.get_recent_events":
             value = self.port.read_events(run_id, arguments["after_sequence"], arguments["limit"])
-            result = {"kind": "event_list", "events": [_event_summary(item) for item in value]}
+            # WP0 schema defect (found live 2026-09-20): AgentToolResultPayload's
+            # event_list items are `{"type": "object", "additionalProperties":
+            # false}` with NO properties, so *any* populated event object fails
+            # validation and the call kills the run. Until the amendment lands,
+            # the events array stays empty and the bounded summaries travel in
+            # safe_summary, which the schema leaves free-form.
+            summaries = [_event_summary(item) for item in value]
+            result = {"kind": "event_list", "events": []}
+            joined = " | ".join(f"{item['sequence_no']}:{item['summary']}" for item in summaries)
+            safe_summary = (f"{len(summaries)} event(s): {joined}" if summaries else "no events after cursor")[:512]
         elif tool_name == "wait_for_event":
             result = {"kind": "wait"}
         else:
