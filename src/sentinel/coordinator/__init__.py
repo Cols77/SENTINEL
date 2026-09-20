@@ -6,9 +6,11 @@ from .evidence import EvidenceDecision, EvidencePolicy
 from .preflight import PreflightReport, SimulatedWorker, make_preflight_report
 from .tasks import AssignmentService, EvidenceTaskService, SimulatedPatroller
 from .agent_loop import AgentLoop
+from .proposer import LlmProposer
 
 __all__ = [
     "CoordinatorPort", "PerceptionPort", "WorkerPort", "PlanApprovalService",
     "EvidenceDecision", "EvidencePolicy", "PreflightReport", "SimulatedWorker",
     "make_preflight_report", "EvidenceTaskService", "SimulatedPatroller", "AssignmentService", "AgentLoop",
+    "LlmProposer",
 ]
