@@ -3,9 +3,13 @@
 
 1. Opens a fresh coordinator gateway (the same real ports the coordinator
    tests use -- ``tests.coordinator.harness``).
-2. Wraps the F executor (P1's ``RulePolicy``) in a ``ShadowLadder`` with the
-   selected advisor arms, auditing every RULE and judgment-point decision to
-   an append-only ``JsonlAuditSink``.
+2. Builds the selected architecture's policy (P4 Task 3's
+   ``architecture.build_policy``): ``F`` is the bare ``ShadowLadder(
+   RulePolicy(), advisors, sink)``; ``E`` wraps that same ladder in an
+   ``ArchitectureRouter`` that gives ``SELECT_PLAN`` to a proposer and folds
+   every proposer failure back onto the ladder. Either way every RULE and
+   judgment-point decision is audited to an append-only ``JsonlAuditSink``,
+   and P4 Task 4's ``driver.drive_run`` runs the loop.
 3. At each judgment point (``SELECT_PLAN``, ``EVIDENCE_GATE``) the operator's
    choice is taken from ``--choices sp=<label>,eg=<label>`` when given, or
    prompted for interactively otherwise -- ``pending_decision`` never
@@ -26,10 +30,17 @@ why, exit code 2 -- unless ``SENTINEL_SHADOW_SWEEP_CONSENT=<batch-id>`` is
 set: a fresh, explicit operator consent for a paid remote call (plan gate
 G-rehearsal, Task 6 Step 4). Nothing in this script sets that variable.
 
+``--architecture {F,E}`` (default: the ``SENTINEL_ARCHITECTURE`` env var,
+then ``F``) selects the architecture; ``--proposer scripted:<PLAN_ID>``
+supplies E's proposer with a tiny non-LLM stand-in -- there is no live-LLM
+proposer option here (that is P4 Task 6, deferred until Codex's P3b1
+``LlmProposer`` lands). ``--architecture E`` with no ``--proposer`` exits 2
+before anything is opened or created.
+
 Every mutation here still goes through ``CommandGateway.submit`` (directly,
 or through ``operator_choice.submit_choice``) -- this script adds no new
-mutation path. Advisors never change what is executed: the ``ShadowLadder``
-executor (``RulePolicy``) is the only thing whose output is ever submitted.
+mutation path. Advisors never change what is executed: only the executor
+policy's own output (RULE, or E's accepted proposal) is ever submitted.
 """
 from __future__ import annotations
 
@@ -45,19 +56,19 @@ for _path in (REPO_ROOT / "src", REPO_ROOT):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-from sentinel.coordinator.agent_loop import AgentLoop  # noqa: E402
+from sentinel.coordinator.architecture import ArchitectureUnavailable, build_policy, resolve_architecture  # noqa: E402
+from sentinel.coordinator.boundary import CoordinatorBoundary  # noqa: E402, F401 -- re-exported for callers that import it from here
 from sentinel.coordinator.command_gateway import CommandGateway  # noqa: E402
-from sentinel.coordinator.decision_state import read_decision_state  # noqa: E402
+from sentinel.coordinator.driver import drive_run  # noqa: E402
 from sentinel.coordinator.legal_tools import EVIDENCE_GATE, SELECT_PLAN, load_catalogue_plans  # noqa: E402
-from sentinel.coordinator.operator_choice import pending_decision, submit_choice  # noqa: E402
-from sentinel.coordinator.policies import JevPolicy, RulePolicy  # noqa: E402
-from sentinel.coordinator.policy import bind_context  # noqa: E402
+from sentinel.coordinator.operator_choice import submit_choice  # noqa: E402
+from sentinel.coordinator.policies import JevPolicy  # noqa: E402
+from sentinel.coordinator.policy import ContextualPolicy, PolicyContext, one_call  # noqa: E402
 from sentinel.coordinator.repository import CoordinatorRepository  # noqa: E402
-from sentinel.coordinator.shadow import JsonlAuditSink, ShadowLadder  # noqa: E402
+from sentinel.coordinator.shadow import JsonlAuditSink  # noqa: E402
 
-from tests.coordinator.harness import CoordinatorBoundary, FakeWorker, envelope  # noqa: E402
+from tests.coordinator.harness import FakeWorker, envelope  # noqa: E402
 
-_TERMINAL_STATUSES = {"COMPLETED", "FAILED", "EMERGENCY"}
 _MAX_STEPS = 10
 _POINT_ARG_KEYS = {SELECT_PLAN: "sp", EVIDENCE_GATE: "eg"}
 
@@ -161,68 +172,88 @@ def _confirm_task(repo: CoordinatorRepository, gateway: CommandGateway, run_id: 
     }, sequence=30, run_id=run_id, actor_type="OPERATOR", expected=_state_version(repo, run_id)))
 
 
+# --- architecture E's proposer (CLI-testing stand-in only) ---------------
+
+class ScriptedProposer:
+    """``--proposer scripted:<PLAN_ID>``: always proposes the same catalogue
+    plan id, regardless of context -- no model, no network call. This is a
+    seam for exercising ``ArchitectureRouter`` end to end; the real proposer
+    is P3b1's ``LlmProposer`` (Task 6, deferred, not part of this task)."""
+
+    def __init__(self, plan_id: str) -> None:
+        self.plan_id = plan_id
+
+    def decide(self, request: dict, context: PolicyContext) -> dict:
+        return one_call(request, "inspection.propose_plan", {"catalogue_plan_id": self.plan_id})
+
+
+def build_proposer(spec: str | None) -> ContextualPolicy | None:
+    """``None`` -> no proposer (architecture F, or E with none supplied --
+    ``architecture.build_policy`` is what raises ``ArchitectureUnavailable``
+    for that case). ``"scripted:<PLAN_ID>"`` -> ``ScriptedProposer``."""
+    if spec is None:
+        return None
+    prefix = "scripted:"
+    if spec.startswith(prefix) and len(spec) > len(prefix):
+        return ScriptedProposer(spec[len(prefix):])
+    raise ValueError(f"unknown --proposer spec: {spec!r} (expected 'scripted:<PLAN_ID>')")
+
+
 # --- the rehearsal itself -------------------------------------------------
 
 def run_rehearsal(*, advisors_mode: str, choices: dict[str, str], db_path: Path, audit_path: Path,
                    run_id: str | None = None, agent_run_id: str | None = None,
                    request_text: str = "inspect one station",
-                   prompt: Callable[[str], str] = input) -> dict[str, Any]:
+                   prompt: Callable[[str], str] = input,
+                   architecture: str | None = None,
+                   proposer: ContextualPolicy | None = None) -> dict[str, Any]:
     """Drives one simulated demo run end to end and returns a small summary
     dict. Every mutation goes through ``CommandGateway.submit`` -- directly
     here, or through ``operator_choice.submit_choice`` -- there is no other
-    mutation path."""
+    mutation path.
+
+    ``architecture`` (``resolve_architecture``'s rules: explicit value, then
+    ``SENTINEL_ARCHITECTURE``, then ``"F"``) and ``proposer`` select which
+    ``ContextualPolicy`` (P4 Task 3's ``build_policy``) drives the run. The
+    policy -- and any ``ArchitectureUnavailable`` it raises for ``"E"`` with
+    no ``proposer`` -- is built *before* the database is opened, so a bad
+    architecture selection never creates one."""
     run_id = run_id or str(uuid.uuid4())
     agent_run_id = agent_run_id or str(uuid.uuid4())
     advisors = build_advisors(advisors_mode)  # before any side effect: live mode refuses without consent
+    resolved_architecture = resolve_architecture(architecture)
+    sink = JsonlAuditSink(audit_path)
+    policy = build_policy(resolved_architecture, advisors=advisors, sink=sink, proposer=proposer)
 
     repo = CoordinatorRepository.open(db_path)
     try:
         gateway = CommandGateway(repo)
-        boundary = CoordinatorBoundary(repo, gateway)
         catalogue = load_catalogue_plans()
-        sink = JsonlAuditSink(audit_path)
-        ladder = ShadowLadder(RulePolicy(), advisors, sink)
-        policy = bind_context(ladder, repo, catalogue)
 
-        gateway.submit(envelope("RUN_CREATE", {"request_text": request_text}, sequence=1,
-                                 run_id=run_id, actor_type="OPERATOR"))
+        def on_approval(state) -> None:
+            if not state.plan_approved:
+                _confirm_plan(repo, gateway, run_id)
+            elif state.task_status == "ASSIGNMENT_PROPOSED":
+                _confirm_task(repo, gateway, run_id, state.task_id)
+            else:
+                raise RuntimeError(f"WAITING_FOR_APPROVAL but no known approval target: {state!r}")
 
-        for _ in range(_MAX_STEPS):
-            status = repo.connection.execute(
-                "SELECT status FROM runs WHERE run_id = ?", (run_id,)).fetchone()[0]
-            if status in _TERMINAL_STATUSES:
-                break
+        def on_judgment(pending: dict) -> None:
+            label = _resolve_label(pending, choices, prompt)
+            submit_choice(repo, gateway, run_id, label, catalogue=catalogue, sink=sink)
 
-            result = AgentLoop(boundary, policy, max_turns=8, repository=repo, catalogue=catalogue).run(
-                run_id, agent_run_id, request_text)
+        drive_result = drive_run(
+            repo=repo, gateway=gateway, policy=policy, catalogue=catalogue,
+            run_id=run_id, agent_run_id=agent_run_id, request_text=request_text,
+            on_approval=on_approval, on_judgment=on_judgment,
+            max_steps=_MAX_STEPS, max_turns=8,
+        )
 
-            if result.get("error_code") == "WAITING_FOR_APPROVAL":
-                state = read_decision_state(repo, run_id)
-                if not state.plan_approved:
-                    _confirm_plan(repo, gateway, run_id)
-                elif state.task_status == "ASSIGNMENT_PROPOSED":
-                    _confirm_task(repo, gateway, run_id, state.task_id)
-                else:
-                    raise RuntimeError(f"WAITING_FOR_APPROVAL but no known approval target: {state!r}")
-                continue
-
-            if result.get("status") == "NEEDS_REVIEW":
-                pending = pending_decision(repo, run_id, catalogue)
-                if pending is None:
-                    raise RuntimeError(f"NEEDS_REVIEW but the run is not at a judgment point: {result!r}")
-                label = _resolve_label(pending, choices, prompt)
-                submit_choice(repo, gateway, run_id, label, catalogue=catalogue, sink=sink)
-                continue
-
-            raise RuntimeError(f"rehearsal run stopped on an unexpected result: {result!r}")
-        else:
-            raise RuntimeError(f"rehearsal did not complete within {_MAX_STEPS} steps")
-
-        final_status = repo.connection.execute(
-            "SELECT status FROM runs WHERE run_id = ?", (run_id,)).fetchone()[0]
         return {
-            "run_id": run_id, "agent_run_id": agent_run_id, "status": final_status,
+            "run_id": run_id, "agent_run_id": agent_run_id, "status": drive_result["status"],
             "advisors": advisors_mode, "audit_path": str(audit_path), "db_path": str(db_path),
+            "architecture": resolved_architecture,
+            "approvals": drive_result["approvals"], "judgments": drive_result["judgments"],
         }
     finally:
         repo.close()
@@ -233,6 +264,11 @@ def run_rehearsal(*, advisors_mode: str, choices: dict[str, str], db_path: Path,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--advisors", required=True, choices=("none", "fake", "live"))
+    parser.add_argument("--architecture", default=None, choices=("F", "E"),
+                         help="F (default) or E; unset falls back to the SENTINEL_ARCHITECTURE env var, then F")
+    parser.add_argument("--proposer", default=None,
+                         help="scripted:<PLAN_ID> -- a non-LLM stand-in proposer for architecture E; "
+                              "there is no live-LLM proposer option in this task")
     parser.add_argument("--choices", default=None,
                          help="sp=<SELECT_PLAN label>,eg=<EVIDENCE_GATE label>; omitted entries are prompted for")
     parser.add_argument("--run-id", default=None)
@@ -249,16 +285,28 @@ def main(argv: list[str] | None = None) -> int:
             print(f"refusing to run rehearsal with '--advisors live': {exc}", file=sys.stderr)
             return 2
 
+    try:
+        proposer = build_proposer(args.proposer)
+    except ValueError as exc:
+        print(f"invalid --proposer: {exc}", file=sys.stderr)
+        return 2
+
     run_id = args.run_id or str(uuid.uuid4())
     db_path = args.db or (REPO_ROOT / "artifacts" / "shadow" / f"{run_id}.sqlite3")
     audit_path = args.audit or (REPO_ROOT / "artifacts" / "shadow" / f"{run_id}.jsonl")
     db_path.parent.mkdir(parents=True, exist_ok=True)
     audit_path.parent.mkdir(parents=True, exist_ok=True)
 
-    summary = run_rehearsal(
-        advisors_mode=args.advisors, choices=parse_choices(args.choices),
-        db_path=db_path, audit_path=audit_path, run_id=run_id, request_text=args.request,
-    )
+    try:
+        summary = run_rehearsal(
+            advisors_mode=args.advisors, choices=parse_choices(args.choices),
+            db_path=db_path, audit_path=audit_path, run_id=run_id, request_text=args.request,
+            architecture=args.architecture, proposer=proposer,
+        )
+    except ArchitectureUnavailable as exc:
+        print(f"refusing to run rehearsal: {exc}", file=sys.stderr)
+        return 2
+
     print(json.dumps(summary, indent=2))
     return 0
 
