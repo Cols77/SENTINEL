@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from .cube.site import load_site
 from .emergency import EmergencyHotkey, EmergencySender
 from .models import RunReport
 from .reporting import ProgressLogger, write_report, write_video_manifest
@@ -167,6 +169,13 @@ def build_parser() -> argparse.ArgumentParser:
     map_check.add_argument("--frames", type=Path, required=True,
                            help="directory of recorded PNG frames")
     map_check.add_argument("--tag-map", type=Path, required=True)
+
+    site_map = subparsers.add_parser(
+        "cube-site-map", help="generate the tag-map-v1 file from a cube-site-v1 file")
+    site_map.add_argument("--site", type=Path, required=True)
+    site_map.add_argument("--calibration-from", type=Path, required=True,
+                          help="existing tag map whose camera_calibration is reused")
+    site_map.add_argument("--out", type=Path, required=True)
 
     emergency = subparsers.add_parser(
         "emergency", help="send an immediate motor-stop command"
@@ -600,6 +609,24 @@ def _run_pose_map_check(args: Any) -> int:
     return 0 if result["multi_tag_frames"] else 1
 
 
+def _run_cube_site_map(args: Any) -> int:
+    try:
+        site = load_site(args.site)
+        calibration = json.loads(
+            args.calibration_from.read_text(encoding="utf-8"))["camera_calibration"]
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"cube-site-map failed: {exc}", flush=True)
+        return 1
+    doc = site.tag_map_doc(calibration)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    env = site.envelope()
+    print(f"cube-site-map: wrote {len(doc['tags'])} tags to {args.out}; commanded bounds "
+          f"x {env.min_x_cm}-{env.max_x_cm} y {env.min_y_cm}-{env.max_y_cm} "
+          f"z {env.min_z_cm}-{env.max_z_cm} cm")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -646,6 +673,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "pose-map-check":
         return _run_pose_map_check(args)
+    if args.command == "cube-site-map":
+        return _run_cube_site_map(args)
 
     if args.real and not args.confirm:
         print("Real mode requires --confirm after the physical preflight.")
