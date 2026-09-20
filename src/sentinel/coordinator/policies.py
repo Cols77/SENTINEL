@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .legal_tools import ADVISORY_POINTS, ESCALATE_LABEL
+from .legal_tools import ADVISORY_POINTS, ESCALATE_LABEL, needs_judgment
 from .policy import PolicyContext, one_call
 
 INSTRUCTIONS: dict[str, str] = {
@@ -28,6 +28,8 @@ INSTRUCTIONS: dict[str, str] = {
     "EVIDENCE_GATE": "The detection passed the score rules and lies inside the approved plan, but a task already "
                      "exists at the same station. Choose 'create_task' if this is a second, distinct hazard. Choose "
                      "'escalate' if it is the same hazard seen again or you cannot tell.",
+    "ASSIGN": "Two or more patrollers are ranked within a near-tie. Choose 'assign_rank_1' if the top-ranked "
+              "patroller is an acceptable assignment. Choose 'escalate' if the operator should pick.",
 }
 
 
@@ -104,8 +106,9 @@ class JevPolicy:
             return one_call(request, candidate.tool_name, candidate.arguments)
 
         point = legal.decision_point
-        assert point in ADVISORY_POINTS, f"legal set at {point!r} has {len(legal.candidates)} candidates " \
-                                          "but is not a known advisory point"
+        assert point in ADVISORY_POINTS or needs_judgment(legal), \
+            f"legal set at {point!r} has {len(legal.candidates)} candidates " \
+            "but is neither a declared advisory point nor an unsettled judgment turn"
         instruction = self.instructions[point]
         criteria = {candidate.label: candidate.description for candidate in legal.candidates}
         packet = context.state.to_packet()

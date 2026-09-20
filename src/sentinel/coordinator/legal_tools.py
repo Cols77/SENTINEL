@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from .assignment_policy import gap_band, is_near_tie, rank_gap
 from .command_gateway import EVIDENCE_SCORE_THRESHOLD
 from .decision_state import DecisionState, DetectionView
 
@@ -31,6 +32,25 @@ EVIDENCE_TASK_SCORE = 0.75
 # consulted and recorded (P2 Task 2's ShadowLadder) -- a superset now that
 # EVIDENCE_GATE is rule-decided but still shadowed.
 JUDGMENT_POINTS = frozenset({SELECT_PLAN})
+# ADVISORY_POINTS stays exactly as P2b defined it: the points that are
+# shadowed *unconditionally*, even when a rule settles them (that is what
+# produces the rule-vs-Jev comparison data at EVIDENCE_GATE).
+#
+# P3's new judgment points -- a duplicate detection at EVIDENCE_GATE, a
+# near-tie at ASSIGN, REPLAN -- are NOT added here. They are picked up
+# dynamically instead: `ShadowLadder` and `JevPolicy` shadow a turn when it
+# is in this set *or* when `needs_judgment(legal)` holds. Two reasons:
+#   1. Semantically it is the stronger rule -- wherever a human is being
+#      asked to choose, an advisor's answer is exactly the datum P3b's
+#      promotion criteria need, so it should never depend on remembering to
+#      extend a constant. REPLAN (Task 9) is then covered with no edit.
+#   2. ASSIGN is only *sometimes* a judgment point (a near-tie), and a
+#      static set cannot express "sometimes" -- adding ASSIGN here would
+#      also start shadowing every ordinary single-patroller assignment.
+# It also keeps this constant owned by the P2 session, whose
+# test_judgment_points_is_select_plan_only_and_advisory_points_is_the_superset
+# asserts exact equality on it. If that session later folds the new points
+# in, relax that assertion to the superset check its own name describes.
 ADVISORY_POINTS = frozenset({SELECT_PLAN, EVIDENCE_GATE})
 
 
@@ -151,8 +171,11 @@ def legal_set(state: DecisionState, catalogue: Sequence[CataloguePlan], *,
             ("PLAN_APPROVED", "PLAN_REJECTED", "PATROLLER_ASSIGNMENT_CONFIRMED", "OPERATOR_ASSIGNMENT_REJECTED"),
         ),))
     if state.plan_id is None:
+        # Task 8: a catalogue entry already proposed (and rejected) in this
+        # run is not offered again -- re-proposing it raises a raw
+        # sqlite3.IntegrityError through the gateway (blocker A9).
         plans = tuple(Candidate("inspection.propose_plan", {"catalogue_plan_id": p.plan_id}, p.plan_id, p.description)
-                       for p in catalogue)
+                       for p in catalogue if p.plan_id not in state.proposed_catalogue_plan_ids)
         return LegalSet(SELECT_PLAN, plans + (_escalate("no catalogue plan fits the operator request"),))
     # Work queue (P3a Task 7): the oldest unreferenced detection is triaged
     # first; only once the detection queue is empty does the oldest task move
@@ -167,9 +190,22 @@ def legal_set(state: DecisionState, catalogue: Sequence[CataloguePlan], *,
                                           "rank patrollers for the task"),))
     ranked_unassigned = next((t for t in state.tasks if t.status == "PROPOSED" and t.ranked_patrollers), None)
     if ranked_unassigned is not None:
-        return LegalSet(ASSIGN, (Candidate("assignment.propose", {"task_id": ranked_unassigned.task_id,
-                         "patroller_id": ranked_unassigned.ranked_patrollers[0], "reason": "deterministic rank-1"},
-                         "assign_rank_1", "propose the rank-1 patroller"),))
+        # Task 8: a near-tie between rank 1 and rank 2 is a judgment point;
+        # a clear gap (or the gateway's own single-patroller ranking, A3) is
+        # still settled by rule -- unchanged from P2b, description kept
+        # byte-identical (the v1 golden fixture compares it).
+        scores = ranked_unassigned.ranking_scores
+        assign = Candidate("assignment.propose", {"task_id": ranked_unassigned.task_id,
+                            "patroller_id": ranked_unassigned.ranked_patrollers[0], "reason": "deterministic rank-1"},
+                            "assign_rank_1", "propose the rank-1 patroller")
+        if is_near_tie(scores):
+            band = gap_band(rank_gap(scores))
+            near_tie_assign = Candidate(assign.tool_name, assign.arguments, assign.label,
+                                         f"propose the rank-1 patroller (near-tie: {band})")
+            return LegalSet(ASSIGN, (near_tie_assign,
+                                      _escalate("patroller ranking is a near-tie; operator should confirm")),
+                             rule_choice=None)
+        return LegalSet(ASSIGN, (assign,))
     if not state.tasks:
         return LegalSet(WAIT_OBSERVATION, (_wait(
             "awaiting station observation", ("DETECTION_RECORDED", "OBSERVATION_CAPTURED"),

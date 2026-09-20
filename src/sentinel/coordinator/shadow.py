@@ -20,7 +20,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, Protocol, Sequence, runtime_checkable
 
-from .legal_tools import ADVISORY_POINTS
+from .legal_tools import ADVISORY_POINTS, needs_judgment
 from .policies import Decision
 from .policy import ContextualPolicy, PolicyContext
 
@@ -129,7 +129,11 @@ class ShadowLadder:
 
     def decide(self, request: dict[str, Any], context: PolicyContext) -> dict[str, Any]:
         decision_point = context.legal.decision_point
-        if decision_point in ADVISORY_POINTS:
+        # Shadow the declared advisory points unconditionally (P2b), plus any
+        # turn that no rule settled -- P3's duplicate detections and near-tie
+        # rankings are judgment points only *sometimes*, so membership in a
+        # static set cannot express them. See ADVISORY_POINTS in legal_tools.
+        if decision_point in ADVISORY_POINTS or needs_judgment(context.legal):
             return self._judgment_step(request, context, decision_point)
         return self._rule_step(request, context, decision_point)
 

@@ -16,7 +16,7 @@ from typing import Any, Sequence
 from .agent_loop import command_for
 from .decision_state import read_decision_state
 from .errors import CoordinatorError
-from .legal_tools import ESCALATE_LABEL, JUDGMENT_POINTS, CataloguePlan, legal_set
+from .legal_tools import ESCALATE_LABEL, CataloguePlan, legal_set, needs_judgment
 
 
 def pending_decision(repository: Any, run_id: str, catalogue: "Sequence[CataloguePlan]") -> dict | None:
@@ -26,7 +26,7 @@ def pending_decision(repository: Any, run_id: str, catalogue: "Sequence[Catalogu
     descriptions -- never an advisor's pick, confidence or band."""
     state = read_decision_state(repository, run_id)
     legal = legal_set(state, catalogue)
-    if legal.decision_point not in JUDGMENT_POINTS:
+    if not needs_judgment(legal):
         return None
     return {
         "decision_point": legal.decision_point,
@@ -53,7 +53,7 @@ def submit_choice(repository: Any, gateway: Any, run_id: str, label: str, *,
     """
     state = read_decision_state(repository, run_id)
     legal = legal_set(state, catalogue)
-    if legal.decision_point not in JUDGMENT_POINTS or label not in legal.labels:
+    if not needs_judgment(legal) or label not in legal.labels:
         raise CoordinatorError(
             "INVALID_OPERATOR_CHOICE",
             f"{label!r} is not a legal choice at {legal.decision_point!r} (legal: {list(legal.labels)})",
