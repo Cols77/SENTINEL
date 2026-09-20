@@ -1,161 +1,36 @@
 {
   "scenario_set": "sentinel.live-llm-acceptance.v1",
-  "description": "Context-sensitive scenarios for the opt-in live LLM acceptance gate. Each scenario drives a bounded horizon of at most max_turns reasoning turns (default 4) with sanitized coordinator feedback between turns; it passes when the ordered deliverable sequence (expected_turns) is fulfilled within the horizon, in order. State-inspection calls inside the horizon are legal and never count as deliverables. Identifiers are deterministic fixture values; no credentials live here.",
+  "description": "Context-sensitive scenarios for the opt-in live LLM acceptance gate. Each scenario names only the operator request, the starting harness steps that put the real coordinator into the scenario's starting state, and the expected ordered tool-name sequence a correct policy produces. Context (event_context, evidence_context, legal_tools, argument values) is never hand-authored here: it comes from the real AgentLoop reading the real repository through DecisionState/legal_set, so no identifier is smuggled into this fixture (see P1 defect D10). tests/agent/test_live_gate_real_loop.py drives these scenarios through the real coordinator gateway.",
   "scenarios": [
     {
       "name": "initial_plan_one_station",
-      "user_request": "Survey only the LEFT_ALLEY_MIDDLE station. Marker-verified plans are unavailable for this run, so exclude any plan that requires marker verification or covers more stations than requested.",
-      "phase": "PLAN",
-      "state_version": 1,
-      "legal_tools": [
-        "state.get_summary",
-        "state.get_recent_events",
-        "inspection.propose_plan",
-        "task.create",
-        "patroller.rank_for_task",
-        "assignment.propose",
-        "wait_for_event",
-        "finish"
-      ],
-      "event_context": [
-        {
-          "sequence_no": 1,
-          "event_type": "RUN_CREATED",
-          "summary": "Operator requested a one-station survey of LEFT_ALLEY_MIDDLE."
-        }
-      ],
-      "evidence_context": [],
-      "catalogue": {
-        "catalogue_id": "SURVEY_CATALOGUE_V1",
-        "plans": [
-          {
-            "id": "PLAN_MARKER_VERIFIED_6",
-            "mode": "MARKER_VERIFIED",
-            "station_count": 6,
-            "requires_marker_verification": true,
-            "excluded": true
-          },
-          {
-            "id": "PLAN_ROUTE_ONLY_2_ZONE",
-            "mode": "ROUTE_ONLY_2_ZONE",
-            "station_count": 2,
-            "requires_marker_verification": false,
-            "excluded": false
-          }
-        ]
-      },
-      "expected_turns": [
-        {
-          "expected_tool": "inspection.propose_plan",
-          "expectations": {
-            "arguments.catalogue_plan_id": "PLAN_ROUTE_ONLY_2_ZONE"
-          }
-        },
-        {
-          "expected_tool": "wait_for_event",
-          "expectations": {}
-        }
-      ],
-      "coordinator_feedback": {
-        "kind": "plan",
-        "run_status": "WAITING_FOR_APPROVAL",
-        "safe_summary": "plan submitted; operator approval is required before dispatch"
-      },
+      "user_request": "Survey only the LEFT_ALLEY_MIDDLE station. Marker-verified plans are unavailable for this run, so exclude any plan that requires marker verification; among the remaining plans, propose the one with the fewest stations.",
+      "setup": ["create_run"],
+      "expected_tool_sequence": ["inspection.propose_plan"],
+      "expected_result_error_code": "WAITING_FOR_APPROVAL",
       "max_turns": 4
     },
     {
       "name": "qualifying_evidence_to_task",
-      "user_request": "A qualifying rock detection with accepted evidence is available. Create the remediation task for it, then check the coordinator ranking for the new task.",
-      "phase": "EVIDENCE_QUALIFIED",
-      "state_version": 7,
-      "legal_tools": [
-        "state.get_summary",
-        "state.get_recent_events",
-        "task.create",
-        "patroller.rank_for_task",
-        "wait_for_event",
-        "finish"
+      "user_request": "A qualifying rock detection with accepted evidence is available. Create the remediation task for it, then rank and propose a patroller.",
+      "setup": [
+        "create_run",
+        "propose_route_only_plan",
+        "approve_pending_plan",
+        "report_preflight",
+        "dispatch_station",
+        "capture_and_perceive"
       ],
-      "event_context": [
-        {
-          "sequence_no": 6,
-          "event_type": "DETECTION_RECORDED",
-          "summary": "Perception result 55555555-5555-4555-8555-555555555555 judged qualifying for LEFT_ALLEY_MIDDLE."
-        },
-        {
-          "sequence_no": 7,
-          "event_type": "RUN_TASK_CREATED",
-          "summary": "Task created 22222222-2222-4222-8222-222222222222 for station LEFT_ALLEY_MIDDLE awaiting patrol ranking."
-        }
-      ],
-      "evidence_context": [
-        {
-          "artifact_id": "33333333-3333-4333-8333-333333333333",
-          "source_kind": "SIMULATED",
-          "status": "ACCEPTED",
-          "summary": "Station capture artifact with accepted evidence hash for LEFT_ALLEY_MIDDLE."
-        }
-      ],
-      "expected_turns": [
-        {
-          "expected_tool": "task.create",
-          "expectations": {
-            "arguments.perception_result_id": "55555555-5555-4555-8555-555555555555",
-            "arguments.section_id": "LEFT_ALLEY_MIDDLE",
-            "arguments.evidence_artifact_id": "33333333-3333-4333-8333-333333333333"
-          }
-        },
-        {
-          "expected_tool": "patroller.rank_for_task",
-          "expectations": {
-            "arguments.task_id": "22222222-2222-4222-8222-222222222222"
-          }
-        }
-      ],
-      "coordinator_feedback": {
-        "kind": "task",
-        "task_id": "22222222-2222-4222-8222-222222222222",
-        "run_status": "EXECUTING",
-        "safe_summary": "task created from qualifying evidence; ranking is available"
-      },
+      "expected_tool_sequence": ["task.create", "patroller.rank_for_task", "assignment.propose"],
+      "expected_result_error_code": "WAITING_FOR_APPROVAL",
       "max_turns": 4
     },
     {
       "name": "approval_wait",
       "user_request": "A plan proposal is awaiting operator confirmation. Do not propose anything new while approval is pending.",
-      "phase": "AWAITING_APPROVAL",
-      "state_version": 4,
-      "legal_tools": [
-        "state.get_summary",
-        "wait_for_event",
-        "finish"
-      ],
-      "event_context": [
-        {
-          "sequence_no": 3,
-          "event_type": "PLAN_PROPOSED",
-          "summary": "Agent plan proposal is pending operator confirmation."
-        }
-      ],
-      "evidence_context": [],
-      "expected_turns": [
-        {
-          "expected_tool": "wait_for_event",
-          "expectations": {}
-        },
-        {
-          "expected_tool": [
-            "wait_for_event",
-            "finish"
-          ],
-          "expectations": {}
-        }
-      ],
-      "coordinator_feedback": {
-        "kind": "wait",
-        "run_status": "WAITING_FOR_APPROVAL",
-        "safe_summary": "no new events; operator approval is still pending"
-      },
+      "setup": ["create_run", "propose_route_only_plan"],
+      "expected_tool_sequence": [],
+      "expected_result_error_code": "WAITING_FOR_APPROVAL",
       "max_turns": 4
     }
   ]

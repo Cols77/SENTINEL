@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Judgment cases v2",
+  "description": "Per-case judgment labels with separated hazard / needs_review / priority fields. J2: state is a structured judgment_context.v1 snapshot, not prose.",
+  "type": "object",
+  "required": ["case_id", "state", "hazard", "needs_review", "priority", "rationale"],
+  "additionalProperties": true,
+  "properties": {
+    "case_id": {"type": "string", "minLength": 1},
+    "state": {
+      "type": "object",
+      "required": ["context_version", "observation", "mission", "operations"],
+      "properties": {
+        "context_version": {"const": "judgment_context.v1"},
+        "observation": {
+          "type": "object",
+          "required": ["source", "object", "perception_confidence", "size_m",
+                       "position_relation", "duplicate_of_existing_detection"],
+          "properties": {
+            "source": {"type": ["string", "null"]},
+            "object": {"type": "string", "minLength": 1},
+            "perception_confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+            "size_m": {"type": ["number", "null"], "exclusiveMinimum": 0},
+            "position_relation": {"type": "string", "minLength": 1},
+            "duplicate_of_existing_detection": {"type": "boolean"}
+          }
+        },
+        "mission": {
+          "type": "object",
+          "required": ["workflow", "trail_status"],
+          "properties": {
+            "workflow": {"type": "string", "minLength": 1},
+            "trail_status": {"type": "string"}
+          }
+        },
+        "operations": {
+          "type": "object",
+          "required": ["patroller_available"],
+          "properties": {
+            "patroller_available": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "reference": {"type": "object", "description": "v1 reference label kept for traceability"},
+    "hazard": {"type": ["boolean", "null"], "description": "null = undetermined (unscored pending review)"},
+    "needs_review": {"type": "boolean"},
+    "priority": {"enum": ["ignore", "low", "medium", "high", "critical", null]},
+    "rationale": {"type": "string", "minLength": 1}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"hazard": {"const": true}}, "required": ["hazard"]},
+      "then": {"properties": {"priority": {"enum": ["low", "medium", "high", "critical"]}}}
+    },
+    {
+      "if": {"properties": {"hazard": {"const": null}}, "required": ["hazard"]},
+      "then": {"properties": {"needs_review": {"const": true}, "priority": {"const": null}}}
+    }
+  ]
+}

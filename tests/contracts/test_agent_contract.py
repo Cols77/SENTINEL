@@ -167,6 +167,47 @@ def test_named_proposal_and_action_tools_have_typed_arguments():
         validate_document(invalid)
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        (
+            "task.create",
+            {
+                "perception_result_id": UUID,
+                "section_id": "LEFT_ALLEY_MIDDLE",
+                "evidence_artifact_id": UUID,
+                "reason": "qualifying evidence with accepted hash",
+            },
+        ),
+        (
+            "patroller.rank_for_task",
+            {"task_id": UUID, "reason": "ranking requested for the created task"},
+        ),
+    ],
+)
+def test_optional_reason_argument_is_schema_legal(tool_name, arguments):
+    assert validate_document(_tool_call(tool_name, arguments)) == []
+
+
+def test_optional_reason_argument_is_bounded_to_512_chars():
+    with pytest.raises(ContractValidationError):
+        validate_document(
+            _tool_call(
+                "task.create",
+                {
+                    "perception_result_id": UUID,
+                    "section_id": "LEFT_ALLEY_MIDDLE",
+                    "evidence_artifact_id": UUID,
+                    "reason": "x" * 513,
+                },
+            )
+        )
+    with pytest.raises(ContractValidationError):
+        validate_document(
+            _tool_call("patroller.rank_for_task", {"task_id": UUID, "reason": "x" * 513})
+        )
+
+
 def test_public_wrappers_are_typed_and_reject_unknown_tool_names():
     call = AgentToolCall.from_dict(
         {

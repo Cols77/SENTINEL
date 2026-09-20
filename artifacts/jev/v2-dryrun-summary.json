@@ -1,0 +1,323 @@
+{
+  "title": "Jev v2 offline dry run (J4) -- static/baselines + fake Jev transport",
+  "fixture": "fixtures/judgment/cases.v2.jsonl",
+  "label_source": "approved v2 case-level hazard/needs_review labels projected into run_cases reference shape; embedded v1 reference kept for traceability only",
+  "repeats": 3,
+  "network": "none (fake Jev transport injected into JevJudge; no live provider call)",
+  "arms": {
+    "static_v2": {
+      "metrics": {
+        "total": 21,
+        "unavailable": 0,
+        "hazard": {
+          "scored": 15,
+          "false_safe": 0,
+          "false_escalation": 7
+        },
+        "review": {
+          "scored": 0,
+          "false_safe": 0,
+          "false_escalation": 0
+        },
+        "stability": {
+          "cases": 15,
+          "flipped": 0,
+          "flip_count": 0
+        },
+        "routing": {
+          "threshold_0.5": {
+            "escalate": 45,
+            "no_escalate": 0
+          },
+          "bands": {
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "unknown": 45
+          }
+        },
+        "pos_and_review": {
+          "pos_clean_false_safe": {
+            "false_safe": 0,
+            "scored": 4
+          },
+          "needs_review_recall": {
+            "hits": 0,
+            "needed": 0,
+            "recall": null,
+            "false_escalation_on_negatives": 0
+          },
+          "self_confidence_bands_noul": {
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "unknown": 21
+          }
+        },
+        "decision_rule_vs_always_escalate": {
+          "ranks_fixture": false,
+          "false_safe": {
+            "judge": 0,
+            "always_escalate": 0
+          },
+          "false_escalation": {
+            "judge": 7,
+            "always_escalate": 7
+          },
+          "equal_or_better_false_safe": true,
+          "beats_false_escalation": false
+        }
+      },
+      "repeats": 3
+    },
+    "jev_fake_transport": {
+      "metrics": {
+        "total": 21,
+        "unavailable": 0,
+        "hazard": {
+          "scored": 15,
+          "false_safe": 4,
+          "false_escalation": 0
+        },
+        "review": {
+          "scored": 21,
+          "false_safe": 2,
+          "false_escalation": 5
+        },
+        "stability": {
+          "cases": 36,
+          "flipped": 0,
+          "flip_count": 0
+        },
+        "routing": {
+          "threshold_0.5": {
+            "escalate": 54,
+            "no_escalate": 54
+          },
+          "bands": {
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "unknown": 108
+          }
+        },
+        "pos_and_review": {
+          "pos_clean_false_safe": {
+            "false_safe": 0,
+            "scored": 4
+          },
+          "needs_review_recall": {
+            "hits": 9,
+            "needed": 11,
+            "recall": 0.818,
+            "false_escalation_on_negatives": 5
+          },
+          "self_confidence_bands_noul": {
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "unknown": 42
+          }
+        },
+        "decision_rule_vs_always_escalate": {
+          "ranks_fixture": false,
+          "false_safe": {
+            "judge": 4,
+            "always_escalate": 0
+          },
+          "false_escalation": {
+            "judge": 0,
+            "always_escalate": 7
+          },
+          "equal_or_better_false_safe": false,
+          "beats_false_escalation": true
+        }
+      },
+      "repeats": 3
+    },
+    "baseline-always_safe": {
+      "metrics": {
+        "total": 21,
+        "unavailable": 0,
+        "hazard": {
+          "scored": 15,
+          "false_safe": 8,
+          "false_escalation": 0
+        },
+        "review": {
+          "scored": 21,
+          "false_safe": 11,
+          "false_escalation": 0
+        },
+        "stability": {
+          "cases": 36,
+          "flipped": 0,
+          "flip_count": 0
+        },
+        "routing": {
+          "threshold_0.5": {
+            "escalate": 0,
+            "no_escalate": 36
+          },
+          "bands": {
+            "high": 36,
+            "medium": 0,
+            "low": 0,
+            "unknown": 0
+          }
+        },
+        "pos_and_review": {
+          "pos_clean_false_safe": {
+            "false_safe": 4,
+            "scored": 4
+          },
+          "needs_review_recall": {
+            "hits": 0,
+            "needed": 11,
+            "recall": 0.0,
+            "false_escalation_on_negatives": 0
+          },
+          "self_confidence_bands_noul": {
+            "high": 42,
+            "medium": 0,
+            "low": 0,
+            "unknown": 0
+          }
+        },
+        "decision_rule_vs_always_escalate": {
+          "ranks_fixture": false,
+          "false_safe": {
+            "judge": 8,
+            "always_escalate": 0
+          },
+          "false_escalation": {
+            "judge": 0,
+            "always_escalate": 7
+          },
+          "equal_or_better_false_safe": false,
+          "beats_false_escalation": true
+        }
+      },
+      "repeats": 1
+    },
+    "baseline-always_escalate": {
+      "metrics": {
+        "total": 21,
+        "unavailable": 0,
+        "hazard": {
+          "scored": 15,
+          "false_safe": 0,
+          "false_escalation": 7
+        },
+        "review": {
+          "scored": 21,
+          "false_safe": 0,
+          "false_escalation": 10
+        },
+        "stability": {
+          "cases": 36,
+          "flipped": 0,
+          "flip_count": 0
+        },
+        "routing": {
+          "threshold_0.5": {
+            "escalate": 36,
+            "no_escalate": 0
+          },
+          "bands": {
+            "high": 36,
+            "medium": 0,
+            "low": 0,
+            "unknown": 0
+          }
+        },
+        "pos_and_review": {
+          "pos_clean_false_safe": {
+            "false_safe": 0,
+            "scored": 4
+          },
+          "needs_review_recall": {
+            "hits": 11,
+            "needed": 11,
+            "recall": 1.0,
+            "false_escalation_on_negatives": 10
+          },
+          "self_confidence_bands_noul": {
+            "high": 42,
+            "medium": 0,
+            "low": 0,
+            "unknown": 0
+          }
+        },
+        "decision_rule_vs_always_escalate": null
+      },
+      "repeats": 1
+    },
+    "baseline-static_rules": {
+      "metrics": {
+        "total": 21,
+        "unavailable": 0,
+        "hazard": {
+          "scored": 15,
+          "false_safe": 5,
+          "false_escalation": 0
+        },
+        "review": {
+          "scored": 21,
+          "false_safe": 1,
+          "false_escalation": 8
+        },
+        "stability": {
+          "cases": 36,
+          "flipped": 0,
+          "flip_count": 0
+        },
+        "routing": {
+          "threshold_0.5": {
+            "escalate": 3,
+            "no_escalate": 5
+          },
+          "bands": {
+            "high": 8,
+            "medium": 0,
+            "low": 0,
+            "unknown": 28
+          }
+        },
+        "pos_and_review": {
+          "pos_clean_false_safe": {
+            "false_safe": 1,
+            "scored": 4
+          },
+          "needs_review_recall": {
+            "hits": 10,
+            "needed": 11,
+            "recall": 0.909,
+            "false_escalation_on_negatives": 8
+          },
+          "self_confidence_bands_noul": {
+            "high": 8,
+            "medium": 3,
+            "low": 3,
+            "unknown": 28
+          }
+        },
+        "decision_rule_vs_always_escalate": {
+          "ranks_fixture": false,
+          "false_safe": {
+            "judge": 5,
+            "always_escalate": 0
+          },
+          "false_escalation": {
+            "judge": 0,
+            "always_escalate": 7
+          },
+          "equal_or_better_false_safe": false,
+          "beats_false_escalation": true
+        }
+      },
+      "repeats": 1
+    }
+  },
+  "known_flake": "tests/test_env_file.py::test_parses_comments_and_quoted_values -- pre-existing flake, tracked by WP1 card t_45e8629b; not touched here."
+}

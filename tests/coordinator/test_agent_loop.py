@@ -99,6 +99,68 @@ def test_agent_loop_rejects_unknown_tool_without_submitting_mutation():
     assert port.submissions == []
 
 
+def test_agent_loop_retry_after_schema_invalid_result_within_budget():
+    """A schema-invalid model result gets bounded corrective feedback: the next
+    turn's request carries a REJECTED previous_result, and the run can still
+    finish without new contract fields."""
+    class Port:
+        def read_state(self, run_id):
+            return {"run_id": run_id, "state_version": 0, "run_status": "RUNNING", "agent_phase": "PLAN"}
+        def read_events(self, *args): return []
+        def submit(self, command): return {}
+
+    requests = []
+    def model(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return {"contract_version": "sentinel.v0", "wire_type": "agent_result", "status": "TOOL_CALLS", "tool_calls": []}  # missing agent_run_id: schema-invalid
+        return {"contract_version": "sentinel.v0", "wire_type": "agent_result", "agent_run_id": request["agent_run_id"], "status": "TOOL_CALLS", "tool_calls": [{"contract_version": "sentinel.v0", "wire_type": "agent_tool_call", "tool_name": "finish", "arguments": {"status": "DONE", "summary": "recovered"}}]}
+
+    result = AgentLoop(Port(), model, max_turns=4).run(RUN_ID, "66666666-6666-4666-8666-666666666666", "inspect")
+    assert result["status"] == "DONE"
+    assert result["summary"] == "recovered"
+    feedback = requests[1]["previous_result"]
+    assert feedback["status"] == "REJECTED"
+    assert feedback["error_code"] == "INVALID_AGENT_RESULT"
+    assert feedback["safe_summary"]
+
+
+def test_agent_loop_fails_after_two_corrective_retries():
+    """Beyond the 2-retry corrective budget, an invalid result is terminal."""
+    class Port:
+        def read_state(self, run_id):
+            return {"run_id": run_id, "state_version": 0, "run_status": "RUNNING", "agent_phase": "PLAN"}
+        def read_events(self, *args): return []
+        def submit(self, command): return {}
+
+    def model(request):
+        return {"contract_version": "sentinel.v0", "wire_type": "agent_result", "status": "TOOL_CALLS", "tool_calls": []}
+
+    result = AgentLoop(Port(), model, max_turns=8).run(RUN_ID, "66666666-6666-4666-8666-666666666666", "inspect")
+    assert result["status"] == "FAILED"
+    assert result["error_code"] == "INVALID_AGENT_RESULT"
+
+
+def test_agent_loop_retry_after_agent_run_id_mismatch_within_budget():
+    """An agent_run_id mismatch also earns bounded corrective feedback."""
+    class Port:
+        def read_state(self, run_id):
+            return {"run_id": run_id, "state_version": 0, "run_status": "RUNNING", "agent_phase": "PLAN"}
+        def read_events(self, *args): return []
+        def submit(self, command): return {}
+
+    requests = []
+    def model(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return {"contract_version": "sentinel.v0", "wire_type": "agent_result", "agent_run_id": "99999999-9999-4999-8999-999999999999", "status": "TOOL_CALLS", "tool_calls": [{"contract_version": "sentinel.v0", "wire_type": "agent_tool_call", "tool_name": "state.get_summary", "arguments": {}}]}
+        return {"contract_version": "sentinel.v0", "wire_type": "agent_result", "agent_run_id": request["agent_run_id"], "status": "TOOL_CALLS", "tool_calls": [{"contract_version": "sentinel.v0", "wire_type": "agent_tool_call", "tool_name": "finish", "arguments": {"status": "DONE", "summary": "recovered"}}]}
+
+    result = AgentLoop(Port(), model, max_turns=4).run(RUN_ID, "66666666-6666-4666-8666-666666666666", "inspect")
+    assert result["status"] == "DONE"
+    assert requests[1]["previous_result"]["status"] == "REJECTED"
+
+
 def test_agent_loop_stops_at_approval_without_model_call():
     class Port:
         def read_state(self, run_id):

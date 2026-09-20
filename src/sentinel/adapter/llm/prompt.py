@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from sentinel.contracts import AgentRequest
@@ -30,11 +30,11 @@ _TOOL_DEFINITIONS = (
     ),
     _function(
         wire_tool_name("task.create"), "Propose a task from an available observation and evidence reference.",
-        {"type": "object", "additionalProperties": False, "required": ["perception_result_id", "section_id", "evidence_artifact_id"], "properties": {"perception_result_id": {"type": "string", "format": "uuid"}, "section_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"}, "evidence_artifact_id": {"type": "string", "format": "uuid"}}},
+        {"type": "object", "additionalProperties": False, "required": ["perception_result_id", "section_id", "evidence_artifact_id"], "properties": {"perception_result_id": {"type": "string", "format": "uuid"}, "section_id": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$"}, "evidence_artifact_id": {"type": "string", "format": "uuid"}, "reason": {"type": "string", "maxLength": 512}}},
     ),
     _function(
         wire_tool_name("patroller.rank_for_task"), "Read the coordinator ranking for a proposed task.",
-        {"type": "object", "additionalProperties": False, "required": ["task_id"], "properties": {"task_id": {"type": "string", "format": "uuid"}}},
+        {"type": "object", "additionalProperties": False, "required": ["task_id"], "properties": {"task_id": {"type": "string", "format": "uuid"}, "reason": {"type": "string", "maxLength": 512}}},
     ),
     _function(
         wire_tool_name("assignment.propose"), "Propose a configured patroller for coordinator review.",
@@ -114,12 +114,70 @@ def _event_cursor(request: AgentRequest, previous: Mapping[str, Any] | None) -> 
     return events[-1]["sequence_no"] if events else 0
 
 
-def build_chat_request(request: AgentRequest, *, prompt_revision: str, tool_policy_revision: str) -> dict[str, Any]:
-    """Build a stable provider payload from the shared request contract."""
+def _bounded_options(candidates: Any) -> list[dict[str, Any]]:
+    """Render a LegalSet's candidates as bounded {label, description} pairs.
+    Duck-typed on `.label`/`.description` so this module never imports the
+    coordinator package (adapter stays provider- and coordinator-neutral)."""
+    options: list[dict[str, Any]] = []
+    for candidate in list(candidates)[:8]:
+        label = getattr(candidate, "label", None)
+        description = getattr(candidate, "description", None)
+        if not isinstance(label, str):
+            continue
+        options.append({"label": _text(label, 64), "description": _text(description or "", 256)})
+    return options
+
+
+def _history_messages(history: Sequence[Any]) -> list[dict[str, Any]]:
+    """Render bounded prior (tool call, tool result) pairs as replayed chat
+    turns: an assistant tool call followed by its tool result. Unknown or
+    malformed entries are skipped rather than raising, since history is a
+    best-effort adapter-local convenience, never load-bearing for contract
+    validity."""
+    messages: list[dict[str, Any]] = []
+    for index, entry in enumerate(history):
+        try:
+            call, result = entry
+        except (TypeError, ValueError):
+            continue
+        tool_name = getattr(call, "tool_name", None)
+        if not isinstance(tool_name, str) or tool_name not in APPROVED_TOOL_NAMES:
+            continue
+        arguments = getattr(call, "arguments", None)
+        if not isinstance(arguments, Mapping):
+            arguments = {}
+        call_id = f"history-{index}"
+        messages.append({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": call_id, "type": "function",
+                "function": {"name": wire_tool_name(tool_name), "arguments": json.dumps(dict(arguments), sort_keys=True, separators=(",", ":"))},
+            }],
+        })
+        rendered_result = _bounded_previous(result) if isinstance(result, Mapping) else {}
+        messages.append({"role": "tool", "tool_call_id": call_id, "content": json.dumps(rendered_result, sort_keys=True, separators=(",", ":"))})
+    return messages
+
+
+def build_chat_request(
+    request: AgentRequest, *, prompt_revision: str, tool_policy_revision: str,
+    context: Any = None, history: Sequence[Any] = (),
+) -> dict[str, Any]:
+    """Build a stable provider payload from the shared request contract.
+
+    ``context`` is an optional PolicyContext-like object (duck-typed on
+    ``.state.to_packet()`` and ``.legal.decision_point``/``.legal.candidates``)
+    that, when given, adds the decision packet and described legal options to
+    the rendered context; omitted, the payload is exactly the plain-request
+    shape this function has always produced. ``history`` is a bounded sequence
+    of prior (tool call, tool result) pairs replayed as chat turns before the
+    current context message.
+    """
     if not isinstance(request, AgentRequest):
         raise TypeError("request must be an AgentRequest")
     previous = _bounded_previous(request.previous_result)
-    context = {
+    context_block = {
         "config": {"prompt_revision": prompt_revision, "tool_policy_revision": tool_policy_revision},
         "agent_run_id": request.agent_run_id,
         "run_id": request.run_id,
@@ -133,6 +191,16 @@ def build_chat_request(request: AgentRequest, *, prompt_revision: str, tool_poli
         "previous_result": previous,
         "user_request": request.user_request,
     }
+    if context is not None:
+        state = getattr(context, "state", None)
+        to_packet = getattr(state, "to_packet", None)
+        if callable(to_packet):
+            context_block["decision_packet"] = to_packet()
+        legal = getattr(context, "legal", None)
+        candidates = getattr(legal, "candidates", None)
+        if candidates:
+            context_block["decision_point"] = getattr(legal, "decision_point", None)
+            context_block["options"] = _bounded_options(candidates)
     return {
         "messages": [
             {"role": "system", "content": (
@@ -151,10 +219,15 @@ def build_chat_request(request: AgentRequest, *, prompt_revision: str, tool_poli
                 "unfulfilled deliverable (a plan to propose, a task to create, a task awaiting "
                 "ranking); prefer the domain tool that matches the request over state-inspection "
                 "or finish. "
+                "When the request or context contains genuinely contradictory constraints that "
+                "cannot be resolved with the available tools, finish with status NEEDS_REVIEW "
+                "is the correct action; it is not correct as a way to avoid a fulfillable "
+                "deliverable. "
                 "Invariants: return exactly one tool call per response, using only a legal tool; "
                 "treat the structured context as facts; never invent evidence or identifiers."
             )},
-            {"role": "user", "content": json.dumps(context, sort_keys=True, separators=(",", ":"))},
+            *_history_messages(history),
+            {"role": "user", "content": json.dumps(context_block, sort_keys=True, separators=(",", ":"))},
         ],
         "tools": copy.deepcopy(list(_TOOL_DEFINITIONS)),
         "tool_choice": "auto",
