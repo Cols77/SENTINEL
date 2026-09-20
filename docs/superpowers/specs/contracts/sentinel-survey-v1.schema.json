@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sentinel-survey-v1",
+  "$defs": {
+    "Detection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "matched_prompt", "raw_score", "score_kind", "bbox",
+                   "bbox_coordinate_space", "description", "provider_item_id"],
+      "properties": {
+        "class": {"enum": ["computer", "person", "phone", "pen"]},
+        "matched_prompt": {"type": ["string", "null"]},
+        "raw_score": {"type": ["number", "null"]},
+        "score_kind": {"enum": ["DETECTOR_RAW", "VLM_CONFIDENCE_BAND", "NONE"]},
+        "bbox": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/BBox"}
+          ]
+        },
+        "bbox_coordinate_space": {"const": "PIXELS_TOP_LEFT"},
+        "description": {"type": ["string", "null"]},
+        "provider_item_id": {"type": ["string", "null"]}
+      }
+    },
+    "BBox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": {"type": "number"},
+        "y": {"type": "number"},
+        "width": {"type": "number"},
+        "height": {"type": "number"}
+      }
+    },
+    "Sweep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sweep_id", "run_id", "option_id", "stops", "status"],
+      "properties": {
+        "sweep_id": {"type": "string"},
+        "run_id": {"type": "string"},
+        "option_id": {"type": "string"},
+        "stops": {"type": "integer", "minimum": 1},
+        "status": {"enum": ["PROPOSED", "FLOWN", "ABORTED"]}
+      }
+    },
+    "Frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame_id", "sweep_id", "stop_index", "look_deg", "x_cm", "y_cm", "z_cm",
+                   "heading_deg", "position_kind", "artifact_id", "sha256", "image_path",
+                   "captured_at", "command_completed_at", "delta_z_cm", "analysis_status"],
+      "properties": {
+        "frame_id": {"type": "string"},
+        "sweep_id": {"type": "string"},
+        "stop_index": {"type": "integer"},
+        "look_deg": {"type": "number"},
+        "x_cm": {"type": "number"},
+        "y_cm": {"type": "number"},
+        "z_cm": {"type": "number"},
+        "heading_deg": {"type": "number"},
+        "position_kind": {"enum": ["COMMANDED", "MEASURED"]},
+        "artifact_id": {"type": "string"},
+        "sha256": {"type": "string"},
+        "image_path": {"type": "string"},
+        "captured_at": {"type": "string"},
+        "command_completed_at": {"type": ["string", "null"]},
+        "delta_z_cm": {"type": "number"},
+        "analysis_status": {"type": "string"}
+      }
+    },
+    "Sighting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sighting_id", "frame_id", "detection", "band", "x_cm", "y_cm", "depth_cm"],
+      "properties": {
+        "sighting_id": {"type": "string"},
+        "frame_id": {"type": "string"},
+        "detection": {"$ref": "#/$defs/Detection"},
+        "band": {"type": "string"},
+        "x_cm": {"type": ["number", "null"]},
+        "y_cm": {"type": ["number", "null"]},
+        "depth_cm": {"type": ["number", "null"]}
+      }
+    },
+    "Object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["object_id", "run_id", "class", "x_cm", "y_cm", "distinct_stops", "band",
+                   "appearance", "sighting_ids", "depth_spread_pct"],
+      "properties": {
+        "object_id": {"type": "string"},
+        "run_id": {"type": "string"},
+        "class": {"enum": ["computer", "person", "phone", "pen"]},
+        "x_cm": {"type": ["number", "null"]},
+        "y_cm": {"type": ["number", "null"]},
+        "distinct_stops": {"type": "integer", "minimum": 0},
+        "band": {"enum": ["CONFIRMED", "UNCERTAIN"]},
+        "appearance": {"type": ["string", "null"]},
+        "sighting_ids": {"type": "array", "items": {"type": "string"}},
+        "depth_spread_pct": {"type": ["number", "null"]}
+      }
+    },
+    "ClassCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class", "confirmed", "uncertain", "method"],
+      "properties": {
+        "class": {"enum": ["computer", "person", "phone", "pen"]},
+        "confirmed": {"type": "integer", "minimum": 0},
+        "uncertain": {"type": "integer", "minimum": 0},
+        "method": {"enum": ["MERGED_MULTI_VIEW", "SINGLE_VIEW_LOWER_BOUND", "NOT_OBSERVABLE"]}
+      }
+    },
+    "Report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["report_id", "run_id", "body", "class_counts"],
+      "properties": {
+        "report_id": {"type": "string"},
+        "run_id": {"type": "string"},
+        "body": {"type": "string"},
+        "class_counts": {"type": "array", "items": {"$ref": "#/$defs/ClassCount"}}
+      }
+    }
+  }
+}
