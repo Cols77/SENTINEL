@@ -38,6 +38,8 @@ def evaluator():
 
 
 def execute(args):
+    if Path(args.output).exists():
+        raise FileExistsError('survey output already exists; choose a new path')
     root = Path(args.survey_root).resolve()
     before = snapshot(root)
     ev = evaluator()
@@ -100,7 +102,6 @@ def execute(args):
             def results_read(*a, **kw):
                 reads['get_results'] += 1
                 return original_results(*a, **kw)
-            loop.get_site, loop.get_results = site_read, results_read
 
             class Sink:
                 def write(self, record):
@@ -185,6 +186,7 @@ def execute(args):
 
             store = SurveyStore.open(Path(temporary) / (mode + '.sqlite3'))
             try:
+                loop.get_site, loop.get_results = site_read, results_read
                 outcome = loop.run_survey(store=store, run_id=mode, request_text='Count the scene objects',
                     options=options, policy=RecordedPolicy(), flight=StrictFlight(), detector=ScriptedDetector(script),
                     on_approval=approve, writer=writer, max_flights=args.max_flights)
@@ -209,7 +211,12 @@ def execute(args):
             except ev.Unevaluable as error:
                 result['modes'][mode] = {'status': 'UNEVALUABLE', 'reason': str(error),
                     'reads': reads, 'approvals': approvals, 'decisions': decisions, 'flown_option_ids': flown}
+            except Exception as error:
+                result['modes'][mode] = {'status': 'ERROR', 'error_category': type(error).__name__,
+                    'reads': reads, 'approvals': approvals, 'decisions': decisions,
+                    'routes': routes, 'flown_option_ids': flown}
             finally:
+                loop.get_site, loop.get_results = original_site, original_results
                 tables = [row[0] for row in store.connection.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
                 final_state = {name: [dict(row) for row in store.connection.execute(
@@ -226,6 +233,7 @@ def execute(args):
     result['source_after'] = snapshot(root)
     result['source_stable'] = result['source_before'] == result['source_after']
     result['status'] = ('SOURCE_CHANGED' if not result['source_stable'] else
+                        'ERROR' if any(r['status'] == 'ERROR' for r in result['modes'].values()) else
                         'UNEVALUABLE' if all(r['status'] == 'UNEVALUABLE' for r in result['modes'].values()) else 'EVALUATED')
     return result
 
@@ -244,7 +252,8 @@ def main():
     result = execute(args)
     target = Path(args.output)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(result, indent=2, allow_nan=False) + '\n', encoding='utf-8')
+    with target.open('x', encoding='utf-8') as stream:
+        stream.write(json.dumps(result, indent=2, allow_nan=False) + '\n')
 
 
 if __name__ == '__main__':
