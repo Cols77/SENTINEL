@@ -83,6 +83,35 @@ def _event_summary(event: dict) -> dict:
     return {"sequence_no": event.get("sequence_no", 0), "event_type": event_type[:64], "summary": summary or event_type[:64] or "EVENT"}
 
 
+def command_for(tool_name: str, arguments: dict[str, Any], run_id: str, actor_type: str, actor_id: str,
+                 key: str) -> dict[str, Any] | None:
+    """Build the ``command_envelope`` for one legal-candidate tool call: the
+    single tool-name -> ``command_type`` mapping (D7), including the
+    ``inspection.propose_plan`` payload wrapper. Returns ``None`` for a tool
+    with no command mapping (``wait_for_event``, ``finish``); callers decide
+    what "no command" means for their own tool set. ``key`` is the caller's
+    idempotency key -- ``command_id`` and ``correlation_id`` are both
+    deterministic UUIDs derived from it, so this never depends on
+    ``actor_id`` happening to be a UUID (an operator actor id like
+    ``"OPERATOR_1"`` is not one). Shared by ``AgentLoop._execute`` and P2
+    Task 3's operator choice path so there is exactly one source of truth
+    for the mapping."""
+    command_type = _COMMAND_TYPES.get(tool_name)
+    if command_type is None:
+        return None
+    payload = dict(arguments)
+    if tool_name == "inspection.propose_plan":
+        payload = {"intent": "REQUEST_OPERATOR_APPROVAL", **payload}
+    return {
+        "contract_version": "sentinel.v0", "wire_type": "command_envelope",
+        "command_id": str(uuid.uuid5(uuid.NAMESPACE_URL, key)),
+        "command_type": command_type, "run_id": run_id,
+        "actor_type": actor_type, "actor_id": actor_id,
+        "correlation_id": str(uuid.uuid5(uuid.NAMESPACE_URL, "correlation:" + key)),
+        "idempotency_key": key, "issued_at": "2999-01-01T00:00:00Z", "payload": payload,
+    }
+
+
 def _normalize_error_code(code: Any) -> str:
     candidate = re.sub(r"[^A-Z0-9_]", "_", str(code or "").upper()).strip("_") or "GATEWAY_ERROR"
     if not candidate[:1].isalpha():
@@ -257,8 +286,11 @@ class AgentLoop:
         elif tool_name == "wait_for_event":
             result = {"kind": "wait"}
         else:
-            command_type = _COMMAND_TYPES.get(tool_name)
-            if command_type is None:
+            payload = dict(arguments)
+            fingerprint = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            key = "agent-" + hashlib.sha256((agent_run_id + ":" + tool_name + ":" + fingerprint).encode()).hexdigest()
+            command = command_for(tool_name, arguments, run_id, "AGENT", agent_run_id, key)
+            if command is None:
                 # D7: an unmapped tool name is rejected without ever calling submit.
                 return AgentToolResult.from_dict({
                     "contract_version": "sentinel.v0", "wire_type": "agent_tool_result", "tool_name": tool_name,
@@ -268,12 +300,7 @@ class AgentLoop:
                     "safe_summary": f"unknown tool: {tool_name}"[:512],
                     "result": {"kind": "empty"},
                 }).to_dict()
-            payload = dict(arguments)
-            fingerprint = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-            key = "agent-" + hashlib.sha256((agent_run_id + ":" + tool_name + ":" + fingerprint).encode()).hexdigest()
-            command = {"contract_version": "sentinel.v0", "wire_type": "command_envelope", "command_id": str(uuid.uuid5(uuid.NAMESPACE_URL, key)), "command_type": command_type, "run_id": run_id, "actor_type": "AGENT", "actor_id": agent_run_id, "correlation_id": agent_run_id, "idempotency_key": key, "issued_at": "2999-01-01T00:00:00Z", "payload": payload}
-            if tool_name == "inspection.propose_plan":
-                command["payload"] = {"intent": "REQUEST_OPERATOR_APPROVAL", **payload}
+            command_type = command["command_type"]
             try:
                 submit_result = self.port.submit(command)
             except CoordinatorError as exc:

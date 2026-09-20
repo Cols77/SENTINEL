@@ -8,6 +8,7 @@ from sentinel.coordinator.agent_loop import AgentLoop
 from sentinel.coordinator.decision_state import DecisionState, read_decision_state
 from sentinel.coordinator.legal_tools import (
     ESCALATE_LABEL,
+    EVIDENCE_GATE,
     RANK,
     SELECT_PLAN,
     Candidate,
@@ -38,6 +39,15 @@ def _request() -> dict:
 def _rank_legal() -> LegalSet:
     return LegalSet(RANK, (Candidate("patroller.rank_for_task", {"task_id": _TASK_ID}, "rank",
                                       "rank patrollers for the task"),))
+
+
+def _evidence_gate_legal_with_rule_choice(rule_choice: str | None) -> LegalSet:
+    create = Candidate("task.create", {"perception_result_id": RESULT_ID, "section_id": "LEFT_ALLEY_MIDDLE",
+                                        "evidence_artifact_id": ARTIFACT_ID}, "create_task",
+                        "create a patrol task for this detection")
+    escalate = Candidate("finish", {"status": "NEEDS_REVIEW", "summary": "review"}, ESCALATE_LABEL,
+                          "hand the decision to the operator with the reason")
+    return LegalSet(EVIDENCE_GATE, (create, escalate), rule_choice=rule_choice)
 
 
 def _dummy_state() -> DecisionState:
@@ -107,6 +117,42 @@ def test_rule_policy_escalates_at_select_plan_when_multiple_candidates():
     escalate = Candidate("finish", {"status": "NEEDS_REVIEW", "summary": "no plan fits"}, ESCALATE_LABEL,
                           "hand the decision to the operator with the reason")
     legal = LegalSet(SELECT_PLAN, plans + (escalate,))
+    policy = RulePolicy()
+    result = policy.decide(_request(), PolicyContext(state=None, legal=legal))
+    assert result["tool_calls"][0]["tool_name"] == "finish"
+    assert policy.last.chooser == "OPERATOR"
+    assert policy.last.label == ESCALATE_LABEL
+
+
+def test_rule_policy_acts_on_rule_choice_create_task_instead_of_escalating():
+    """Task A: at EVIDENCE_GATE (2 candidates) a deterministic rule_choice
+    now decides -- RulePolicy no longer escalates just because there is
+    more than one candidate."""
+    legal = _evidence_gate_legal_with_rule_choice("create_task")
+    policy = RulePolicy()
+    result = policy.decide(_request(), PolicyContext(state=None, legal=legal))
+    assert result["tool_calls"][0]["tool_name"] == "task.create"
+    assert policy.last.chooser == "RULE"
+    assert policy.last.label == "create_task"
+
+
+def test_rule_policy_acts_on_rule_choice_escalate_without_needing_an_operator_choice():
+    """rule_choice == escalate is still a *rule* decision (chooser RULE),
+    not an OPERATOR one -- EVIDENCE_GATE is no longer a judgment point the
+    operator is asked at."""
+    legal = _evidence_gate_legal_with_rule_choice(ESCALATE_LABEL)
+    policy = RulePolicy()
+    result = policy.decide(_request(), PolicyContext(state=None, legal=legal))
+    assert result["tool_calls"][0]["tool_name"] == "finish"
+    assert policy.last.chooser == "RULE"
+    assert policy.last.label == ESCALATE_LABEL
+
+
+def test_rule_policy_still_escalates_at_a_multi_candidate_point_with_no_rule_choice():
+    """Multiple candidates but no rule_choice (e.g. SELECT_PLAN, where
+    legal_set() never computes one) -- RulePolicy's fallback OPERATOR
+    escalation is unchanged."""
+    legal = _evidence_gate_legal_with_rule_choice(None)
     policy = RulePolicy()
     result = policy.decide(_request(), PolicyContext(state=None, legal=legal))
     assert result["tool_calls"][0]["tool_name"] == "finish"

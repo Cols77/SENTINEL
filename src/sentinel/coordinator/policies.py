@@ -1,9 +1,11 @@
 """RULE and Jev policies over described legal candidates (D9, D11).
 
-``RulePolicy`` is the F executor: it acts only when the legal set leaves a
-single candidate and otherwise hands the decision to the operator. ``F``
-plus this policy is the demo architecture -- Jev and the LLM run only as
-shadow advisors elsewhere (see the plan's Decisions section).
+``RulePolicy`` is the F executor: it acts on the legal set's single
+candidate, or on a deterministic ``rule_choice`` where one has been computed
+(Task A: EVIDENCE_GATE), and otherwise hands the decision to the operator
+(SELECT_PLAN, which has no rule_choice). ``F`` plus this policy is the demo
+architecture -- Jev and the LLM run only as shadow advisors elsewhere (see
+the plan's Decisions section).
 
 ``JevPolicy`` is the fail-closed bridge for ``E`` (the P3 follow-up): at a
 judgment point with more than one candidate it asks Jev to choose among the
@@ -17,7 +19,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .legal_tools import ESCALATE_LABEL, JUDGMENT_POINTS
+from .legal_tools import ADVISORY_POINTS, ESCALATE_LABEL
 from .policy import PolicyContext, one_call
 
 INSTRUCTIONS: dict[str, str] = {
@@ -32,10 +34,11 @@ INSTRUCTIONS: dict[str, str] = {
 @dataclass(frozen=True)
 class Decision:
     """Audit shape for one policy decision, regardless of which policy made
-    it. ``chooser`` is ``RULE`` (a single candidate, no judgment needed),
-    ``JEV`` (Jev picked and acted, including a deliberate escalate) or
-    ``OPERATOR`` (escalated -- by rule, by low confidence, or by judge
-    failure)."""
+    it. ``chooser`` is ``RULE`` (a single candidate, or a deterministic
+    ``rule_choice`` -- no judgment needed either way), ``JEV`` (Jev picked
+    and acted, including a deliberate escalate) or ``OPERATOR`` (escalated
+    -- at a judgment point with no rule_choice, by low confidence, or by
+    judge failure)."""
 
     chooser: str
     label: str | None
@@ -48,9 +51,12 @@ class Decision:
 
 
 class RulePolicy:
-    """Acts only when the legal set has exactly one candidate; at a
-    judgment point (2+ candidates) it always escalates, labelling the
-    decision ``OPERATOR``. This is the F executor: rules plus operator."""
+    """Acts on the legal set's single candidate, or on ``legal.rule_choice``
+    when a deterministic rule has computed one (Task A: EVIDENCE_GATE) --
+    both are labelled chooser ``RULE``. Only where neither applies (a
+    judgment point with 2+ candidates and no rule_choice -- SELECT_PLAN)
+    does it escalate, labelling the decision ``OPERATOR``. This is the F
+    executor: rules plus operator."""
 
     def __init__(self) -> None:
         self.last: Decision | None = None
@@ -59,6 +65,11 @@ class RulePolicy:
         legal = context.legal
         if len(legal.candidates) == 1:
             candidate = legal.candidates[0]
+            self.last = Decision(chooser="RULE", label=candidate.label, confidence=None, band=None,
+                                  legal_labels=legal.labels, model=None, error=None, latency_ms=None)
+            return one_call(request, candidate.tool_name, candidate.arguments)
+        if legal.rule_choice is not None:
+            candidate = legal.by_label(legal.rule_choice)
             self.last = Decision(chooser="RULE", label=candidate.label, confidence=None, band=None,
                                   legal_labels=legal.labels, model=None, error=None, latency_ms=None)
             return one_call(request, candidate.tool_name, candidate.arguments)
@@ -93,8 +104,8 @@ class JevPolicy:
             return one_call(request, candidate.tool_name, candidate.arguments)
 
         point = legal.decision_point
-        assert point in JUDGMENT_POINTS, f"legal set at {point!r} has {len(legal.candidates)} candidates " \
-                                          "but is not a known judgment point"
+        assert point in ADVISORY_POINTS, f"legal set at {point!r} has {len(legal.candidates)} candidates " \
+                                          "but is not a known advisory point"
         instruction = self.instructions[point]
         criteria = {candidate.label: candidate.description for candidate in legal.candidates}
         packet = context.state.to_packet()

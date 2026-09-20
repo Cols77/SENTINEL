@@ -12,7 +12,22 @@ from .decision_state import DecisionState
 TERMINAL, WAIT_APPROVAL, SELECT_PLAN, WAIT_OBSERVATION = "TERMINAL", "WAIT_APPROVAL", "SELECT_PLAN", "WAIT_OBSERVATION"
 EVIDENCE_GATE, EVIDENCE_VETO, RANK, ASSIGN, DONE = "EVIDENCE_GATE", "EVIDENCE_VETO", "RANK", "ASSIGN", "DONE"
 ESCALATE_LABEL = "escalate"
-JUDGMENT_POINTS = frozenset({SELECT_PLAN, EVIDENCE_GATE})
+
+# Operator policy, decided 2026-09-20 ("Make it a rule, keep shadow" / "Escalate
+# below 0.75"): at EVIDENCE_GATE the create_task/escalate choice is computable,
+# so a deterministic rule decides it (`legal_set()` sets `LegalSet.rule_choice`
+# below) -- advisors are still consulted in shadow at that point and recorded,
+# they just no longer gate execution. This is distinct from the static veto
+# `EVIDENCE_SCORE_THRESHOLD` (below which a detection never reaches
+# EVIDENCE_GATE at all -- it is vetoed straight to EVIDENCE_VETO).
+EVIDENCE_TASK_SCORE = 0.75
+
+# JUDGMENT_POINTS: where the operator is actually asked to choose (P2 Task 3's
+# submit_choice/pending_decision). ADVISORY_POINTS: where shadow advisors are
+# consulted and recorded (P2 Task 2's ShadowLadder) -- a superset now that
+# EVIDENCE_GATE is rule-decided but still shadowed.
+JUDGMENT_POINTS = frozenset({SELECT_PLAN})
+ADVISORY_POINTS = frozenset({SELECT_PLAN, EVIDENCE_GATE})
 
 
 @dataclass(frozen=True)
@@ -27,6 +42,11 @@ class Candidate:
 class LegalSet:
     decision_point: str
     candidates: tuple[Candidate, ...]
+    # The label a deterministic rule selects at an advisory point (e.g.
+    # EVIDENCE_GATE), or None where no rule computes one (e.g. SELECT_PLAN,
+    # which the operator alone decides). `candidates` stays the full option
+    # set regardless, so advisors still choose among all of them.
+    rule_choice: str | None = None
 
     @property
     def labels(self) -> tuple[str, ...]:
@@ -91,7 +111,13 @@ def legal_set(state: DecisionState, catalogue: Sequence[CataloguePlan], *,
         create = Candidate("task.create", {"perception_result_id": det["result_id"], "section_id": det["station_id"],
                                             "evidence_artifact_id": det["artifact_id"]},
                             "create_task", "create a patrol task for this detection")
-        return LegalSet(EVIDENCE_GATE, (create, _escalate("detection needs operator review before tasking")))
+        escalate = _escalate("detection needs operator review before tasking")
+        # Operator policy 2026-09-20: create_task iff the detection is inside
+        # the approved plan AND raw_score >= EVIDENCE_TASK_SCORE; otherwise
+        # escalate (marginal-band and out-of-plan detections alike).
+        inside_plan = det["station_id"] in state.plan_station_ids
+        rule_choice = "create_task" if inside_plan and score >= EVIDENCE_TASK_SCORE else ESCALATE_LABEL
+        return LegalSet(EVIDENCE_GATE, (create, escalate), rule_choice=rule_choice)
     if not state.ranked_patrollers:
         return LegalSet(RANK, (Candidate("patroller.rank_for_task", {"task_id": state.task_id}, "rank",
                                           "rank patrollers for the task"),))
