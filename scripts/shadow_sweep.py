@@ -36,13 +36,17 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from sentinel.coordinator.legal_tools import ESCALATE_LABEL, EVIDENCE_GATE, SELECT_PLAN, Candidate, LegalSet  # noqa: E402
+from sentinel.coordinator.legal_tools import (  # noqa: E402
+    ADVISORY_POINTS, ESCALATE_LABEL, EVIDENCE_GATE, SELECT_PLAN, Candidate, LegalSet,
+)
 from sentinel.coordinator.policies import JevPolicy  # noqa: E402
 from sentinel.coordinator.policy import PolicyContext  # noqa: E402
 from sentinel.shadow_eval import REPORT_HEADER, score  # noqa: E402
 
 FIXTURE_PATH = REPO_ROOT / "fixtures" / "decisions" / "turns.v1.jsonl"
-JUDGMENT_POINTS = (SELECT_PLAN, EVIDENCE_GATE)
+# Sourced from legal_tools so a sweep automatically covers decision points added
+# later (P3 adds ASSIGN near-ties and REPLAN) instead of silently skipping them.
+JUDGMENT_POINTS = tuple(sorted(ADVISORY_POINTS))
 
 
 # --- offline, non-LLM baseline judges (fake, static) ------------------------
