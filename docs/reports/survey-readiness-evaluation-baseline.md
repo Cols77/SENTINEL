@@ -32,6 +32,10 @@ run. Its recorded loop SHA256 is
 `5d7d590dd8ade039eddfecc2e531750b490c4bbbb7576e727464f0ea1394426d`;
 the artifact contains the complete source hash maps. This measured dirty state
 supersedes the earlier clean-checkout observation in the handoff.
+The exact dirty [loop source](../../artifacts/proposal-eval/survey-run-0apvd3cn/production-loop.py)
+was subsequently archived after its bytes were verified against both captured
+hashes. Separate [archive provenance](../../artifacts/proposal-eval/survey-run-0apvd3cn/source-archive.json)
+binds it to the original result hash; the original run result remains unchanged.
 
 The scene SHA256 is
 `df86c177b538df468277a2ee50001a731c9515629a6471d973ddc4d8cfa0ba24`.
