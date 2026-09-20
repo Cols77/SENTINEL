@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import hashlib
+import sqlite3
 
 import pytest
 
@@ -65,3 +67,17 @@ def test_calibration_mismatch_is_unevaluable(tmp_path):
     path.write_text(json.dumps(scene))
     report = run(tmp_path, '--approve-sweeps', '--scene', str(path))
     assert report['status'] == 'UNEVALUABLE'
+
+
+def test_final_databases_and_append_evidence_survive_runner_exit(tmp_path):
+    report = run(tmp_path, '--approve-sweeps', '--modes', 'F')
+    row = report['modes']['F']
+    database = Path(row['database']['path'])
+    assert database.is_file()
+    assert hashlib.sha256(database.read_bytes()).hexdigest() == row['database']['sha256']
+    with sqlite3.connect(database) as connection:
+        assert connection.execute('SELECT COUNT(*) FROM reports').fetchone()[0] == 1
+    assert len(row['database']['snapshot']['reports']) == 1
+    stream = Path(report['append_stream_path']).read_text().splitlines()
+    assert json.loads(stream[0])['mode'] == 'F'
+    assert report['option_generation'] == 'independent_manifest_adapter_not_production_generate_options'

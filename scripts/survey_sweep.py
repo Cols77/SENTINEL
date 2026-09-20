@@ -6,6 +6,7 @@ filming-consent claims are involved. Source snapshots detect concurrent changes.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import hashlib
 import importlib.util
 import json
@@ -72,12 +73,21 @@ def execute(args):
             round(span + scene.camera['width_px'] * distance / scene.camera['fx_px']), len(stops) * 22,
             observability.resolvable_classes(distance), distance))
 
+    output_parent = Path(args.output).resolve().parent
+    output_parent.mkdir(parents=True, exist_ok=True)
+    retained_directory = Path(tempfile.mkdtemp(prefix='survey-run-', dir=output_parent))
+    append_stream = retained_directory / 'episodes.jsonl'
     result = {'evidence_kind': 'synthetic_production_loop_with_scripted_advisors',
+              'option_generation': 'independent_manifest_adapter_not_production_generate_options',
+              'artifact_directory': str(retained_directory), 'append_stream_path': str(append_stream),
+              'manifest': {'scene_path': str(Path(args.scene).resolve()), 'survey_root': str(root),
+                           'modes': args.modes.split(','), 'max_flights': args.max_flights,
+                           'scripted_approvals_enabled': args.approve_sweeps},
               'production_commit': before['commit'], 'source_before': before,
               'scene_id': scene.scene_id, 'scene_sha256': hashlib.sha256(Path(args.scene).read_bytes()).hexdigest(),
               'paid_calls': 0, 'hardware_flights': 0, 'modes': {}}
     original_site, original_results = loop.get_site, loop.get_results
-    with tempfile.TemporaryDirectory(prefix='sentinel-survey-eval-') as temporary:
+    with nullcontext(retained_directory) as temporary:
         for mode in args.modes.split(','):
             reads = {'get_site': 0, 'get_results': 0}
             approvals, flown, decisions, routes = [], [], [], []
@@ -189,7 +199,18 @@ def execute(args):
                 result['modes'][mode] = {'status': 'UNEVALUABLE', 'reason': str(error),
                     'reads': reads, 'approvals': approvals, 'decisions': decisions, 'flown_option_ids': flown}
             finally:
+                tables = [row[0] for row in store.connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+                final_state = {name: [dict(row) for row in store.connection.execute(
+                    'SELECT * FROM "' + name.replace('"', '""') + '"')] for name in tables}
+                store.connection.execute('PRAGMA wal_checkpoint(TRUNCATE)')
                 store.connection.close()
+                database = Path(temporary) / (mode + '.sqlite3')
+                result['modes'].setdefault(mode, {'status': 'ERROR', 'reads': reads, 'approvals': approvals})
+                result['modes'][mode]['database'] = {'path': str(database),
+                    'sha256': hashlib.sha256(database.read_bytes()).hexdigest(), 'snapshot': final_state}
+                with append_stream.open('a', encoding='utf-8') as stream:
+                    stream.write(json.dumps({'mode': mode, **result['modes'][mode]}, allow_nan=False) + '\n')
     loop.get_site, loop.get_results = original_site, original_results
     result['source_after'] = snapshot(root)
     result['source_stable'] = result['source_before'] == result['source_after']

@@ -148,3 +148,14 @@ Hypothesis absence now leaves recall/localisation unset, duplicate class-count
 rows are rejected, malformed report payloads receive no completion/validity
 credit, and prediction coordinates require finite non-boolean numbers (None
 remains a legitimate unlocalized hypothesis).
+
+Persistence correction: each invocation now retains a uniquely named directory
+beside its output, with final per-arm SQLite databases, SHA256 hashes, JSON table
+snapshots, and an append-only episodes.jsonl. The output manifest records source,
+scene, modes, approval flag and flight budget. A focused RED reproduced the
+missing saved database; all six bridge tests then passed in 7.86 seconds.
+
+The bridge uses independently constructed manifest-derived SweepOption objects.
+It exercises the production loop/store/detector/proposer seams, but does not run
+production generate_options. Close-look range and generated-option geometry
+findings remain source-reviewed, not exercised or corrected by this replay.
