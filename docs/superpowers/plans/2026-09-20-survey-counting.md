@@ -109,6 +109,98 @@ safety claim.
 
 Both are attribution signals: they separate "the provider missed it" from "the geometry failed".
 
+## Rev 4 amendments — a coherence review found nine more defects. Read this too.
+
+**Rev 4 supersedes rev 3 where they overlap, and both supersede the task bodies.** Every item below was independently verified against the repository before being written down.
+
+### V1. `judge.choice` has a required `name` argument — Task 6 omits it (CRITICAL)
+
+The real signature (`src/sentinel/judgment.py:178`, identically at `:305`) is:
+
+```python
+def choice(self, state: dict, instruction: str, *, options=None,
+           criteria: Mapping[str, str | None] | None = None, name: str) -> dict[str, Any]
+```
+
+`name` is **required and keyword-only**. Task 6's `JevProposer` calls `judge.choice(instruction=..., state=..., criteria=...)`, which raises `TypeError` — and because the call is wrapped in `except Exception`, **mode `J` would silently escalate on every single turn.**
+
+This is not hypothetical. `judgment.py:308-311`'s own docstring records that this exact bug class already hit the LLM advisor, and the live shadow sweep of 2026-09-20 measured it as `error_rate 1.0`.
+
+Use the working call site's form (`coordinator/policies.py:171`):
+
+```python
+answer = self.judge.choice(state, instruction, criteria=criteria,
+                           name=context.legal.decision_point.lower())
+```
+
+**Add a test exercising `JevProposer` against a real judge class**, not only a permissive `**kwargs` fake. Note `StaticJudge.choice` (`judgment.py:73`) takes `options` and has **no `criteria` parameter at all**, so the test must either prove the proposer works with both shapes or state that it requires `JevJudge`.
+
+### V2. Escalating at `REVIEW_RESULTS` raises `StopIteration` (CRITICAL)
+
+`review_candidates` builds `[report] + follow-ups` with **no escalate candidate**, but `_escalate` calls `context.legal.by_label(ESCALATE_LABEL)`, and `LegalSet.by_label` is an unguarded `next(...)`. Every escalation path at the review point crashes, and the loop's own `if label == ESCALATE_LABEL:` branch there is unreachable dead code.
+
+Fix: add an escalate `Candidate` to `review_candidates`, **and** make `_escalate` synthesise a call when no escalate candidate exists, so neither decision point can crash.
+
+### V3. `LlmProposer` can never choose legally at `REVIEW_RESULTS` (CRITICAL)
+
+It hard-codes `call.get("tool_name") != "survey.propose_sweep"`, so it can never pick `survey.submit_report`; and it validates `arguments["option_id"]` against candidate **labels**, which at review are `report` and `follow_up:<option_id>` while the argument carries the **bare** option id. A correct follow-up is rejected as `unknown_option` → `_escalate` → V2's crash. Mode `E` therefore crashes Task 9's three-mode comparison.
+
+Fix: validate against the `option_id` **values** in the candidates' arguments, not their labels, and accept `survey.submit_report` at the review point.
+
+### V4. `MIN_DETECTABLE_PX = 12.0` makes a plan test false (CRITICAL)
+
+`test_moving_closer_can_make_a_phone_resolvable` asserts `"phone" not in resolvable_classes(600.0)`, but 15 × 683 / 600 = **17.07 px ≥ 12**, so the phone *is* resolvable at 6 m and the test fails.
+
+Set **`MIN_DETECTABLE_PX = 20.0`**. Then phone is 34.2 px at 3 m (resolvable ✓), 17.1 px at 6 m (not ✓), 68.3 px at 1.5 m (resolvable ✓), pen 2.3 px (not ✓) — all four assertions hold, and the options tests hold at ranges 150/300/400. This constant also drives `class_counts`'s `NOT_OBSERVABLE` decision, so it is load-bearing; pin it with a comment saying so.
+
+### V5. `check_report`'s class matching misses plurals (CRITICAL)
+
+`entry["class"] in body.lower()` fails for `person` against the body "exactly 2 **people**". Use an explicit form map and generate rev 3's R4 regex from it rather than hand-writing it:
+
+```python
+_CLASS_FORMS = {"computer": ("computer", "computers"), "person": ("person", "persons", "people"),
+                "phone": ("phone", "phones"), "pen": ("pen", "pens")}
+```
+
+Also fix `test_claiming_certainty_about_a_not_observable_class_is_rejected`: its body says "3 pens" where 3 is already outside the permitted set, so it passes on the number check and never reaches the pen rule it names. Use a permitted count such as "2 pens".
+
+### V6. People are over-counted, contradicting the spec (CRITICAL)
+
+Spec §4.3 says people are counted as **the largest number seen in any single frame**. The plan routes `person` through `_unmerged` **per sighting**, so one person seen from three stops becomes **three** `UNCERTAIN` person objects. Nothing implements max-per-frame, and the existing test only checks `x_cm is None`, so the over-count is invisible.
+
+Fix: count `person` as `max(person sightings per frame_id)` in `report.class_counts`. Add a test with three frames each seeing one person, asserting the count is **1**.
+
+### V7. `band` must not be a `Detection` field (MAJOR)
+
+`normalise` adds a ninth key `band` to a `Detection` whose contract is copied verbatim from the WP3 pipeline spec — 8 fields with `additionalProperties: false`. Every detection it produces would fail its own contract.
+
+Fix: `normalise` returns `(detection, band)` pairs, or `DetectionBatch` carries a parallel `bands` tuple. The band is a **`Sighting`** property, stored in the `sightings.band` column rev 3's R2 adds, never part of the `Detection` document. Add a contract test proving a `Detection` emitted by `normalise` validates against the schema.
+
+### V8. Other confirmed defects (MAJOR)
+
+| # | Defect | Fix |
+|---|---|---|
+| V8a | `class_counts` uses `min(option.range_cm for option in options)` — the observability of a sweep that may never have flown | Use the **flown** sweeps' range from the store, per spec §5.1 |
+| V8b | Raw provider responses are discarded whenever consent is not `RETAIN`, breaking spec §6.3 and §9.3 | Under rev 3's R5 there is no non-retain path that calls the provider at all, so **always** store `batch.raw` |
+| V8c | `decision_quality` is specified in three places and computed nowhere — `score_episode` reads a key `run_survey` never sets | Record, at each review turn, the uncertain set plus the `addresses` list of the chosen and of the best-available follow-up, and compute it |
+| V8d | `SurveyContext(store, run_id, legal, results)` in Task 5's Interfaces; the dataclass has no `store` field and every call site passes three | Fix the Interfaces line to `SurveyContext(run_id, legal, results)` |
+| V8e | `JevProposer` escalates when `confidence is None`; the repo's `JevPolicy` falls back to `probabilities[label]` | Match the repo: fall back before escalating |
+| V8f | `survey.get_site` and `survey.get_results` are named as tools in spec §3.3 but never implemented; the loop calls store functions directly | Implement both as real functions in `loop.py` and route the loop through them, so the advertised tool surface exists |
+
+### V9. Baseline test count is wrong, and `av` is missing
+
+`import av` fails in this environment, so `tests/test_video.py` raises a **collection error** and the suite is **657 collected + 1 error**, not the "662 passed, 3 skipped" Task 10 expects. `av==14.2.0` is a declared dependency that is not installed.
+
+**Before Task 10's full-suite step, record the true baseline by running `rtk proxy uv run pytest -q` first**, and compare against that rather than against any number in this plan. The `av` gap is pre-existing and is **not** damage caused by this work — do not try to fix it, and do not let it be mistaken for a regression.
+
+### V10. Documents this plan cites are now in the worktree
+
+`docs/handoffs/2026-09-20-HANDOFF-to-codex-jev.md` and `docs/superpowers/plans/2026-09-21-p3b1-approval-gated-E.md` were previously readable only from the main checkout, which the Global Constraints forbid. Both have been copied onto this branch.
+
+### V11. The "nothing gated" claim, stated precisely
+
+`coordinator/__init__.py` imports `agent_loop` **and** Codex's `proposer`, so importing `coordinator.legal_tools` transitively executes both. No Codex file is *modified*, but `sentinel.coordinator` must remain **importable**. If that ever blocks progress, `Candidate` and `LegalSet` are two trivial 4-field dataclasses and copying them into `survey/` cuts the edge entirely — take that option rather than editing anything of Codex's.
+
 ## Dependency and gate map
 
 | Tasks | Blocked on |
@@ -2927,8 +3019,6 @@ git commit -m "docs(survey): implementation handoff and verification record"
 
 **Spec coverage.** §3.2 modules → Tasks 1–9, 11. §3.3 run steps → Task 7. §4 contract → Task 1. §4.3 classes and methods → Tasks 2, 4, 7. §5.1 camera model → Task 2. §5.2 triangulation → Task 4. §5.3 no rotation → Tasks 2, 4, 11. §5.4 bands → Task 4. §6 provider → Task 12. §7 Jev and modes F/E/J → Tasks 5, 6. §8 failure handling → Tasks 3, 4, 7. §9 evaluation → Task 9. §10 test strategy → all tasks. §12 convergence is explicitly out of scope. §13.4 consent → Task 8.
 
-**Gaps found and closed during review.** The spec's §5.2 gives the bearing formula as `atan((u − 320)/f)`; **320 is wrong for a 960-wide frame** and the correct principal point is 480. Task 4 uses `PRINCIPAL_X = 480.0`. Fix the spec in the same commit as this plan.
-
-The spec also claims Codex's `LlmProposer` "plugs in unchanged". It does not: `PolicyContext.state` is typed to the alley's `DecisionState`. Task 5 defines `SurveyContext` instead, and the Global Constraints record it. Fix the spec's wording in the same commit.
+**Gaps found and closed during review.** Two defects were found here and **have already been fixed in the spec** (rev 2, commit `f2ca73c`): the bearing formula's principal point is 480, not 320; and the spec no longer claims P3b1's `LlmProposer` plugs into the survey flow unchanged. **Do not "fix" either again** — the spec is correct as it stands, and a second-round reviewer flagged the previous wording here as an instruction that would re-break a correct document.
 
 **Type consistency.** `SweepOption.option_id` is the `Candidate.label` at propose and `f"follow_up:{option_id}"` at review; `chosen_label` reads `arguments["option_id"]` in both cases, so it is stable across decision points. `DetectionBatch.status` is `"OK"`/`"PROVIDER_ERROR"` in Task 3 and consumed with exactly those values in Task 7. `position_kind` is `"COMMANDED"`/`"MEASURED"` in Tasks 1, 7 and 11. `band` on a sighting is `"high"`/`"medium"`/`"low"`; `band` on an object is `"CONFIRMED"`/`"UNCERTAIN"` — different vocabularies on purpose, and the merge is the only place both appear.
