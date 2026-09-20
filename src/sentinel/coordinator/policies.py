@@ -63,6 +63,18 @@ class Decision:
     model: str | None
     error: str | None
     latency_ms: int | None
+    # The judge's OWN pick, before banding -- `answer["value"]`. Distinct from
+    # ``label``, which is what the policy went on to do: for any non-HIGH answer
+    # that is the escalate candidate, not what the judge said.
+    #
+    # Without this the two are conflated, and that conflation produced a real
+    # false conclusion. The 2026-09-20 sweep reported escalation_rate 1.0 for
+    # Jev and it was read as "Jev abstained on every turn"; in fact a
+    # MID-confidence *correct* pick was recorded as an escalation, so the
+    # judge's actual behaviour on those 144 calls was never captured at all.
+    # ``None`` where no judge was consulted (a RULE turn) or where the judge
+    # raised before answering.
+    judge_label: str | None = None
 
 
 class RulePolicy:
@@ -152,7 +164,8 @@ class JevPolicy:
             chooser, candidate = "OPERATOR", legal.by_label(ESCALATE_LABEL)
 
         self.last = Decision(chooser=chooser, label=candidate.label, confidence=confidence, band=band,
-                              legal_labels=legal.labels, model=model, error=None, latency_ms=latency_ms)
+                              legal_labels=legal.labels, model=model, error=None, latency_ms=latency_ms,
+                              judge_label=label)
         return one_call(request, candidate.tool_name, candidate.arguments)
 
 

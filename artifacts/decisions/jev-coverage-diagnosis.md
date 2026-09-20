@@ -151,6 +151,30 @@ different model resolutions. The 19%/30% HIGH-band rates remain real
 measurements of *something*; what is not established is that they measure the
 same model the sweep used.
 
+### G3. The 6 easy turns evidence *confidence*, and nothing about correctness
+
+Raised by the P1/P2 session, 2026-09-20, and it bounds the central inference
+more tightly than G1 or G2.
+
+Item 6 observes that 6 of 24 `EVIDENCE_GATE` turns are unambiguous by the
+deterministic rule, yet none produced a HIGH pick. That is strong evidence
+about Jev's **self-reported confidence** on those turns. It says **nothing
+about whether Jev picked correctly**, because in every non-HIGH case the label
+recorded was `JevPolicy`'s escalate fallback, not the judge's own answer. Jev
+may have chosen `create_task` correctly on all six and been recorded as
+escalating on all six; the committed data cannot distinguish the two.
+
+The same conflation produces both headline numbers — `coverage_high = 0.0` and
+`escalation_rate = 1.0` — so they are not two independent signals of weakness.
+They are one measurement, reported twice.
+
+This is now fixed forward rather than only noted: `Decision.judge_label`
+carries the judge's own pick through to the audit record, and `shadow_eval`
+reports `judge_agreement` and `judge_escalation_rate` beside the policy-level
+figures, returning `None` rather than `0.0` where no row carries the field so
+that a report from an older sweep says "not recorded" instead of implying the
+judge never escalated.
+
 ### G2. The instruction handed to Jev contradicted the packet
 
 Every `EVIDENCE_GATE` call in the sweep received `INSTRUCTIONS["EVIDENCE_GATE"]`
