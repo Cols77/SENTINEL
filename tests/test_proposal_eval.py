@@ -82,6 +82,8 @@ def test_audit_interruption_reopens_durable_state(tmp_path):
     assert record["metrics"]["outcome_success"], record["metrics"]
     assert [a["record"] for a in record["audit"] if a["record"] in {"interruption", "recovery"}] == ["interruption", "recovery"]
     assert record["metrics"]["proposal_calls"] == 1
+    assert any(a["record"] == "audit_write_failure" for a in record["audit"])
+    assert record["metrics"]["operator_duplicate_recoveries"] == 1
 
 
 def test_import_preserves_hand_reference_and_reports_exclusions(tmp_path):
@@ -125,3 +127,46 @@ def test_operator_metrics_distinguish_unique_confirmations(tmp_path):
     assert metrics["operator_rejections"] == 1
     assert metrics["operator_duplicate_recoveries"] == 1
     assert metrics["operator_decision_attempts"] == 4
+
+
+@pytest.mark.parametrize("change", [{"setup": "missing_evidnce"}, {"turn_limit": True}, {"expected_effects": ["bogus"]}, {"expected_terminal": "BOGUS"}])
+def test_invalid_case_definitions_rejected(change):
+    from dataclasses import asdict
+    with pytest.raises(ValueError):
+        Case.from_dict({**asdict(load_cases()[0]), **change})
+
+
+def test_fixture_version_and_duplicate_ids_rejected(tmp_path):
+    import json
+    from dataclasses import asdict
+    source = tmp_path / "cases.json"
+    case = asdict(load_cases()[0])
+    for document in [{"version": "unknown", "cases": [case]}, {"version": "proposal-outcomes.v1", "cases": [case, case]}]:
+        source.write_text(json.dumps(document), encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_cases(source)
+
+
+def test_provider_construction_failure_is_persisted(tmp_path):
+    def broken(*args):
+        raise OSError("initialization failed")
+    record = run_case(load_cases()[0], "llm", tmp_path, proposer_factory=broken)
+    assert record["error"]
+    assert not record["metrics"]["outcome_success"]
+    assert (tmp_path / "route_complete/llm/outcome.json").exists()
+
+
+@pytest.mark.parametrize("permanent", [False, True])
+def test_real_audit_write_failure_is_retained(permanent, tmp_path):
+    from sentinel.proposal_eval import _Sink
+    class FailingSink(_Sink):
+        failed = False
+        def write(self, record):
+            if record.get("record") == "tool_attempt" and record["command"]["command_type"] == "OPERATOR_DECIDE" and (permanent or not self.failed):
+                self.failed = True
+                raise OSError("simulated disk write failure")
+            super().write(record)
+    record = run_case(load_cases()[0], "F", tmp_path, sink_factory=FailingSink)
+    assert any(a["record"] == "audit_write_failure" for a in record["audit"])
+    assert record["metrics"]["outcome_success"] is (not permanent)
+    assert (tmp_path / "route_complete/f/recovery.jsonl").exists()

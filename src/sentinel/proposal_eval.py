@@ -44,10 +44,25 @@ class Case:
         value = dict(value)
         for key in ("acceptable_plans", "expected_effects", "operator_decisions", "scripted_choices"):
             if key in value:
+                if not isinstance(value[key], (list, tuple)) or not all(isinstance(item, str) for item in value[key]):
+                    raise ValueError(f"{key} must be a sequence of strings")
                 value[key] = tuple(value[key])
-        case = cls(**value)
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", case.case_id) or not 1 <= case.turn_limit <= 100:
+        try:
+            case = cls(**value)
+        except TypeError as exc:
+            raise ValueError("invalid case fields") from exc
+        if not isinstance(case.case_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", case.case_id) or type(case.turn_limit) is not int or not 1 <= case.turn_limit <= 100:
             raise ValueError("case requires an ID and a bounded turn limit")
+        if not isinstance(case.request, str) or not case.request.strip() or type(case.expected_escalation) is not bool:
+            raise ValueError("request must be nonblank and escalation boolean")
+        if any(not isinstance(getattr(case, key), str) for key in ("setup", "expected_terminal", "provenance", "label_status")):
+            raise ValueError("setup, terminal, provenance and label status must be strings")
+        if case.setup not in {"new", "pending_approval", "missing_evidence", "duplicate_recovery", "stale_evidence_retry", "audit_interruption"}:
+            raise ValueError("unknown case setup")
+        if case.expected_terminal not in {"NEW", "RUNNING", "WAITING_FOR_APPROVAL", "WAITING_FOR_OBSERVATION", "NEEDS_REVIEW", "COMPLETED", "FAILED", "EMERGENCY"}:
+            raise ValueError("unknown expected terminal state")
+        if set(case.expected_effects) - {"plan", "task", "assignment"} or set(case.operator_decisions) - {"CONFIRM", "REJECT"} or set(case.acceptable_plans) - {ROUTE, FULL}:
+            raise ValueError("unknown effect, operator decision or acceptable plan")
         if not case.acceptable_plans and not case.expected_escalation:
             raise ValueError("case must declare acceptable plans or expected escalation")
         return case
@@ -62,6 +77,8 @@ def load_case_bundle(path=None):
     source = Path(path or DEFAULT_CASES)
     text = source.read_text(encoding="utf-8")
     document = [json.loads(line) for line in text.splitlines() if line.strip()] if source.suffix == ".jsonl" else json.loads(text)
+    if isinstance(document, dict) and document.get("version") != "proposal-outcomes.v1":
+        raise ValueError("unsupported proposal fixture version")
     rows = document.get("cases", []) if isinstance(document, dict) else document
     cases, excluded = [], []
     for row in rows:
@@ -86,6 +103,8 @@ def load_case_bundle(path=None):
             excluded.append({"case_id": row.get("case_id", row.get("turn_id")), "reason": reason})
         else:
             cases.append(Case.from_dict(row))
+    if len({case.case_id for case in cases}) != len(cases):
+        raise ValueError("duplicate case IDs")
     return cases, excluded
 
 
@@ -135,19 +154,59 @@ class _Sink:
             stream.write(json.dumps(record, sort_keys=True) + "\n")
 
 
-def run_case(case, arm, output_dir, proposer_factory=None):
+class _RecoveringSink:
+    """Retain failed audit writes separately; retry once, then fail the case."""
+    def __init__(self, primary, directory):
+        self.primary = primary
+        self.fallback = _Sink(directory / "recovery.jsonl")
+        self.records = []
+        self.recoveries = 0
+
+    def write(self, record):
+        record = sanitized(json.loads(json.dumps(record, default=str)))
+        self.records.append(record)
+        try:
+            self.primary.write(record)
+        except OSError as exc:
+            failure = {"record": "audit_write_failure", "error_type": type(exc).__name__, "retained_record": record}
+            self.records.append(failure)
+            self.fallback.write(failure)
+            try:
+                self.primary.write(record)
+            except OSError:
+                self.fallback.write({"record": "audit_write_permanent_failure"})
+                raise
+            self.recoveries += 1
+            recovery = {"record": "audit_write_recovery", "retained_record_type": record.get("record")}
+            self.records.append(recovery)
+            self.fallback.write(recovery)
+
+
+def run_case(case, arm, output_dir, proposer_factory=None, sink_factory=None):
     """Fresh SQLite run; all commands and decisions are retained before scoring."""
     from tests.coordinator.harness import open_harness, envelope, FakeWorker
     from sentinel.adapter.llm.config import LLMConfig
 
-    if isinstance(case, dict):
-        case = Case.from_dict(case)
+    case = Case.from_dict(case if isinstance(case, dict) else asdict(case))
     arm = arm.lower()
     if arm not in {"f", "llm", "jev"}:
         raise ValueError("arm must be F, llm, or jev")
     directory = Path(output_dir) / case.case_id / arm
     directory.mkdir(parents=True, exist_ok=False)
-    sink = _Sink(directory / "raw.jsonl")
+    class InterruptedSink(_Sink):
+        failed = False
+        def write(self, record):
+            if not self.failed and record.get("record") == "tool_attempt" and record["command"]["command_type"] == "OPERATOR_DECIDE":
+                self.failed = True
+                raise OSError("synthetic audit write interruption")
+            super().write(record)
+    primary_factory = sink_factory or (InterruptedSink if case.setup == "audit_interruption" else _Sink)
+    sink_init_error = None
+    try:
+        primary = primary_factory(directory / "raw.jsonl")
+    except Exception as exc:
+        primary, sink_init_error = _Sink(directory / "raw.jsonl"), exc
+    sink = _RecoveringSink(primary, directory)
     repo, gateway = open_harness(directory)
     run_id, agent_id = str(uuid.uuid4()), str(uuid.uuid4())
     catalogue = load_catalogue_plans()
@@ -165,7 +224,13 @@ def run_case(case, arm, output_dir, proposer_factory=None):
             raise
         finally:
             commands.append(attempt)
+            recoveries_before = sink.recoveries
             sink.write(attempt)
+            if attempt.get("accepted") and sink.recoveries > recoveries_before:
+                replay = {"record": "tool_attempt", "command": command, "before": repo.read_state(run_id).to_dict(), "accepted": True,
+                          "outcome": original_submit(command), "recovery": "audit_write_retry_same_command"}
+                commands.append(replay)
+                sink.write(replay)
 
     gateway.submit = submit
     operator_choices = iter(case.scripted_choices or case.acceptable_plans)
@@ -183,6 +248,8 @@ def run_case(case, arm, output_dir, proposer_factory=None):
             return RulePolicy().decide(request, context)
 
     try:
+        if sink_init_error:
+            raise sink_init_error
         ladder = OperatorRules()
         if arm == "f":
             policy = ladder
@@ -273,6 +340,23 @@ def run_case(case, arm, output_dir, proposer_factory=None):
                   "loop_results": loops, "audit": sink.records.copy(), "events": events,
                   "final_state": repo.read_state(run_id).to_dict(), "snapshot": snapshot,
                   "error": error, "report_complete": True, "artifact_dir": str(directory)}
+        record["metrics"] = score_outcome(case, record)
+        (directory / "outcome.json").write_text(json.dumps(sanitized(record), indent=2, default=str), encoding="utf-8")
+        return record
+    except Exception as exc:
+        # Coordinator/provider/audit exceptions are case failures with retained
+        # evidence, never lost rows. SystemExit/KeyboardInterrupt still escape.
+        failure = {"record": "case_exception", "error_type": type(exc).__name__}
+        sink.records.append(failure)
+        sink.fallback.write(failure)
+        tables = [row[0] for row in repo.connection.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        snapshot = {table: [dict(row) for row in repo.connection.execute('SELECT * FROM "' + table + '"')] for table in tables}
+        exists = any(row.get("run_id") == run_id for row in snapshot.get("runs", []))
+        record = {"case_id": case.case_id, "arm": arm, "stage": "coordinator_outcome", "case": asdict(case), "provenance": case.provenance,
+                  "requests": requests, "policy_results": results, "tool_attempts": commands, "loop_results": loops,
+                  "audit": sink.records.copy(), "events": repo.read_events(run_id, 0, 1000) if exists else [],
+                  "final_state": repo.read_state(run_id).to_dict() if exists else {}, "snapshot": snapshot,
+                  "error": "CASE_EXCEPTION:" + type(exc).__name__, "report_complete": True, "artifact_dir": str(directory)}
         record["metrics"] = score_outcome(case, record)
         (directory / "outcome.json").write_text(json.dumps(sanitized(record), indent=2, default=str), encoding="utf-8")
         return record
