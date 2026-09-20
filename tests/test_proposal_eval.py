@@ -57,7 +57,7 @@ def test_unsupported_confident_proposal_is_failure(tmp_path):
     assert not record["metrics"]["proposal_quality_success"]
 
 
-@pytest.mark.parametrize("name", ["marker_complete", "reject_then_different_plan", "duplicate_recovery", "provider_failure", "malformed_provider", "illegal_reference", "stale_evidence_retry"])
+@pytest.mark.parametrize("name", ["marker_complete", "reject_then_different_plan", "duplicate_recovery", "provider_failure", "malformed_provider", "illegal_reference"])
 def test_recovery_paths(name, tmp_path):
     case = next(c for c in load_cases() if c.case_id == name)
     record = run_case(case, "llm", tmp_path)
@@ -200,3 +200,21 @@ def test_draft_catalogue_escalation_reference_is_excluded(tmp_path):
     cases, excluded = load_case_bundle(source)
     assert cases == []
     assert excluded == [{"case_id": "draft-escalation", "reason": "incompatible_or_draft_catalogue"}]
+
+
+def test_recovered_stale_evidence_command_still_fails_evaluation(tmp_path):
+    case = next(c for c in load_cases() if c.setup == "stale_evidence_retry")
+    record = run_case(case, "llm", tmp_path)
+    assert record["final_state"]["run_status"] == "COMPLETED"
+    assert not record["metrics"]["outcome_success"]
+    assert record["metrics"]["recovered_completion"]
+    assert record["metrics"]["failure_reasons"] == ["rejected_gateway_command"]
+
+
+def test_extra_rejected_task_command_is_failure_even_with_valid_effects(tmp_path):
+    case = load_cases()[0]
+    record = run_case(case, "F", tmp_path)
+    rejected = deepcopy(next(a for a in record["tool_attempts"] if a["command"]["command_type"] == "TASK_CREATE"))
+    rejected["accepted"] = False
+    record["tool_attempts"].append(rejected)
+    assert not score_outcome(case, record)["outcome_success"]

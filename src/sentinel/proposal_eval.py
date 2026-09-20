@@ -490,7 +490,13 @@ def score_outcome(case, record):
     operator_attempts = [a for a in attempts if a.get("command", {}).get("command_type") == "OPERATOR_DECIDE"]
     accepted_operator = [a for a in operator_attempts if a.get("accepted")]
     unique_operator = {a["command"]["command_id"]: a["command"] for a in accepted_operator}
+    rejected_commands = sum(not a.get("accepted", False) for a in attempts)
+    recovered_completion = bool(rejected_commands and not reasons
+                                and record.get("final_state", {}).get("run_status") == "COMPLETED")
+    if rejected_commands:
+        reasons.append("rejected_gateway_command")
     return {"outcome_success": not reasons, "failure_reasons": reasons, "proposal_quality_success": quality,
+            "recovered_completion": recovered_completion,
             "false_proposals": false_proposals, "proposal_calls": len(proposals), "proposal_denominator": len(proposals),
             "proposal_latency_ms": sum(a.get("latency_ms", 0) for a in proposals),
             "retries": sum(r.get("previous_result", {}).get("status") == "REJECTED" for r in record.get("requests", []) if r.get("previous_result")),
@@ -502,7 +508,7 @@ def score_outcome(case, record):
             "operator_rejections": sum(c["payload"].get("decision") == "REJECT" for c in unique_operator.values()),
             "operator_duplicate_recoveries": len(accepted_operator) - len(unique_operator),
             "operator_decision_attempts": len(operator_attempts),
-            "gateway_rejections": sum(not a.get("accepted", False) for a in attempts),
+            "gateway_rejections": rejected_commands,
             "turns": len(record.get("requests", [])),
             "rationale_complete": sum(bool(a.get("reason") and a.get("facts")) for a in recommendations),
             "rationale_denominator": len(recommendations), "rationale_factual_support": "unknown",
@@ -526,6 +532,7 @@ def aggregate(records):
             "proposal_coverage": accepted / calls if calls else None,
             "explicit_escalations": sum(m["explicit_escalations"] for m in metrics),
             "gateway_rejections": sum(m["gateway_rejections"] for m in metrics),
+            "recovered_completions": sum(m.get("recovered_completion", False) for m in metrics),
             "operator_approvals": sum(m["operator_approvals"] for m in metrics),
             "operator_rejections": sum(m["operator_rejections"] for m in metrics),
             "operator_duplicate_recoveries": sum(m["operator_duplicate_recoveries"] for m in metrics),
