@@ -24,6 +24,17 @@ async function stopHost(){if(server){server.kill('SIGTERM');await new Promise(r=
  page.on('request',r=>{if(!r.url().startsWith(base+'/')&&!r.url().startsWith('blob:'))external.push(r.url());});
  try{
   await page.goto(base+'/console/');
+  const independentSafety=await page.evaluate(async()=>{
+   const {createSafetyView}=await import('/console/safety.mjs');
+   const host=document.createElement('div');document.body.append(host);
+   const snapshot={run:{id:'r'},session:{id:'s',mode:'REHEARSAL'},safety:{land:{available:true},emergency:{available:true}}};
+   let release;const blocked=new Promise(resolve=>release=resolve);
+   const view=createSafetyView(host,{request_land:()=>blocked,trigger_emergency:async()=>({status:'ACKNOWLEDGED'})},()=>snapshot);
+   view.render(snapshot);host.querySelector('#land-now').click();view.render(snapshot);
+   const available=!host.querySelector('#emergency-stop').disabled;
+   release({status:'ACKNOWLEDGED'});view.dispose();host.remove();return available;
+  });
+  assert.equal(independentSafety,true,'Emergency must remain available during a pending Land request');
   await page.getByRole('textbox',{name:'Mission request'}).fill('count the computers');
   await page.getByRole('button',{name:'Send',exact:true}).click();
   await page.getByRole('button',{name:'Approve flight',exact:true}).waitFor();

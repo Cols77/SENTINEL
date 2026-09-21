@@ -1,5 +1,6 @@
 """Application service shared by Rehearsal and Live adapter sets."""
 from io import BytesIO
+from pathlib import Path
 import hashlib
 from uuid import uuid4
 from PIL import Image
@@ -29,6 +30,11 @@ class MissionControlService:
         self.projection=ProjectionService(self)
         self.artifacts=getattr(adapters.flight,'artifacts',{})
         self.evidence_status={}
+        self.pose_feed=None
+        if config.mode=='REHEARSAL':
+            from .rehearsal_pose import RehearsalPoseFeed
+            fixture_root=Path(__file__).resolve().parents[3]/'fixtures/mission-control'
+            self.pose_feed=RehearsalPoseFeed(config.run_id,config.data_dir/'pose-images',fixture_root)
         from .chat import ChatService
         self.chat=ChatService(self)
         self.closed=False
@@ -55,6 +61,12 @@ class MissionControlService:
         if status in {'FORBIDDEN','REVOKED'}:
             return EvidenceCapability(status,run_id,artifact_id,reason_code=status)
         artifact=self.artifacts.get(artifact_id)
+        if self.pose_feed:
+            with self.pose_feed.lock:
+                pose_artifact=self.pose_feed.artifacts.get(artifact_id)
+                if pose_artifact:
+                    artifact=dict(pose_artifact)
+                    bound={'sha256':artifact['sha256']}
         if not bound or not artifact:
             return EvidenceCapability('NOT_FOUND',run_id,artifact_id,reason_code='NOT_FOUND')
         try:
@@ -102,3 +114,4 @@ class MissionControlService:
             self.approval.cancel(self.config.run_id)
             self.worker.close()
             self.safety.close()
+            if self.pose_feed:self.pose_feed.close()

@@ -108,7 +108,7 @@ def _solve_one(tag, corners, tag_map: TagMap):
     return best
 
 
-def _solve_mapped_tags(frame, tag_map: TagMap):
+def _solve_mapped_tags(frame, tag_map: TagMap, diagnostics=None):
     """Detect tags and PnP-solve every mapped one.
 
     Returns ``[(err, tag, rvec, tvec, corners), ...]`` in detection order,
@@ -125,6 +125,8 @@ def _solve_mapped_tags(frame, tag_map: TagMap):
     if ids is None or len(ids) == 0:
         raise NoTagDetected("no AprilTag markers detected: pose fails closed")
 
+    if diagnostics is not None:
+        diagnostics.extend((int(tag_id), corners[i].reshape(-1, 2)) for i, tag_id in enumerate(ids.flatten()))
     mapped = [i for i, mid in enumerate(ids.flatten()) if tag_map.has_tag(int(mid))]
     if not mapped:
         unknown = sorted(set(int(i) for i in ids.flatten()))
@@ -236,6 +238,10 @@ def estimate_pose(
     detected, or every mapped tag fails its gates.
     """
     solved = _solve_mapped_tags(frame, tag_map)
+    return _report_from_solved(solved, tag_map, run_id=run_id, report_id=report_id, source_kind=source_kind, joint=joint)
+
+
+def _report_from_solved(solved, tag_map, *, run_id, report_id, source_kind, joint):
     joint_solution = _solve_joint(solved, tag_map) if joint and len(solved) >= 2 else None
     if joint_solution is None:
         if joint and len(solved) >= 2:
@@ -269,3 +275,34 @@ def _tag_object_points(size_m: float) -> np.ndarray:
     """Corners of the tag square in the tag frame (IPPE_SQUARE order: TL,TR,BR,BL)."""
     s = size_m / 2.0
     return np.array([[-s, s, 0], [s, s, 0], [s, -s, 0], [-s, -s, 0]], dtype=np.float64)
+
+
+def estimate_pose_with_evidence(frame, tag_map, *, run_id, report_id, artifact_id,
+                                captured_at, source_kind="SIMULATED", joint=True):
+    """Detect once; preserve corners and encoded image alongside the same report."""
+    import hashlib
+    from dataclasses import replace
+    from .evidence import PoseTagEvidence, PoseEvidenceFrame, PoseEstimate
+    diagnostics = []
+    solved = _solve_mapped_tags(frame, tag_map, diagnostics)
+    report = _report_from_solved(solved, tag_map, run_id=run_id, report_id=report_id,
+                                 source_kind=source_kind, joint=joint)
+    report = replace(report, observed_at=datetime.fromisoformat(captured_at.replace("Z", "+00:00")))
+    ok, encoded = cv2.imencode(".png", frame)
+    if not ok:
+        raise ValueError("POSE_IMAGE_ENCODING_FAILED")
+    payload = encoded.tobytes()
+    height, width = frame.shape[:2]
+    used = {tag.tag_id: tag for tag in report.tag_observations}
+    errors = {tag.tag_id: err for err, tag, *rest in solved}
+    tags = tuple(PoseTagEvidence(
+        tag_id=tag_id,
+        corners_xy_normalized=tuple((float(x)/width, float(y)/height) for x,y in corners),
+        status="USED" if tag_id in used else "DETECTED_NOT_USED",
+        reason_code=None if tag_id in used else ("NOT_SELECTED" if tag_id in errors else "UNKNOWN_OR_GATED"),
+        zone_id=tag_map.tag(tag_id).zone_id if tag_map.has_tag(tag_id) else None,
+        reprojection_error_px=errors.get(tag_id),
+    ) for tag_id,corners in diagnostics)
+    evidence = PoseEvidenceFrame(run_id, report_id, artifact_id, hashlib.sha256(payload).hexdigest(),
+                                 captured_at, width, height, source_kind, tags)
+    return PoseEstimate(report, evidence, payload)

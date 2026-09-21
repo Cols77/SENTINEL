@@ -16,6 +16,16 @@ export function createHttpClient(base='/api/v1',fetchImpl=fetch){
   submit_chat:(id,command)=>post(`${runPath(id)}/chat`,command,true),
   request_land:(id,command)=>post(`${runPath(id)}/land`,command),
   trigger_emergency:command=>post(`${base}/safety/emergency`,command),
+  async read_pose_evidence(id,evidence){
+   if(evidence.run_id!==id)throw Error('Pose run mismatch');
+   const response=await fetchImpl(`${runPath(id)}/evidence/${encodeURIComponent(evidence.artifact_id)}`,{cache:'no-store'});
+   if(!response.ok)throw Error('Pose evidence unavailable');
+   const bytes=new Uint8Array(await response.arrayBuffer());
+   const media_type=response.headers.get('content-type');
+   const digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),b=>b.toString(16).padStart(2,'0')).join('');
+   if(bytes.length>10*1024*1024||digest!==evidence.sha256||!['image/png','image/jpeg'].includes(media_type)||Number(response.headers.get('x-image-width'))!==evidence.width_px||Number(response.headers.get('x-image-height'))!==evidence.height_px)throw Error('Pose evidence binding failed');
+   return {bytes,media_type};
+  },
   async read_evidence(id,frameId){
    const frame=snapshots.get(id)?.evidence.frames.find(f=>f.id===frameId);
    const denied=(status,reason)=>({status,run_id:id,frame_id:frameId,reason});

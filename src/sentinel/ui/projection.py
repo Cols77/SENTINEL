@@ -73,6 +73,9 @@ class ProjectionService:
                 s['report'].update(status='ACCEPTED',text=facts['report']['body'],id=facts['report']['report_id'])
             elif state.get('outcome',{}).get('status')=='REPORT_REJECTED':
                 s['report'].update(status='REJECTED',reason='Report failed runtime validation')
+            if svc.pose_feed:
+                pose=svc.pose_feed.projection()
+                if pose:s['localization']=pose
             s['legal_actions']=[dict(action=a,enabled=e,reasons=[] if e else ['Unavailable in current state']) for a,e in [('CHAT',True),('APPROVE',bool(offer)),('REJECT',bool(offer)),('LAND',s['safety']['land']['available']),('EMERGENCY',s['safety']['emergency']['available'])]]
             validate_snapshot(s)
             return svc.store.publish_snapshot(run_id,s)

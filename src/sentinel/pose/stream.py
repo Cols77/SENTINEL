@@ -113,6 +113,9 @@ def run_pose_stream(
     altitude_source: Callable[[], float | None] | None = None,
     on_frame: Callable[[np.ndarray], bool | None] | None = None,
     on_report: Callable[[DronePoseReport], None] | None = None,
+    on_health=None,
+    on_evidence=None,
+    artifact_sink=None,
 ) -> list[DronePoseReport]:
     """Stream ``max_frames`` frames from ``client`` and persist good poses.
 
@@ -134,6 +137,17 @@ def run_pose_stream(
     if max_consecutive_timeouts < 1:
         raise ValueError("max_consecutive_timeouts must be at least 1")
 
+    from datetime import datetime, timezone
+    from .evidence import LatestDisplaySink, PoseStreamHealth
+    from .detector import estimate_pose_with_evidence
+    def publish_evidence(estimate):
+        if artifact_sink is not None:
+            artifact_sink(estimate.evidence.artifact_id, estimate.encoded_png)
+        on_evidence(estimate.evidence)
+    evidence_display = LatestDisplaySink(publish_evidence) if on_evidence else None
+    health_display = LatestDisplaySink(on_health) if on_health else None
+    gated_frames, total_timeouts = 0, 0
+    last_health = 0.0
     reports: list[DronePoseReport] = []
     timeouts = 0
     no_tag_frames = 0
@@ -144,6 +158,9 @@ def run_pose_stream(
         while max_frames is None or i < max_frames:
             if deadline is not None and time.monotonic() >= deadline:
                 break
+            if health_display and time.monotonic() - last_health >= 1:
+                health_display.push(PoseStreamHealth(i,len(reports),no_tag_frames,gated_frames,total_timeouts))
+                last_health = time.monotonic()
             try:
                 timeout = FRAME_READ_TIMEOUT_S
                 if deadline is not None:
@@ -153,6 +170,7 @@ def run_pose_stream(
                 timeouts = 0
             except VideoReadTimeout as exc:
                 timeouts += 1
+                total_timeouts += 1
                 logger.warning(
                     "frame read timeout %d/%d: %s", timeouts, max_consecutive_timeouts, exc
                 )
@@ -178,18 +196,22 @@ def run_pose_stream(
                     logger.warning("preview disabled: %s", exc)
                     on_frame = None
             try:
-                report = estimate_pose(
-                    bgr,
-                    tag_map,
-                    run_id=run_id,
-                    report_id=str(uuid.uuid4()),
-                    source_kind=source_kind,
-                )
+                if evidence_display:
+                    report_id = str(uuid.uuid4())
+                    estimate = estimate_pose_with_evidence(bgr, tag_map, run_id=run_id,
+                        report_id=report_id, artifact_id=f"pose:{run_id}:{report_id}",
+                        captured_at=datetime.now(timezone.utc).isoformat(), source_kind=source_kind)
+                    report = estimate.report
+                    evidence_display.push(estimate)
+                else:
+                    report = estimate_pose(bgr, tag_map, run_id=run_id,
+                        report_id=str(uuid.uuid4()), source_kind=source_kind)
             except NoTagDetected:
                 no_tag_frames += 1
                 logger.debug("frame %d: no tag detected (no pose persisted)", i)
                 continue
             except ValueError as exc:
+                gated_frames += 1
                 logger.warning("frame %d fail-closed (no pose persisted): %s", i, exc)
                 continue
             altitude = _read_altitude(altitude_source)
@@ -212,6 +234,11 @@ def run_pose_stream(
             )
     finally:
         client.stop_video()
+        if health_display:
+            health_display.push(PoseStreamHealth(i,len(reports),no_tag_frames,gated_frames,total_timeouts))
+            health_display.close()
+        if evidence_display:
+            evidence_display.close()
         if no_tag_frames:
             logger.warning(
                 "%d of %d frame(s) had no detectable tag (skipped, no pose persisted)",

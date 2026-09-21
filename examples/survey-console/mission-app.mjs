@@ -7,6 +7,7 @@ import {createEvidenceView,supportingSightings} from './evidence.mjs';
 import {renderCounts} from './counts.mjs';
 import {createChatView} from './chat.mjs';
 import {createSafetyView} from './safety.mjs';
+import {createLocalizationView} from './localization.mjs';
 const root=document.getElementById('app');
 root.classList.add('mission-console');document.title='SENTINEL · Mission Control';
 const status=el('p',{id:'mission-state',role:'status',class:'meta'},['Connecting to local runtime…']);
@@ -16,9 +17,10 @@ const chatHost=el('section',{id:'chat',class:'mission-chat','aria-label':'Missio
 const proposalHost=el('section',{id:'approval'});chatHost.append(proposalHost);
 const mapHost=el('section',{id:'mission-map'},[el('h2',{},['Mission workspace'])]);
 const evidenceHost=el('section',{id:'evidence'});
+const localizationHost=el('section',{id:'localization'});
 const framesHost=el('nav',{id:'captures','aria-label':'Captured frames'});
 const spine=el('ol',{id:'evidence-spine','aria-label':'Evidence spine'});
-const center=el('section',{id:'center',class:'mission-workspace',tabindex:-1},[mapHost,evidenceHost,framesHost,el('h3',{},['Evidence spine']),spine]);
+const center=el('section',{id:'center',class:'mission-workspace',tabindex:-1},[mapHost,localizationHost,evidenceHost,framesHost,el('h3',{},['Evidence spine']),spine]);
 const counts=el('aside',{id:'counts',class:'mission-facts','aria-label':'Survey facts'});
 const audit=el('details',{class:'mission-audit'},[el('summary',{},['Audit log']),el('ol',{id:'audit-events'})]);
 root.append(top,el('div',{class:'mission-layout'},[chatHost,center,counts]),audit);
@@ -27,6 +29,7 @@ const controller=createController(client,missionContract);
 let snapshot=null,selection=null,restored=false;
 const chat=createChatView(chatHost,client,()=>snapshot);
 const safety=createSafetyView(safetyHost,client,()=>snapshot);
+const localization=createLocalizationView(localizationHost,client);
 chatHost.append(proposalHost);
 const evidence=createEvidenceView(evidenceHost,client);evidence.clear();
 const decision=createDecisionController(client,()=>crypto.randomUUID(),id=>({session_id:snapshot.session.id,command_id:id,correlation_id:snapshot.proposal.correlation_id}));
@@ -38,7 +41,7 @@ controller.subscribe(state=>{
  if(!state.survey){if(state.error)status.textContent=`Connection unavailable: ${state.error}`;return;}
  snapshot=state.survey;
  status.textContent=`${snapshot.session.mode} · ${snapshot.source.kind} · ${snapshot.run.phase} · ${snapshot.run.id}${state.needs_refresh?' · refresh required':''}`;
- safety.render(snapshot);
+ safety.render(snapshot);localization.render(snapshot);
  const view=toSurveyView(snapshot);
  chat.render(snapshot.chat.messages);decision.update(view,state.needs_refresh);drawDecision();
  renderCounts(counts,view,{onClass:id=>select('class',id),onObject:id=>select('object',id)});
@@ -49,5 +52,5 @@ controller.subscribe(state=>{
  if(selection){const ids=selection.kind==='frame'?[selection.id]:supportingSightings(view,selection).map(x=>x.frame_id);if(ids.some(id=>snapshot.evidence.frames.find(f=>f.id===id)?.evidence!=='AVAILABLE')){evidence.clear();selection=null;}}
  if(!restored){restored=true;const saved=localStorage.getItem(`sentinel:${snapshot.session.id}:${snapshot.run.id}:decision`);if(saved){try{decision.restore(JSON.parse(saved));}catch{localStorage.removeItem(`sentinel:${snapshot.session.id}:${snapshot.run.id}:decision`);}}}
 });
-try{const session=await client.session();await controller.open(session.active_run_id);const stop=startPolling(()=>controller.refresh());window.addEventListener('pagehide',()=>{stop();chat.dispose();evidence.dispose();safety.dispose();});}
+try{const session=await client.session();await controller.open(session.active_run_id);const stop=startPolling(()=>controller.refresh());window.addEventListener('pagehide',()=>{stop();chat.dispose();evidence.dispose();safety.dispose();localization.dispose();});}
 catch(e){status.textContent='Local runtime unavailable: '+e.message;}

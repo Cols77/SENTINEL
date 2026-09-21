@@ -1,0 +1,42 @@
+{
+  "schema_version": "tag-map-v1",
+  "tag_family": "36h11",
+  "room_scale_m_per_unit": 0.1,
+  "room": {
+    "width_units": 100,
+    "height_units": 100,
+    "origin": "LEFT_ALLEY_FRONT_CORNER"
+  },
+  "tags": [
+    {
+      "tag_id": 0,
+      "zone_id": "PAIR",
+      "x_units": 4.4083,
+      "y_units": 41.2688,
+      "z_units": 1.0,
+      "yaw_deg": 25.0,
+      "size_m": 0.16,
+      "mounting": "WALL"
+    },
+    {
+      "tag_id": 1,
+      "zone_id": "PAIR",
+      "x_units": 4.4083,
+      "y_units": 38.7312,
+      "z_units": 1.0,
+      "yaw_deg": -25.0,
+      "size_m": 0.16,
+      "mounting": "WALL"
+    }
+  ],
+  "camera_calibration": {
+    "width": 960,
+    "height": 720,
+    "fx": 547.0,
+    "fy": 547.0,
+    "cx": 480.0,
+    "cy": 360.0,
+    "dist_coeffs": [],
+    "calibration_source": "nominal"
+  }
+}
