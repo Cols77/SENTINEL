@@ -462,7 +462,9 @@ class CubeMissionRunner(FlightTestRunner):
             self.envelope.position = replace(dead, x_cm=round(fix[0]), y_cm=round(fix[1]))
             if rounds == 0 and abs(heading_error) > YAW_TRIM_THRESHOLD_DEG:
                 self._rotate("cw" if heading_error > 0 else "ccw", round(abs(heading_error)))
-            if not trims or rounds >= MAX_TRIM_ROUNDS:
+            # Inside the tolerance circle, a 20 cm minimum move can only make things worse
+            # (2026-09-21 enlarged trial: 12 cm became 25.7 cm after two trims).
+            if not trims or rounds >= MAX_TRIM_ROUNDS or entry["tolerance"] == "INSIDE":
                 return self._accept_arrival(wp, entry)
             sent = [self._step(direction, distance, optional=True) for direction, distance in trims]
             if not any(sent):

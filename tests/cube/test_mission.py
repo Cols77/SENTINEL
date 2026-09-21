@@ -549,3 +549,15 @@ def test_any_other_stop_failure_still_fails_the_run(tmp_path):
     runner = CubeMissionRunner(client, "dry-run", mission=MISSION, site=SITE, pose_mode="off",
                                mission_log=tmp_path / "mission.jsonl", sleep_fn=lambda seconds: None)
     assert runner.run(confirm=True).status == "FAIL"
+
+
+def test_a_stop_already_inside_the_tolerance_circle_is_not_trimmed(tmp_path):
+    """2026-09-21 enlarged trial: a 12 cm arrival (INSIDE) was 'corrected' by 20 cm minimum
+    moves on a 10.1 cm axis delta, overshot, and finished 25.7 cm out after two trims."""
+    bursts = [[_report(281, 292)] * 10,      # WP1 (270, 300): 13.6 cm off, 11 cm of it along x
+              [_report(150, 300)] * 10]
+    runner, client = _runner(tmp_path, "reanchor", bursts)
+    assert runner.run(confirm=True).status == "PASS"
+    wp1 = _log(tmp_path)[0]
+    assert wp1["tolerance"] == "INSIDE" and wp1["trim_rounds_sent"] == 0
+    assert "left 20" not in client.commands
