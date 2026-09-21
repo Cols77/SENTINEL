@@ -289,3 +289,22 @@ def test_emergency_transmits_while_normal_command_lock_is_held():
         client._command_lock.release()
 
     assert result == ["sent 9 bytes"]
+
+
+def test_land_now_transmits_while_a_move_holds_the_command_lock():
+    """land() waits for the lock an in-flight move holds, so it cannot
+    interrupt one. land_now() must get through regardless (bench test B1)."""
+    client = make_client([])
+    client.connect()
+    client._command_lock.acquire()
+    result = []
+    try:
+        thread = Thread(target=lambda: result.append(client.land_now()))
+        thread.start()
+        thread.join(timeout=0.5)
+        assert not thread.is_alive()
+    finally:
+        client._command_lock.release()
+
+    assert result == ["sent"]
+    assert client._tello.commands[-1] == "land"

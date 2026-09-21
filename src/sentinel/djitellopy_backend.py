@@ -488,6 +488,24 @@ class DjitellopyClient:
     def land(self) -> str:
         return self._command_method(("land",), "land")
 
+    def land_now(self) -> str:
+        """Send `land` while another command is still waiting for its reply.
+
+        ``land()`` takes the command lock, which an in-flight ``move`` holds
+        until the drone answers, so it cannot interrupt one. This sends the
+        datagram without the lock and without waiting: bench test B1 showed
+        the Tello honours it and the interrupted move then answers
+        ``error Auto land``. It goes out through DJITelloPy's own socket: B1
+        found the Tello answers only the source port that sent its first
+        ``command``, and the same-socket path is the one B1 actually flew.
+        """
+        self._ensure_available()
+        sender = getattr(self._tello, "send_command_without_return", None)
+        if sender is None:
+            raise DjitellopyBackendError("this DJITelloPy build cannot send without waiting")
+        sender("land")
+        return self._record("land (no wait)", "sent")
+
     def move(self, direction: str, distance_cm: int) -> str:
         return self._command_method(("move",), f"{direction} {distance_cm}", direction, distance_cm)
 

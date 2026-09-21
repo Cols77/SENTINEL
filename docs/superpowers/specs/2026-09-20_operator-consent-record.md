@@ -120,6 +120,7 @@ agreement to be filmed. It remains per location, per date, recorded by the opera
 | C-20g | `sentinel.survey.sql.schema.sql`'s `frames` table gains a `tolerance` column, mirroring C-20f | workstream B, rev 6 amendment V15 |
 | C-20h | `DetectionBatch.raw` (`sentinel.survey.detector`), already persisted verbatim beside every sighting, gains a `provider` key (which detector answered) and, when the fallback ran, a `primary_error` key | plan Task 12 / live-integration workstream C, rev 6 amendment V16 (`FallbackDetector`) |
 | C-20i | `detector.normalise` gains a `DETECTOR_RAW` banding branch and two PROVISIONAL module constants, `DETECTOR_RAW_HIGH_PROVISIONAL = 0.35` and `DETECTOR_RAW_MEDIUM_PROVISIONAL = 0.25`; `CLASS_MAP` gains `"computer monitor" -> computer` | plan Task 3 / live-integration workstream D, rev 6 amendment V17 — the first honest use of `DETECTOR_RAW` for a survey detection, design spec §6.1's stated WP3-boundary exception made true in code. The bands are provisional until the provider spike (workstream E, not yet run) pins them |
+| C-20j | `sentinel-survey-v1.schema.json` `Frame` gains the optional `tolerance` property (`INSIDE` / `OUTER` / `OUTSIDE` / null). The store and `FlightFrame` already carried it (C-20g); the closed JSON object was one field behind | coherence review of the live-integration run, 2026-09-21 |
 
 ### The WP3 boundary, restated for the record
 

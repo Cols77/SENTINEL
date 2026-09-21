@@ -51,10 +51,19 @@ simulation, real-drone proof is human/live).
 in software; the requirement is still not satisfied.** The stop-time check exists (`passive` and
 `reanchor` modes). The in-move watchdog is now built: `sentinel.pose.watchdog.PoseWatchdog` runs on
 a background thread beside the blocking `move` (`CubeMissionRunner.move_checked`), evaluating the
-already-open pose stream and debouncing on 3 consecutive `OUTSIDE` fixes before it sets an abort
-event; the runner acts on that event once the move returns, ending in the existing controlled
-landing. What is still missing is the motors-on bench test that the Tello honours `land` sent while
-a `move` is still executing (**bench test B1**, `docs/wp5-rehearsal-manifest.md`, owned by another
-session): sending `land` mid-move stays behind a constructor flag defaulting off until that test
-passes. Until bench test B1 is run and passes, this requirement is **not satisfied** and must not be
+already-open pose stream and debouncing on 2 consecutive `OUTSIDE` **joint (two-tag)** fixes before
+it sets an abort event, ending in the existing controlled landing.
+
+**Bench test B1 (`docs/wp5-rehearsal-manifest.md`, flown by the WP5 session) has so far shown**
+that the Tello honours `land` sent while a `move` executes: the move answers `error Auto land`
+within 0.3 s and the drone travels a further 12 cm at the missions' `speed 20` (about 35 cm at
+`speed 50`). `stop` is not a command on this firmware. From that the software now has: a
+lock-free `land` (`DjitellopyClient.land_now`; the ordinary `land()` waits for the lock the
+in-flight move holds and could never interrupt it), `error Auto land` reported as the
+containment abort it is, and a trip line `trip_margin_cm(speed)` inside the cube edge, about
+26 cm at mission speed: (debounce + 0.2 s video lag) x speed + travel after `land`.
+
+Sending `land` mid-move stays behind a constructor flag that defaults **off**: B1's pass bar is
+9 runs and 2 are flown. With the flag off an abort takes effect when the move returns. Until B1
+passes and the flag is on for flights, this requirement is **not satisfied** and must not be
 reported as satisfied.

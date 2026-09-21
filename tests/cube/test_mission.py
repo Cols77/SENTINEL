@@ -272,6 +272,91 @@ def test_a_failed_land_during_move_is_surfaced_in_the_mission_log(tmp_path):
     assert "simulated link drop" in wp1["watchdog_land_error"]
 
 
+class _InterruptibleMoveClient(DryRunClient):
+    """What bench test B1 observed: `land` sent mid-move is honoured, and the
+    interrupted move then answers ``error Auto land``."""
+
+    def __init__(self):
+        super().__init__()
+        self.landed_mid_move = False
+
+    def land_now(self):
+        self.landed_mid_move = True
+        return "sent"
+
+    def move(self, direction, distance_cm):
+        deadline = time.monotonic() + 1.0
+        while not self.landed_mid_move and time.monotonic() < deadline:
+            time.sleep(0.005)
+        if self.landed_mid_move:
+            return "error Auto land"
+        return super().move(direction, distance_cm)
+
+
+def test_an_immediate_land_reports_the_containment_abort_not_a_movement_fault(tmp_path):
+    client = _InterruptibleMoveClient()
+    runner = CubeMissionRunner(
+        client, "dry-run", mission=MISSION, site=SITE, pose_mode="passive",
+        mission_log=tmp_path / "mission.jsonl", burst_fn=lambda: [_report(270, 300)] * 10,
+        sleep_fn=lambda seconds: None, watchdog_fix_fn=lambda: (1000.0, 1000.0),
+        watchdog_poll_interval_s=0.005, land_during_move=True)
+    report = runner.run(confirm=True)
+    assert client.landed_mid_move
+    assert report.status == "FAIL"
+    assert "watchdog" in report.error.lower()
+    assert "auto land" not in report.error.lower()
+    assert _log(tmp_path)[0]["status"] == "ABORTED_EN_ROUTE"
+
+
+def test_an_immediate_land_trips_inside_the_cube_edge_and_a_deferred_one_at_it(tmp_path):
+    """The cube's x edge is 510 cm. 495 cm is inside it, but within the ~26 cm
+    a `land` sent now still needs at mission speed."""
+    outcomes = {}
+    for immediate in (True, False):
+        client = _InterruptibleMoveClient() if immediate else _SlowMoveClient()
+        log = tmp_path / f"mission-{immediate}.jsonl"
+        runner = CubeMissionRunner(
+            client, "dry-run", mission=MISSION, site=SITE, pose_mode="passive",
+            mission_log=log, burst_fn=lambda: [_report(270, 300)] * 10,
+            sleep_fn=lambda seconds: None, watchdog_fix_fn=lambda: (495.0, 300.0),
+            watchdog_poll_interval_s=0.005, land_during_move=immediate)
+        outcomes[immediate] = runner.run(confirm=True).status
+    assert outcomes == {True: "FAIL", False: "PASS"}
+
+
+def test_a_movement_fault_without_a_watchdog_trip_is_still_a_movement_fault(tmp_path):
+    class _FailingMove(DryRunClient):
+        def move(self, direction, distance_cm):
+            return "error Motor stop"
+
+    runner = CubeMissionRunner(
+        _FailingMove(), "dry-run", mission=MISSION, site=SITE, pose_mode="passive",
+        mission_log=tmp_path / "mission.jsonl", burst_fn=lambda: [_report(270, 300)] * 10,
+        sleep_fn=lambda seconds: None, watchdog_fix_fn=lambda: (270.0, 300.0),
+        watchdog_poll_interval_s=0.005)
+    report = runner.run(confirm=True)
+    assert report.status == "FAIL"
+    assert "motor stop" in report.error.lower()
+
+
+def test_the_live_fix_source_ignores_single_tag_fixes(tmp_path, monkeypatch):
+    """B1: in motion, single-tag fixes jumped by more than a metre."""
+    import sentinel.cube.mission as mission_module
+
+    runner, client = _runner(tmp_path, "passive", [])
+    client.read_frame = lambda timeout=None: object()
+    two_tags = DronePoseReport(
+        report_id="p", run_id="r", observed_at=datetime.now(timezone.utc),
+        source_kind="SIMULATED", point=(27.0, 30.0), heading_deg=90.0, altitude_m=None,
+        method="APRILTAG_36H11_PNP", reprojection_error_px=0.5,
+        tag_observations=(TagObservation(4, "STAND_2", 2.0, 0.5),
+                          TagObservation(5, "STAND_2", 2.0, 0.5)))
+    monkeypatch.setattr(mission_module, "_to_bgr", lambda frame: frame)
+    for report, expected in ((_report(270, 300), None), (two_tags, (270.0, 300.0))):
+        monkeypatch.setattr(mission_module, "estimate_pose", lambda *a, _r=report, **k: _r)
+        assert runner._live_watchdog_fix() == expected
+
+
 # -- F1: a waypoint aborted en route still gets a log line --------------------
 
 def test_an_abort_during_the_move_still_logs_a_line_for_that_waypoint(tmp_path):

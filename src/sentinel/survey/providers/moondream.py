@@ -122,4 +122,7 @@ class MoondreamDetector:
                 items.append(entry)
             per_class_raw[class_name] = raw
 
-        return to_detection_batch(normalise(items), {"requests": per_class_raw})
+        # Moondream's detect has no confidence field at all (C1), so its
+        # sightings are banded "medium", never "low": see normalise.
+        return to_detection_batch(normalise(items, unscored_band="medium"),
+                                  {"requests": per_class_raw})
