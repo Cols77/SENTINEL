@@ -205,3 +205,29 @@ def test_build_provider_detector_never_touches_the_network():
         session=fake)
     assert isinstance(detector, MoondreamDetector)
     assert detector.session is fake
+
+
+# -- a live judge for mode J: gated, never reached in tests --------------------
+
+def _live_argv(tmp_path, mode, *flags):
+    argv, frames = _base_argv(tmp_path)
+    argv[argv.index("--mode") + 1] = mode
+    return argv + ["--frames", str(frames), *flags]
+
+
+def test_a_live_judge_is_refused_without_the_operators_go_ahead(tmp_path):
+    with pytest.raises((SystemExit, ValueError)):
+        main(_live_argv(tmp_path, "J", "--live-judge", "jev"))
+
+
+def test_a_live_judge_is_refused_outside_mode_j(tmp_path):
+    with pytest.raises((SystemExit, ValueError)):
+        main(_live_argv(tmp_path, "E", "--live-judge", "llm", "--i-authorise-paid-calls"))
+
+
+def test_a_live_judge_is_refused_without_an_api_key(tmp_path, monkeypatch):
+    import sentinel.env_file as env_file
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(env_file, "load_env_file", lambda *a, **k: {})
+    with pytest.raises((SystemExit, ValueError)):
+        main(_live_argv(tmp_path, "J", "--live-judge", "llm", "--i-authorise-paid-calls"))
