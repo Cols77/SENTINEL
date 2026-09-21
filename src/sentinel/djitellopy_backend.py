@@ -502,7 +502,8 @@ class DjitellopyClient:
             sender = getattr(self._tello, "send_command_with_return", None)
             if sender is None:
                 return self._command_method(methods, command, *args)
-            response = sender(command, timeout=max(self.timeout, travel_s + MOTION_REPLY_SLACK_S))
+            # DJITelloPy enforces an int timeout (enforce_types); a float raises before sending
+            response = sender(command, timeout=math.ceil(max(self.timeout, travel_s + MOTION_REPLY_SLACK_S)))
             normalized = self._record(command, response)
             if "ok" not in normalized.lower():
                 raise DjitellopyBackendError(f"{command} failed: {normalized}")

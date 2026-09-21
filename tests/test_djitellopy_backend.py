@@ -363,3 +363,13 @@ def test_a_moves_reply_timeout_covers_the_time_the_leg_takes():
     assert long_leg >= 300 / 20 + 6
     assert short_leg >= client.timeout
     assert turn >= client.timeout
+
+
+def test_a_moves_reply_timeout_is_a_whole_number_of_seconds():
+    """DJITelloPy's enforce_types rejects a float timeout before anything is
+    sent: on 2026-09-21 the first real leg after takeoff failed that way."""
+    client = make_realistic_client(["ok", "ok"])
+    client.set_speed(20)
+    client.move("up", 20)
+    client.rotate("cw", 45)
+    assert all(type(timeout) is int for _, timeout in client._tello.sends)

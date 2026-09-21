@@ -31,7 +31,9 @@ def localise(
     reports: Sequence[DronePoseReport],
     *,
     min_samples: int = 8,
-    max_spread_cm: float = 5.0,
+    # 10 cm: a hovering Tello's burst spreads 5-10 cm around a good median (2026-09-21
+    # trials); 5 cm came from motors-off data and discarded 3 of 12 stops.
+    max_spread_cm: float = 10.0,
     cm_per_unit: float = 10.0,
 ) -> LocalisationFix | LocalisationUnreliable:
     n = len(reports)
