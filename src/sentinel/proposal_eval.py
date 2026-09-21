@@ -484,14 +484,52 @@ def score_outcome(case, record):
             reasons.append("missing_accepted_assignment_approval")
         if tasks and not any(e["event_type"] == "PATROLLER_ASSIGNMENT_PROPOSED" and e.get("payload", {}).get("task_id") == tasks[0]["task_id"] and e["payload"].get("patroller_id") == "PATROLLER_1" for e in events):
             reasons.append("wrong_assignment_event_target")
-    false_proposals = sum(a.get("gate_outcome") == "accepted" and (case.expected_escalation or a.get("raw_choice") not in case.acceptable_plans) for a in proposals)
-    accepted_proposals = [a for a in proposals if a.get("gate_outcome") == "accepted"]
-    explicit_escalations = sum(a.get("raw_choice") == "escalate" for a in proposals)
-    quality = None if not proposals else false_proposals == 0 and any(a.get("raw_choice") in case.acceptable_plans for a in accepted_proposals)
-    if case.expected_escalation:
-        # Current Jev criteria exclude escalation, and LLM's finish is logged
-        # as invalid_answer. Neither proves a valid, deliberate abstention.
-        quality = False if false_proposals else None
+    routes = [a for a in record.get("audit", []) if a.get("record") == "architecture_route"]
+    accepted_escalation_attempts = [
+        a for a in proposals
+        if a.get("gate_outcome") == "accepted"
+        and a.get("raw_choice") == "escalate"
+        and a.get("policy_label") == "escalate"
+    ]
+    accepted_plan_attempts = [
+        a for a in proposals
+        if a.get("gate_outcome") == "accepted" and a not in accepted_escalation_attempts
+    ]
+    confidence_gate_escalations = sum(
+        a.get("gate_outcome") in {"low_confidence", "low_margin"}
+        for a in proposals
+    )
+    deterministic_refusals = sum(
+        a.get("gate_outcome") == "invalid_answer" for a in proposals
+    )
+    provider_failures = sum(
+        a.get("gate_outcome") == "provider_error" for a in proposals
+    )
+    architecture_f_fallbacks = sum(a.get("route") == "fallback_F" for a in routes)
+    false_proposals = sum(
+        case.expected_escalation or a.get("raw_choice") not in case.acceptable_plans
+        for a in accepted_plan_attempts
+    )
+    correct_proposals = sum(
+        not case.expected_escalation and a.get("raw_choice") in case.acceptable_plans
+        for a in accepted_plan_attempts
+    )
+    accepted_plan_commands = [
+        a for a in attempts
+        if a.get("accepted")
+        and a.get("command", {}).get("command_type") == "AGENT_INTENT_PROPOSE"
+    ]
+    loop_results = record.get("loop_results", [])
+    safe_escalation_trial = bool(
+        proposals
+        and loop_results
+        and loop_results[-1].get("status") == "NEEDS_REVIEW"
+        and not accepted_plan_attempts
+        and not recommendations
+        and not plans
+        and not accepted_plan_commands
+        and not architecture_f_fallbacks
+    )
     operator_attempts = [a for a in attempts if a.get("command", {}).get("command_type") == "OPERATOR_DECIDE"]
     accepted_operator = [a for a in operator_attempts if a.get("accepted")]
     unique_operator = {a["command"]["command_id"]: a["command"] for a in accepted_operator}
@@ -500,14 +538,43 @@ def score_outcome(case, record):
                                 and record.get("final_state", {}).get("run_status") == "COMPLETED")
     if rejected_commands:
         reasons.append("rejected_gateway_command")
+    correct_supported_trial = bool(
+        not case.expected_escalation
+        and accepted_plan_attempts
+        and not false_proposals
+        and correct_proposals == len(accepted_plan_attempts)
+        and not reasons
+        and not architecture_f_fallbacks
+    )
+    quality = (
+        None if case.expected_escalation or not proposals
+        else correct_supported_trial
+    )
+    escalation_success = (
+        bool(accepted_escalation_attempts and safe_escalation_trial)
+        if case.expected_escalation else None
+    )
+    proposal_denominator = 0 if case.expected_escalation else len(proposals)
     return {"outcome_success": not reasons, "failure_reasons": reasons, "proposal_quality_success": quality,
+            "escalation_success": escalation_success,
+            "safe_escalation_trial": safe_escalation_trial,
+            "correct_supported_trial": correct_supported_trial,
             "recovered_completion": recovered_completion,
-            "false_proposals": false_proposals, "proposal_calls": len(proposals), "proposal_denominator": len(proposals),
+            "false_proposals": false_proposals,
+            "unsupported_false_proposals": false_proposals if case.expected_escalation else 0,
+            "proposal_calls": len(proposals), "proposal_denominator": proposal_denominator,
             "proposal_latency_ms": sum(a.get("latency_ms", 0) for a in proposals),
             "retries": sum(r.get("previous_result", {}).get("status") == "REJECTED" for r in record.get("requests", []) if r.get("previous_result")),
             "reproposals": max(0, len(proposals) - 1),
-            "accepted_proposals": len(accepted_proposals), "correct_proposals": len(accepted_proposals) - false_proposals,
-            "explicit_escalations": explicit_escalations,
+            "accepted_proposals": len(accepted_plan_attempts),
+            "accepted_plan_attempts": len(accepted_plan_attempts),
+            "accepted_escalation_attempts": len(accepted_escalation_attempts),
+            "correct_proposals": correct_proposals,
+            "explicit_escalations": len(accepted_escalation_attempts),
+            "confidence_gate_escalations": confidence_gate_escalations,
+            "deterministic_refusals": deterministic_refusals,
+            "provider_failures": provider_failures,
+            "architecture_f_fallbacks": architecture_f_fallbacks,
             "proposal_fallbacks": sum(a.get("gate_outcome") != "accepted" for a in proposals),
             "operator_approvals": sum(c["payload"].get("decision") == "CONFIRM" for c in unique_operator.values()),
             "operator_rejections": sum(c["payload"].get("decision") == "REJECT" for c in unique_operator.values()),
@@ -523,19 +590,29 @@ def score_outcome(case, record):
 def aggregate(records):
     metrics = [r.get("metrics") or score_outcome(r["case"], r) for r in records]
     proposal_rows = [m for m in metrics if m["proposal_quality_success"] is not None]
-    calls = sum(m["proposal_calls"] for m in metrics)
+    calls = sum(m["proposal_denominator"] for m in metrics)
     accepted = sum(m["accepted_proposals"] for m in metrics)
     correct = sum(m["correct_proposals"] for m in metrics)
+    escalation_rows = [m for m in metrics if m.get("escalation_success") is not None]
     return {"case_denominator": len(metrics), "outcome_successes": sum(m["outcome_success"] for m in metrics),
             "outcome_success_rate": sum(m["outcome_success"] for m in metrics) / len(metrics) if metrics else None,
             "proposal_case_denominator": len(proposal_rows), "proposal_quality_successes": sum(m["proposal_quality_success"] for m in proposal_rows),
-            "proposal_call_denominator": sum(m["proposal_calls"] for m in metrics),
+            "escalation_case_denominator": len(escalation_rows),
+            "escalation_successes": sum(m["escalation_success"] for m in escalation_rows),
+            "proposal_call_denominator": calls,
             "false_proposals": sum(m["false_proposals"] for m in metrics),
+            "unsupported_false_proposals": sum(m.get("unsupported_false_proposals", 0) for m in metrics),
             "accepted_proposal_denominator": sum(m["accepted_proposals"] for m in metrics),
+            "accepted_plan_attempts": sum(m.get("accepted_plan_attempts", m["accepted_proposals"]) for m in metrics),
+            "accepted_escalation_attempts": sum(m.get("accepted_escalation_attempts", 0) for m in metrics),
             "correct_proposals": sum(m["correct_proposals"] for m in metrics),
             "proposal_accuracy": correct / accepted if accepted else None,
             "proposal_coverage": accepted / calls if calls else None,
             "explicit_escalations": sum(m["explicit_escalations"] for m in metrics),
+            "confidence_gate_escalations": sum(m.get("confidence_gate_escalations", 0) for m in metrics),
+            "deterministic_refusals": sum(m.get("deterministic_refusals", 0) for m in metrics),
+            "provider_failures": sum(m.get("provider_failures", 0) for m in metrics),
+            "architecture_f_fallbacks": sum(m.get("architecture_f_fallbacks", 0) for m in metrics),
             "gateway_rejections": sum(m["gateway_rejections"] for m in metrics),
             "recovered_completions": sum(m.get("recovered_completion", False) for m in metrics),
             "operator_approvals": sum(m["operator_approvals"] for m in metrics),
