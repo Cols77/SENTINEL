@@ -73,6 +73,11 @@ Both model arms bind the shared SELECT_PLAN semantic revision
 `SENTINEL_LLM_PROMPT_REVISION=prompt-v4-complete-constraints` and
 `SENTINEL_LLM_TOOL_POLICY_REVISION=legal-tools-v2`. Jev's policy thresholds are
 recorded separately as `act_at=0.60` and `min_margin=0.15`.
+The Jev manifest retains the historical `configurations.jev.prompt_revision`
+field for report-reader compatibility; it has the same value as the explicit
+`decision_prompt_revision`. The runner rejects any runtime drift from the
+required semantic revision before authorization, provider construction, or
+output creation. The manifest schema version remains `proposal-eval-run.v1`.
 
 Each live arm is authorized separately. First run a dry run with the exact
 provider identity reviewed by the operator and a concise decision note:

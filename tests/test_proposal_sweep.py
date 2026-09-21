@@ -34,6 +34,7 @@ def test_dry_run_validates_and_prints_budget_without_artifacts(tmp_path, capsys)
     assert manifest["case_ids"] == CASE_IDS
     config = manifest["configurations"]["jev"]
     assert config["requested_model"] == "typesafe/jev-1.13-20260917"
+    assert config["prompt_revision"] == DECISION_PROMPT_REVISION
     assert config["decision_prompt_revision"] == DECISION_PROMPT_REVISION
     assert config["expected_resolved_model"] is None
     assert config["resolved_model"] is None
@@ -41,6 +42,30 @@ def test_dry_run_validates_and_prints_budget_without_artifacts(tmp_path, capsys)
     assert config["identity_decision_note"] is None
     assert manifest["thresholds"] == {"jev_act_at": 0.60, "jev_min_margin": 0.15}
     assert len(printed["authorization_sha256"]) == 64
+    assert not out.exists()
+
+
+def test_dry_run_rejects_semantic_revision_drift_before_provider_or_output(
+        tmp_path, monkeypatch, capsys):
+    from scripts import proposal_sweep
+
+    out = tmp_path / "must-not-exist"
+    monkeypatch.setattr(proposal_sweep, "DECISION_PROMPT_REVISION", "drifted-revision")
+    monkeypatch.setattr(
+        proposal_sweep, "_live_transport",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("provider initialized before revision validation")),
+    )
+
+    status = proposal_sweep.main([
+        "--mode", "live", "--arms", "jev", "--dry-run", "--output", str(out),
+        *_identity_args("jev", "typesafe/jev-1.13-20260917"),
+    ])
+
+    assert status == 2
+    error = capsys.readouterr().err
+    assert "select_plan.complete_constraints.v2" in error
+    assert "drifted-revision" in error
     assert not out.exists()
 
 
@@ -153,7 +178,7 @@ def test_live_gate_has_exact_applicability_and_denominators():
         assert _evaluate_live_gate(candidate, trials, identity_status="verified")["live_gate_applicable"] is False
 
 
-def test_applicable_live_gate_fails_on_mismatch_or_trial_shape():
+def test_identity_mismatch_fails_applicable_gate_and_bad_shape_is_nonapplicable():
     from scripts.proposal_sweep import _evaluate_live_gate
     manifest = {"mode": "live", "arms": ["jev"], "fixture_path": FIXTURE_RELATIVE,
                 "fixture_sha256": "a" * 64, "pinned_fixture_sha256": "a" * 64,
@@ -164,14 +189,89 @@ def test_applicable_live_gate_fails_on_mismatch_or_trial_shape():
                "event_counts": {"provider_request": 1, "provider_result": 1,
                                 "proposal_attempt": 1, "case_outcome": 1}}
               for i in range(36)]
-    assert not _evaluate_live_gate(manifest, trials, identity_status="mismatched")["passed"]
+    mismatch = _evaluate_live_gate(manifest, trials, identity_status="mismatched")
+    assert mismatch["live_gate_applicable"] is True
+    assert mismatch["passed"] is False
     trials[0]["event_counts"]["provider_result"] = 0
     gate = _evaluate_live_gate(manifest, trials, identity_status="verified")
-    assert not gate["passed"]
+    assert gate["live_gate_applicable"] is False
+    assert gate["passed"] is False
     assert "trial_event_shape" in gate["failure_reasons"]
 
 
-def test_live_refuses_before_initializing_provider_or_artifacts(tmp_path, monkeypatch):
+def test_completed_applicable_live_gate_failure_exits_nonzero_without_network(
+        tmp_path, monkeypatch, capsys):
+    from dataclasses import asdict
+    from types import SimpleNamespace
+    from scripts import proposal_sweep
+
+    expected_model = "typesafe/jev-1.13-20260917"
+    provider_calls = []
+
+    class FakeJudge:
+        def __init__(self, stream, observations):
+            self.stream = stream
+            self.observations = observations
+
+        def choice(self, **kwargs):
+            provider_calls.append(kwargs)
+            self.stream.write({"record": "provider_wire_request", "request": {"model": expected_model}})
+            self.observations.append({
+                "model": expected_model,
+                "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+            })
+            return {"value": "PLAN_ROUTE_ONLY_2_ZONE"}
+
+    def fake_run_case(case, arm, output_dir, proposer_factory=None, **kwargs):
+        directory = output_dir / case.case_id / arm
+        directory.mkdir(parents=True)
+        measured = proposer_factory(arm, SimpleNamespace(write=lambda row: None), case)
+        measured.choice(state={}, instruction="select", criteria={}, name="select_plan")
+        return {
+            "case": asdict(case),
+            "artifact_dir": str(directory),
+            "audit": [{"record": "proposal_attempt", "gate_outcome": "accepted"}],
+            "metrics": {
+                "outcome_success": False,
+                "failure_reasons": ["synthetic_gate_failure"],
+                "architecture_f_fallbacks": 0,
+                "unsupported_false_proposals": 0,
+            },
+        }
+
+    monkeypatch.setattr(proposal_sweep, "require_authorization", lambda manifest: None)
+    monkeypatch.setattr(proposal_sweep, "require_proposer_consent", lambda arm: None)
+    monkeypatch.setattr(
+        proposal_sweep, "_live_transport",
+        lambda arm, config, stream, observations: FakeJudge(stream, observations),
+    )
+    monkeypatch.setattr(
+        proposal_sweep, "build_proposer",
+        lambda *args, judge_factory=None, **kwargs: judge_factory(),
+    )
+    monkeypatch.setattr(proposal_sweep, "run_case", fake_run_case)
+    monkeypatch.setattr(
+        proposal_sweep, "aggregate",
+        lambda records: {"case_denominator": len(records), "plan_attempt_denominator": len(records)},
+    )
+    out = tmp_path / "fake-live"
+
+    status = proposal_sweep.main([
+        "--mode", "live", "--arms", "jev", "--execute", "--output", str(out),
+        *_identity_args("jev", expected_model),
+    ])
+    capsys.readouterr()
+
+    summary = json.loads((out / "summary.json").read_text())
+    assert status == 1
+    assert len(provider_calls) == 36
+    assert summary["live_gate"]["live_gate_applicable"] is True
+    assert summary["live_gate"]["passed"] is False
+    assert summary["live_gate"]["supported_correct"] == 0
+
+
+def test_live_refuses_manifest_authorization_before_initializing_provider_or_artifacts(
+        tmp_path, monkeypatch, capsys):
     from scripts import proposal_sweep
     monkeypatch.delenv("SENTINEL_PROPOSAL_EVAL_CONSENT", raising=False)
     monkeypatch.setenv("SENTINEL_JEV_PROPOSER_CONSENT", "older-generic-consent")
@@ -179,7 +279,11 @@ def test_live_refuses_before_initializing_provider_or_artifacts(tmp_path, monkey
         raise AssertionError("provider initialized without manifest authorization")
     monkeypatch.setattr(proposal_sweep, "_live_transport", forbidden)
     out = tmp_path / "new"
-    assert proposal_sweep.main(["--mode", "live", "--arms", "jev", "--execute", "--output", str(out)]) == 2
+    assert proposal_sweep.main([
+        "--mode", "live", "--arms", "jev", "--execute", "--output", str(out),
+        *_identity_args("jev", "typesafe/jev-1.13-20260917"),
+    ]) == 2
+    assert "SENTINEL_PROPOSAL_EVAL_CONSENT" in capsys.readouterr().err
     assert not out.exists()
 
 

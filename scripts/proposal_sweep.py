@@ -30,6 +30,7 @@ from sentinel.proposal_eval import load_case_bundle, run_case, score_outcome, ag
 CATALOGUE = ROOT / "docs/superpowers/specs/contracts/fixtures/survey-catalogue-v1.fixture.json"
 PINNED_CASES = ROOT / "fixtures/proposal_eval/generated-requests-v1.json"
 PINNED_FIXTURE_PATH = "fixtures/proposal_eval/generated-requests-v1.json"
+REQUIRED_DECISION_PROMPT_REVISION = "select_plan.complete_constraints.v2"
 LLM_PROMPT_REVISION = "prompt-v4-complete-constraints"
 LLM_TOOL_POLICY_REVISION = "legal-tools-v2"
 TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
@@ -305,6 +306,10 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="explicitly validate and print the manifest without execution")
     args = parser.parse_args(argv)
     try:
+        if DECISION_PROMPT_REVISION != REQUIRED_DECISION_PROMPT_REVISION:
+            raise ValueError(
+                "decision prompt revision must be "
+                f"{REQUIRED_DECISION_PROMPT_REVISION}, got {DECISION_PROMPT_REVISION}")
         cases, excluded = load_case_bundle(args.fixtures)
         if not cases:
             raise ValueError("no evaluable cases")
@@ -342,7 +347,10 @@ def main(argv=None):
                 f"tool policy revision {LLM_TOOL_POLICY_REVISION}")
         configurations = {
             arm: ({"provider": "scripted_operator", "requested_model": None} if arm.lower() == "f" else
-                  {"provider": "openrouter", "requested_model": JEV_PROPOSER_MODEL} if arm == "jev" else
+                  {"provider": "openrouter", "requested_model": JEV_PROPOSER_MODEL,
+                   # Historical readers consume prompt_revision. It is the same
+                   # semantic SELECT_PLAN revision recorded explicitly below.
+                   "prompt_revision": DECISION_PROMPT_REVISION} if arm == "jev" else
                   {**llm_config.to_dict(), "requested_model": llm_config.model})
             for arm in arms}
         for arm, config in configurations.items():
