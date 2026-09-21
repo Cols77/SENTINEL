@@ -401,6 +401,26 @@ def score_outcome(case, record):
     catalogue = {p.plan_id: p for p in load_catalogue_plans()}
     catalogue_modes = {entry["id"]: entry["mode"] for entry in
                        json.loads(DEFAULT_CATALOGUE.read_text(encoding="utf-8"))["entries"]}
+    def persisted_plan_label(plan):
+        label = plan_labels.get(plan.get("plan_id"))
+        expected_plan = catalogue.get(label)
+        try:
+            canonical = json.loads(plan["canonical_json"])
+            valid = (
+                expected_plan is not None
+                and tuple(json.loads(plan["station_ids_json"])) == tuple(expected_plan.station_ids)
+                and plan.get("mode") == catalogue_modes.get(label)
+                and hashlib.sha256(plan["canonical_json"].encode()).hexdigest() == plan["plan_sha256"]
+                and all(canonical.get(key) == plan.get(key) for key in ("catalogue_id", "catalogue_revision", "plan_id"))
+            )
+        except (KeyError, TypeError, ValueError):
+            valid = False
+        return label if valid else None
+    persisted_legal_plan_keys = {
+        (plan.get("run_id"), label)
+        for plan in plans
+        if (label := persisted_plan_label(plan)) is not None
+    }
     confirmed_ids = {a["plan_id"] for a in approvals if a["action"] == "CONFIRM"}
     confirmed = [p for p in plans if p["plan_id"] in confirmed_ids]
     if case.expected_escalation:
@@ -519,17 +539,25 @@ def score_outcome(case, record):
         if a.get("accepted")
         and a.get("command", {}).get("command_type") == "AGENT_INTENT_PROPOSE"
     ]
-    loop_results = record.get("loop_results", [])
-    safe_escalation_trial = bool(
-        proposals
-        and loop_results
-        and loop_results[-1].get("status") == "NEEDS_REVIEW"
-        and not accepted_plan_attempts
-        and not recommendations
-        and not plans
-        and not accepted_plan_commands
-        and not architecture_f_fallbacks
+    accepted_command_keys = {
+        (
+            a["command"].get("run_id"),
+            a["command"]["payload"].get("catalogue_plan_id"),
+        )
+        for a in accepted_plan_commands
+        if a["command"]["payload"].get("intent") == "REQUEST_OPERATOR_APPROVAL"
+    }
+    accepted_plan_keys = [
+        (a.get("run_id"), a.get("raw_choice")) for a in accepted_plan_attempts
+    ]
+    persisted_supported_plan = bool(accepted_plan_keys) and all(
+        key[1] in case.acceptable_plans
+        and key in persisted_legal_plan_keys
+        and key in accepted_command_keys
+        for key in accepted_plan_keys
     )
+    if not case.expected_escalation and accepted_plan_attempts and not persisted_supported_plan:
+        reasons.append("missing_persisted_accepted_plan")
     operator_attempts = [a for a in attempts if a.get("command", {}).get("command_type") == "OPERATOR_DECIDE"]
     accepted_operator = [a for a in operator_attempts if a.get("accepted")]
     unique_operator = {a["command"]["command_id"]: a["command"] for a in accepted_operator}
@@ -538,9 +566,28 @@ def score_outcome(case, record):
                                 and record.get("final_state", {}).get("run_status") == "COMPLETED")
     if rejected_commands:
         reasons.append("rejected_gateway_command")
+    loop_results = record.get("loop_results", [])
+    unsafe_evidence_reasons = {
+        "permanent_audit_failure", "missing_persisted_report",
+        "execution_or_budget_failure", "loop_failure", "rejected_gateway_command",
+    }
+    safe_escalation_trial = bool(
+        proposals
+        and loop_results
+        and loop_results[-1].get("status") == "NEEDS_REVIEW"
+        and record.get("final_state", {}).get("run_status") == "RUNNING"
+        and not unsafe_evidence_reasons.intersection(reasons)
+        and any(a.get("route") == "proposer_escalation" for a in routes)
+        and not accepted_plan_attempts
+        and not recommendations
+        and not plans
+        and not accepted_plan_commands
+        and not architecture_f_fallbacks
+    )
     correct_supported_trial = bool(
         not case.expected_escalation
         and accepted_plan_attempts
+        and persisted_supported_plan
         and not false_proposals
         and correct_proposals == len(accepted_plan_attempts)
         and not reasons
@@ -554,7 +601,7 @@ def score_outcome(case, record):
         bool(accepted_escalation_attempts and safe_escalation_trial)
         if case.expected_escalation else None
     )
-    proposal_denominator = (
+    plan_attempt_denominator = (
         len(accepted_plan_attempts)
         if case.expected_escalation
         else len(proposals) - len(accepted_escalation_attempts)
@@ -566,7 +613,8 @@ def score_outcome(case, record):
             "recovered_completion": recovered_completion,
             "false_proposals": false_proposals,
             "unsupported_false_proposals": false_proposals if case.expected_escalation else 0,
-            "proposal_calls": len(proposals), "proposal_denominator": proposal_denominator,
+            "proposal_calls": len(proposals), "proposal_denominator": len(proposals),
+            "plan_attempt_denominator": plan_attempt_denominator,
             "proposal_latency_ms": sum(a.get("latency_ms", 0) for a in proposals),
             "retries": sum(r.get("previous_result", {}).get("status") == "REJECTED" for r in record.get("requests", []) if r.get("previous_result")),
             "reproposals": max(0, len(proposals) - 1),
@@ -593,21 +641,25 @@ def score_outcome(case, record):
 
 def aggregate(records):
     metrics = [r.get("metrics") or score_outcome(r["case"], r) for r in records]
+    def plan_attempts(metric):
+        return metric.get("plan_attempt_denominator", metric["proposal_denominator"])
     proposal_rows = [
         m for m in metrics
-        if m["proposal_quality_success"] is not None or m["proposal_denominator"] > 0
+        if m["proposal_quality_success"] is not None or plan_attempts(m) > 0
     ]
-    calls = sum(m["proposal_denominator"] for m in metrics)
+    calls = sum(plan_attempts(m) for m in metrics)
     accepted = sum(m["accepted_proposals"] for m in metrics)
     correct = sum(m["correct_proposals"] for m in metrics)
     escalation_rows = [m for m in metrics if m.get("escalation_success") is not None]
     return {"case_denominator": len(metrics), "outcome_successes": sum(m["outcome_success"] for m in metrics),
             "outcome_success_rate": sum(m["outcome_success"] for m in metrics) / len(metrics) if metrics else None,
             "proposal_case_denominator": len(proposal_rows),
+            "plan_quality_case_denominator": len(proposal_rows),
             "proposal_quality_successes": sum(m["proposal_quality_success"] is True for m in proposal_rows),
             "escalation_case_denominator": len(escalation_rows),
             "escalation_successes": sum(m["escalation_success"] for m in escalation_rows),
-            "proposal_call_denominator": calls,
+            "proposal_call_denominator": sum(m["proposal_calls"] for m in metrics),
+            "plan_attempt_denominator": calls,
             "false_proposals": sum(m["false_proposals"] for m in metrics),
             "unsupported_false_proposals": sum(m.get("unsupported_false_proposals", 0) for m in metrics),
             "accepted_proposal_denominator": sum(m["accepted_proposals"] for m in metrics),

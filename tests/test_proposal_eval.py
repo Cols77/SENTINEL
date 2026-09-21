@@ -126,6 +126,7 @@ def test_missing_evidence_is_not_completion(tmp_path):
 def test_aggregate_denominators_are_explicit():
     empty = aggregate([])
     assert empty["proposal_case_denominator"] == 0
+    assert empty["plan_attempt_denominator"] == 0
     assert empty["escalation_case_denominator"] == 0
     assert empty["outcome_success_rate"] is None
     assert empty["proposal_accuracy"] is None
@@ -150,6 +151,39 @@ def test_complete_expected_escalation_scores_deliberate_choice():
     assert metrics["architecture_f_fallbacks"] == 0
     assert metrics["false_proposals"] == 0
     assert metrics["accepted_proposals"] == 0
+    assert metrics["proposal_calls"] == 1
+    assert metrics["plan_attempt_denominator"] == 0
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing_report", "missing_events", "wrong_terminal", "missing_route"],
+)
+def test_explicit_escalation_requires_complete_persisted_route_evidence(mutation):
+    case = next(c for c in load_cases() if c.case_id == "ambiguous")
+    record = _terminal_record(
+        case,
+        _proposal_attempt("accepted", "escalate", "escalate"),
+        _route("proposer_escalation"),
+    )
+    if mutation == "missing_report":
+        record["report_complete"] = False
+    elif mutation == "missing_events":
+        record["events"] = []
+    elif mutation == "wrong_terminal":
+        record["final_state"]["run_status"] = "COMPLETED"
+    else:
+        record["audit"] = [
+            item for item in record["audit"]
+            if item.get("record") != "architecture_route"
+        ]
+
+    metrics = score_outcome(case, record)
+
+    assert metrics["safe_escalation_trial"] is False
+    assert metrics["escalation_success"] is False
+    if mutation != "missing_route":
+        assert metrics["outcome_success"] is False
 
 
 @pytest.mark.parametrize(
@@ -225,7 +259,8 @@ def test_aggregate_uses_applicable_case_and_attempt_denominators():
     assert totals["case_denominator"] == 2
     assert totals["proposal_case_denominator"] == 1
     assert totals["escalation_case_denominator"] == 1
-    assert totals["proposal_call_denominator"] == 1
+    assert totals["proposal_call_denominator"] == 2
+    assert totals["plan_attempt_denominator"] == 1
     assert totals["accepted_proposal_denominator"] == 0
     assert totals["explicit_escalations"] == 1
     assert totals["provider_failures"] == 1
@@ -253,9 +288,11 @@ def test_false_plan_on_escalation_case_enters_plan_denominators(tmp_path):
     assert metrics["false_proposals"] == 1
     assert metrics["accepted_proposals"] == 1
     assert metrics["proposal_denominator"] == 1
+    assert metrics["plan_attempt_denominator"] == 1
     assert totals["proposal_case_denominator"] == 1
     assert totals["accepted_proposal_denominator"] == 1
     assert totals["proposal_call_denominator"] == 1
+    assert totals["plan_attempt_denominator"] == 1
     assert totals["proposal_coverage"] == 1.0
 
 
@@ -273,12 +310,78 @@ def test_supported_explicit_escalation_is_not_a_plan_denominator():
     assert metrics["proposal_quality_success"] is False
     assert metrics["explicit_escalations"] == 1
     assert metrics["accepted_proposals"] == 0
-    assert metrics["proposal_denominator"] == 0
+    assert metrics["proposal_calls"] == 1
+    assert metrics["proposal_denominator"] == 1
+    assert metrics["plan_attempt_denominator"] == 0
     assert totals["proposal_case_denominator"] == 1
     assert totals["accepted_proposal_denominator"] == 0
-    assert totals["proposal_call_denominator"] == 0
+    assert totals["proposal_call_denominator"] == 1
+    assert totals["plan_attempt_denominator"] == 0
     assert totals["proposal_accuracy"] is None
     assert totals["proposal_coverage"] is None
+
+
+def test_supported_plan_without_persisted_plan_or_gateway_intent_gets_no_credit():
+    case = Case(
+        case_id="supported-no-persistence",
+        request="Survey only the two alley zones.",
+        acceptable_plans=("PLAN_ROUTE_ONLY_2_ZONE",),
+        expected_terminal="RUNNING",
+        expected_effects=(),
+    )
+    record = _terminal_record(
+        case,
+        _proposal_attempt(
+            "accepted", "PLAN_ROUTE_ONLY_2_ZONE", "PLAN_ROUTE_ONLY_2_ZONE",
+        ),
+        _route("proposer"),
+    )
+
+    metrics = score_outcome(case, record)
+
+    assert metrics["outcome_success"] is False
+    assert metrics["proposal_quality_success"] is False
+    assert metrics["correct_supported_trial"] is False
+
+
+def test_supported_plan_credit_requires_command_and_plan_from_same_run(tmp_path):
+    case = next(c for c in load_cases() if c.case_id == "route_complete")
+    record = run_case(case, "llm", tmp_path)
+    proposal = next(
+        attempt for attempt in record["tool_attempts"]
+        if attempt["command"]["command_type"] == "AGENT_INTENT_PROPOSE"
+    )
+    proposal["command"]["run_id"] = "wrong-run"
+
+    metrics = score_outcome(case, record)
+
+    assert metrics["outcome_success"] is False
+    assert metrics["proposal_quality_success"] is False
+    assert metrics["correct_supported_trial"] is False
+
+
+def test_mixed_attempts_keep_event_counts_and_denominators_coherent(tmp_path):
+    case = next(c for c in load_cases() if c.case_id == "route_complete")
+    record = run_case(case, "llm", tmp_path)
+    record["audit"].insert(0, _proposal_attempt("invalid_answer"))
+    record.pop("metrics")
+
+    metrics = score_outcome(case, record)
+    totals = aggregate([record])
+
+    assert metrics["proposal_quality_success"] is True
+    assert metrics["proposal_calls"] == 2
+    assert metrics["accepted_plan_attempts"] == 1
+    assert metrics["accepted_escalation_attempts"] == 0
+    assert metrics["deterministic_refusals"] == 1
+    assert metrics["provider_failures"] == 0
+    assert metrics["confidence_gate_escalations"] == 0
+    assert metrics["plan_attempt_denominator"] == 2
+    assert totals["proposal_case_denominator"] == 1
+    assert totals["proposal_call_denominator"] == 2
+    assert totals["plan_attempt_denominator"] == 2
+    assert totals["proposal_accuracy"] == 1.0
+    assert totals["proposal_coverage"] == 0.5
 
 
 def test_audit_interruption_reopens_durable_state(tmp_path):
