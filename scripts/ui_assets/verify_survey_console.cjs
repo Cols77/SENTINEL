@@ -21,6 +21,57 @@ async function main() {
   try {
     await page.goto(base + "/examples/survey-console/");
     await page.locator("#scenario").waitFor();
+    const thinBox = await page.evaluate(async () => {
+      const { createEvidenceView } = await import(
+        "/examples/survey-console/evidence.mjs"
+      );
+      const { makeScenario } = await import(
+        "/examples/survey-console/fixtures.mjs"
+      );
+      const s = makeScenario("people-lower-bound").snapshots[0];
+      s.sightings[0].bbox = [0, 0, 1, 1];
+      const canvas = document.createElement("canvas");
+      canvas.width = 1;
+      canvas.height = 10000;
+      const bytes = Uint8Array.from(
+        atob(canvas.toDataURL("image/png").split(",")[1]),
+        (c) => c.charCodeAt(0),
+      );
+      const h = document.createElement("div");
+      h.style.width = "400px";
+      document.body.append(h);
+      const view = createEvidenceView(h, {
+        read_evidence: async () => ({
+          status: "AVAILABLE",
+          run_id: s.run_id,
+          frame_id: "f1",
+          media_type: "image/png",
+          bytes,
+          width: 1,
+          height: 10000,
+        }),
+      });
+      await view.select(s, { kind: "frame", id: "f1" });
+      const stage = h.querySelector(".image-stage").getBoundingClientRect(),
+        box = h.querySelector("[data-sighting-id]").getBoundingClientRect();
+      const expectedWidth = stage.height / 10000,
+        expectedLeft = stage.left + (stage.width - expectedWidth) / 2;
+      const result = {
+        boxWidth: box.width,
+        expectedWidth,
+        inside:
+          box.left >= expectedLeft - 0.05 &&
+          box.right <= expectedLeft + expectedWidth + 0.05,
+      };
+      view.dispose();
+      h.remove();
+      return result;
+    });
+    assert.ok(
+      thinBox.boxWidth <= thinBox.expectedWidth + 0.05,
+      JSON.stringify(thinBox),
+    );
+    assert.equal(thinBox.inside, true);
     assert.equal(await page.locator("[data-testid]").count(), 5);
     assert.match(
       await page.locator('[data-testid="Header"]').innerText(),
@@ -274,7 +325,11 @@ async function main() {
         ].includes(id)
       )
         assert.equal(await page.locator("#approve").isDisabled(), true);
-      await page.locator(".pane").evaluateAll(es => es.forEach(e => { e.scrollTop = 0; }));
+      await page.locator(".pane").evaluateAll((es) =>
+        es.forEach((e) => {
+          e.scrollTop = 0;
+        }),
+      );
       await page.screenshot({ path: path.join(output, id + ".png") });
     }
     await page.selectOption("#scenario", "source-stale");
@@ -306,7 +361,19 @@ async function main() {
       if (status === "IN_DOUBT") {
         const old = await page.locator("#attempt-status").innerText();
         await page.locator("#retry-decision").click();
-        assert.equal(await page.locator("#attempt-status").innerText(), old);
+        assert.match(
+          await page.locator("#attempt-status").innerText(),
+          /PENDING/,
+        );
+        assert.equal(
+          await page.locator("#resolve-fixture-decision").isEnabled(),
+          true,
+        );
+        await page.selectOption("#fixture-decision-result", "ACKNOWLEDGED");
+        await page.locator("#resolve-fixture-decision").click();
+        const settled = await page.locator("#attempt-status").innerText();
+        assert.match(settled, /ACKNOWLEDGED/);
+        assert.equal(settled.split("\n")[0], old.split("\n")[0]);
       }
     }
     const type = await page.evaluate(() => ({

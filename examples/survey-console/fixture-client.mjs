@@ -100,12 +100,27 @@ export function createFixtureClient(input) {
               "IDENTITY_REUSED",
               "Attempt identity reused with changed payload",
             );
+          if (prior.latestStatus === "IN_DOUBT") {
+            // Reconcile the same attempt; never create another decision identity.
+            prior.latestStatus = null;
+            prior.promise = new Promise((resolve) => {
+              prior.resolve = resolve;
+            });
+            pending = prior;
+            calls.push(structuredClone(a));
+          }
           return prior.promise;
         }
         if (attemptKeys.has(a.attempt_id))
           throw error("IDENTITY_REUSED", "Attempt ID reused with another key");
-        if (pending)
-          throw error("INVALID_ARGUMENT", "An attempt is already pending");
+        if (
+          pending ||
+          [...ledger.values()].some((row) => row.latestStatus === "IN_DOUBT")
+        )
+          throw error(
+            "INVALID_ARGUMENT",
+            "An attempt is pending or unresolved",
+          );
         let resolve;
         const promise = new Promise((r) => (resolve = r));
         const row = { identity, promise, resolve, attempt: structuredClone(a) };
@@ -156,6 +171,7 @@ export function createFixtureClient(input) {
       if (!pending) return;
       const row = pending;
       pending = null;
+      row.latestStatus = status;
       row.resolve({
         attempt_id: row.attempt.attempt_id,
         status,
