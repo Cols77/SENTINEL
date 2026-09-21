@@ -112,11 +112,18 @@ def main(argv=None) -> int:
                     print(f"  {path.name}: ERROR {result.error}")
                     continue
                 raw.extend(result.detections)
-            for d in raw:
-                assert d.query in PHRASE_TO_CLASS, (
-                    f"detect_multipass matched an unsent query {d.query!r}")
+            # Raw detect_multipass output routinely contains tokenizer
+            # fragments and merged-query labels (detection.py's own module
+            # docstring: "rock boulder"); _match_query's fallback then
+            # returns that garbled label unchanged, which is never a member
+            # of PHRASE_TO_CLASS. clean()/is_valid_label() exists to filter
+            # exactly this, so the query-sanity assert belongs *after*
+            # clean()+deduplicate(), not over the unfiltered raw list.
             kept, _rejected = clean(raw, width, height, list(ALL_QUERIES))
             kept = deduplicate(kept)
+            for d in kept:
+                assert d.query in PHRASE_TO_CLASS, (
+                    f"clean() kept an unsent query {d.query!r}")
             plain = [{"query": d.query, "score": d.score, "box_xyxy": d.box_xyxy} for d in kept]
             response = to_response(plain, width, height, spec["id"], spec["sha"])
             out_path = out_dir / (path.stem + ".json")

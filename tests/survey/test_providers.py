@@ -265,3 +265,40 @@ def test_moondream_asks_once_per_class_and_a_second_class_failure_fails_the_whol
     assert len(session.calls) == 2
     assert session.calls[0]["json"]["object"] == "computer"
     assert session.calls[1]["json"]["object"] == "phone"
+
+
+def test_moondream_sightings_are_not_banded_low_so_they_can_confirm_an_object(frame):
+    """Moondream's detect has no confidence field at all. Banded "low" -- the
+    default for a missing confidence -- none of its sightings could ever
+    confirm an object, and a Moondream-only run would count nothing. The
+    honest reading is "no confidence claimed" (score_kind NONE), with
+    confirmation left to agreement from three stops."""
+    from sentinel.survey.merge import merge_sightings
+
+    response = FakeResponse(json_data={
+        "request_id": "r1",
+        "objects": [{"x_min": 0.48, "y_min": 0.60, "x_max": 0.52, "y_max": 0.66}],
+    })
+    detector = MoondreamDetector(api_key="k", model="moondream-3", session=FakeSession(response))
+    batch = detector.detect(str(frame), ("computer",))
+
+    assert batch.bands == ("medium",)
+    assert batch.detections[0]["score_kind"] == "NONE"
+    assert batch.detections[0]["raw_score"] is None
+
+    sightings = [{"sighting_id": f"s{i}", "class": "computer", "stop_index": i,
+                  "band": batch.bands[0], "bbox": batch.detections[0]["bbox"],
+                  "frame_x_cm": 0.0, "frame_y_cm": 0.0, "heading_deg": 0.0, "look_deg": 0.0}
+                 for i in range(3)]
+    assert merge_sightings(sightings)[0]["band"] == "CONFIRMED"
+
+
+def test_a_vlm_that_omits_its_confidence_is_still_banded_low():
+    """Gemini is asked for a confidence word. Leaving it out is not the same
+    as having no such field, and stays "low"."""
+    from sentinel.survey.detector import normalise
+
+    result = normalise([{"label": "laptop", "x": 0.1, "y": 0.1, "width": 0.1, "height": 0.1}])
+    assert result.pairs[0][1] == "low"
+    with pytest.raises(ValueError):
+        normalise([], unscored_band="certain")

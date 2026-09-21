@@ -109,7 +109,18 @@ class NormaliseResult(NamedTuple):
     dropped: tuple[str, ...]
 
 
-def normalise(items, width: int = IMAGE_WIDTH, height: int = IMAGE_HEIGHT) -> NormaliseResult:
+def normalise(items, width: int = IMAGE_WIDTH, height: int = IMAGE_HEIGHT, *,
+              unscored_band: str = "low") -> NormaliseResult:
+    """``unscored_band`` is the band of an item that carries neither a
+    confidence word nor a raw score. It stays ``"low"`` for a provider that
+    *could* have said how sure it was and did not. A provider whose API has
+    no confidence at all (Moondream ``detect``) passes ``"medium"``: a
+    ``"low"`` sighting can never confirm an object, so ``"low"`` there would
+    mean nothing that provider sees is ever counted. ``score_kind`` stays
+    ``NONE`` either way -- no confidence is claimed, and what confirms an
+    object is agreement from three stops, not the model's word."""
+    if unscored_band not in _BANDS:
+        raise ValueError(f"unscored_band must be one of {sorted(_BANDS)}")
     pairs: list[tuple[dict, str]] = []
     dropped: list[str] = []
     for item in items:
@@ -143,7 +154,7 @@ def normalise(items, width: int = IMAGE_WIDTH, height: int = IMAGE_HEIGHT) -> No
             raw_score = None
             # A VLM band is never a detector score (WP3 section 2).
             score_kind = "VLM_CONFIDENCE_BAND" if band_str in _BANDS else "NONE"
-            band = band_str if band_str in _BANDS else "low"
+            band = band_str if band_str in _BANDS else unscored_band
         detection = {
             "class": mapped,
             "matched_prompt": label,

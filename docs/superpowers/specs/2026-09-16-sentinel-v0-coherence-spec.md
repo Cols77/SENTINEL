@@ -237,7 +237,7 @@ only at a stop, after the drone has settled. Three levels are possible:
 | Level | What pose does | Requirement impact | State |
 |---|---|---|---|
 | 1. Stop-time check (`passive`) | measured at each localised stop; outside the cube means a controlled landing | none: SR-063 as written | implemented |
-| 2. In-leg watchdog | the pose stream, which already stays open all flight, is also evaluated *during* legs whenever tags are in view; outside the cube means a controlled landing. It can end the flight and nothing else | none on SR-063; **required by W08 since 2026-09-21**. Needs a second thread beside the blocking `move`, and a bench test that the Tello honours `land` while a `move` is executing | built (`sentinel.pose.watchdog` + `CubeMissionRunner.move_checked`); sending `land` mid-move is behind a flag defaulting off, pending bench test B1 |
+| 2. In-leg watchdog | the pose stream, which already stays open all flight, is also evaluated *during* legs whenever tags are in view; outside the cube means a controlled landing. It can end the flight and nothing else | none on SR-063; **required by W08 since 2026-09-21**. Needs a second thread beside the blocking `move`, and a bench test that the Tello honours `land` while a `move` is executing | built (`sentinel.pose.watchdog` + `CubeMissionRunner.move_checked`): 2 consecutive joint fixes, a speed-based trip margin (about 26 cm at `speed 20`), a lock-free `land`. Bench test B1 has shown the Tello honours `land` mid-move (12 cm further travel at `speed 20`); 2 of its 9 runs are flown, so sending `land` mid-move stays behind a flag defaulting off |
 | 3. Stop-time correction (`reanchor`) | a good fix replaces the dead-reckoned position at a hover and sends at most two bounded trim moves toward the approved waypoint | SR-063 amendment C1, **consented 2026-09-21 (Colin)** | implemented; run with `cube-run --pose reanchor --sr063-amended`; not yet flown (cube design Stage 3) |
 
 Continuous *steering* from pose — a velocity loop on `rc` commands — is excluded from V0 by SR-063
@@ -285,10 +285,15 @@ Known non-conforming artifacts as of this revision, each to be corrected by its 
 
 | Artifact | Uses | Consequence |
 |---|---|---|
-| WP5 cube design E4 and `sentinel.cube.observe` | field of view 70.2° x 55.6° | view width per unit of range is taken as 1.41 where the measured figure is 1.08, so a "back-and-wide" stop stands about 30 % too close to span the alley mouth it promises to; and the bottom of the view is taken as 36.4° below the horizon where the measured figure is about 31° |
+| Dzivha's `fixtures/perception` package, `sentinel_perception.config.CameraConfig` | field of view 70.2° x 55.6° (`hfov_deg`, `vfov_deg` defaults) | the same wrong FOV as the two rows below carried until 2026-09-21; her bearing arithmetic is skewed by it until her package adopts the measured model. Out of scope for this repository's owner to fix directly — `fixtures/perception` is her package, read-only from here (survey design §D handoff, `docs/handoffs/2026-09-21-HANDOFF-to-dzivha-camera-and-survey.md`) |
 
-(The survey-counting design carried the same error, f = 683 px with a level optical axis, until
-its rev 5 of the same date; see that document's §5.1.)
+> **Rev (2026-09-21, live-integration workstream A2).** `sentinel.cube.observe` is no longer in this
+> table: `WIDTH_PER_RANGE` and `BELOW_HORIZON_DEG` now derive from `sentinel.camera.TELLO_MEASURED`
+> (≈1.076 of width per unit range and ≈30.9° below the horizon, matching the measured figures this
+> table used to contrast them against), pinned by `tests/cube/test_observe.py`'s
+> `test_observe_constants_agree_with_the_calibrated_camera`. The survey-counting design carried the
+> same error, f = 683 px with a level optical axis, until its rev 5 of the same date; see that
+> document's §5.1.
 
 ### 10.6 Acceptance and gates
 

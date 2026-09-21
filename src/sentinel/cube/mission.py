@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from sentinel.client import EmergencyAborted
 from sentinel.envelope import EnvelopeViolation
 from sentinel.models import Position
 from sentinel.pose.containment import Containment, check_containment
@@ -29,7 +30,7 @@ from sentinel.pose.localise import LocalisationFix, localise
 from sentinel.pose.replay import FrameRecorder
 from sentinel.pose.scoring import heading_delta_deg
 from sentinel.pose.stream import _to_bgr, run_pose_stream
-from sentinel.pose.watchdog import POLL_INTERVAL_S, PoseWatchdog
+from sentinel.pose.watchdog import POLL_INTERVAL_S, PoseWatchdog, trip_margin_cm
 from sentinel.runner import FlightTestRunner
 
 POSE_MODES = ("off", "passive", "reanchor")
@@ -38,6 +39,9 @@ MAX_LOOK_DEG = 170
 FACING_DEG = 90.0
 DEAD_BAND_CM = 10
 MIN_MOVE_CM = 20
+#: The speed FlightTestRunner._preflight commands and reads back before any
+#: move. B1 measured 16 cm/s of real cruise at this setting.
+COMMAND_SPEED_CM_S = 20.0
 MAX_TRIM_ROUNDS = 2
 YAW_TRIM_THRESHOLD_DEG = 10.0
 PLAUSIBILITY_CM = 60.0
@@ -170,15 +174,16 @@ class CubeMissionRunner(FlightTestRunner):
         self.footprint = site.footprint()
         self._look_offset = 0
         self._implausible_streak = 0
-        # A4/W08-b: sending `land` from the watchdog thread mid-move is
-        # pending bench test B1 (does the Tello honour it?) -- see
-        # docs/wp5-rehearsal-manifest.md and coherence spec section 10.3.
-        # Until it passes this stays off and an abort takes effect once the
-        # blocking move returns, same as every other controlled landing here.
+        # A4/W08-b: sending `land` from the watchdog thread mid-move. Bench
+        # test B1 has shown the Tello honours it, but only 2 of its 9 runs
+        # are flown (docs/wp5-rehearsal-manifest.md). Until all 9 pass this
+        # stays off and an abort takes effect once the blocking move
+        # returns, same as every other controlled landing here.
         self.land_during_move = land_during_move
         self._watchdog_poll_interval_s = watchdog_poll_interval_s
         self._watchdog_last_fix_cm: list[float] | None = None
         self._watchdog_land_error: Exception | None = None
+        self._watchdog_fix_errors = 0
         if pose_mode not in ("passive", "reanchor"):
             self._watchdog_fix_fn = None
         elif watchdog_fix_fn is not None:
@@ -257,6 +262,7 @@ class CubeMissionRunner(FlightTestRunner):
         target = {"x_cm": wp.x_cm, "y_cm": wp.y_cm, "z_cm": wp.z_cm}
         self._watchdog_last_fix_cm = None
         self._watchdog_land_error = None
+        self._watchdog_fix_errors = 0
         env = self.envelope
         origin = env.position.as_dict()
         # F2: reanchoring can leave the tracked x/y a few cm outside the
@@ -310,26 +316,43 @@ class CubeMissionRunner(FlightTestRunner):
     def move_checked(self, direction: str, distance_cm: int) -> None:
         """A4/W08-b: while modes passive/reanchor move, a background watchdog
         evaluates containment against an injectable pose-fix source; OUTSIDE
-        on 3 consecutive fixes ends in the existing controlled landing as
-        soon as this move returns. No tag in view -> no fix -> no action."""
+        on consecutive joint fixes ends in the existing controlled landing.
+        No tag in view -> no fix -> no action.
+
+        With ``land_during_move`` the watchdog trips ``trip_margin_cm`` inside
+        the cube edge and sends `land` at once; the interrupted move then
+        fails with ``error Auto land`` (bench test B1), which is the expected
+        result of the abort and is reported as the containment abort it is,
+        not as a movement fault. Without it the trip line is the edge itself
+        and the abort waits for the move to return."""
         if self._watchdog_fix_fn is None:
             super().move_checked(direction, distance_cm)
             return
+        immediate = self.land_during_move
         watchdog = PoseWatchdog(
             self._watchdog_fix_fn, self.footprint,
             poll_interval_s=self._watchdog_poll_interval_s,
-            on_trip=self._send_land_during_move if self.land_during_move else None)
+            margin_cm=trip_margin_cm(COMMAND_SPEED_CM_S) if immediate else 0.0,
+            on_trip=self._send_land_during_move if immediate else None)
         watchdog.start()
+        move_error: Exception | None = None
         try:
             super().move_checked(direction, distance_cm)
+        except (EnvelopeViolation, EmergencyAborted):
+            raise
+        except Exception as exc:  # noqa: BLE001 - DJITelloPy raises its own non-RuntimeError type
+            move_error = exc
         finally:
             watchdog.stop()
             if watchdog.last_fix is not None:
                 self._watchdog_last_fix_cm = [round(watchdog.last_fix[0], 1),
                                               round(watchdog.last_fix[1], 1)]
+            self._watchdog_fix_errors += watchdog.errors
         if watchdog.abort_event.is_set():
             raise ContainmentAbort("containment: the in-move watchdog observed the drone "
-                                   "leave the cube")
+                                   "leave the cube") from move_error
+        if move_error is not None:
+            raise move_error
 
     def _live_watchdog_fix(self) -> tuple[float, float] | None:
         """Default in-move fix source (production, mode "real" only): one
@@ -345,6 +368,11 @@ class CubeMissionRunner(FlightTestRunner):
                                    report_id="watchdog", source_kind="LIVE")
         except (NoTagDetected, ValueError):
             return None
+        # B1: in motion, single-tag fixes jumped by more than a metre while
+        # joint fixes stayed smooth. A report lists two or more tags only
+        # when the joint solve produced it (detector.estimate_pose).
+        if len(report.tag_observations) < 2:
+            return None
         return (report.point[0] * CM_PER_UNIT, report.point[1] * CM_PER_UNIT)
 
     def _send_land_during_move(self) -> None:
@@ -353,8 +381,10 @@ class CubeMissionRunner(FlightTestRunner):
         Mirrors FlightTestRunner.trigger_emergency's pattern for a
         cross-thread command: attempt once, record failure, never let an
         exception escape the watchdog thread."""
+        # land() waits for the command lock the in-flight move holds, so it
+        # could only land after the move; land_now() is the lock-free send.
         try:
-            self.client.land()
+            getattr(self.client, "land_now", self.client.land)()
         except Exception as exc:  # noqa: BLE001 - must never kill the watchdog thread
             self._watchdog_land_error = exc
 
@@ -535,7 +565,7 @@ class CubeMissionRunner(FlightTestRunner):
                      "spread_p95_cm": None, "arrival_error_cm": None, "containment": None,
                      "tolerance": None, "proposed_trims": None,
                      "trim_rounds_sent": 0, "looks_deg": list(wp.looks_deg),
-                     "watchdog_land_error": None, "height_cm": None,
+                     "watchdog_land_error": None, "watchdog_fix_errors": 0, "height_cm": None,
                      "open_loop_fix_cm": None, "open_loop_error_cm": None, "localise_s": None,
                      "battery_pct": None}
             try:
@@ -561,4 +591,5 @@ class CubeMissionRunner(FlightTestRunner):
                     # flight through ContainmentAbort either way.
                     if self._watchdog_land_error is not None:
                         entry["watchdog_land_error"] = str(self._watchdog_land_error)
+                entry["watchdog_fix_errors"] = self._watchdog_fix_errors
                 self._append_log(entry)
