@@ -1,1060 +1,584 @@
-# SENTINEL Mission Control Center Implementation Plan
+# SENTINEL Mission Control Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Turn LightCode's fixture survey console into a projector-ready Mission Control application that supports persistent text chat, identity-bound approvals, Rehearsal and Live runtime projections, visible localization/tag performance, and independent Land/Emergency controls.
+**Goal:** Connect the existing console to the published integration runtime, first completing an existing survey scenario without a drone, then adding localization presentation and Live adapters through the same application interfaces.
 
-**Architecture:** Keep the tested static HTML/CSS/ES-module frontend and serve it from a local NiceGUI/FastAPI host. A Python projection service exposes complete snapshots, ordered events, bounded evidence, and idempotent commands; a single mission worker owns mission mutation, while safety commands use a separate typed port. Land a fully working Rehearsal vertical slice before adding Live survey, flight, pose, and safety adapters.
+**Architecture:** One MissionControlService owns a persisted UI journal, projection, bounded chat, approval broker and guarded mission worker. Both modes execute the real survey loop, candidate selection, merge and report validation; startup selects hardware/provider boundary adapters. The existing vanilla frontend is served by a local NiceGUI/FastAPI host and consumes typed HTTP responses.
 
-**Tech Stack:** Python 3.11+, NiceGUI/FastAPI, SQLite WAL, vanilla ES modules, inline SVG, Node test runner, pytest, Playwright browser acceptance, existing SENTINEL survey/cube/pose packages.
+**Tech Stack:** Python 3.11+, NiceGUI/FastAPI, SQLite WAL, vanilla ES modules, inline SVG, pytest, Node tests and Playwright. No JavaScript build system.
+
+**Spec:** [Approved Mission Control design](../specs/2026-09-21-sentinel-mission-control-design.md), approved by Alan after revision `4625fdc`.
+
+**Execution:** Preserve Alan's previously selected **Native** method: implementation in this session, followed by one fresh independent whole-branch review. This revised plan awaits user review before implementation.
+
+## Global Constraints
+
+- “Dry-run and Live use the same application interfaces and production orchestration; deterministic adapters replace external hardware and provider boundaries in dry-run.”
+- “The existing frontend is preserved.”
+- “No sibling-worktree dependency is allowed.”
+- “The canonical frontend URL is `/console/`: `/` redirects there and static serving supplies its index.”
+- “The browser decision port retains `submit_decision(attempt)`”.
+- “Mission admission is atomic: a second distinct mutating mission is refused while one is active”.
+- “Emergency first latches the active runner and prevents subsequent normal command dispatch, then attempts the independent emergency transport.”
+- “There is no automatic switch from a failed Live session.”
+- “Minimum body text is 16 px and metadata is at least 14 px for projector readability.”
+- Event polling defaults to 500 ms while visible, backs off while hidden, and never overlaps. Display frames are bounded to 5 Hz. Pose stale threshold defaults to 2000 ms; AGING starts at half-threshold and STALE only above threshold.
+- Complete persisted chat messages; no token streaming, voice, React, draggable panels, browser configuration or direct chat flight authorization.
+- Rehearsal requires no hardware, network or provider credentials. Live hardware checks remain outside automated execution.
+- Preserve all existing decision/evidence regression coverage. No raw paths, secrets, image bytes, private prompts or provider payloads in public snapshots/events.
+
+## Review Focus
+
+1. Two tabs reuse an idempotency key with different payloads: conflict without a second action (Tasks 1–2).
+2. Pose-age polling advances display versions while a proposal waits: approval stays usable until authoritative decision state changes (Tasks 1–2, 9).
+3. Emergency arrives during blocked flight or database activity: latch and independent send remain responsive, even if auditing must reconcile later (Task 3).
+4. A valid image capability is revoked while a previous request is in flight: remove stale imagery and reject late results (Tasks 5–6).
+5. A browser response is lost after approval was committed: reload/retry returns the same result without another mission or approval (Tasks 2, 6, 8).
+
+## Verified integration and file ownership
+
+At planning time the published integration reference is `6d7f24b641feb94188d15507a10da5ec65ae1aaa`; fetch again at execution. PR #8 contains the frontend and docs; PR #7 remains its asset foundation. Merge published ancestry without rewriting either branch.
+
+Existing runtime seams:
+
+- `survey.loop.run_survey`: keyword arguments `store, run_id, request_text, options, policy, flight, detector, on_approval, writer`; optional consent/camera/flight-budget arguments. Approval receives the full rendered candidate call and returns a boolean.
+- `survey.proposer.RuleProposer.decide(request, context)`: deterministic legal-candidate selection. Other survey proposer implementations share this seam.
+- `survey.flight.FlightPort.fly(option) -> list[FlightFrame]`; `ScriptedDetector.detect(image_path, classes)` provides deterministic detector responses.
+- `survey.cube_bridge.CubeFlight` composes `CubeMissionRunner` and uses the measured camera model. Do not replace it with an unrelated runner wrapper.
+- `SurveyStore` owns SQL writes; add explicit backend read methods instead of exporting its connection.
+- `runner.trigger_emergency()` currently latches then calls the client. `EmergencySender.send()` is independent transport only and has no runner latch.
+- `coordinator.agent_loop.AgentLoop` exposes coordinator tools, not a drop-in survey chat session. Add a survey-specific bounded adapter around the adopted survey policy; do not silently map coordinator tools to survey actions.
+
+New files and responsibilities:
+
+| Files | Responsibility |
+|---|---|
+| `src/sentinel/ui/models.py`, `schema.py` | Strict public payloads, validation and command/result types |
+| `src/sentinel/ui/store.py` | UI sessions/runs, commands, offers, messages and ordered event journal |
+| `src/sentinel/ui/approval.py`, `mission_worker.py` | Persisted identity-bound decisions and single active mission admission |
+| `src/sentinel/ui/safety.py` | Session/run binding and public runner safety ports |
+| `src/sentinel/ui/scenarios.py`, `fixtures/mission-control/clean-computer.json` | Reusable dry-run inputs and valid synthetic artifact generation |
+| `src/sentinel/ui/runtime.py`, `service.py`, `projection.py` | Shared survey execution, service facade and allowlisted complete snapshots |
+| `src/sentinel/ui/chat.py`, `decision_session.py` | Persisted conversation and bounded legal intent adapter |
+| `src/sentinel/ui/app.py`, `api.py`, `__main__.py`, `bootstrap.py` | Local host, HTTP routes and immutable mode composition |
+| `src/sentinel/ui/pose_projection.py`, `src/sentinel/pose/evidence.py` | Backend freshness and exact-frame diagnostic binding |
+| `examples/survey-console/http-client.mjs`, `mission-contract.mjs`, `view-model.mjs` | HTTP boundary, v2 validation and explicit renderer adaptation |
+| `examples/survey-console/chat.mjs`, `mission-map.mjs`, `localization.mjs`, `safety.mjs` | New focused views using existing DOM utilities |
+| `tests/ui/`, existing `tests/survey_console/`, `scripts/ui_assets/verify_mission_control.cjs` | Runtime/API, frontend and real-host acceptance |
+
+Keep `contract.mjs` and the original fixture verifier usable as a v1 regression harness. New v2 consumers use `mission-contract.mjs`; `view-model.mjs` maps backend fields to existing count/evidence render inputs without calculating authoritative facts. Product startup never selects the old snapshot-advancement fixture client.
+
+## Delivery checkpoints
+
+- **A — Shared-runtime dry-run:** Tasks 0–8. One real survey reaches a validated report through the browser; safety uses fake transports and runtime latches.
+- **B — Broader scenarios and localization:** Tasks 9–10. Full visual and failure acceptance.
+- **C — Live adapter composition:** Tasks 11–12. Contract/startup tests, whole-branch review and PR handoff. Hardware verification is separate.
 
 ---
 
-## Scope, ownership, and prerequisite gate
+### Task 0: Incorporate published runtime and record the baseline
 
-This plan is intentionally linear even though it crosses four seams. Tasks 1–6 are LightCode's
-UI/Rehearsal vertical slice. Tasks 7–10 adopt runtime interfaces and must not bypass missing
-integration contracts. Tasks 11–12 compose and verify Live mode.
+**Files:** merge incoming integration files; create `docs/handoffs/2026-09-21-mission-control.md` for exact refs, command results and later acceptance evidence.
 
-The PR branch currently contains the fixture console but not the active local integration work.
-The operator must publish the approved `integration/survey-demo` tip before Live tasks begin.
-LightCode may complete Tasks 1–6 against the fixture console while that publication is pending.
+**Interfaces:** consumes published Git refs; produces a merged branch with survey/cube/pose seams above and a reproducible baseline.
 
-### Task 0: Update branch ancestry and prove the baseline
+- [ ] Fetch and inspect ancestry, then merge without force-pushing. Run from the clean isolated worktree; preserve the user's docs commits.
 
-**Files:**
-- Verify: `examples/survey-console/`
-- Verify: `tests/survey_console/`
-- Verify: `src/sentinel/survey/`
-- Verify: `src/sentinel/cube/mission.py`
-- Verify: `src/sentinel/pose/stream.py`
-
-- [ ] **Step 1: Fetch and merge the published integration branch without rewriting the PR**
-
-```powershell
-rtk git fetch origin
-rtk git merge --no-ff origin/integration/survey-demo
+```bash
+git fetch origin integration/survey-demo:refs/remotes/origin/integration/survey-demo
+git rev-parse HEAD origin/integration/survey-demo
+git merge --no-ff origin/integration/survey-demo
+rg -n 'class SurveyStore|def run_survey|class CubeMissionRunner|def run_pose_stream|def trigger_emergency' src/sentinel
+uv sync --all-extras
+uv run pytest -q --ignore=fixtures
+node --test tests/survey_console/*.test.mjs
 ```
 
-Expected: a merge commit or `Already up to date`; do not force-push and do not resolve conflicts
-by dropping either the fixture console or integration runtime.
+Expected: all required seams exist; Node baseline has 45 passing tests before new additions. Record actual Python counts/skips instead of assuming the pre-integration count. Missing or materially incompatible seams block dependent work; do not substitute local sibling files. Resolve ordinary merge conflicts preserving both implementations.
 
-- [ ] **Step 2: Verify required source seams exist**
+- [ ] Commit the baseline handoff after the merge and successful checks.
 
-```powershell
-rtk rg -n "class SurveyStore|def run_survey|class CubeMissionRunner|def run_pose_stream|def trigger_emergency" src/sentinel
+```bash
+git add docs/handoffs/2026-09-21-mission-control.md
+git commit -m "docs: record mission control integration baseline"
 ```
 
-Expected: matches in `survey/store.py`, `survey/loop.py`, `cube/mission.py`, `pose/stream.py`, and
-`runner.py`. If one is absent, stop Live work and report the exact missing integration commit;
-Tasks 1–6 may still proceed.
+### Task 1: Define the public contract and durable journal
 
-- [ ] **Step 3: Run the Python and existing UI baselines**
+**Files:** create `src/sentinel/ui/__init__.py`, `models.py`, `schema.py`, `store.py`; create `tests/ui/__init__.py`, `conftest.py`, `test_models.py`, `test_store.py`; create `examples/survey-console/mission-contract.mjs`, `tests/survey_console/mission-contract.test.mjs`, `fixtures/mission-control/contract-v2.json`.
 
-```powershell
-rtk uv sync --all-extras
-rtk proxy uv run pytest -q --ignore=fixtures
-rtk node --test tests/survey_console/*.test.mjs
-```
+**Interfaces:** `validate_snapshot(dict) -> dict`; JS `validateMission(snapshot) -> snapshot`; `UIStore.open(path)`; `ensure_run(session_id, run_id, mode)`, `read_run(run_id)`, `append_event(run_id, event_type, payload)`, `read_events(run_id, after, limit)`, `claim_command(command)`, `settle_command(command_id, result)`, `read_command(command_id)`, `publish_snapshot(run_id, snapshot)`, `read_snapshot(run_id)`. All store returns are detached dictionaries. Test modules explicitly import pytest, the named production symbols, and threading/concurrent-futures helpers used in their snippets; Node modules import node:test, node:assert/strict and the named exports. `contractFixture` is loaded from `fixtures/mission-control/contract-v2.json` with the repository-relative URL resolved from the test file. Command claims return `{created: bool, command: dict}` or raise `CommandConflict`.
 
-Expected: Python suite passes with only documented skips/warnings; survey console reports 45
-passing tests and zero failures. Preserve the output in the PR handoff.
-
-### Task 1: Add the local Mission Control host
-
-**Files:**
-- Modify: `pyproject.toml`
-- Modify: `uv.lock`
-- Create: `src/sentinel/ui/__init__.py`
-- Create: `src/sentinel/ui/__main__.py`
-- Create: `src/sentinel/ui/app.py`
-- Create: `tests/ui/__init__.py`
-- Create: `tests/ui/test_app.py`
-
-- [ ] **Step 1: Write the failing host test**
+- [ ] Write strict contract and concurrent identity tests. `ui_store` is a temporary-file store fixture defined in this task. `valid_snapshot` loads the checked-in contract JSON; every nested shape is closed, not a permissive pass-through.
 
 ```python
-# tests/ui/test_app.py
-from fastapi.testclient import TestClient
-from pathlib import Path
-
-from sentinel.ui.app import build_app
-
-
-class StubService:
-    def session(self) -> dict:
-        return {"mode": "REHEARSAL", "active_run_id": "run-demo"}
-
-
-def test_host_serves_console_and_session(tmp_path):
-    repository_root = Path(__file__).resolve().parents[2]
-    app = build_app(StubService(), repository_root=repository_root)
-    client = TestClient(app)
-    assert client.get("/api/v1/session").json() == {
-        "mode": "REHEARSAL",
-        "active_run_id": "run-demo",
-    }
-    assert client.get("/").status_code == 200
-```
-
-- [ ] **Step 2: Run the test and confirm the missing package failure**
-
-```powershell
-rtk proxy uv run pytest tests/ui/test_app.py -q
-```
-
-Expected: FAIL because `sentinel.ui` does not exist.
-
-- [ ] **Step 3: Add NiceGUI and the smallest host**
-
-Add `"nicegui>=3.6,<4"` to project dependencies, run `rtk uv lock`, and implement:
-
-```python
-# src/sentinel/ui/app.py
-from pathlib import Path
-
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
-
-
-def build_app(service, *, repository_root: Path) -> FastAPI:
-    api = FastAPI(title="SENTINEL Mission Control", docs_url=None, redoc_url=None)
-    console = repository_root / "examples" / "survey-console"
-    assets = repository_root / "assets" / "sentinel-ui"
-    api.mount("/console", StaticFiles(directory=console), name="console")
-    api.mount("/assets/sentinel-ui", StaticFiles(directory=assets), name="sentinel-assets")
-
-    @api.get("/", include_in_schema=False)
-    async def index():
-        return FileResponse(console / "index.html")
-
-    @api.get("/api/v1/session")
-    async def session():
-        return service.session()
-
-    return api
-```
-
-`src/sentinel/ui/__main__.py` parses `--host`, `--port`, `--mode rehearsal|live`, and the immutable
-startup paths required by later tasks, then runs the FastAPI app through NiceGUI's supported
-`ui.run_with`/Uvicorn integration. Bind to `127.0.0.1` by default and never enable NiceGUI On Air.
-
-- [ ] **Step 4: Run focused tests and import-boundary checks**
-
-```powershell
-rtk proxy uv run pytest tests/ui/test_app.py tests/coordinator/test_package_boundary.py -q
-```
-
-Expected: PASS; coordinator tests still prove coordinator code imports no NiceGUI.
-
-- [ ] **Step 5: Commit**
-
-```powershell
-rtk git add pyproject.toml uv.lock src/sentinel/ui tests/ui
-rtk git commit -m "feat(ui): add local mission control host"
-```
-
-### Task 2: Adopt a complete projection and event store
-
-**Files:**
-- Create: `src/sentinel/ui/models.py`
-- Create: `src/sentinel/ui/store.py`
-- Create: `src/sentinel/ui/projection.py`
-- Create: `tests/ui/conftest.py`
-- Create: `tests/ui/test_models.py`
-- Create: `tests/ui/test_store.py`
-- Create: `tests/ui/test_projection.py`
-- Modify: `examples/survey-console/contract.mjs`
-- Modify: `tests/survey_console/contract.test.mjs`
-
-- [ ] **Step 1: Write failing Python contract tests**
-
-```python
-# tests/ui/test_models.py
-from sentinel.ui.models import validate_snapshot
-
-
-def test_snapshot_rejects_internal_paths(valid_snapshot):
-    valid_snapshot["evidence"]["frames"][0]["image_path"] = "C:/secret/frame.jpg"
-    try:
+def test_unknown_public_field_is_rejected(valid_snapshot):
+    valid_snapshot["evidence"]["image_path"] = "/private/frame.png"
+    with pytest.raises(ValueError):
         validate_snapshot(valid_snapshot)
-    except ValueError as exc:
-        assert "image_path" in str(exc)
-    else:
-        raise AssertionError("internal path accepted")
 
 
-def test_pose_health_requires_backend_age(valid_snapshot):
-    del valid_snapshot["localization"]["age_ms"]
-    try:
-        validate_snapshot(valid_snapshot)
-    except ValueError as exc:
-        assert "age_ms" in str(exc)
-    else:
-        raise AssertionError("missing age accepted")
+def test_same_key_different_payload_conflicts(ui_store):
+    first = dict(session_id="s", run_id="r", command_id="c", correlation_id="x",
+                 idempotency_key="k", expected_version=0, kind="CHAT", text="count computers")
+    assert ui_store.claim_command(first)["created"]
+    assert not ui_store.claim_command(first)["created"]
+    with pytest.raises(CommandConflict):
+        ui_store.claim_command({**first, "text": "land"})
 ```
 
-Create `tests/ui/conftest.py` with one complete V1 snapshot containing exactly the top-level units
-from the design: `session`, `run`, `source`, `safety`, `chat`, `proposal`, `mission`,
-`localization`, `evidence`, `results`, `report`, `events`, and `legal_actions`.
-
-- [ ] **Step 2: Confirm the contract tests fail**
-
-```powershell
-rtk proxy uv run pytest tests/ui/test_models.py -q
-```
-
-Expected: FAIL because `validate_snapshot` does not exist.
-
-- [ ] **Step 3: Implement strict projection validation**
-
-In `models.py`, define frozen dataclasses for command/evidence results and use an exact-key
-validator for snapshots. These types are also used by Task 3:
+- [ ] Run `uv run pytest tests/ui/test_models.py tests/ui/test_store.py -q`; confirm failures identify missing implementation.
+- [ ] Implement the schema and journal. These names/types are the shared boundary for all later tasks:
 
 ```python
-from dataclasses import dataclass
-
-
 @dataclass(frozen=True)
 class EvidenceCapability:
-    status: str
+    status: str  # AVAILABLE, NOT_FOUND, FORBIDDEN, REVOKED
     run_id: str
     artifact_id: str
     media_type: str | None = None
     payload: bytes | None = None
+    sha256: str | None = None
+    width: int | None = None
+    height: int | None = None
     reason_code: str | None = None
 
 
-INTERNAL_KEYS = frozenset({"image_path", "storage_key", "payload_json", "raw_response_json"})
-
-
-def _reject_internal(value, path="snapshot"):
-    if isinstance(value, dict):
-        forbidden = INTERNAL_KEYS.intersection(value)
-        if forbidden:
-            raise ValueError(f"{path} contains internal field {sorted(forbidden)[0]}")
-        for key, child in value.items():
-            _reject_internal(child, f"{path}.{key}")
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            _reject_internal(child, f"{path}[{index}]")
-
-
-def _exact(value: dict, keys: set[str], path: str):
-    if not isinstance(value, dict) or set(value) != keys:
-        raise ValueError(f"{path} keys differ")
-
-
-def validate_snapshot(snapshot: dict) -> dict:
-    required = {
-        "session", "run", "source", "safety", "chat", "proposal", "mission",
-        "localization", "evidence", "results", "report", "events", "legal_actions",
-    }
-    if set(snapshot) != required:
-        raise ValueError(f"snapshot keys differ: {sorted(set(snapshot) ^ required)}")
-    _reject_internal(snapshot)
-    _exact(snapshot["localization"], {
-        "status", "age_ms", "stale_after_ms", "latest_report", "recent_stream",
-        "containment", "pose_evidence",
-    }, "localization")
-    if snapshot["localization"]["status"] not in {"FRESH", "AGING", "STALE", "UNAVAILABLE"}:
-        raise ValueError("localization.status")
-    if snapshot["localization"]["age_ms"] is not None and snapshot["localization"]["age_ms"] < 0:
-        raise ValueError("localization.age_ms")
-    if snapshot["events"]["watermark"] < 0:
-        raise ValueError("events.watermark")
-    # Continue this exact-key pattern for every nested object in tests/ui/conftest.py.
-    # Resolve frame, sighting, tag, stop, proposal, and report references before returning.
-    return snapshot
+class CommandConflict(ValueError):
+    pass
 ```
 
-Implement the recursive checks explicitly; do not serialize arbitrary dataclasses with
-`__dict__` and do not pass through unknown runtime payloads.
+Contract v2 has exactly `schema_version=2` plus the spec's 13 units. Define closed nested models in `schema.py` and mirror their keys/enums in JS:
 
-- [ ] **Step 4: Write and implement the append-only UI store**
+- `session`: `id, mode, startup_summary`; the summary contains `site_id, pose_mode, detector_name`, no private paths.
+- `run`: `id, request_text, status, phase, version, decision_version, updated_at`. Status includes ACTIVE, COMPLETE, ABORTED, RECOVERY_REQUIRED. Phase uses the existing seven UI steps. `version` changes for any new complete snapshot; `decision_version` changes only when command legality/identity changes. Approval `expected_version` compares to `decision_version`, not display polling age. Map this value explicitly into approval controls; preserve the snapshot display version for reconciliation. Increment decision_version on proposal replacement, eligibility changes and settlement, never just on age refresh.
+- `source`: `mode, kind, freshness`; mode REHEARSAL/LIVE, kind SIMULATED/REPLAYED/LIVE, freshness FRESH/STALE. Mode must match session.
+- `safety`: `land, emergency`; each has `available, status, reason, command_id`. Status IDLE/REQUESTED/ACKNOWLEDGED/COMPLETED/UNAVAILABLE/FAILED. An emergency transport send alone never implies COMPLETED.
+- `chat`: `messages, pending_command_id`; message `id, run_id, sequence, role, body, status, snapshot_version` with COMPLETE/FAILED status, inert public text.
+- `proposal`: null or the complete existing v1 Proposal plus `run_id, decision_version, correlation_id`; retain geometry, justification, eligibility and hash.
+- `mission`: `flights, sweep, envelope, route, active_stop_id, commanded_position`; existing v1 flights/sweep/stop fields remain, with backend map coordinates on separate route entries `stop_id,x,y` and envelope `min_x,max_x,min_y,max_y`. Unknown coordinates are null, not zero.
+- `localization`: `status, age_ms, stale_after_ms, latest_report, recent_stream, containment, pose_evidence, map_position`. Report allowlist contains run/report identity, observation time, source, point, heading, altitude, method, tag observations and error. The Task 9 diagnostic defines pose evidence; absent report/evidence/map position is null. Stream counters use the five fields in the spec.
+- `evidence`: `frames, sightings, objects, analysis, provider, failures`; preserve existing strict v1 fact shapes, extend frames with `artifact_id,sha256,width,height,source_kind`. New artifact fields may be null only when evidence is unavailable.
+- `results`: `counts`; retain v1 count semantics without deriving counts in JS.
+- `report`: existing v1 `status,text,reason` plus `run_id,id` (id null when absent).
+- `events`: `watermark`; event pages retain existing `id,run_id,sequence,occurred_at,summary`, plus allowlisted `type,refs` where refs is a list of `{kind,id}` within that run.
+- `legal_actions`: list of `{action,enabled,reasons}`, actions CHAT/APPROVE/REJECT/LAND/EMERGENCY; this list never substitutes for backend checks.
 
-Tests create two SQLite connections to one temporary file and assert ordered, run-scoped events,
-idempotent commands, persisted chat, and snapshot version monotonicity. Implement these tables in
-`store.py`:
+Use explicit validators for nested types, finite numbers, enum values, unique identities and run/frame/object/stop references. Factor existing JS fact validators into named exports as needed without weakening v1. Contract fixture JSON is shared by Python and Node tests; include one invalid mutation per nested unit and a cross-run reference case.
 
-```sql
-CREATE TABLE ui_events (
-  run_id TEXT NOT NULL,
-  sequence_no INTEGER NOT NULL,
-  event_id TEXT NOT NULL UNIQUE,
-  event_type TEXT NOT NULL,
-  public_payload_json TEXT NOT NULL,
-  occurred_at TEXT NOT NULL,
-  PRIMARY KEY (run_id, sequence_no)
-);
-CREATE TABLE ui_commands (
-  command_id TEXT PRIMARY KEY,
-  run_id TEXT,
-  idempotency_key TEXT NOT NULL UNIQUE,
-  command_type TEXT NOT NULL,
-  request_json TEXT NOT NULL,
-  status TEXT NOT NULL,
-  result_json TEXT,
-  created_at TEXT NOT NULL
-);
-CREATE TABLE ui_messages (
-  message_id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL,
-  sequence_no INTEGER NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('OPERATOR','ASSISTANT','SYSTEM')),
-  body TEXT NOT NULL,
-  status TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  UNIQUE (run_id, sequence_no)
-);
-```
+Store tables: `ui_sessions(session_id PK, mode, config_json)`, `ui_runs(run_id PK, session_id, status, version, decision_version, snapshot_json)`, `ui_events(run_id,sequence_no PK pair,event_id UNIQUE,event_type,public_payload_json,occurred_at)`, `ui_commands(command_id PK,session_id,run_id,idempotency_key UNIQUE,kind,request_json,status,result_json,created_at)`, `ui_messages(message_id PK,run_id,sequence_no UNIQUE per run,role,body,status,snapshot_version)`, `ui_offers(proposal_id PK,run_id,proposal_sha256,decision_version,correlation_id,payload_json,status)`. Parameterize SQL, WAL, foreign keys, one connection per thread, `busy_timeout=5000`, short `BEGIN IMMEDIATE` writes. Atomic claims compare canonical request JSON before returning prior results. Snapshot publication atomically increments version and records its watermark. Never hold a transaction while waiting on approval/provider/hardware.
 
-Use WAL, `busy_timeout=5000`, parameterized SQL, explicit transactions, and a separate connection
-per thread. `append_event` allocates `MAX(sequence_no)+1` inside `BEGIN IMMEDIATE`.
+- [ ] Add two-connection concurrent command/event tests and snapshot monotonicity/reload tests; run Python and Node contract suites to PASS.
+- [ ] Commit: `git add src/sentinel/ui tests/ui fixtures/mission-control examples/survey-console/mission-contract.mjs examples/survey-console/contract.mjs tests/survey_console/mission-contract.test.mjs && git commit -m "feat(ui): define durable mission control contract"`.
 
-- [ ] **Step 5: Expand the browser validator to the same public shape**
+### Task 2: Persist approvals and refuse concurrent missions
 
-Update `contract.mjs` to validate schema version 2 while keeping a `validateSurveyV1` export for
-the untouched fixture tests until Task 3 migrates them. Add JavaScript tests that reject raw paths,
-unknown fields, mismatched run IDs, invalid pose states, missing event watermarks, and unresolved
-frame/sighting/tag references.
+**Files:** create `src/sentinel/ui/approval.py`, `mission_worker.py`, `tests/ui/test_approval.py`, `test_mission_worker.py`.
 
-- [ ] **Step 6: Run both contract suites**
+**Interfaces:** `ApprovalBroker(store).offer(run_id, candidate, correlation_id) -> PendingApproval`; `PendingApproval.wait() -> bool`; `ApprovalBroker.decide(attempt) -> dict`; `recover_interrupted_runs() -> None`; `MissionWorker(run_callable).start(request) -> Future`. `run_callable(request)` creates its own thread-owned stores. `MissionBusy` is a public exception mapped to HTTP 409. Attempts retain existing `attempt_id` and add `session_id,command_id,correlation_id`; commands persist all three identities unchanged.
 
-```powershell
-rtk proxy uv run pytest tests/ui/test_models.py tests/ui/test_store.py tests/ui/test_projection.py -q
-rtk node --test tests/survey_console/contract.test.mjs
-```
-
-Expected: PASS.
-
-- [ ] **Step 7: Commit**
-
-```powershell
-rtk git add src/sentinel/ui tests/ui examples/survey-console/contract.mjs tests/survey_console/contract.test.mjs
-rtk git commit -m "feat(ui): adopt mission control projection"
-```
-
-### Task 3: Build the complete Rehearsal service and HTTP client
-
-**Files:**
-- Create: `src/sentinel/ui/rehearsal.py`
-- Create: `src/sentinel/ui/api.py`
-- Create: `fixtures/mission-control/golden-run.json`
-- Create: `tests/ui/test_rehearsal.py`
-- Create: `tests/ui/test_api.py`
-- Create: `examples/survey-console/http-client.mjs`
-- Modify: `examples/survey-console/app.mjs`
-- Modify: `examples/survey-console/controller.mjs`
-- Modify: `tests/survey_console/client.test.mjs`
-
-- [ ] **Step 1: Write failing Rehearsal API tests**
+- [ ] Write tests for exact proposal/hash/decision-version binding, reload, duplicate attempts, lost response reconciliation, unrelated age refresh, replacement, rejection and process recovery. Use synchronization Events rather than sleeps.
 
 ```python
-def test_rehearsal_exposes_snapshot_events_and_bounded_evidence(client):
-    snapshot = client.get("/api/v1/runs/golden-run/snapshot").json()
-    assert snapshot["session"]["mode"] == "REHEARSAL"
-    events = client.get(
-        "/api/v1/runs/golden-run/events", params={"after_sequence": 0, "limit": 200}
-    ).json()
-    assert [row["sequence"] for row in events] == list(range(1, len(events) + 1))
-    image = client.get("/api/v1/runs/golden-run/evidence/frame-1")
-    assert image.headers["content-type"] in {"image/png", "image/jpeg"}
-    assert "image_path" not in image.headers
+def test_worker_refuses_second_active_mission():
+    entered, release = Event(), Event()
+    def run(request):
+        entered.set()
+        assert release.wait(2)
+        return request
+    worker = MissionWorker(run)
+    first = worker.start({"run_id": "r"})
+    assert entered.wait(1)
+    try:
+        with pytest.raises(MissionBusy):
+            worker.start({"run_id": "other"})
+    finally:
+        release.set()
+    assert first.result(timeout=1)["run_id"] == "r"
 ```
 
-- [ ] **Step 2: Run and confirm 404 failures**
-
-```powershell
-rtk proxy uv run pytest tests/ui/test_rehearsal.py tests/ui/test_api.py -q
-```
-
-Expected: FAIL because routes and service are absent.
-
-- [ ] **Step 3: Implement the Rehearsal adapter**
-
-`RehearsalService` loads `golden-run.json`, validates every supplied snapshot/event, owns only
-fixture advancement, and implements the same service methods Live will implement:
+- [ ] Run the two new test files and confirm missing-class failures.
+- [ ] Implement atomic offer/decision journal updates before event publication or waiter notification. A changed decision version yields CONFLICT; a changed display version alone does not. A settled identical attempt returns its persisted result. Reusing an identity with another decision conflicts. Waiters exist only in this process; startup marks interrupted Live work RECOVERY_REQUIRED and terminalizes outstanding waiters without dispatch.
 
 ```python
-class MissionControlService(Protocol):
-    def session(self) -> dict: ...
-    def read_snapshot(self, run_id: str) -> dict: ...
-    def read_events(self, run_id: str, after_sequence: int, limit: int) -> list[dict]: ...
-    def read_evidence(self, run_id: str, artifact_id: str) -> EvidenceCapability: ...
-    def submit_chat(self, run_id: str, command: dict) -> dict: ...
-    def submit_decision(self, run_id: str, command: dict) -> dict: ...
-    def request_land(self, run_id: str, command: dict) -> dict: ...
-    def trigger_emergency(self, command: dict) -> dict: ...
-```
+class MissionBusy(RuntimeError):
+    pass
 
-Import `EvidenceCapability` from `sentinel.ui.models`; return `payload` only from the evidence
-route and never include it in snapshot JSON.
-
-The fixture contains request, proposal, approval, flight, fresh pose, aging pose, stale pose,
-recovered pose, capture/analysis, uncertain count, follow-up, and report stages. Synthetic images
-remain clearly labelled Rehearsal.
-
-- [ ] **Step 4: Add typed FastAPI routes**
-
-Implement the exact `/api/v1` routes from the design. Validate `limit` as 1–200, map missing runs
-to 404, conflicts to 409, forbidden evidence to 403, and uncertain command outcomes to a 202 body
-with `status: IN_DOUBT`. Never return a traceback or private exception text.
-
-- [ ] **Step 5: Implement the browser HTTP client**
-
-```javascript
-// examples/survey-console/http-client.mjs
-export function createHttpClient(base = "/api/v1") {
-  const json = async (url, init) => {
-    const response = await fetch(url, init);
-    const body = await response.json();
-    if (!response.ok) throw Object.assign(new Error(body.message), { code: body.code });
-    return body;
-  };
-  return {
-    read_survey: (runId) => json(`${base}/runs/${runId}/snapshot`),
-    read_survey_events: (runId, after, limit) =>
-      json(`${base}/runs/${runId}/events?after_sequence=${after}&limit=${limit}`),
-    submit_decision: (runId, attempt) => json(`${base}/runs/${runId}/decisions`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(attempt),
-    }),
-  };
-}
-```
-
-Add a visibility-aware 500 ms poller that never overlaps calls and invokes `controller.refresh()`.
-Do not add SSE or WebSocket client code.
-
-- [ ] **Step 6: Run Rehearsal service and client tests**
-
-```powershell
-rtk proxy uv run pytest tests/ui/test_rehearsal.py tests/ui/test_api.py -q
-rtk node --test tests/survey_console/client.test.mjs tests/survey_console/controller.test.mjs
-```
-
-Expected: PASS.
-
-- [ ] **Step 7: Commit**
-
-```powershell
-rtk git add src/sentinel/ui fixtures/mission-control tests/ui examples/survey-console tests/survey_console
-rtk git commit -m "feat(ui): connect rehearsal mission service"
-```
-
-### Task 4: Restyle the stable field-command-ledger shell
-
-**Files:**
-- Modify: `assets/sentinel-ui/tokens/tokens.css`
-- Add: `assets/sentinel-ui/fonts/IBMPlexSans-Variable.woff2`
-- Add: `assets/sentinel-ui/fonts/IBMPlexMono-Regular.woff2`
-- Add: `assets/sentinel-ui/fonts/OFL.txt`
-- Modify: `examples/survey-console/index.html`
-- Modify: `examples/survey-console/console.css`
-- Modify: `examples/survey-console/shell.mjs`
-- Modify: `scripts/ui_assets/verify_survey_console.cjs`
-
-- [ ] **Step 1: Add failing browser assertions for the new regions**
-
-Extend the verifier to require `CommandBar`, `ChatRail`, `MissionWorkspace`, `FactsRail`,
-`EvidenceSpine`, and `AuditDrawer`; assert no horizontal overflow at 1440x900, 1920x1080, and
-390x844; assert Land and Emergency remain visible at every fixture stage.
-
-- [ ] **Step 2: Run the verifier and confirm region failures**
-
-```powershell
-rtk python -m http.server 8770 --bind 127.0.0.1
-rtk node scripts/ui_assets/verify_survey_console.cjs http://127.0.0.1:8770
-```
-
-Expected: FAIL with missing mission-control region IDs.
-
-- [ ] **Step 3: Implement the stable layout and tokens**
-
-Use one CSS grid with fixed command bar, 300 px chat rail, flexible central workspace, 300 px
-facts rail, and central evidence spine. Keep the geometry stable between phases. Define local
-`@font-face` declarations and preserve 16 px body/14 px metadata minimums. Cyan is measured/live,
-amber is aging/attention, and red is emergency/containment only.
-
-The center contains two persistent children:
-
-```html
-<section id="mission-sheet" aria-label="Mission route and position"></section>
-<section id="camera-stage" aria-label="Current camera and evidence"></section>
-```
-
-Add an off-canvas audit drawer opened by a labelled button; do not keep the full event log in the
-first viewport.
-
-- [ ] **Step 4: Verify accessibility and responsive states**
-
-```powershell
-rtk node scripts/ui_assets/verify_survey_console.cjs http://127.0.0.1:8770
-```
-
-Expected: PASS at all three viewports, reduced motion, keyboard-only navigation, and no external
-font/network request.
-
-- [ ] **Step 5: Commit**
-
-```powershell
-rtk git add assets/sentinel-ui examples/survey-console scripts/ui_assets/verify_survey_console.cjs
-rtk git commit -m "feat(ui): create field command ledger shell"
-```
-
-### Task 5: Add the persistent text mission thread
-
-**Files:**
-- Create: `src/sentinel/ui/chat.py`
-- Create: `tests/ui/test_chat.py`
-- Create: `examples/survey-console/chat.mjs`
-- Create: `tests/survey_console/chat.test.mjs`
-- Modify: `examples/survey-console/app.mjs`
-- Modify: `examples/survey-console/shell.mjs`
-- Modify: `examples/survey-console/console.css`
-
-- [ ] **Step 1: Write failing backend chat tests**
-
-```python
-def test_chat_persists_one_atomic_reply(service):
-    command = {
-        "command_id": "cmd-1", "idempotency_key": "chat-1", "expected_version": 3,
-        "text": "How many computers have you seen?",
-    }
-    first = service.submit_chat("run-1", command)
-    second = service.submit_chat("run-1", command)
-    assert first == second
-    messages = service.read_snapshot("run-1")["chat"]["messages"]
-    assert [m["role"] for m in messages[-2:]] == ["OPERATOR", "ASSISTANT"]
-    assert all(m["status"] == "COMPLETE" for m in messages[-2:])
-```
-
-Also test unsupported requests escalate or clarify, status/count questions cite snapshot versions,
-provider failures preserve the operator message, and chat cannot approve a proposal.
-
-- [ ] **Step 2: Confirm failures, then implement `ChatService`**
-
-`ChatService` wraps the integrated bounded decision session when present. Rehearsal uses a
-deterministic responder over the current projection. It writes the operator message first, calls
-the bounded session once, writes one complete assistant/system result, and records public events.
-It exposes no token stream and no private reasoning.
-
-- [ ] **Step 3: Write failing frontend transcript tests**
-
-Test one continuous run thread, preserved composer text after failure, suggested prompts, no
-auto-scroll while history is being inspected, and a disabled duplicate send while the same
-command is pending.
-
-- [ ] **Step 4: Implement `chat.mjs`**
-
-Export `createChatView(host, client, getSnapshot)` with `render(messages)`, `submit(text)`, and
-`dispose()`. Generate command UUIDs with `crypto.randomUUID()`, retain the same identity on retry,
-and render assistant Markdown as inert text for V1 (no raw HTML injection).
-
-- [ ] **Step 5: Run and commit**
-
-```powershell
-rtk proxy uv run pytest tests/ui/test_chat.py -q
-rtk node --test tests/survey_console/chat.test.mjs
-rtk git add src/sentinel/ui/chat.py tests/ui/test_chat.py examples/survey-console tests/survey_console
-rtk git commit -m "feat(ui): add persistent mission chat"
-```
-
-### Task 6: Connect proposal cards to a real approval broker
-
-**Files:**
-- Create: `src/sentinel/ui/approval.py`
-- Create: `tests/ui/test_approval.py`
-- Modify: `examples/survey-console/approval.mjs`
-- Modify: `examples/survey-console/app.mjs`
-- Modify: `tests/survey_console/approval.test.mjs`
-
-- [ ] **Step 1: Write failing broker tests**
-
-```python
-def test_approval_unblocks_exact_waiter_only(broker):
-    pending = broker.offer(run_id="run-1", proposal_id="p-1", proposal_sha256="abc", version=7)
-    result = broker.decide({
-        "run_id": "run-1", "proposal_id": "p-1", "proposal_sha256": "abc",
-        "expected_version": 7, "decision": "APPROVE", "command_id": "c-1",
-        "idempotency_key": "approve-1",
-    })
-    assert result["status"] == "ACKNOWLEDGED"
-    assert pending.wait(timeout=0.1) == "APPROVE"
-
-
-def test_replaced_proposal_conflicts(broker):
-    broker.offer(run_id="run-1", proposal_id="p-2", proposal_sha256="new", version=8)
-    assert broker.decide({
-        "run_id": "run-1", "proposal_id": "p-1", "proposal_sha256": "old",
-        "expected_version": 7, "decision": "APPROVE", "command_id": "c-2",
-        "idempotency_key": "approve-old",
-    })["status"] == "CONFLICT"
-```
-
-Cover browser refresh, duplicate delivery, reject, `IN_DOUBT` reconciliation, and backend restart
-turning a Live waiter into `RECOVERY_REQUIRED`.
-
-- [ ] **Step 2: Implement the broker and route binding**
-
-The broker persists offers/attempts before publishing them, uses a thread-safe in-memory waiter
-only for the current process, and checks all immutable identity fields before resolving it. It
-never calls flight code from the HTTP request thread.
-
-- [ ] **Step 3: Move working buttons into inline chat proposal cards**
-
-Render the full candidate in the thread and keep the right facts rail as a read-only summary.
-Both Approve and Reject call the same `submit_decision` method. Disable stale, ineligible, pending,
-and settled cards with visible reasons. Preserve LightCode's existing retry identity behavior.
-
-- [ ] **Step 4: Run and commit**
-
-```powershell
-rtk proxy uv run pytest tests/ui/test_approval.py -q
-rtk node --test tests/survey_console/approval.test.mjs
-rtk git add src/sentinel/ui/approval.py tests/ui/test_approval.py examples/survey-console tests/survey_console
-rtk git commit -m "feat(ui): bind inline proposal approvals"
-```
-
-### Task 7: Project real survey state and mission progress
-
-**Files:**
-- Create: `src/sentinel/ui/survey_projection.py`
-- Create: `src/sentinel/ui/mission_worker.py`
-- Create: `tests/ui/test_survey_projection.py`
-- Create: `tests/ui/test_mission_worker.py`
-- Create: `examples/survey-console/mission-map.mjs`
-- Create: `tests/survey_console/mission-map.test.mjs`
-- Modify: `src/sentinel/survey/loop.py`
-- Modify: `src/sentinel/survey/store.py`
-- Modify: `src/sentinel/cube/mission.py`
-- Modify: `examples/survey-console/shell.mjs`
-
-- [ ] **Step 1: Write failing projection tests over a real `SurveyStore`**
-
-Populate a temporary survey database with a run, proposed/flown sweep, frames, sightings,
-objects, and report. Assert the projection returns exact counts, two-flight budget, frame status,
-artifact IDs, route stops, commanded/measured distinction, and no `image_path`.
-
-- [ ] **Step 2: Add public read methods rather than UI SQL**
-
-Add focused methods to `SurveyStore`: `read_run`, `read_sweeps`, `read_frames_public`,
-`read_objects_public`, `read_report`, and `read_event_page`. Each returns allowlisted dictionaries.
-`survey_projection.py` composes those methods; browser and JavaScript code never query SQLite.
-
-- [ ] **Step 3: Add event hooks at existing lifecycle boundaries**
-
-Inject an optional `emit(event_type, public_payload)` callback into `run_survey` and
-`CubeMissionRunner`. Emit proposal offered, decision applied, flight started, stop active,
-localization result, frame captured, analysis completed, merge completed, report accepted/rejected,
-and terminal outcome. Defaults preserve existing callers and behavior.
-
-- [ ] **Step 4: Implement one serial mission worker**
-
-```python
 class MissionWorker:
-    def __init__(self, run_callable, approval_broker, emit):
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sentinel-mission")
-        self._run_callable = run_callable
-        self._approval_broker = approval_broker
-        self._emit = emit
+    def __init__(self, run_callable):
+        self._run = run_callable
+        self._lock = Lock()
+        self._active = False
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sentinel-mission")
 
     def start(self, request):
-        return self._executor.submit(self._run_callable, request, self._approval_broker, self._emit)
+        with self._lock:
+            if self._active:
+                raise MissionBusy("MISSION_BUSY")
+            self._active = True
+        try:
+            return self._pool.submit(self._execute, request)
+        except BaseException:
+            with self._lock:
+                self._active = False
+            raise
+
+    def _execute(self, request):
+        try:
+            return self._run(request)
+        finally:
+            with self._lock:
+                self._active = False
 ```
 
-Tests prove the UI thread remains responsive while approval blocks and that a second mutating
-mission is refused while one is active.
+Add `close()` that shuts down the executor after the service resolves/cancels pending waiters; test teardown cannot leave a blocked worker. Service command claims precede admission, so same-command retries read the existing result rather than call start again. A busy rejection settles that command as CONFLICT rather than leaving it pending.
 
-- [ ] **Step 5: Render the inline SVG mission sheet**
+- [ ] Run `uv run pytest tests/ui/test_approval.py tests/ui/test_mission_worker.py tests/ui/test_store.py -q`; expect PASS.
+- [ ] Commit: `git add src/sentinel/ui tests/ui && git commit -m "feat(ui): bind durable approvals and mission admission"`.
 
-`mission-map.mjs` consumes only backend-provided map coordinates. Draw envelope, route, numbered
-stops, active stop, commanded ghost, measured marker, and containment state. Do not convert pose
-units in JavaScript and do not infer progress from stop order or time.
+### Task 3: Establish shared safety semantics with fake transports
 
-- [ ] **Step 6: Run focused and regression tests**
+**Files:** modify `src/sentinel/runner.py`, `src/sentinel/cube/mission.py`; create `src/sentinel/ui/safety.py`, `tests/ui/test_safety.py`; extend `tests/test_runner.py` and `tests/cube/test_mission.py`.
 
-```powershell
-rtk proxy uv run pytest tests/ui/test_survey_projection.py tests/ui/test_mission_worker.py tests/survey tests/cube/test_mission.py -q
-rtk node --test tests/survey_console/mission-map.test.mjs tests/survey_console/*.test.mjs
-```
+**Interfaces:** public `FlightTestRunner.latch_emergency() -> bool` atomically sets emergency state, returning whether newly latched; existing `trigger_emergency()` preserves compatibility by using the latch then its current send path. Add `request_controlled_land()` and an explicit controlled-terminal exception/state. `SafetyControlPort.request_land(run_id, command_identity) -> dict`; `trigger_emergency(session_id, command_identity, active_run_id=None) -> dict`. `RunnerSafetyAdapter` receives a thread-safe active-runner registry, independent sender, session ID and audit sink; `SafetyRegistry.bind(run_id, runner)`, `unbind(run_id, runner)` and `get(run_id)` are defined in this file.
 
-Expected: PASS.
-
-- [ ] **Step 7: Commit**
-
-```powershell
-rtk git add src/sentinel/ui src/sentinel/survey src/sentinel/cube tests/ui tests/survey tests/cube examples/survey-console tests/survey_console
-rtk git commit -m "feat(ui): project live survey mission state"
-```
-
-### Task 8: Preserve pose evidence and derive localization health
-
-**Files:**
-- Create: `src/sentinel/pose/evidence.py`
-- Create: `src/sentinel/ui/pose_projection.py`
-- Create: `tests/pose/test_evidence.py`
-- Create: `tests/ui/test_pose_projection.py`
-- Modify: `src/sentinel/pose/detector.py`
-- Modify: `src/sentinel/pose/stream.py`
-- Modify: `src/sentinel/pose/persistence.py`
-
-- [ ] **Step 1: Write failing detector-evidence tests**
-
-Use rendered tag frames from existing pose test helpers. Assert the diagnostic contains normalized
-four-corner polygons, `USED` versus `DETECTED_NOT_USED`, run/report/frame hash binding, and no raw
-image bytes or path.
+- [ ] Write race tests using injected send callbacks and Events. A fake sender asserts the latch before recording a send; then a send failure must leave the runner unable to move. Test no active runner, duplicate identity, blocked normal transport and held UI database writer.
 
 ```python
-def test_pose_evidence_binds_corners_to_report(rendered_frame, tag_map):
-    result = estimate_pose_with_evidence(rendered_frame, tag_map, run_id="r", report_id="p")
-    assert result.report.report_id == result.evidence.report_id == "p"
-    assert all(len(tag.corners_xy_normalized) == 4 for tag in result.evidence.tags)
-    assert all(0 <= value <= 1 for tag in result.evidence.tags for point in tag.corners_xy_normalized for value in point)
+def test_emergency_latch_precedes_independent_send(runner, registry, identity):
+    registry.bind("r", runner)
+    def send():
+        assert runner.emergency_triggered
+        raise OSError("offline")
+    adapter = RunnerSafetyAdapter(registry, send, "s", audit_sink=lambda result: None)
+    result = adapter.trigger_emergency("s", identity, "r")
+    assert result["status"] == "FAILED"
+    assert runner.emergency_triggered
+    with pytest.raises(EmergencyAborted):
+        runner.move_checked("forward", 20)
 ```
 
-- [ ] **Step 2: Introduce an additive diagnostic return path**
+Here `identity` is `{command_id,correlation_id,idempotency_key}`; fixture `runner` uses the existing DryRunClient and existing runner test construction. Define both in `tests/ui/conftest.py`. Reuse existing runner test fixtures where importable; do not send a socket packet.
 
-Keep `estimate_pose(...) -> DronePoseReport` unchanged. Add
-`estimate_pose_with_evidence(...) -> PoseEstimate` where `PoseEstimate` contains the report and
-`PoseEvidenceFrame`. The stream uses the richer function only when an evidence sink is supplied.
-Existing pose consumers and wire contracts remain unchanged.
-
-Define the new types in `src/sentinel/pose/evidence.py`:
+- [ ] Run focused tests to failure; implement latch-before-independent-send with no normal transport or SQLite lock on the critical path. Use an in-memory command ledger for immediate same-process reconciliation and a separate queued audit writer; audit failure is visible and retryable without claiming the physical outcome. Persisted restart state is RECOVERY_REQUIRED, not assumed exactly-once delivery across crashes.
 
 ```python
-@dataclass(frozen=True)
-class PoseTagEvidence:
-    tag_id: int
-    corners_xy_normalized: tuple[tuple[float, float], ...]
-    status: Literal["USED", "DETECTED_NOT_USED"]
-    reason_code: str | None
-    zone_id: str | None
-    reprojection_error_px: float | None
-
-
-@dataclass(frozen=True)
-class PoseEvidenceFrame:
-    run_id: str
-    report_id: str
-    artifact_id: str
-    sha256: str
-    captured_at: str
-    width_px: int
-    height_px: int
-    source_kind: str
-    tags: tuple[PoseTagEvidence, ...]
-
-
-@dataclass(frozen=True)
-class PoseStreamHealth:
-    frames_seen: int
-    reports_emitted: int
-    no_tag_frames: int
-    gated_frames: int
-    timeouts: int
+runner = registry.get(active_run_id) if active_run_id else None
+if runner is not None:
+    runner.latch_emergency()
+try:
+    bytes_sent = independent_send()
+    result = {"status": "ACKNOWLEDGED", "bytes_sent": bytes_sent}
+except OSError:
+    result = {"status": "FAILED", "reason_code": "EMERGENCY_SEND_FAILED"}
 ```
 
-- [ ] **Step 3: Add an aggregated stream-health callback**
+This is the critical section within the adapter, after identity/session validation and duplicate lookup. Also handle missing transport as UNAVAILABLE. A transport error cannot clear the latch. The registry also retains a session emergency latch when no runner exists; mission admission and runner registration atomically refuse after it is set. Safety cancellation releases any approval waiter with a terminal outcome, without accepting the proposal. Ensure emergency and controlled-land latches participate in every runner and Cube override's normal-command check. Land latches before dispatch; a distinct terminal outcome ends the mission without being relabelled emergency. Do not hold a normal command lock while waiting for its transport response; a command already sent may finish, but no subsequent command may start after the safety latch wins. Emergency remains usable after Land.
 
-Extend `run_pose_stream` with optional `on_health(PoseStreamHealth)` and
-`on_evidence(PoseEvidenceFrame)` callbacks. Once per second, publish counts for frames seen,
-reports emitted, no-tag frames, gated frames, and timeouts. Callback failures disable only that
-display callback and never stop flight/localization.
+- [ ] Run `uv run pytest tests/ui/test_safety.py tests/test_runner.py tests/cube/test_mission.py -q`; expect PASS including compatibility tests.
+- [ ] Commit: `git add src/sentinel/runner.py src/sentinel/cube/mission.py src/sentinel/ui/safety.py tests && git commit -m "feat(safety): bind independent emergency to runner state"`.
 
-- [ ] **Step 4: Derive freshness on the backend**
+### Task 4: Execute the clean scenario through the production survey loop
 
-`pose_projection.py` reads the latest run-bound report and returns `age_ms`, effective
-`stale_after_ms`, and `FRESH` up to half-threshold, `AGING` up to threshold, `STALE` above it, or
-`UNAVAILABLE`. Use an injected UTC clock in tests. Convert pose to mission-sheet coordinates via
-the adopted site transform in Python.
+**Files:** create `src/sentinel/ui/scenarios.py`, `runtime.py`, `fixtures/mission-control/clean-computer.json`, `tests/ui/test_runtime.py`; modify `src/sentinel/survey/loop.py`, `store.py`; extend `tests/survey/test_loop.py`.
 
-- [ ] **Step 5: Run pose and UI tests**
+**Interfaces:** `ScenarioAdapters` frozen dataclass contains `options,policy,flight,detector,writer,camera,source_kind`; `build_rehearsal_adapters(scenario_path, artifact_root) -> ScenarioAdapters`. `SurveyRuntime(survey_db, ui_db, adapters, approval, safety_registry).execute(request) -> dict`. Add optional `emit(event_type, public_payload)` to `run_survey` and its ingestion helper; default None preserves existing callers. Add `SurveyStore.read_run`, `read_sweeps`, `read_frames_public`, `read_objects_public`, `read_report`, all run-scoped and allowlisted.
 
-```powershell
-rtk proxy uv run pytest tests/pose/test_evidence.py tests/ui/test_pose_projection.py tests/pose/test_detector.py tests/pose/test_live_stream.py -q
+- [ ] Promote clean scenario data from `test_a_clean_run_flies_once_counts_and_reports` into JSON inputs: existing envelope, four rail stops, one computer's scripted detections. Build actual PNG bytes with existing Pillow facilities, hash the bytes and use real dimensions. Product code must not import `_StaticFlight`, `_one_computer_script` or other test helpers. Scripted flight implements the existing FlightPort and yields valid FlightFrames; counts/report are never fixture outputs. Register a DryRunClient-backed runner for its active duration and check its safety latches before each simulated stop/capture. Simulated safety terminates the actual dry-run worker; it is not only a change to a UI badge. Worker admission consults the session emergency latch, and terminal cleanup unregisters the exact runner instance.
+- [ ] Write the failing test using temporary stores, real broker, adapters and worker. `runtime_harness` is a fixture created in this task that builds those components, exposes `worker,broker,store`, and closes them on teardown. `wait_for_offer()` uses a publication Event, not polling sleep. `attempt_for(offer, decision)` supplies all immutable identity fields with fresh UUIDs.
+
+```python
+def test_clean_scenario_requires_approval_and_reports(runtime_harness):
+    h = runtime_harness
+    future = h.worker.start({"run_id": "clean", "request_text": "count the computers",
+                             "correlation_id": "clean-request"})
+    offer = h.wait_for_offer()
+    assert h.flight_count() == 0
+    h.broker.decide(h.attempt_for(offer, "APPROVE"))
+    result = future.result(timeout=5)
+    assert result["status"] == "REPORTED"
+    assert result["counts"]["computer"]["confirmed"] == 1
+    assert h.read_report()["body"] == result["report"]
 ```
 
-Expected: PASS with existing `DronePoseReport` tests unchanged.
+- [ ] Run `uv run pytest tests/ui/test_runtime.py -q` to fail, then implement the actual call, opening SurveyStore inside the worker thread:
 
-- [ ] **Step 6: Commit**
-
-```powershell
-rtk git add src/sentinel/pose src/sentinel/ui/pose_projection.py tests/pose tests/ui/test_pose_projection.py
-rtk git commit -m "feat(pose): expose bounded localization evidence"
+```python
+outcome = run_survey(
+    store=survey_store, run_id=request["run_id"], request_text=request["request_text"],
+    options=adapters.options, policy=adapters.policy, flight=adapters.flight,
+    detector=adapters.detector, writer=adapters.writer, camera=adapters.camera,
+    on_approval=lambda candidate: approval.offer(
+        request["run_id"], candidate, request["correlation_id"]
+    ).wait(), emit=publish_runtime_event,
+)
 ```
 
-### Task 9: Make localization behavior legible in the browser
+`publish_runtime_event` is `SurveyRuntime._publish_event(type,payload)`: it persists only the defined public lifecycle payloads and refreshes the projection after committed runtime changes. Never publish a merge/report completion before the associated store write succeeds. Emit proposal, decision, sweep start/finish, capture, analysis, merge and report result at their actual boundaries. Durable projection failures stop subsequent ordinary work and become explicit failure state; optional display callbacks may fail without breaking flight control. Translate runner controlled-land/emergency termination into ABORTED run state and stop subsequent capture, merge or report work; never turn a cancelled approval into authorization. Close connections in finally blocks.
 
-**Files:**
-- Create: `examples/survey-console/localization.mjs`
-- Create: `tests/survey_console/localization.test.mjs`
-- Modify: `examples/survey-console/evidence.mjs`
-- Modify: `examples/survey-console/mission-map.mjs`
-- Modify: `examples/survey-console/shell.mjs`
-- Modify: `examples/survey-console/console.css`
+- [ ] Test rejection with zero flights, no external connection constructor calls, reporter mismatch yielding REPORT_REJECTED, and worker-thread connection ownership. Run `uv run pytest tests/ui/test_runtime.py tests/survey -q` to PASS.
+- [ ] Commit: `git add src/sentinel/ui src/sentinel/survey fixtures/mission-control tests/ui tests/survey && git commit -m "feat(ui): run rehearsal through production survey loop"`.
 
-- [ ] **Step 1: Write failing state and geometry tests**
+### Task 5: Serve real projections, evidence and the frontend
 
-Test fresh, aging, stale, unavailable, and refreshed pose; tag corner letterboxing; separate
-localization/survey layers; commanded/measured markers; no-fix ribbon segments; and reduced motion.
-Assert stale coordinates remain fixed and labelled with age rather than drifting.
+**Files:** create `src/sentinel/ui/projection.py`, `service.py`, `api.py`, `app.py`, `__main__.py`, `bootstrap.py`; modify `pyproject.toml`, `uv.lock`; create `tests/ui/test_projection.py`, `test_api.py`, `test_app.py`, `test_evidence.py`.
 
-- [ ] **Step 2: Implement localization rendering**
+**Interfaces:** `ProjectionService.snapshot(run_id) -> dict`; `MissionControlService.session`, `read_snapshot`, `read_events`, `read_evidence`, `submit_chat`, `submit_decision`, `request_land`, `trigger_emergency`, `close`. Reads take the run ID and event cursor/limit or artifact ID as in the spec; commands take `(run_id, command)` except session emergency `(command)`. `submit_chat` is wired in Task 7; until then the route explicitly returns capability unavailable. `build_app(service, repository_root: Path) -> FastAPI`. `build_service(config) -> MissionControlService` initially supports Rehearsal and explicitly refuses Live until Task 11.
 
-`localization.mjs` exports pure render models before DOM functions:
+- [ ] Write host tests that resolve HTML references and load modules/CSS, rather than asserting only root HTTP 200. Add run-scoped artifact hash, revoked, missing and malformed-image tests.
+
+```python
+def test_console_assets_resolve(client):
+    assert client.get("/", follow_redirects=False).headers["location"] == "/console/"
+    assert client.get("/console/").status_code == 200
+    for path in ("/console/app.mjs", "/console/console.css", "/assets/sentinel-ui/tokens/tokens.css"):
+        assert client.get(path).status_code == 200
+```
+
+- [ ] Run focused tests to fail. Add NiceGUI to dependencies with a compatible locked release; inspect its installed supported `ui.run_with` integration before composing the FastAPI app. Bind localhost; do not enable On Air. Implement static routing:
+
+```python
+app.mount("/console", StaticFiles(directory=console, html=True), name="console")
+app.mount("/assets/sentinel-ui", StaticFiles(directory=assets), name="assets")
+@app.get("/", include_in_schema=False)
+def index():
+    return RedirectResponse("/console/", status_code=307)
+```
+
+Projection uses public SurveyStore reads and UI journal state. Unknown phase details stay unavailable until supplied; never fabricate pose or infer stop completion from elapsed time. Store a coherent snapshot with its event watermark; increment display version when backend age/freshness changes. State changes and polling must not silently invalidate approval decision_version.
+
+Evidence reads resolve artifact IDs only through the current run's authorization registry, verify stored hash/dimensions, enforce PNG/JPEG and a 10 MiB encoded size/20 megapixel decoded bound, and return `EvidenceCapability`. API AVAILABLE responses send only image bytes plus hash/dimensions headers; denial responses use safe structured JSON. Browser `frame_id` is mapped through the snapshot's frame-to-artifact reference, never treated as a filesystem path.
+
+Route table is exactly spec §7. Event limit is 1–200. Missing resources use 404, denied 403, revoked 410, conflict 409, IN_DOUBT 202. Errors contain stable public code/message only. Use FastAPI sync/threadpool handlers for blocking store calls; do not execute synchronous provider or hardware work on the event loop. Safety critical processing uses its independent path from Task 3.
+
+- [ ] Run `uv run pytest tests/ui/test_projection.py tests/ui/test_api.py tests/ui/test_app.py tests/ui/test_evidence.py -q`; expect PASS.
+- [ ] Commit: `git add src/sentinel/ui tests/ui pyproject.toml uv.lock && git commit -m "feat(ui): host bounded runtime projections and evidence"`.
+
+### Task 6: Adopt the HTTP client without losing controller guarantees
+
+**Files:** create `examples/survey-console/http-client.mjs`, `view-model.mjs`, `tests/survey_console/http-client.test.mjs`, `view-model.test.mjs`; modify `controller.mjs`, `app.mjs`, `approval.mjs`, `evidence.mjs` and corresponding tests.
+
+**Interfaces:** `createHttpClient(base, fetchImpl=fetch)` exposes `read_survey(runId)`, `read_survey_events(runId,after,limit)`, `read_evidence(runId,frameId)`, `submit_decision(attempt)`, `submit_chat(runId,command)`, `request_land(runId,command)`, `trigger_emergency(command)`. `toSurveyView(snapshot)` performs field/unit selection only; it does not infer authoritative state. Controller receives explicit contract selectors for v2 run/version/watermark, defaulting to v1 for legacy fixture tests.
+
+- [ ] Write a one-argument decision test and a 409 test before client implementation:
 
 ```javascript
-export function poseStyle(status, containment) {
-  if (containment === "OUTSIDE") return "pose-outside";
-  return {
-    FRESH: "pose-fresh",
-    AGING: "pose-aging",
-    STALE: "pose-stale",
-    UNAVAILABLE: "pose-unavailable",
-  }[status];
+test("one-argument decision preserves conflict identity", async () => {
+  const attempt = { run_id: "r", attempt_id: "a" };
+  const client = createHttpClient("/api/v1", async (url, init) => {
+    assert.equal(url, "/api/v1/runs/r/decisions");
+    assert.deepEqual(JSON.parse(init.body), attempt);
+    return new Response(JSON.stringify({attempt_id: "a", status: "CONFLICT", message: "Changed"}), {status: 409});
+  });
+  assert.equal((await client.submit_decision(attempt)).status, "CONFLICT");
+});
+```
+
+- [ ] Run `node --test tests/survey_console/http-client.test.mjs` to fail. Implement the typed decision path; other errors remain explicit transport/capability errors:
+
+```javascript
+async function submit_decision(attempt) {
+  const response = await fetchImpl(`${base}/runs/${encodeURIComponent(attempt.run_id)}/decisions`, {
+    method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(attempt)
+  });
+  const body = await response.json();
+  if (response.status === 409 && body.status === "CONFLICT" && body.attempt_id === attempt.attempt_id) return body;
+  if (!response.ok) throw new Error(body.message ?? "Decision transport failed");
+  return body;
 }
 ```
 
-Draw tag quadrilaterals as SVG polygons over the exact evidence image geometry. Labels include tag
-ID and used/not-used state. Survey boxes and localization tags have independent labelled toggles;
-localization is primary during flight and survey objects during analysis.
+The decision controller still validates the full result and tracks detached/stale attempts. Persisted snapshot/command state restores pending identities after reload; do not generate a replacement idempotency key on timeout. Add command/correlation/session identity to new attempts without rewriting outstanding ones.
 
-- [ ] **Step 3: Add the pose health block and ribbon**
+Evidence client converts bounded binary bytes/headers to the existing EvidenceResult shape, validates identity and dimensions, and returns explicit forbidden/revoked outcomes. Preserve revocation, late-result, URL cleanup, malformed image and very-thin-image regression tests. Remove hardcoded fixture provenance strings in runtime views; use actual mode/source facts.
 
-Show state text, age, source kind, used tag IDs, heading, optional altitude, overall reprojection
-error, containment, recent fix/no-fix segments, and last observation time. Color is accompanied by
-solid/dashed shape and text.
+Poll only after previous refresh completes, schedule next visible refresh after 500 ms or hidden after 5000 ms; dispose cancels timer and discards stale responses. Preserve run epoch guards, conflicting-event detection, gap visibility, same-version mutation rejection and watermark monotonicity for both contracts.
 
-- [ ] **Step 4: Run and commit**
+- [ ] Add tests for 202 reconciliation, response loss followed by identical retry, polling overlap, run switch, HTTP denial/revocation and changed display versus decision version. Run `node --test tests/survey_console/*.test.mjs` to PASS.
+- [ ] Commit: `git add examples/survey-console tests/survey_console && git commit -m "feat(ui): adopt runtime HTTP client and preserve reconciliation"`.
 
-```powershell
-rtk node --test tests/survey_console/localization.test.mjs tests/survey_console/evidence.test.mjs tests/survey_console/mission-map.test.mjs
-rtk git add examples/survey-console tests/survey_console
-rtk git commit -m "feat(ui): visualize localization health and tags"
-```
+### Task 7: Connect persistent chat and inline approvals
 
-### Task 10: Adopt controlled Land and independent Emergency
+**Files:** create `src/sentinel/ui/decision_session.py`, `chat.py`, `tests/ui/test_chat.py`, `test_decision_session.py`, `examples/survey-console/chat.mjs`, `tests/survey_console/chat.test.mjs`; modify service/API, app, shell and approval modules.
 
-**Files:**
-- Create: `src/sentinel/ui/safety.py`
-- Create: `tests/ui/test_safety.py`
-- Create: `examples/survey-console/safety.mjs`
-- Create: `tests/survey_console/safety.test.mjs`
-- Modify: `src/sentinel/runner.py`
-- Modify: `tests/test_runner.py`
-- Modify: `examples/survey-console/shell.mjs`
-- Modify: `examples/survey-console/console.css`
+**Interfaces:** `DecisionReply` frozen dataclass fields `kind, message, request_text` where kind ANSWER/CLARIFY/PROPOSE/REFUSE and request_text is null unless PROPOSE. `SurveyDecisionSession.respond(text, snapshot) -> DecisionReply` wraps an injected bounded intent responder and validates its output. `ChatService.submit(run_id, command) -> dict`; `createChatView(host, client, getSnapshot)` returns `render(messages),submit(text),dispose()`.
 
-- [ ] **Step 1: Write runner-level controlled-land race tests**
-
-Before exposing a UI action, add tests proving a public controlled-land request latches before
-sending `land`, prevents any later normal command, is idempotent, and remains distinct from
-`trigger_emergency`. Use `DryRunClient` and synchronization events; send no hardware command.
-
-- [ ] **Step 2: Add a public runner seam only if those tests define safe behavior**
-
-Implement `request_controlled_land()` on `FlightTestRunner` with its own latch and lock. Do not call
-the private `_attempt_normal_landing` from UI code. The runner reports requested, acknowledged,
-and completed separately and treats a land latch as a controlled terminal outcome, not emergency.
-
-If integration has already supplied an equivalent tested method, adapt `SafetyControlPort` to it
-and do not create a duplicate.
-
-- [ ] **Step 3: Implement `SafetyControlPort` adapters**
+- [ ] Write idempotent transcript, unsupported-input and no-chat-approval tests. `chat_harness` builds the real store/service with a scripted intent responder; its `submit(text,key)` constructs UUID identities and current decision version.
 
 ```python
-class SafetyControlPort(Protocol):
-    def request_land(self) -> dict: ...
-    def trigger_emergency(self) -> dict: ...
-
-
-class RunnerSafetyAdapter:
-    def __init__(self, runner, emergency_sender):
-        self.runner = runner
-        self.emergency_sender = emergency_sender
-
-    def request_land(self) -> dict:
-        self.runner.request_controlled_land()
-        return {"status": "ACKNOWLEDGED"}
-
-    def trigger_emergency(self) -> dict:
-        sent = self.emergency_sender.send()
-        return {"status": "ACKNOWLEDGED", "bytes_sent": sent}
+def test_text_cannot_approve(chat_harness):
+    h = chat_harness
+    h.install_pending_proposal()
+    reply = h.submit("approve it and take off", key="chat-1")
+    assert reply["kind"] in {"CLARIFY", "REFUSE"}
+    assert h.pending_proposal()["status"] == "PENDING"
+    assert h.flight_count() == 0
 ```
 
-Emergency uses the independent sender/runner emergency seam, never the mission executor queue.
-Sanitize errors and preserve command identity in `ui_commands`.
-
-- [ ] **Step 4: Implement browser safety controls**
-
-Land is one click. Emergency requires pointer/keyboard hold for 1200 ms, has an accessible label,
-and remains visible while ordinary controls disable. Show REQUESTED, ACKNOWLEDGED, COMPLETED, and
-UNAVAILABLE accurately; never display “safe” merely because HTTP returned.
-
-- [ ] **Step 5: Run race, adapter, and browser tests**
-
-```powershell
-rtk proxy uv run pytest tests/test_runner.py tests/ui/test_safety.py -q
-rtk node --test tests/survey_console/safety.test.mjs
-```
-
-Expected: PASS.
-
-- [ ] **Step 6: Commit**
-
-```powershell
-rtk git add src/sentinel/runner.py src/sentinel/ui/safety.py tests/test_runner.py tests/ui/test_safety.py examples/survey-console tests/survey_console
-rtk git commit -m "feat(ui): connect controlled land and emergency"
-```
-
-### Task 11: Compose immutable Rehearsal and Live startup modes
-
-**Files:**
-- Create: `src/sentinel/ui/bootstrap.py`
-- Create: `tests/ui/test_bootstrap.py`
-- Modify: `src/sentinel/ui/__main__.py`
-- Modify: `src/sentinel/ui/app.py`
-- Modify: `src/sentinel/cli.py`
-- Modify: `tests/test_cli.py`
-- Modify: `examples/survey-console/shell.mjs`
-
-- [ ] **Step 1: Write startup-gate tests**
-
-Test that Rehearsal starts without hardware, Live refuses without `--confirm`, site, tag map,
-survey database, pose database, detector/provider configuration, consent, and emergency transport,
-and Live never constructs a fixture adapter after a failed gate.
-
-- [ ] **Step 2: Implement immutable configuration**
-
-Add a `mission-control` CLI command with:
-
-```text
---mode rehearsal|live
---host 127.0.0.1
---port 8080
---site PATH
---tag-map PATH
---survey-db PATH
---pose-db PATH
---pose off|passive|reanchor
---detector replay|moondream|gemini
---location TEXT
---consent-date YYYY-MM-DD
---confirm
-```
-
-Provider secrets remain environment-only and are never copied into `SessionConfig` projections.
-The browser receives a read-only summary, not configuration controls.
-
-- [ ] **Step 3: Compose adapters by mode**
-
-`bootstrap.py` returns a `RehearsalService` or a `LiveMissionControlService`. Live composes the
-survey projection, mission worker, approval broker, pose projection/evidence sink, and safety
-adapter. Refuse startup if any required port is absent; never substitute the rehearsal service.
+- [ ] Run both new Python files to fail. Implement one persisted operator message before calling the responder, one complete public reply after it, and idempotent command settlement. Provider failure keeps the operator message and safe failure reply; duplicate delivery does not call the responder twice. On uncertain provider completion, retain a pending/failed public result rather than inventing another execution.
 
 ```python
-def build_service(config: SessionConfig) -> MissionControlService:
-    if config.mode == "REHEARSAL":
-        return RehearsalService.from_fixture(config.rehearsal_fixture)
+reply = session.respond(command["text"], projection.snapshot(run_id))
+if reply.kind == "PROPOSE":
+    worker.start({"run_id": run_id, "request_text": reply.request_text,
+                  "correlation_id": command["correlation_id"]})
+```
+
+This runs after identity claim and before command settlement. `respond` accepts arbitrary text but only legal supported intent becomes PROPOSE; unsupported/contradictory text clarifies or refuses. Rehearsal injects deterministic responder results for existing scenario prompts; Live injects the configured responder under identical response validation. Policy choice still occurs inside run_survey and validates existing legal candidates. Do not reuse coordinator AgentLoop's incompatible tools. Status/count answers cite snapshot version and stay responsive during approval waits; a second proposal uses guarded mission admission.
+
+- [ ] Move the existing full proposal render and Approve/Reject controls into the single run transcript. Preserve immutable retry identity, stale disabling, typed result display, focus and full candidate geometry. Enter submits text; browser failures preserve composer text; duplicate send disabled only for its pending command; history inspection suppresses auto-scroll. Render Markdown as inert text for V1.
+- [ ] Run `uv run pytest tests/ui/test_chat.py tests/ui/test_decision_session.py -q` and `node --test tests/survey_console/chat.test.mjs tests/survey_console/approval.test.mjs` to PASS.
+- [ ] Commit: `git add src/sentinel/ui tests/ui examples/survey-console tests/survey_console && git commit -m "feat(ui): connect persistent chat and inline decisions"`.
+
+### Task 8: Prove the first dry-run milestone through the real host
+
+**Files:** create `scripts/ui_assets/verify_mission_control.cjs`, `examples/survey-console/safety.mjs`, `tests/survey_console/safety.test.mjs`; modify app/shell/CSS, README and handoff; extend API/integration tests.
+
+**Interfaces:** `createSafetyView(host, client, getSnapshot)` renders availability and binds actions; Land uses one click, Emergency requires a 1200 ms pointer/keyboard hold with cancel on blur/release. Verifier accepts base URL and writes ignored artifacts. Existing `verify_survey_console.cjs` remains the isolated fixture regression suite.
+
+- [ ] Write browser acceptance against a temporary real Rehearsal host: submit request, inspect proposal, reload before deciding, approve, inspect evidence and report. Browser harness starts its own temporary session/database; it does not reuse a completed run across test cases.
+
+```javascript
+await page.goto(`${base}/console/`);
+await page.getByRole("textbox", {name: "Mission request"}).fill("count the computers");
+await page.getByRole("button", {name: "Send"}).click();
+await page.getByRole("button", {name: "Approve", exact: true}).waitFor();
+await page.reload();
+await page.getByRole("button", {name: "Approve", exact: true}).click();
+await page.getByRole("status", {name: "Report status"}).getByText("Accepted", {exact: true}).waitFor();
+```
+
+Verifier must additionally assert one confirmed computer from API results, authorized image bytes/hash, actual SurveyStore report, complete event provenance, no external requests and no console errors. Store assertions use a backend test harness, never expose test SQL endpoints in product API.
+
+- [ ] Run to fail before missing view wiring is added. Implement accessible safety controls, mode/source labels and minimal layout integration; safety acknowledgements are not physical completion. Simulated safety actions operate the fake adapter registry and remain visibly simulated.
+- [ ] Test rejection, lost decision response, two-tab conflict, same-identity retry, concurrent mission refusal, responsive status while waiting, forbidden/revoked image and no automatic approval on reload. Wire adapter test hooks only through injected constructors in tests, never unauthenticated product routes.
+- [ ] Start host in a separate terminal on port 8771 (8770 is the existing user preview), then run acceptance:
+
+```bash
+uv run python -m sentinel.ui --mode rehearsal --scenario fixtures/mission-control/clean-computer.json --host 127.0.0.1 --port 8771
+node scripts/ui_assets/verify_mission_control.cjs http://127.0.0.1:8771
+node --test tests/survey_console/*.test.mjs
+uv run pytest tests/ui tests/survey tests/test_runner.py -q
+```
+
+Expected: all pass. Record checkpoint A as real runtime dry-run with exact commit, artifacts and commands; do not mark full localization or Live complete.
+- [ ] Commit: `git add scripts/ui_assets/verify_mission_control.cjs examples/survey-console tests docs/handoffs && git commit -m "test(ui): prove integrated dry-run milestone"`.
+
+### Task 9: Preserve pose diagnostics and render backend freshness
+
+**Files:** create `src/sentinel/pose/evidence.py`, `src/sentinel/ui/pose_projection.py`, `tests/pose/test_evidence.py`, `tests/ui/test_pose_projection.py`, `examples/survey-console/localization.mjs`, `tests/survey_console/localization.test.mjs`; modify pose detector/stream/persistence, UI evidence and snapshot schema fixture.
+
+**Interfaces:** `PoseTagEvidence`, `PoseEvidenceFrame`, `PoseStreamHealth` use exact spec §9 fields. `PoseEstimate(report: DronePoseReport, evidence: PoseEvidenceFrame)` is frozen. Add `estimate_pose_with_evidence(frame,tag_map,*,run_id,report_id,artifact_id,captured_at,source_kind="SIMULATED",joint=True) -> PoseEstimate`. Existing `estimate_pose` signature/result remains unchanged. Stream optional callbacks are `on_health(PoseStreamHealth)` and `on_evidence(PoseEvidenceFrame)`; encoded evidence bytes go to a separate bounded artifact sink, never snapshot JSON.
+
+- [ ] Write exact-image hash/corner/report tests using existing rendered AprilTag fixtures and a clock boundary test:
+
+```python
+@pytest.mark.parametrize("age,expected", [(0,"FRESH"),(999,"FRESH"),(1000,"AGING"),(2000,"AGING"),(2001,"STALE")])
+def test_freshness_threshold(age, expected):
+    assert freshness_status(age, 2000) == expected
+```
+
+`freshness_status(age_ms,stale_after_ms)` is defined in pose_projection; absent report yields UNAVAILABLE. Add mismatched artifact/report/run and throwing-display-callback tests before implementation.
+
+- [ ] Run new tests to fail; retain corners at detector solve time, encode/store the exact image once, hash its served bytes and bind all diagnostics to it. Do not rerun detection on another frame or equate raw-array hash with encoded-byte hash. Keep used/not-used tag state and allowlisted rejection reason; failed pose frames count as no-fix and do not acquire a fabricated report ID.
+
+```python
+def freshness_status(age_ms, stale_after_ms):
+    if age_ms is None:
+        return "UNAVAILABLE"
+    if age_ms > stale_after_ms:
+        return "STALE"
+    return "AGING" if age_ms >= stale_after_ms / 2 else "FRESH"
+```
+
+Publish aggregated stream health at most once/second; bounded display callbacks must not block localization or flight, and a failing display sink disables itself visibly. Derive age and map coordinates in Python via the adopted site transform; changing age updates display version only.
+
+- [ ] Render supplied freshness and exact-image polygons with existing letterboxing math. Freeze stale measured coordinates; commanded ghost remains separate. Add independently labelled tag/object toggles and recent fix/no-fix ribbon. Preserve thin-image clipping and reduced motion.
+- [ ] Run `uv run pytest tests/pose tests/ui/test_pose_projection.py -q` and `node --test tests/survey_console/localization.test.mjs tests/survey_console/evidence.test.mjs`; expect PASS.
+- [ ] Commit: `git add src/sentinel/pose src/sentinel/ui tests examples/survey-console && git commit -m "feat(ui): expose exact-frame pose diagnostics and freshness"`.
+
+### Task 10: Complete mission presentation and broader dry-run scenarios
+
+**Files:** create `examples/survey-console/mission-map.mjs`, `tests/survey_console/mission-map.test.mjs`, `fixtures/mission-control/uncertain-followup.json`, `missing-analysis.json`; modify shell/chat/counts/evidence/CSS, runtime event hooks in cube mission/bridge, scenario loader and verifier; add locally vendored fonts/license under `assets/sentinel-ui/fonts/`.
+
+**Interfaces:** `missionMapModel(snapshot) -> {envelope,route,activeStop,commanded,measured}` selects supplied backend coordinates; `renderMissionMap(host, model)` uses inline SVG. Extend CubeMissionRunner optional public lifecycle sink and CubeFlight runner registration callbacks, preserving defaults for existing consumers.
+
+- [ ] Write geometry/progress tests: no measured point when localization is unavailable, no inferred completed stop, same backend units, stale marker frozen. Add runtime scenario tests for uncertain count, operator-approved follow-up and missing analysis. Derive inputs from existing survey tests/evaluation manifests, but feed them through the production loop; never import evaluation outcomes as runtime results.
+
+```javascript
+test("missing measured location stays absent", () => {
+  const snapshot = structuredClone(contractFixture);
+  snapshot.localization.map_position = null;
+  assert.equal(missionMapModel(snapshot).measured, null);
+});
+```
+
+- [ ] Run new tests to fail. Implement stable command bar, left chat, central mission/camera, evidence spine, right facts and audit drawer. Capture/progress events come from real runner callbacks. Display UNAVAILABLE for absent signals; no animation advances operational state.
+- [ ] Vendor IBM Plex Sans/Mono from the official distribution with attribution. Keep authoritative tokens JSON/CSS consistent; prefer page-scoped semantic variables for new console styling so the asset foundation does not change unnecessarily. If shared tokens change, edit JSON and generator inputs, regenerate CSS and rerun `scripts/ui_assets/check_assets.py`.
+- [ ] Extend actual-host acceptance to 1440x900,1920x1080,390x844, focus/skip-link/keyboard/reduced-motion, inert malicious strings, no external requests or overflow, stale→recovered tags and frame-request cap. Broader dry-run scenarios must complete actual merge/report validation.
+- [ ] Run `node --test tests/survey_console/*.test.mjs`, `uv run pytest tests/ui tests/survey tests/cube -q`, the asset checker and real-host verifier to PASS; record checkpoint B.
+- [ ] Commit: `git add examples/survey-console src/sentinel fixtures/mission-control assets/sentinel-ui scripts/ui_assets tests docs/handoffs && git commit -m "feat(ui): complete mission evidence and rehearsal scenarios"`.
+
+### Task 11: Compose Live adapters behind the same application service
+
+**Files:** modify `src/sentinel/ui/bootstrap.py`, `runtime.py`, `__main__.py`, `src/sentinel/cli.py`, `src/sentinel/survey/cube_bridge.py`; create `tests/ui/test_bootstrap.py`; extend `tests/test_cli.py`, `tests/survey/test_cube_bridge.py`.
+
+**Interfaces:** frozen `SessionConfig` contains mode, host, port, scenario_path, artifact_root, ui_db, survey_db, site_path, tag_map_path, pose_db, pose_mode, detector_name, location, consent_date, confirm. Secrets are resolved from environment by provider adapters and excluded from public summaries. `build_rehearsal_adapters(config.scenario_path,config.artifact_root)` from Task 4; `build_live_adapters(config) -> ScenarioAdapters` defined here; `validate_live_startup(config) -> None` fails with safe startup errors; `build_service(config)` always returns the same MissionControlService.
+
+- [ ] Write startup gate tests using injected fake adapter factories, with a spy proving Live failure never invokes the rehearsal factory. Parameterize absent confirm/site/tag-map/databases/consent/provider/profile/preflight/independent transport. Verify frozen config and no credential projection.
+
+```python
+def test_live_failure_never_constructs_rehearsal(live_config, monkeypatch):
+    calls = []
+    monkeypatch.setattr(bootstrap, "build_rehearsal_adapters", lambda *args: calls.append(args))
+    with pytest.raises(StartupError):
+        bootstrap.build_service(replace(live_config, confirm=False))
+    assert calls == []
+```
+
+- [ ] Run tests to fail. Implement mode composition and the CLI. Flags: `--mode rehearsal|live`, localhost `--host`, `--port`, `--scenario`, `--artifact-root`, `--ui-db`, `--survey-db`, `--site`, `--tag-map`, `--pose-db`, `--pose off|passive|reanchor`, `--detector replay|moondream|gemini`, `--location`, `--consent-date`, `--confirm`.
+
+```python
+if config.mode == "REHEARSAL":
+    adapters = build_rehearsal_adapters(config.scenario_path, config.artifact_root)
+else:
     validate_live_startup(config)
-    return LiveMissionControlService(
-        projection=build_live_projection(config),
-        worker=build_mission_worker(config),
-        approval=build_approval_broker(config),
-        pose=build_pose_projection(config),
-        safety=build_safety_adapter(config),
-    )
+    adapters = build_live_adapters(config)
+return MissionControlService(config=config, adapters=adapters)
 ```
 
-- [ ] **Step 4: Run startup tests and CLI regressions**
+Service constructor composes the same store, projection, broker, worker, chat and safety units from Tasks 1–7. Live adapters use existing CubeFlight, measured camera model, selected survey proposer/detector/writer and pose pipeline. Register each active Cube runner before flight and remove it only after terminal cleanup; independent emergency is session-available when no runner exists. A session emergency also latches admission so a new runner cannot start immediately after a no-active-runner emergency. Check latches atomically at registration/admission, not just once in UI.
 
-```powershell
-rtk proxy uv run pytest tests/ui/test_bootstrap.py tests/test_cli.py -q
+Live preflight executes under the backend's existing authorization rules; automated tests inject fakes rather than connect to a drone. A startup exception never constructs a deterministic replacement. Software tests can prove composition and refusal; they do not establish measured hardware readiness.
+
+- [ ] Run `uv run pytest tests/ui/test_bootstrap.py tests/survey/test_cube_bridge.py tests/test_cli.py tests/ui/test_safety.py -q` to PASS, with contract parity tests comparing both modes' payload validation using fake Live adapters.
+- [ ] Commit: `git add src/sentinel tests && git commit -m "feat(ui): compose live adapters through shared runtime"`.
+
+### Task 12: Verify, review and publish the integrated change
+
+**Files:** update `examples/survey-console/README.md`, `contract.md`, root `README.md`, `docs/handoffs/2026-09-21-mission-control.md`; implementation fixes only when supported by new failures or review findings.
+
+**Interfaces:** consumes completed Tasks 0–11; produces reproducible handoff, fresh independent review and an updated PR #8 linked to #7.
+
+- [ ] Run complete suites once after focused checks pass:
+
+```bash
+node --test tests/survey_console/*.test.mjs
+uv run pytest -q --ignore=fixtures
+uv run python scripts/ui_assets/check_assets.py
+node scripts/ui_assets/verify_mission_control.cjs http://127.0.0.1:8771
 ```
 
-Expected: PASS.
+Run the retained fixture verifier with its static fixture host as a separate regression check; do not claim it proves HTTP/runtime integration. Record exact command results, skips/warnings and source refs. Browser harness owns its temporary processes/data and stops them afterward; preserve the user's original port 8770 preview unless explicitly replacing it.
 
-- [ ] **Step 5: Commit**
+- [ ] Verify privacy/source/performance invariants: no private fields in DOM/API/logs; no nonlocal requests in Rehearsal; bounded polling/image rates; responsive chat/snapshot/safety during worker activity; approval age updates remain usable; recovery cannot dispatch.
+- [ ] Run one fresh independent whole-branch review under native execution. Address actionable findings with targeted failing regressions, then rerun affected checks. Do not replace completed implementation with a review-only report.
+- [ ] Write handoff with implemented adapters, milestones A/B/C, exact tests, source/commit ancestry, unresolved hardware-only checks and actual limitations. Do not claim flight, measured pose, landing completion or emergency motor-stop success from fake transports.
+- [ ] Commit documentation, push normally, update existing PR #8 title/body to its final scope, comment with the five corrected contract gaps and test evidence, and re-request Cols77 review. Link #7 as the foundation; inspect PR base/merge state after integration before editing it and avoid an unrelated diff or duplicated runtime commits. No force push or merge of the PR is authorized by this plan. Use a structured API body or a temporary Markdown file with `gh pr comment --body-file` for the detailed comment; inspect existing reviewer requests before renewing the request.
 
-```powershell
-rtk git add src/sentinel/ui src/sentinel/cli.py tests/ui/test_bootstrap.py tests/test_cli.py examples/survey-console/shell.mjs
-rtk git commit -m "feat(ui): compose rehearsal and live mission control"
-```
+## Coverage and self-review
 
-### Task 12: Complete browser acceptance, documentation, and handoff
+Spec §§1–3 → Tasks 0,4,8,10 (intent, reuse, runtime dry-run). §4 → Tasks 1–7 (host, projection, worker, commands, safety). §5 → Tasks 4,11 (shared mode composition). §6 → Tasks 7,8,10 (chat/presentation). §7 → Tasks 1,5,6 (versioned payload/API). §8 → Tasks 4,5,9,10 (authoritative signals). §9 → Tasks 9,10 (pose diagnostics). §§10–11 → Tasks 2,3,6–8,11 (identity, failure/recovery and safety). §12 → Tasks 6,8–10,12 (accessibility/privacy/performance). §§13–14 → Tasks 8,10–12 (ordered milestones, acceptance, handoff).
 
-**Files:**
-- Modify: `scripts/ui_assets/verify_survey_console.cjs`
-- Modify: `examples/survey-console/README.md`
-- Modify: `examples/survey-console/contract.md`
-- Modify: `README.md`
-- Create: `docs/handoffs/2026-09-21-mission-control.md`
-- Modify: relevant tests under `tests/ui/` and `tests/survey_console/`
-
-- [ ] **Step 1: Extend browser acceptance over the complete golden run**
-
-The verifier must drive request, proposal, approval, route progress, fresh/aging/stale/recovered
-pose, AprilTag overlays, commanded/measured markers, object evidence, uncertain count, follow-up,
-report, Land availability, and Emergency availability. It also covers reject, conflict,
-`IN_DOUBT`, forbidden evidence, event gap, disconnect/reconnect, and backend recovery-required.
-
-- [ ] **Step 2: Assert presentation and network invariants**
-
-At 1440x900, 1920x1080, and 390x844 assert no overflow, visible focus, reduced motion, no console
-errors, no external requests, bounded frame requests, no overlapping event polls, and no raw path,
-storage key, provider secret, or private prompt in DOM/network bodies.
-
-- [ ] **Step 3: Run all focused suites**
-
-```powershell
-rtk node --test tests/survey_console/*.test.mjs
-rtk proxy uv run pytest tests/ui tests/survey tests/pose tests/cube tests/test_runner.py tests/test_cli.py -q
-```
-
-Expected: all pass.
-
-- [ ] **Step 4: Run the complete serial repository suite**
-
-```powershell
-rtk proxy uv run pytest -q --ignore=fixtures
-```
-
-Expected: all tests pass; only previously documented skips/warnings remain.
-
-- [ ] **Step 5: Run browser verification from the real host**
-
-```powershell
-rtk uv run python -m sentinel.ui --mode rehearsal --host 127.0.0.1 --port 8770
-rtk node scripts/ui_assets/verify_survey_console.cjs http://127.0.0.1:8770
-```
-
-Expected: verifier exits 0 and writes ignored screenshots/validation evidence under `artifacts/`.
-
-- [ ] **Step 6: Document truthfully**
-
-Update the README and handoff with exact implemented adapters, source commit, test counts, mode
-labels, known unavailable signals, and the separate operator-authorized hardware gates. Do not
-claim Live flight, Land completion, emergency success, or provider readiness from Rehearsal tests.
-
-- [ ] **Step 7: Commit**
-
-```powershell
-rtk git add scripts/ui_assets examples/survey-console README.md docs/handoffs tests/ui tests/survey_console
-rtk git commit -m "test(ui): complete mission control acceptance"
-```
-
-## Final hardware gate — operator-authorized, not part of automated execution
-
-After all software verification passes, the operator separately authorizes and witnesses:
-
-1. Live camera delivery with source/freshness labels.
-2. AprilTag polygons bound to the same frame/report/hash as the pose.
-3. Fresh → aging → stale → recovered pose behavior by temporarily occluding tags.
-4. Commanded and measured positions on the same mission sheet.
-5. Controlled Land from the UI, with requested/acknowledged/completed kept distinct.
-6. Independent Emergency transport availability and its documented physical fallback.
-
-Record observed evidence and exact run IDs in the handoff. A software acknowledgement alone never
-proves physical completion.
+Review Focus cases are assigned to concrete tests above. Original plan defects are removed: no snapshot-driven Rehearsal service, no two-argument browser decision call, no throwing on typed 409 conflicts, no root module routing mismatch, no unguarded executor queue, no sender-only emergency adapter. Planning performs no dependency install, product changes or hardware operation.

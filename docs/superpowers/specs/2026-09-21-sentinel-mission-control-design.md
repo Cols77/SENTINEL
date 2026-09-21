@@ -1,14 +1,14 @@
 ---
 id: sentinel-mission-control-design
 title: "SENTINEL mission control center"
-status: revised-awaiting-review
+status: approved
 date: 2026-09-21
 ---
 
 # SENTINEL mission control center — design
 
 > Revised on 2026-09-21 after Alan approved the shared-runtime, dry-run-first approach.
-> This written revision awaits review before the implementation plan is revised.
+> Alan approved this written revision on 2026-09-21; the implementation plan is being revised.
 > It supersedes the earlier delivery sequence; implementation ownership remains with LightCode.
 
 ## 1. Purpose and release boundary
@@ -277,7 +277,9 @@ events        latest exposed sequence and snapshot watermark
 legal_actions exact current operator actions and disabled reasons
 ```
 
-The contract carries an explicit `schema_version` separate from `run.version`. The implementation
+The contract carries an explicit `schema_version` separate from `run.version`. A separate
+`run.decision_version` tracks authoritative decision changes: approval `expected_version` binds
+to it, so display-only pose-age refreshes cannot invalidate an otherwise current proposal. The implementation
 plan must define the exact versioned payload, identity fields and response envelopes together
 with a consumer migration; it cannot change validation while leaving consumers on the old shape.
 
