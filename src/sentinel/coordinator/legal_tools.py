@@ -126,7 +126,7 @@ def load_catalogue_plans(path: Path | None = None) -> tuple[CataloguePlan, ...]:
             marker_work = "it schedules no marker-verification step"
         plans.append(CataloguePlan(
             entry["id"],
-            f"This plan will visit exactly {len(stations)} stations "
+            f"This plan schedules visits to exactly {len(stations)} stations "
             f"({', '.join(map(str, stations))}); {marker_work}; mode={mode}",
             station_ids=tuple(stations),
         ))

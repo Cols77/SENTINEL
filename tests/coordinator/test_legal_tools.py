@@ -73,10 +73,10 @@ def test_load_catalogue_plans_describes_both_fixture_plans():
     marker = by_id["PLAN_MARKER_VERIFIED_6"].description
     route = by_id["PLAN_ROUTE_ONLY_2_ZONE"].description
 
-    assert "will visit exactly 6 stations" in marker
+    assert "schedules visits to exactly 6 stations" in marker
     assert "schedules a marker-verification step at every listed station" in marker
     assert "marker verification=required" not in marker
-    assert "will visit exactly 2 stations" in route
+    assert "schedules visits to exactly 2 stations" in route
     assert "schedules no marker-verification step" in route
     assert "marker verification=not required" not in route
 
