@@ -68,7 +68,7 @@ from .context import SurveyContext
 from .merge import merge_sightings
 from .observability import SYNTHETIC_LEVEL, CameraModel
 from .proposer import chosen_label
-from .report import ReportMismatch, check_report, class_counts
+from .report import ReportMismatch, check_report, class_counts, unconfirmed_caveat
 
 #: The camera's altitude above the plane its subjects rest on (design spec
 #: 5.2's worked example: Delta_z = 55 cm, D = 3 m -> v ~ 125 px). Fixed for
@@ -115,6 +115,8 @@ def get_results(store, run_id: str, options) -> dict[str, Any]:
         "uncertain_objects": [o for o in objects if o["band"] == "UNCERTAIN"],
         "unanalysed": store.unanalysed_count(run_id),
         "flights_used": store.flights_used(run_id),
+        "flown_option_ids": sorted({row["option_id"] for row in store.connection.execute(
+            "SELECT option_id FROM sweeps WHERE run_id = ? AND status != 'ABORTED'", (run_id,))}),
     }
 
 
@@ -198,19 +200,24 @@ def _review_decision_quality(review, uncertain: list[dict], label: str | None) -
     return 1.0 if chosen_addressed >= best_addressed else 0.0
 
 
+def _with_caveat(body: str, results) -> str:
+    caveat = unconfirmed_caveat(body, results["class_counts"])
+    return body if caveat is None else f"{body.rstrip()} {caveat}"
+
+
 def _write_report(writer, results) -> tuple[str | None, ReportMismatch | None]:
     """R4: the writer is allowed exactly one rewrite before the run gives
     up and reports REPORT_REJECTED."""
     body = writer(results)
     try:
         check_report(body, results["class_counts"])
-        return body, None
+        return _with_caveat(body, results), None
     except ReportMismatch as mismatch:
         retry_results = {**results, "rejected_report": body, "rejection_reason": str(mismatch)}
         body = writer(retry_results)
         try:
             check_report(body, results["class_counts"])
-            return body, None
+            return _with_caveat(body, results), None
         except ReportMismatch as second_mismatch:
             return None, second_mismatch
 

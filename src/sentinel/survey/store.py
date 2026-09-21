@@ -107,7 +107,7 @@ class SurveyStore:
 
     def sightings(self, run_id: str) -> list[dict]:
         rows = self.connection.execute(
-            "SELECT g.*, f.stop_index, f.x_cm AS frame_x_cm, f.y_cm AS frame_y_cm, "
+            "SELECT g.*, f.stop_index, f.sweep_id, f.x_cm AS frame_x_cm, f.y_cm AS frame_y_cm, "
             "f.heading_deg, f.look_deg, f.delta_z_cm "
             "FROM sightings g JOIN frames f ON f.frame_id = g.frame_id "
             "JOIN sweeps s ON s.sweep_id = f.sweep_id WHERE s.run_id = ?", (run_id,))

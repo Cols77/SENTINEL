@@ -135,7 +135,11 @@ def associate(sightings: list[dict], delta_z_cm: float = 55.0,
         x_cm, y_cm, depth_cm = located
         sid = sighting["sighting_id"]
         groups[sid] = {"ids": [sid], "x_cm": x_cm, "y_cm": y_cm, "points": [(x_cm, y_cm)],
-                       "depths": [depth_cm], "stops": {sighting.get("stop_index")},
+                       # rev 6: a stop is a viewpoint of ONE sweep. Keyed on stop_index
+                       # alone, a follow-up's stop 0 was the rail's stop 0 again, so a
+                       # second look could never add the viewpoint that confirms.
+                       "depths": [depth_cm],
+                       "stops": {(sighting.get("sweep_id"), sighting.get("stop_index"))},
                        "bands": [sighting.get("band")], "ambiguous": False}
 
     while len(groups) > 1:

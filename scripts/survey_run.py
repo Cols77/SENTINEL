@@ -99,11 +99,13 @@ _PLURAL = {"computer": "computers", "person": "people", "phone": "phones", "pen"
 class _DefaultJudge:
     """Offline, no-network stand-in for ``--mode J`` when no live judge is
     wired in (Task 12's provider gate is separate and still closed).
-    Deterministic -- always the alphabetically-first candidate, at high
-    confidence -- so a replay run is repeatable."""
+    Deterministic -- always the first candidate offered, the same one
+    ``rules`` takes, at high confidence -- so a replay run is repeatable.
+    (It used to take the alphabetically first label, which is the two-stop
+    close look: a first sweep that cannot confirm anything.)"""
 
     def choice(self, state, instruction, *, criteria, name):
-        label = sorted(criteria)[0]
+        label = next(iter(criteria))
         return {"value": label, "confidence": 0.9,
                 "probabilities": {label: 0.9,
                                   **{k: 0.02 for k in criteria if k != label}}}
@@ -201,11 +203,22 @@ def build_policy(mode: str, *, judge=None, adapter=None, sink) -> SurveyPolicy:
 
 
 def _default_writer(results: dict) -> str:
-    parts = [f"{entry['confirmed']} {_PLURAL[entry['class']]}" for entry in results["class_counts"]
-             if entry["method"] != "NOT_OBSERVABLE"]
+    parts = []
+    for entry in results["class_counts"]:
+        noun = _PLURAL[entry["class"]]
+        if entry["method"] == "NOT_OBSERVABLE":
+            continue
+        if entry["method"] == "SINGLE_VIEW_LOWER_BOUND":
+            parts.append(f"at least {entry['uncertain']} {noun}")
+        elif entry["uncertain"]:
+            parts.append(f"{entry['confirmed']} {noun} confirmed and up to "
+                         f"{entry['confirmed'] + entry['uncertain']} {noun} counting the ones "
+                         "I could not confirm")
+        else:
+            parts.append(f"{entry['confirmed']} {noun}")
     if not parts:
         return "No observable classes were confirmed this run."
-    return "I found " + ", ".join(parts) + "."
+    return "I found " + "; ".join(parts) + "."
 
 
 def _real_tello_client(args):
