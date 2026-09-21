@@ -3,7 +3,9 @@ import json
 import jsonschema
 import pytest
 
-from sentinel.survey.detector import CLASS_MAP, ReplayDetector, ScriptedDetector, normalise
+from sentinel.survey.detector import (CLASS_MAP, DetectionBatch, FallbackDetector, ReplayDetector,
+                                      ScriptedDetector, normalise)
+from sentinel.survey.providers import ModelIdentityMismatch, ProviderAuthError, ProviderTimeout
 from tests.survey.test_survey_contract import SCHEMA
 
 
@@ -140,3 +142,116 @@ def test_the_scripted_detector_without_a_matching_key_is_a_provider_error():
     batch = ScriptedDetector({}).detect("frames/absent.png", ("computer",))
     assert batch.status == "PROVIDER_ERROR"
     assert batch.detections == ()
+
+
+# -- FallbackDetector (plan section C3) --------------------------------------
+
+_OK_DETECTION = {"class": "computer", "matched_prompt": "computer", "raw_score": None,
+                 "score_kind": "NONE", "bbox": None, "bbox_coordinate_space": "PIXELS_TOP_LEFT",
+                 "description": None, "provider_item_id": None}
+
+
+class _RaisingDetector:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def detect(self, image_path, classes):
+        raise self._exc
+
+
+class _FixedDetector:
+    def __init__(self, batch):
+        self._batch = batch
+
+    def detect(self, image_path, classes):
+        return self._batch
+
+
+def test_fallback_is_not_tried_when_the_primary_succeeds():
+    primary = _FixedDetector(DetectionBatch((_OK_DETECTION,), "OK"))
+    fallback = _RaisingDetector(AssertionError("fallback must not be called"))
+    detector = FallbackDetector(primary, fallback, primary_name="primary",
+                                fallback_name="fallback")
+
+    batch = detector.detect("frame.jpg", ("computer",))
+
+    assert batch.detections == (_OK_DETECTION,)
+    assert batch.raw["provider"] == "primary"
+
+
+def test_fallback_is_not_tried_on_a_class_map_miss():
+    primary = _FixedDetector(DetectionBatch((), "CLASS_MAP_MISS", dropped=("sandwich",)))
+    fallback = _RaisingDetector(AssertionError("fallback must not be called"))
+    detector = FallbackDetector(primary, fallback, primary_name="primary",
+                                fallback_name="fallback")
+
+    batch = detector.detect("frame.jpg", ("computer",))
+
+    assert batch.status == "CLASS_MAP_MISS"
+    assert batch.raw["provider"] == "primary"
+
+
+def test_a_provider_error_batch_from_the_primary_triggers_the_fallback():
+    primary = _FixedDetector(DetectionBatch((), "PROVIDER_ERROR"))
+    fallback = _FixedDetector(DetectionBatch((_OK_DETECTION,), "OK"))
+    detector = FallbackDetector(primary, fallback, primary_name="primary",
+                                fallback_name="fallback")
+
+    batch = detector.detect("frame.jpg", ("computer",))
+
+    assert batch.detections == (_OK_DETECTION,)
+    assert batch.raw["provider"] == "fallback"
+    assert batch.raw["primary_error"] == "PROVIDER_ERROR"
+
+
+def test_a_raised_provider_error_from_the_primary_triggers_the_fallback():
+    primary = _RaisingDetector(ProviderTimeout("slow"))
+    fallback = _FixedDetector(DetectionBatch((_OK_DETECTION,), "OK"))
+    detector = FallbackDetector(primary, fallback, primary_name="primary",
+                                fallback_name="fallback")
+
+    batch = detector.detect("frame.jpg", ("computer",))
+
+    assert batch.raw["provider"] == "fallback"
+    assert batch.raw["primary_error"] == "ProviderTimeout"
+
+
+def test_a_raised_model_identity_mismatch_from_the_primary_still_triggers_the_fallback():
+    """C3: fallback is tried on ProviderError "incl. subclasses" --
+    ModelIdentityMismatch is a ProviderError subclass, and this caller is
+    exactly the kind of deliberate catcher its own docstring requires."""
+    primary = _RaisingDetector(ModelIdentityMismatch("drift"))
+    fallback = _FixedDetector(DetectionBatch((_OK_DETECTION,), "OK"))
+    detector = FallbackDetector(primary, fallback, primary_name="primary",
+                                fallback_name="fallback")
+
+    batch = detector.detect("frame.jpg", ("computer",))
+
+    assert batch.raw["provider"] == "fallback"
+    assert batch.raw["primary_error"] == "ModelIdentityMismatch"
+
+
+def test_when_both_primary_and_fallback_fail_the_batch_is_provider_error_with_both_named():
+    primary = _RaisingDetector(ProviderTimeout("slow"))
+    fallback = _RaisingDetector(ProviderAuthError("bad key"))
+    detector = FallbackDetector(primary, fallback, primary_name="primary",
+                                fallback_name="fallback")
+
+    batch = detector.detect("frame.jpg", ("computer",))
+
+    assert batch.status == "PROVIDER_ERROR"
+    assert batch.detections == ()
+    assert batch.raw["primary_error"] == "ProviderTimeout"
+    assert batch.raw["fallback_error"] == "ProviderAuthError"
+
+
+def test_the_primarys_own_raw_response_is_preserved_alongside_the_provider_stamp():
+    primary = _FixedDetector(DetectionBatch((_OK_DETECTION,), "OK", raw={"objects": ["x"]}))
+    fallback = _RaisingDetector(AssertionError("fallback must not be called"))
+    detector = FallbackDetector(primary, fallback, primary_name="primary",
+                                fallback_name="fallback")
+
+    batch = detector.detect("frame.jpg", ("computer",))
+
+    assert batch.raw["objects"] == ["x"]
+    assert batch.raw["provider"] == "primary"

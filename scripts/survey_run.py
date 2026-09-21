@@ -19,8 +19,7 @@ over frames already consented for (design spec 13.4) passes no
 ``--retain-person-frames`` flag at all and is unaffected by this check,
 exactly as ``run_survey`` itself treats a ``None`` location.
 
-Modes E and J (Task 12's provider adapters are a separate, still-closed
-gate) fall back to small offline, no-network stand-ins
+Modes E and J fall back to small offline, no-network stand-ins
 (``_DefaultJudge``/``_DefaultAdapter``) when no live judge or adapter is
 supplied, so every mode stays replayable without a paid call -- consistent
 with this plan's "no paid API call" constraint. A caller that does have a
@@ -28,16 +27,28 @@ real judge or adapter (e.g. Task 13's later live comparison, gated
 separately) passes it to ``build_policy`` directly; this script's own CLI
 surface has no ``--judge``/``--adapter`` flag, matching the plan's Task 10
 flag list.
+
+``--detector``/``--fallback`` (plan section C4) select the *perception*
+detector, a separate axis from ``--mode``'s proposer selection above:
+``replay`` (default, the ``ReplayDetector`` this script always used) or a
+live ``moondream``/``gemini`` provider adapter (Task 12 / plan section C).
+A live provider detector refuses to start (a plain, non-zero-exit error --
+see ``build_provider_detector``) unless an API key is present in the
+environment (``src/sentinel/env_file.py`` / ``os.environ``) *and* filming
+consent is recorded for ``--location``/``--date`` -- the same consent
+rule ``--retain-person-frames`` already enforces above, now widened to
+cover every path that can send a frame to a third party.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 for _path in (REPO_ROOT / "src", REPO_ROOT):
@@ -54,7 +65,7 @@ from sentinel.survey.candidates import ESCALATE_LABEL  # noqa: E402
 from sentinel.survey.consent import consent_policy  # noqa: E402
 from sentinel.survey.context import SurveyPolicy  # noqa: E402
 from sentinel.survey.cube_bridge import CubeFlight, envelope_from_site  # noqa: E402
-from sentinel.survey.detector import ReplayDetector  # noqa: E402
+from sentinel.survey.detector import FallbackDetector, ReplayDetector  # noqa: E402
 from sentinel.survey.envelope import SweepEnvelope  # noqa: E402
 from sentinel.survey.eval import load_scene, score_episode  # noqa: E402
 from sentinel.survey.flight import ReplayFlight  # noqa: E402
@@ -62,7 +73,15 @@ from sentinel.survey.loop import run_survey  # noqa: E402
 from sentinel.survey.observability import CAMERAS, SYNTHETIC_LEVEL, TELLO_MEASURED  # noqa: E402
 from sentinel.survey.options import generate_options  # noqa: E402
 from sentinel.survey.proposer import JevProposer, LlmProposer, RuleProposer  # noqa: E402
+from sentinel.survey.providers.gemini import GeminiDetector  # noqa: E402
+from sentinel.survey.providers.moondream import MoondreamDetector  # noqa: E402
 from sentinel.survey.store import SurveyStore  # noqa: E402
+
+#: name -> (API key env var, model env var, adapter class). Plan section C4.
+_PROVIDER_ENV = {
+    "moondream": ("MOONDREAM_API_KEY", "MOONDREAM_MODEL", MoondreamDetector),
+    "gemini": ("GEMINI_API_KEY", "GEMINI_MODEL", GeminiDetector),
+}
 
 #: The same fixed envelope used across the survey test suite (tests/survey/
 #: test_loop.py, test_eval.py). ``--site`` (Task 11) is the only place a
@@ -138,6 +157,54 @@ def _real_tello_client(args):
     return DjitellopyClient(local_ip=args.local_ip, tello_ip=args.tello_ip)
 
 
+class _HttpxPostSession:
+    """Adapts ``httpx`` (this repo's HTTP dependency -- see pyproject.toml)
+    to the ``post(url, *, headers, json, timeout)`` duck type
+    ``providers.post_json`` expects, translating the adapters' ``(connect,
+    read, total)`` timeout tuple into httpx's own ``Timeout`` object. The
+    real call site: only reached when the operator passes ``--detector`` or
+    ``--fallback`` as ``moondream``/``gemini`` -- never during any test,
+    which always injects a fake session instead."""
+
+    def post(self, url, *, headers, json, timeout):
+        import httpx
+        connect_s, read_s, total_s = timeout
+        return httpx.post(url, headers=headers, json=json,
+                          timeout=httpx.Timeout(total_s, connect=connect_s, read=read_s))
+
+
+def build_provider_detector(name: str, *, environ: Mapping[str, str] | None = None, session=None):
+    """Builds a live ``MoondreamDetector``/``GeminiDetector`` from the
+    environment (``src/sentinel/env_file.py`` populates ``os.environ`` from
+    the nearest ``.env`` first, same pattern as
+    ``sentinel.adapter.llm.config.load_config``). Raises a plain, readable
+    ``RuntimeError`` -- not a stack trace from a missing-key ``KeyError`` --
+    when the API key or model id is absent, so ``main`` exits non-zero with
+    a message that names exactly what to set."""
+    key_var, model_var, cls = _PROVIDER_ENV[name]
+    if environ is None:
+        from sentinel.env_file import load_env_file
+        load_env_file()
+        source = os.environ
+    else:
+        source = environ
+    api_key = source.get(key_var)
+    if not api_key:
+        raise RuntimeError(f"--detector/--fallback {name} requires {key_var} to be set "
+                           f"(see src/sentinel/env_file.py or export it directly)")
+    model = source.get(model_var)
+    if not model:
+        raise RuntimeError(f"--detector/--fallback {name} requires {model_var} to be set")
+    return cls(api_key=api_key, model=model, session=session or _HttpxPostSession())
+
+
+def build_detector(kind: str, responses_dir, *, environ: Mapping[str, str] | None = None,
+                   session=None):
+    if kind == "replay":
+        return ReplayDetector(responses_dir)
+    return build_provider_detector(kind, environ=environ, session=session)
+
+
 def _make_on_approval(auto_approve: bool):
     if auto_approve:
         return lambda call: True
@@ -151,7 +218,8 @@ def _make_on_approval(auto_approve: bool):
     return _prompt
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = None,
+        session=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mode", choices=("F", "E", "J"), default="F")
@@ -187,7 +255,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--local-ip", default=None, help="--real only")
     parser.add_argument("--tello-ip", default="192.168.10.1", help="--real only")
     parser.add_argument("--responses", type=Path, required=True,
-                        help="a ReplayDetector responses dir (one json per frame)")
+                        help="a ReplayDetector responses dir (one json per frame); ignored "
+                             "unless --detector replay")
+    parser.add_argument("--detector", choices=("replay", "moondream", "gemini"), default="replay",
+                        help="replay (default) never leaves the machine; moondream/gemini are "
+                             "live providers gated on an API key and recorded filming consent")
+    parser.add_argument("--fallback", choices=("none", "moondream", "gemini"), default="none",
+                        help="tried only when --detector cannot answer (plan section C3); "
+                             "gated the same way --detector is")
     parser.add_argument("--db", type=Path, required=True)
     parser.add_argument("--request", default="count the computers")
     parser.add_argument("--location", default=None)
@@ -215,10 +290,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # Resolves consent BEFORE anything else is built -- the envelope, the
     # policy, the flight, the detector -- so a refusal happens before
-    # anything moves (rev 3 R5).
-    if args.retain_person_frames:
+    # anything moves (rev 3 R5). Widened by plan section C4: a live
+    # provider detector sends the frame to a third party exactly as
+    # --retain-person-frames does, so it is gated the same way -- a
+    # strict superset of the original check, so every existing
+    # --retain-person-frames-only test is unaffected.
+    uses_live_provider = args.detector != "replay" or args.fallback != "none"
+    if args.retain_person_frames or uses_live_provider:
         if not args.location or not args.date:
-            raise ValueError("--retain-person-frames requires --location and --date")
+            raise ValueError("--location and --date are required when retaining person frames "
+                             "or using a live provider detector")
         consent_policy(store, args.location, args.date)
 
     run_id = str(uuid.uuid4())
@@ -258,7 +339,11 @@ def main(argv: list[str] | None = None) -> int:
     options = generate_options(envelope, camera)
     sink = JsonlAuditSink(args.db.with_suffix(".jsonl"))
     policy = build_policy(args.mode, sink=sink)
-    detector = ReplayDetector(args.responses)
+    detector = build_detector(args.detector, args.responses, environ=environ, session=session)
+    if args.fallback != "none":
+        fallback_detector = build_provider_detector(args.fallback, environ=environ,
+                                                     session=session)
+        detector = FallbackDetector(detector, fallback_detector)
 
     outcome = run_survey(store=store, run_id=run_id, request_text=args.request,
                          options=options, policy=policy, flight=flight, detector=detector,

@@ -22,6 +22,7 @@ rev 3 R6 and rev 4 V7 amend this module from the plan's original body:
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -150,3 +151,67 @@ class ReplayDetector:
             return DetectionBatch((), "PROVIDER_ERROR")
         raw = json.loads(path.read_text(encoding="utf-8"))
         return _batch_from(normalise(raw.get("objects", [])), raw)
+
+
+def _stamp(batch: DetectionBatch, provider: str, *, primary_error: str | None = None
+          ) -> DetectionBatch:
+    """Returns ``batch`` with ``raw`` carrying who answered (C3: "the
+    returned batch's raw records which provider answered") and, when the
+    fallback ran, the primary's error class name."""
+    raw = dict(batch.raw or {})
+    raw["provider"] = provider
+    if primary_error is not None:
+        raw["primary_error"] = primary_error
+    return dataclasses.replace(batch, raw=raw)
+
+
+class FallbackDetector:
+    """Implements ``DetectorPort``. Tries ``primary`` first; falls back to
+    ``fallback`` only when ``primary`` cannot answer at all -- it raised a
+    ``ProviderError`` (including ``ModelIdentityMismatch``: a caller built
+    specifically to catch and reroute on provider failure is exactly the
+    kind of deliberate catcher that error's own docstring requires) or
+    returned a batch whose status is ``"PROVIDER_ERROR"`` (this codebase's
+    only failure status; the plan prose's "ANALYSIS_FAILED" is this status
+    under a different name -- no such literal exists anywhere else in this
+    codebase). A ``CLASS_MAP_MISS`` batch is a substantive answer, not a
+    failure, and is never a fallback trigger.
+
+    The returned batch's ``raw`` always carries ``"provider"``: which
+    detector answered. When the fallback had to run, it also carries
+    ``"primary_error"``: the primary's exception class name, or the literal
+    string ``"PROVIDER_ERROR"`` when the primary failed by returning a
+    failed batch rather than raising (its own adapter already swallowed
+    the underlying exception -- see ``providers.post_json``)."""
+
+    def __init__(self, primary, fallback, *, primary_name: str | None = None,
+                fallback_name: str | None = None) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.primary_name = primary_name or type(primary).__name__
+        self.fallback_name = fallback_name or type(fallback).__name__
+
+    def detect(self, image_path: str, classes: tuple[str, ...]) -> DetectionBatch:
+        # Local import: providers/__init__.py imports this module
+        # (DetectionBatch, NormaliseResult) at package-init time, so a
+        # module-level import of providers here would cycle.
+        from .providers import ProviderError
+
+        primary_error_name: str | None = None
+        try:
+            batch = self.primary.detect(image_path, classes)
+        except ProviderError as exc:
+            primary_error_name = type(exc).__name__
+        else:
+            if batch.status != "PROVIDER_ERROR":
+                return _stamp(batch, self.primary_name)
+            primary_error_name = "PROVIDER_ERROR"
+
+        try:
+            fallback_batch = self.fallback.detect(image_path, classes)
+        except ProviderError as exc:
+            return DetectionBatch((), "PROVIDER_ERROR",
+                                  raw={"provider": self.fallback_name,
+                                       "primary_error": primary_error_name,
+                                       "fallback_error": type(exc).__name__})
+        return _stamp(fallback_batch, self.fallback_name, primary_error=primary_error_name)

@@ -3,9 +3,12 @@ import json
 
 import pytest
 
-from scripts.survey_run import build_policy, main
-from sentinel.survey.consent import ConsentMissing
+from scripts.survey_run import build_policy, build_provider_detector, main
+from sentinel.survey.consent import ConsentMissing, record_consent
+from sentinel.survey.detector import ReplayDetector
 from sentinel.survey.proposer import JevProposer, LlmProposer, RuleProposer
+from sentinel.survey.providers.moondream import MoondreamDetector
+from sentinel.survey.store import SurveyStore
 
 #: RuleProposer always picks the first actionable candidate, and
 #: options.generate_options lists RAIL_MID_HEIGHT first -- see
@@ -115,3 +118,90 @@ def test_summary_reports_measured_and_commanded_frame_counts(tmp_path, capsys):
     assert main(argv) == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["frame_counts"] == {"measured": 0, "commanded": 4, "outer_tolerance": 0}
+
+
+# -- Task 12 / plan section C4: --detector / --fallback CLI wiring -----------
+
+class _FakeSession:
+    """Never reaches a socket -- records nothing here, just answers every
+    call the same way; only used to prove ``build_provider_detector``
+    wires the injected session through instead of constructing a real
+    one."""
+
+    def post(self, url, *, headers, json, timeout):
+        raise AssertionError("a CLI test must never actually post")
+
+
+def test_replay_remains_the_default_detector(tmp_path):
+    """No --detector/--fallback flag at all: the default replay path never
+    requires a key or consent, exactly as before this plan's C4."""
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    (frames / "frames.json").write_text("[]", encoding="utf-8")
+    argv = ["--mode", "F", "--frames", str(frames), "--responses", str(frames),
+           "--db", str(tmp_path / "s.sqlite3"), "--request", "count", "--auto-approve"]
+    assert main(argv) == 0  # runs to completion -- no refusal for a key or consent
+
+
+def test_a_live_detector_without_location_and_date_is_refused(tmp_path):
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    (frames / "frames.json").write_text("[]", encoding="utf-8")
+    argv = ["--mode", "F", "--detector", "moondream", "--frames", str(frames),
+           "--responses", str(frames), "--db", str(tmp_path / "s.sqlite3"),
+           "--request", "count", "--auto-approve"]
+    with pytest.raises(ValueError):
+        main(argv)
+
+
+def test_a_live_detector_without_recorded_consent_is_refused(tmp_path):
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    (frames / "frames.json").write_text("[]", encoding="utf-8")
+    argv = ["--mode", "F", "--detector", "moondream", "--frames", str(frames),
+           "--responses", str(frames), "--db", str(tmp_path / "s.sqlite3"),
+           "--request", "count", "--location", "garden", "--date", "2026-09-21",
+           "--auto-approve"]
+    with pytest.raises(ConsentMissing):
+        main(argv)
+
+
+def test_a_live_detector_without_an_api_key_is_refused(tmp_path):
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    (frames / "frames.json").write_text("[]", encoding="utf-8")
+    db_path = tmp_path / "s.sqlite3"
+    store = SurveyStore.open(db_path)
+    record_consent(store, "garden", "2026-09-21", "colin")
+
+    argv = ["--mode", "F", "--detector", "moondream", "--frames", str(frames),
+           "--responses", str(frames), "--db", str(db_path), "--request", "count",
+           "--location", "garden", "--date", "2026-09-21", "--auto-approve"]
+    with pytest.raises(RuntimeError, match="MOONDREAM_API_KEY"):
+        main(argv, environ={})
+
+
+def test_a_fallback_provider_without_an_api_key_is_also_refused(tmp_path):
+    """Proves the fallback path is gated too, not just --detector."""
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    (frames / "frames.json").write_text("[]", encoding="utf-8")
+    db_path = tmp_path / "s.sqlite3"
+    store = SurveyStore.open(db_path)
+    record_consent(store, "garden", "2026-09-21", "colin")
+
+    argv = ["--mode", "F", "--detector", "replay", "--fallback", "gemini",
+           "--frames", str(frames), "--responses", str(frames), "--db", str(db_path),
+           "--request", "count", "--location", "garden", "--date", "2026-09-21",
+           "--auto-approve"]
+    with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
+        main(argv, environ={})
+
+
+def test_build_provider_detector_never_touches_the_network():
+    fake = _FakeSession()
+    detector = build_provider_detector(
+        "moondream", environ={"MOONDREAM_API_KEY": "k", "MOONDREAM_MODEL": "moondream-3"},
+        session=fake)
+    assert isinstance(detector, MoondreamDetector)
+    assert detector.session is fake
