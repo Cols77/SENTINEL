@@ -341,12 +341,13 @@ W08 implementation status rather than reporting the requirement satisfied.
 |---|---|---|---|---|---|---|
 | N | forward 200 | none (failsafe land at 12 s) | `ok` after 10.5 s | - | - | - |
 | B@5s | forward 200 | stop + land | `error Motor stop` | void | void | **void: flew into the tag door** (started ~195 cm from it; no clearance check) |
-| B@1.2s | forward 100 | stop, land at 1.5 s | `error Auto land`, 0.29 s after `land` | 1.4 s | 2.6 s | **45 cm** |
-| A@1.2s | forward 100 | land | `error Auto land`, 0.16 s after `land` | 1.0 s | 2.3 s | **50 cm** (total 70 cm; operator tape 70 cm) |
+| B@1.2s | forward 100 | stop, land at 1.5 s | `error Auto land`, 0.29 s after `land` | 1.4 s | 2.6 s | **33 cm** |
+| A@1.2s | forward 100 | land | `error Auto land`, 0.16 s after `land` | 1.0 s | 2.3 s | **35 cm** (total 70 cm; operator tape 70 cm) |
+| A@0.5s | forward 100 | land | `error Auto land`, 0.20 s after `land` | - | 2.7 s | ~15 cm: `land` arrived before the drone was moving (motion starts ~0.6 s after the move); weak video (17 fps, mostly single-tag fixes) |
 
 - **The Tello honours `land` during a move.** The move ends with `error Auto land` within 0.3 s, the drone brakes and descends; no emergency cut needed; telemetry answered afterwards.
 - **`stop` does not exist on this firmware** (`unknown command: stop`). Variant B is variant A with a 0.3 s delay; drop it.
-- **Post-abort travel is 45-50 cm** at the ~45 cm/s cruise speed, measured from the tags in the recorded video (`scripts/b1_offline_pose.py`, 2-tag fixes, windowed medians). The A run's total, 69.8 cm, matches the operator's tape (70 cm). Integrating the state stream's `vgx` under-reads by ~25 % (55 cm) and must not be used for this. This travel lands *outside* the cube, so it sizes the free space beyond the cube edge / the watchdog trip margin, not the `Site.commanded` inset (which absorbs open-loop drift).
+- **Post-abort travel is 33-35 cm (about ±10 cm)**, measured from the tags in the recorded video (`scripts/b1_offline_pose.py`, 2-tag fixes, windowed medians), after correcting for the video lagging the command clock by ~0.2 s (motion onset: +0.8 s in video vs +0.6 s in state-stream velocity, both 1.2 s runs). Without that correction the same runs read 45-50 cm. The drone is doing ~70 cm/s when `land` lands mid-move. The A run's total, 69.8 cm, matches the operator's tape (70 cm). Integrating the state stream's `vgx` under-reads by ~25 % (55 cm) and must not be used for this. This travel lands *outside* the cube, so it sizes the free space beyond the cube edge / the watchdog trip margin, not the `Site.commanded` inset (which absorbs open-loop drift).
 - `speed 50` does not shorten a 200 cm move (10.5 s).
 - The state stream's `h` field is not the height (reads 0-10 at 90 cm hover); use `tof`.
 - The Tello only answers the UDP source port that sent its first `command` after boot; the harness now uses a fixed port 8889.

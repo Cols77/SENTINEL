@@ -61,6 +61,9 @@ def main() -> int:
     parser.add_argument("log")
     parser.add_argument("--tag-map", required=True)
     parser.add_argument("--video", default=None)
+    parser.add_argument("--latency", type=float, default=0.2,
+                        help="video lag behind the command clock, s (measured 0.21-0.22 s from motion onset "
+                             "in video vs state-stream velocity, 2026-09-21)")
     args = parser.parse_args()
     log_path = Path(args.log)
     log = json.loads(log_path.read_text(encoding="utf-8"))
@@ -91,14 +94,15 @@ def main() -> int:
     result = {"frames": index, "localised": len(rows)}
     two_tag = [r for r in rows if r["tags"] >= 2]
     if move_t is not None and two_tag:
-        start = window_median(rows, move_t - 0.5, move_t)
+        start = window_median(rows, move_t - 0.5 + args.latency, move_t + args.latency)
         last_t = two_tag[-1]["t"]
         final = window_median(rows, last_t - 0.4, last_t)
         result.update({"at_move_sent": start, "last_two_tag_fixes": final})
         if start and final:
             result["travel_total_cm"] = dist(start, final)
         if land_t is not None:
-            at_land = window_median(rows, land_t - 0.15, land_t + 0.15)
+            seen_at = land_t + args.latency
+            at_land = window_median(rows, seen_at - 0.15, seen_at + 0.15)
             result.update({"land_sent_t": land_t, "at_land_sent": at_land})
             if start and final and at_land:
                 result.update({"travel_before_land_cm": dist(start, at_land),
