@@ -153,3 +153,26 @@ class SurveyStore:
                 "VALUES (?, ?, ?, ?, ?)",
                 (report_id, run_id, body, json.dumps(class_counts), utc_now()))
         return report_id
+
+
+    def read_run(self, run_id: str) -> dict | None:
+        row = self.connection.execute("SELECT * FROM survey_runs WHERE run_id=?", (run_id,)).fetchone()
+        return dict(row) if row else None
+
+    def read_sweeps(self, run_id: str) -> list[dict]:
+        return [dict(row) for row in self.connection.execute("SELECT * FROM sweeps WHERE run_id=? ORDER BY created_at", (run_id,))]
+
+    def read_frames_public(self, run_id: str) -> list[dict]:
+        return [{k:v for k,v in row.items() if k != "image_path"} for row in self.frames(run_id)]
+
+    def read_objects_public(self, run_id: str) -> list[dict]:
+        rows = self.connection.execute("SELECT * FROM objects WHERE run_id=?", (run_id,))
+        return [{**dict(row), "sighting_ids": json.loads(row["sighting_ids_json"])} for row in rows]
+
+    def read_report(self, run_id: str) -> dict | None:
+        row = self.connection.execute("SELECT * FROM reports WHERE run_id=? ORDER BY created_at DESC LIMIT 1", (run_id,)).fetchone()
+        return dict(row) if row else None
+
+    def read_sightings_public(self, run_id: str) -> list[dict]:
+        allowed = {"sighting_id", "frame_id", "class", "raw_score", "score_kind", "bbox_json", "band"}
+        return [{k:v for k,v in row.items() if k in allowed} for row in self.sightings(run_id)]

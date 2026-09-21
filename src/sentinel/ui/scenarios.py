@@ -1,0 +1,80 @@
+"""Synthetic scene inputs, not outcomes; the normal survey loop derives every result."""
+from dataclasses import dataclass
+import hashlib
+import json
+from pathlib import Path
+from PIL import Image, ImageDraw
+from sentinel.dry_run import DryRunClient
+from sentinel.runner import FlightTestRunner
+from sentinel.survey.envelope import SweepEnvelope
+from sentinel.survey.options import generate_options
+from sentinel.survey.flight import FlightFrame
+from sentinel.survey.detector import ScriptedDetector
+from sentinel.survey.proposer import RuleProposer
+from sentinel.survey.observability import SYNTHETIC_LEVEL, IMAGE_WIDTH, IMAGE_HEIGHT, PRINCIPAL_X, PRINCIPAL_Y, FOCAL_PX
+
+@dataclass(frozen=True)
+class ScenarioAdapters:
+    options: tuple
+    policy: object
+    flight: object
+    detector: object
+    writer: object
+    camera: object
+    source_kind: str
+
+class ScenarioFlight:
+    def __init__(self, frames, artifacts):
+        self.frames, self.artifacts = frames, artifacts
+        self.flights=0
+        self.registry=None
+        self.run_id=None
+        self.emit=lambda *args:None
+
+    def fly(self, option):
+        runner=FlightTestRunner(DryRunClient(),'dry-run')
+        if self.registry:
+            self.registry.bind(self.run_id,runner)
+        self.flights+=1
+        try:
+            result=[]
+            for frame in self.frames[option.option_id]:
+                runner._raise_if_emergency()
+                self.emit('STOP_ARRIVED',dict(stop_index=frame.stop_index,x_cm=frame.x_cm,y_cm=frame.y_cm,option_id=option.option_id))
+                result.append(frame)
+            return result
+        finally:
+            if self.registry:
+                self.registry.unbind(self.run_id,runner)
+
+
+def build_rehearsal_adapters(scenario_path, artifact_root):
+    scene=json.loads(Path(scenario_path).read_text())
+    root=Path(artifact_root);root.mkdir(parents=True,exist_ok=True)
+    options=generate_options(SweepEnvelope(-150,150,0,100,80,180,300))
+    frames,script,artifacts={},{},{}
+    for option in options:
+        frames[option.option_id]=[]
+        for i,(x,y) in enumerate(option.stops):
+            depth=scene['target_y_cm']-y
+            u=PRINCIPAL_X+FOCAL_PX*(scene['target_x_cm']-x)/depth
+            v=PRINCIPAL_Y+55*FOCAL_PX/depth
+            detection=dict(label='laptop',confidence=scene['band'],description='a synthetic laptop',x=(u-20)/IMAGE_WIDTH,y=(v-20)/IMAGE_HEIGHT,width=40/IMAGE_WIDTH,height=40/IMAGE_HEIGHT)
+            name=f'{option.option_id}-{i}.png'
+            image=Image.new('RGB',(IMAGE_WIDTH,IMAGE_HEIGHT),'#18232c')
+            draw=ImageDraw.Draw(image)
+            draw.rectangle((u-20,v-20,u+20,v+20),fill='#7bb7c4',outline='white',width=2)
+            draw.text((12,12),'REHEARSAL / SYNTHETIC SCENE',fill='white')
+            path=root/name;image.save(path)
+            payload=path.read_bytes();digest=hashlib.sha256(payload).hexdigest()
+            artifact=f'{scene["id"]}:{option.option_id}:{i}'
+            frames[option.option_id].append(FlightFrame(i,0,x,y,option.z_cm,0,'COMMANDED',str(path),artifact,digest,delta_z_cm=55))
+            script[name]=[detection]
+            artifacts[artifact]=dict(path=path,sha256=digest,width=IMAGE_WIDTH,height=IMAGE_HEIGHT)
+    flight=ScenarioFlight(frames,artifacts)
+    def writer(results):
+        row=next(c for c in results['class_counts'] if c['class']=='computer')
+        if row['uncertain']:
+            return f"Between {row['confirmed']} and {row['confirmed']+row['uncertain']} computers; unresolved observations remain."
+        return f"I found {row['confirmed']} computers."
+    return ScenarioAdapters(options,RuleProposer(),flight,ScriptedDetector(script),writer,SYNTHETIC_LEVEL,'SIMULATED')

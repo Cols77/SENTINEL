@@ -119,12 +119,14 @@ def get_results(store, run_id: str, options) -> dict[str, Any]:
 
 
 def _fly_and_ingest(store, run_id, option, flight, detector,
-                    camera: CameraModel = SYNTHETIC_LEVEL) -> tuple[str, ...]:
+                    camera: CameraModel = SYNTHETIC_LEVEL, emit=None) -> tuple[str, ...]:
     """Returns every raw label this sweep's frames could not map to a known
     class (rev 3 R6's ``dropped``), in the order seen, duplicates included --
     the caller (``run_survey``) accumulates these across the whole run for
     R8's ``dropped_labels`` attribution signal."""
     sweep_id = store.add_sweep(run_id, option.option_id, len(option.stops))
+    if emit:
+        emit("SWEEP_STARTED", {"option_id": option.option_id, "sweep_id": sweep_id})
     dropped: list[str] = []
     for frame in flight.fly(option):
         # Task 11/V12: a real flight port stamps its own per-frame delta_z
@@ -139,6 +141,8 @@ def _fly_and_ingest(store, run_id, option, flight, detector,
             artifact_id=frame.artifact_id, sha256=frame.sha256,
             image_path=frame.image_path, delta_z_cm=delta_z_cm,
             tolerance=frame.tolerance)
+        if emit:
+            emit("FRAME_CAPTURED", {"frame_id": frame_id, "artifact_id": frame.artifact_id})
         batch = detector.detect(frame.image_path, option.resolvable_classes)
         store.set_frame_analysis(frame_id, "OK" if batch.status == "OK" else batch.status)
         # R3: the band detector.normalise attached to each detection is
@@ -149,12 +153,16 @@ def _fly_and_ingest(store, run_id, option, flight, detector,
         for detection, band in zip(batch.detections, bands):
             store.add_sighting(frame_id, detection, band, raw_response=batch.raw)
         dropped.extend(batch.dropped)
+    if emit:
+        emit("ANALYSIS_COMPLETED", {"sweep_id": sweep_id})
     store.set_sweep_status(sweep_id, "FLOWN")
 
     rows = store.sightings(run_id)
     for row in rows:
         row["bbox"] = json.loads(row["bbox_json"]) if row["bbox_json"] else None
     store.set_objects(run_id, merge_sightings(rows, delta_z_cm=DELTA_Z_CM, camera=camera))
+    if emit:
+        emit("MERGE_COMPLETED", {"sweep_id": sweep_id})
     return tuple(dropped)
 
 
@@ -219,7 +227,7 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
                flight, detector, on_approval, writer,
                location: str | None = None, consent_date: str | None = None,
                max_flights: int = MAX_FLIGHTS,
-               camera: CameraModel = SYNTHETIC_LEVEL) -> dict[str, Any]:
+               camera: CameraModel = SYNTHETIC_LEVEL, emit=None) -> dict[str, Any]:
     """rev 3 R5 (Task 8): when ``location`` is given, filming consent is
     gated *before anything else happens* -- before ``store.create_run``,
     before any sweep, before the detector is ever touched. Absent consent,
@@ -271,7 +279,7 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
 
         option = next(o for o in options if o.option_id == call["arguments"]["option_id"])
         dropped_labels.extend(_fly_and_ingest(store, run_id, option, flight, detector,
-                                              camera))
+                                              camera, emit))
 
         results = get_results(store, run_id, options)
         if results["flights_used"] >= max_flights:
@@ -300,6 +308,8 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
                 "escalations": escalations + [{"point": "REPORT", "error": str(mismatch)}],
                 "decision_quality": decision_quality, "dropped_labels": dropped}
     store.add_report(run_id, body, results["class_counts"])
+    if emit:
+        emit("REPORT_ACCEPTED", {"summary": "Validated evidence-backed report"})
     return {"status": "REPORTED", "flights": results["flights_used"],
             "counts": results["counts"], "report": body, "escalations": escalations,
             "decision_quality": decision_quality, "dropped_labels": dropped}
