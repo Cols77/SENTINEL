@@ -92,13 +92,26 @@ def test_calls_jev_with_packet_and_every_described_legal_candidate() -> None:
     }
     assert name == "select_plan"
     assert criteria == {
-        ROUTE: "route-only plan",
-        FULL: "full marker-verified plan",
-        ESCALATE_LABEL: "ask the operator",
+        ROUTE: (
+            "Choose this catalogue plan when the operator request is fully matched by "
+            "the future work it will perform: route-only plan"
+        ),
+        FULL: (
+            "Choose this catalogue plan when the operator request is fully matched by "
+            "the future work it will perform: full marker-verified plan"
+        ),
+        ESCALATE_LABEL: (
+            "Choose escalation only when no catalogue plan fully matches every explicit "
+            "request constraint, the constraints conflict, or the request lacks enough "
+            "detail to choose. Do not escalate merely because the selected work has not "
+            "run yet or downstream results are absent."
+        ),
     }
     assert "SELECT_PLAN" in instruction
     assert "fully satisfy every explicit operator constraint" in instruction
     assert "closest" in instruction
+    assert "future work" in instruction
+    assert "downstream facts" in instruction
 
 
 @pytest.mark.parametrize("field, mismatched", [
@@ -266,6 +279,23 @@ def test_explicit_malformed_confidence_does_not_fall_back(confidence):
     assert sink.records[0]["probabilities"] == {
         ROUTE: 0.8, FULL: 0.1, ESCALATE_LABEL: 0.1,
     }
+
+
+def test_explicit_escalation_is_honoured_without_plan_confidence_gates():
+    sink = MemoryAuditSink()
+    answer = {
+        "value": ESCALATE_LABEL,
+        "confidence": 0.20,
+        "probabilities": {ROUTE: 0.35, FULL: 0.25, ESCALATE_LABEL: 0.40},
+    }
+
+    result = JevProposer(Judge(answer), sink).decide(_request(), _context())
+
+    _assert_escalation(result)
+    attempt, = sink.records
+    assert attempt["raw_choice"] == ESCALATE_LABEL
+    assert attempt["policy_label"] == ESCALATE_LABEL
+    assert attempt["gate_outcome"] == "accepted"
 
 
 @pytest.mark.parametrize("confidence, probabilities, outcome", [

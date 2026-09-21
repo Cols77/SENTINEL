@@ -260,7 +260,7 @@ def test_adapter_forwards_optional_policy_context_to_prompt():
     assert adapter.last_request is not None
     rendered = json.loads(adapter.last_request["messages"][-1]["content"])
     assert rendered["decision_point"] == SELECT_PLAN
-    assert rendered["decision_prompt_revision"] == "select_plan.complete_constraints.v2"
+    assert rendered["decision_prompt_revision"] == "select_plan.complete_constraints.v3"
     assert (
         "fully satisfy every explicit operator constraint"
         in rendered["decision_instruction"]

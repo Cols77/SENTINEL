@@ -8,7 +8,11 @@ import time
 from typing import Any
 
 from sentinel.contracts import AgentModelResult, AgentRequest
-from sentinel.decision_prompt import SELECT_PLAN_INSTRUCTION
+from sentinel.decision_prompt import (
+    SELECT_PLAN_ESCALATION_CRITERION,
+    SELECT_PLAN_INSTRUCTION,
+    SELECT_PLAN_PLAN_CRITERION_PREFIX,
+)
 
 from .legal_tools import ESCALATE_LABEL, Candidate, SELECT_PLAN
 from .policy import PolicyContext, one_call
@@ -195,7 +199,12 @@ class JevProposer:
             return self._escalate(request)
 
         criteria = {
-            label: candidate.description for label, candidate in candidates.items()
+            label: (
+                SELECT_PLAN_ESCALATION_CRITERION
+                if label == ESCALATE_LABEL
+                else SELECT_PLAN_PLAN_CRITERION_PREFIX + candidate.description
+            )
+            for label, candidate in candidates.items()
         }
         started = time.perf_counter()
         try:
@@ -299,7 +308,9 @@ class JevProposer:
         runners_up = [value for key, value in probabilities.items() if key != label]
         margin = probabilities[label] - (max(runners_up) if runners_up else 0.0)
         assessment["margin"] = margin
-        if confidence < self.gates.act_at:
+        if label == ESCALATE_LABEL:
+            assessment["gate_outcome"] = "accepted"
+        elif confidence < self.gates.act_at:
             assessment["gate_outcome"] = "low_confidence"
         elif margin < self.gates.min_margin:
             assessment["gate_outcome"] = "low_margin"

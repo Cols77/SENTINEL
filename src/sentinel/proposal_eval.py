@@ -505,10 +505,17 @@ def score_outcome(case, record):
         if tasks and not any(e["event_type"] == "PATROLLER_ASSIGNMENT_PROPOSED" and e.get("payload", {}).get("task_id") == tasks[0]["task_id"] and e["payload"].get("patroller_id") == "PATROLLER_1" for e in events):
             reasons.append("wrong_assignment_event_target")
     routes = [a for a in record.get("audit", []) if a.get("record") == "architecture_route"]
-    accepted_escalation_attempts = [
+    raw_escalation_attempts = [
+        a for a in proposals if a.get("raw_choice") == "escalate"
+    ]
+    raw_plan_attempts = [
         a for a in proposals
+        if isinstance(a.get("raw_choice"), str)
+        and a.get("raw_choice") != "escalate"
+    ]
+    accepted_escalation_attempts = [
+        a for a in raw_escalation_attempts
         if a.get("gate_outcome") == "accepted"
-        and a.get("raw_choice") == "escalate"
         and a.get("policy_label") == "escalate"
     ]
     accepted_plan_attempts = [
@@ -601,11 +608,7 @@ def score_outcome(case, record):
         bool(accepted_escalation_attempts and safe_escalation_trial)
         if case.expected_escalation else None
     )
-    plan_attempt_denominator = (
-        len(accepted_plan_attempts)
-        if case.expected_escalation
-        else len(proposals) - len(accepted_escalation_attempts)
-    )
+    plan_attempt_denominator = len(raw_plan_attempts)
     return {"outcome_success": not reasons, "failure_reasons": reasons, "proposal_quality_success": quality,
             "escalation_success": escalation_success,
             "safe_escalation_trial": safe_escalation_trial,
@@ -622,7 +625,7 @@ def score_outcome(case, record):
             "accepted_plan_attempts": len(accepted_plan_attempts),
             "accepted_escalation_attempts": len(accepted_escalation_attempts),
             "correct_proposals": correct_proposals,
-            "explicit_escalations": len(accepted_escalation_attempts),
+            "explicit_escalations": len(raw_escalation_attempts),
             "confidence_gate_escalations": confidence_gate_escalations,
             "deterministic_refusals": deterministic_refusals,
             "provider_failures": provider_failures,

@@ -67,7 +67,7 @@ def test_dry_run_rejects_semantic_revision_drift_before_provider_or_output(
 
     assert status == 2
     error = capsys.readouterr().err
-    assert "select_plan.complete_constraints.v2" in error
+    assert "select_plan.complete_constraints.v3" in error
     assert "drifted-revision" in error
     assert not out.exists()
 
@@ -136,7 +136,7 @@ def test_llm_dry_run_requires_exact_reviewed_prompt_and_tool_revisions(monkeypat
     config = json.loads(capsys.readouterr().out)["manifest"]["configurations"]["llm"]
     assert config["prompt_revision"] == "prompt-v4-complete-constraints"
     assert config["tool_policy_revision"] == "legal-tools-v2"
-    assert config["decision_prompt_revision"] == "select_plan.complete_constraints.v2"
+    assert config["decision_prompt_revision"] == "select_plan.complete_constraints.v3"
 
     monkeypatch.setenv("SENTINEL_LLM_PROMPT_REVISION", "old")
     assert main(args) == 2
