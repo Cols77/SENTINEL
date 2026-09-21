@@ -13,3 +13,7 @@ Runtime: bundled Python 3.12 with a project venv sharing the bundled scientific 
 ## Progress
 
 Implementation is in progress. No hardware operation has been performed or validated.
+
+## Checkpoint A — integrated dry run
+
+Real-host browser acceptance passed: text request, reload at approval, approval response loss, reload/reconciliation, one production survey flight, one confirmed computer, persisted validated report, authorized PNG evidence, keyboard emergency hold over simulated transport, 1440/1920/narrow viewports, no browser errors or external requests. The browser harness owns a temporary real backend and deletes only its own data afterward. Runtime and survey focused suite: 228 passed. Original Node regression coverage is retained.

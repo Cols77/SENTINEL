@@ -525,3 +525,5 @@ summary {
 #evidence-spine{font-size:14px;padding-left:22px}.mission-audit{margin-top:20px;padding:16px;border:1px solid var(--border-control)}.mission-audit ol{max-height:280px;overflow:auto;font-size:14px}
 @media(max-width:1050px){.mission-layout{grid-template-columns:minmax(250px,1fr) minmax(300px,1.5fr)}.mission-facts{grid-column:1/-1}}
 @media(max-width:680px){.mission-console{padding:10px}.mission-layout{display:flex;flex-direction:column}.mission-layout>*{width:100%}.mission-workspace{order:0}.mission-chat{order:1}.mission-facts{order:2}.mission-command-bar{position:sticky;top:0;z-index:10;background:var(--surface-canvas);flex-wrap:wrap;padding:10px}.mission-command-bar p{margin:4px 0}}
+
+#safety-controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.safety-status{flex-basis:100%;font-size:14px}.emergency-control{border:2px solid #eb6b65;background:#321a1b;min-height:44px}.emergency-control:not(:disabled):hover{background:#492326;border-color:#ff8b85}

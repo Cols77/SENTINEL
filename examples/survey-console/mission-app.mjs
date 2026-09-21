@@ -6,6 +6,7 @@ import {createDecisionController,renderApproval} from './approval.mjs';
 import {createEvidenceView,supportingSightings} from './evidence.mjs';
 import {renderCounts} from './counts.mjs';
 import {createChatView} from './chat.mjs';
+import {createSafetyView} from './safety.mjs';
 const root=document.getElementById('app');
 root.classList.add('mission-console');document.title='SENTINEL · Mission Control';
 const status=el('p',{id:'mission-state',role:'status',class:'meta'},['Connecting to local runtime…']);
@@ -25,6 +26,7 @@ const client=createHttpClient();
 const controller=createController(client,missionContract);
 let snapshot=null,selection=null,restored=false;
 const chat=createChatView(chatHost,client,()=>snapshot);
+const safety=createSafetyView(safetyHost,client,()=>snapshot);
 chatHost.append(proposalHost);
 const evidence=createEvidenceView(evidenceHost,client);evidence.clear();
 const decision=createDecisionController(client,()=>crypto.randomUUID(),id=>({session_id:snapshot.session.id,command_id:id,correlation_id:snapshot.proposal.correlation_id}));
@@ -36,6 +38,7 @@ controller.subscribe(state=>{
  if(!state.survey){if(state.error)status.textContent=`Connection unavailable: ${state.error}`;return;}
  snapshot=state.survey;
  status.textContent=`${snapshot.session.mode} · ${snapshot.source.kind} · ${snapshot.run.phase} · ${snapshot.run.id}${state.needs_refresh?' · refresh required':''}`;
+ safety.render(snapshot);
  const view=toSurveyView(snapshot);
  chat.render(snapshot.chat.messages);decision.update(view,state.needs_refresh);drawDecision();
  renderCounts(counts,view,{onClass:id=>select('class',id),onObject:id=>select('object',id)});
@@ -46,5 +49,5 @@ controller.subscribe(state=>{
  if(selection){const ids=selection.kind==='frame'?[selection.id]:supportingSightings(view,selection).map(x=>x.frame_id);if(ids.some(id=>snapshot.evidence.frames.find(f=>f.id===id)?.evidence!=='AVAILABLE')){evidence.clear();selection=null;}}
  if(!restored){restored=true;const saved=localStorage.getItem(`sentinel:${snapshot.session.id}:${snapshot.run.id}:decision`);if(saved){try{decision.restore(JSON.parse(saved));}catch{localStorage.removeItem(`sentinel:${snapshot.session.id}:${snapshot.run.id}:decision`);}}}
 });
-try{const session=await client.session();await controller.open(session.active_run_id);const stop=startPolling(()=>controller.refresh());window.addEventListener('pagehide',()=>{stop();chat.dispose();evidence.dispose();});}
+try{const session=await client.session();await controller.open(session.active_run_id);const stop=startPolling(()=>controller.refresh());window.addEventListener('pagehide',()=>{stop();chat.dispose();evidence.dispose();safety.dispose();});}
 catch(e){status.textContent='Local runtime unavailable: '+e.message;}
