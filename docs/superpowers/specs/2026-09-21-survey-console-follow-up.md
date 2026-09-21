@@ -1,6 +1,6 @@
 # Survey console follow-up specification
 
-Status: proposed for review; no runtime implementation authorized by this document alone.
+Status: approved for native fixture-only execution on 2026-09-21; implemented in the separate follow-up branch. Live integration remains out of scope.
 
 ## Decision and sources
 

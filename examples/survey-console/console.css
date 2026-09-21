@@ -478,7 +478,9 @@ summary {
 }
 .sighting-box {
   position: absolute;
-  border: 2px solid var(--accent-primary);
+  /* Inset paint cannot enlarge tiny boxes or spill into letterboxing. */
+  box-shadow: inset 0 0 0 2px var(--accent-primary);
+  overflow: hidden;
   pointer-events: none;
 }
 .sighting-box span {

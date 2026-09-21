@@ -15,7 +15,7 @@ LIVE and REPLAY are fixture semantics. The existing kit uses REPLAYED; a backend
 | `read_survey(run_id)` | Complete cloned `Survey`; invalid run raises NOT_FOUND |
 | `read_survey_events(run_id, after_sequence, limit)` | Ordered `SurveyEvent[]`; exclusive cursor, limit 1–200, never beyond the exposed snapshot watermark |
 | `read_evidence(run_id, frame_id)` | Scoped `EvidenceResult`; NOT_FOUND, FORBIDDEN, REVOKED are explicit tagged denials; AVAILABLE contains synthetic PNG/JPEG bytes only |
-| `submit_decision(attempt)` | `DecisionResult`; immutable proposal/hash/version binding; same attempt and key reuse the original promise/result; changed payload/key reuse raises IDENTITY_REUSED |
+| `submit_decision(attempt)` | `DecisionResult`; immutable proposal/hash/version binding; same attempt and key reuse the pending promise or settled result; IN_DOUBT retries reopen reconciliation with the original identity; changed payload/key reuse raises IDENTITY_REUSED |
 
 Fixture-only `advance()`, `resolveDecision(status)`, and cloned `calls` are consumed only by reviewer controls/tests. The client has no HTTP, database, drone or provider adapter.
 
@@ -29,7 +29,7 @@ Evidence accepts PNG/JPEG up to 10 MiB, times out after 5 seconds and checks dec
 
 ## Approval lifecycle
 
-The full candidate is inspectable: original request, ID/hash, complete stops and geometry, duration, classes, proposer mode/source, justification, guardrail disagreement, target uncertainty and consent/envelope/preflight eligibility. Both choices require a current, eligible projection. Pending double clicks cannot create a second attempt. An uncertain transport outcome retries the same attempt and key. A conflict requires a newer snapshot before a deliberate new attempt. ACKNOWLEDGED means only submission acknowledgement. A settled decision cannot be submitted again on the same proposal/hash merely because the snapshot version changes. Detached results remain associated with the old proposal. The controller's UI-only `history` stores prior attempt/result pairs when a deliberate new attempt starts.
+The full candidate is inspectable: original request, ID/hash, complete stops and geometry, duration, classes, proposer mode/source, justification, guardrail disagreement, target uncertainty and consent/envelope/preflight eligibility. Both choices require a current, eligible projection. Pending double clicks cannot create a second attempt. An uncertain transport outcome retries the same attempt and key. In the fixture client, retry after IN_DOUBT creates a pending reconciliation response so reviewer controls can settle it as ACKNOWLEDGED or REJECTED; it never creates a new decision identity. A conflict requires a newer snapshot before a deliberate new attempt. ACKNOWLEDGED means only submission acknowledgement. A settled decision cannot be submitted again on the same proposal/hash merely because the snapshot version changes. Detached results remain associated with the old proposal. The controller's UI-only `history` stores prior attempt/result pairs when a deliberate new attempt starts.
 
 ## Backend-owner adoption checklist
 

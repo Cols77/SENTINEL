@@ -77,3 +77,37 @@ test("fixture advance does not exceed final snapshot", async () => {
   for (let i = 0; i < 10; i++) c.advance();
   assert.equal((await c.read_survey(a.run_id)).version, 6);
 });
+
+test("uncertain fixture result reconciles under the original attempt identity", async () => {
+  const { c, a } = setup();
+  const first = c.submit_decision(a);
+  c.resolveDecision("IN_DOUBT");
+  assert.equal((await first).status, "IN_DOUBT");
+  const retry = c.submit_decision({ ...a });
+  const duplicate = c.submit_decision({ ...a });
+  assert.notEqual(retry, first);
+  assert.equal(retry, duplicate);
+  c.resolveDecision("ACKNOWLEDGED");
+  assert.equal((await retry).status, "ACKNOWLEDGED");
+  assert.equal((await retry).attempt_id, a.attempt_id);
+  assert.deepEqual(c.calls, [a, a]);
+  assert.deepEqual(await c.submit_decision(a), await retry);
+  assert.equal((await c.read_survey(a.run_id)).flights.used, 1);
+});
+
+test("uncertain fixture outcome blocks a different decision identity", async () => {
+  const { c, a } = setup();
+  const first = c.submit_decision(a);
+  c.resolveDecision("IN_DOUBT");
+  await first;
+  const outcome = await Promise.race([
+    c
+      .submit_decision({ ...a, attempt_id: "other", idempotency_key: "other" })
+      .then(
+        () => "accepted",
+        (e) => e.code,
+      ),
+    new Promise((resolve) => setImmediate(() => resolve("pending"))),
+  ]);
+  assert.equal(outcome, "INVALID_ARGUMENT");
+});
