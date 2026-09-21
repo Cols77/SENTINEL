@@ -19,6 +19,15 @@ rev 3 R6 and rev 4 V7 amend this module from the plan's original body:
   only as a ``Sighting`` property once it reaches the store.
 - ``"monitor"`` is removed from ``CLASS_MAP``. In a lecture room it turns
   every external display and the projector screen into a computer.
+
+Plan phase 4 (D) adds one more source: ``scripts/survey_detect_gdino.py``
+bridges Dzivha's real Grounding DINO detector into ``ReplayDetector``
+response files, each item carrying a numeric ``score`` and
+``"score_kind": "DETECTOR_RAW"`` instead of a VLM's ``"confidence"`` band
+string. ``normalise`` bands those by two PROVISIONAL module constants (see
+below) and preserves the raw float in ``Detection.raw_score`` -- design
+spec 6.1's stated WP3-boundary exception, made true in code here ahead of
+the design doc revision that reconciles it (plan workstream F).
 """
 from __future__ import annotations
 
@@ -36,12 +45,28 @@ from .observability import IMAGE_HEIGHT, IMAGE_WIDTH
 CLASS_MAP = {
     "laptop": "computer", "computer": "computer",
     "notebook computer": "computer",
+    # Phase 4 (D): the specific two-word phrase scripts/survey_detect_gdino.py
+    # sends Grounding DINO, deliberately distinct from the bare "monitor"
+    # rev 3 R6 removed above -- that removal was about a single ambiguous
+    # word turning every lecture-room external display or projector screen
+    # into a computer; "computer monitor" is the class-phrase this bridge
+    # asks for on purpose and must resolve, not go silently dropped.
+    "computer monitor": "computer",
     "person": "person", "people": "person", "man": "person", "woman": "person",
     "cell phone": "phone", "phone": "phone", "mobile phone": "phone", "smartphone": "phone",
     "pen": "pen", "pencil": "pen",
 }
 
 _BANDS = {"high", "medium", "low"}
+
+#: PROVISIONAL until the provider spike (plan workstream E) measures real
+#: detector score distributions and pins these for real. A DETECTOR_RAW
+#: score at or above this is "high"; do not treat these as validated
+#: thresholds -- they are a starting point for scripts/survey_detect_gdino.py
+#: output, not a measured cutoff.
+DETECTOR_RAW_HIGH_PROVISIONAL = 0.35
+#: PROVISIONAL, same caveat as above -- the "medium" floor.
+DETECTOR_RAW_MEDIUM_PROVISIONAL = 0.25
 
 
 @dataclass(frozen=True)
@@ -93,19 +118,43 @@ def normalise(items, width: int = IMAGE_WIDTH, height: int = IMAGE_HEIGHT) -> No
         if mapped is None:
             dropped.append(label)
             continue
-        band = str(item.get("confidence", "")).strip().lower()
+        # Phase 4 (D): a bridged detector item (scripts/survey_detect_gdino.py)
+        # carries a numeric "score" and "score_kind": "DETECTOR_RAW" instead
+        # of a VLM's "confidence" band string. Banded here by the PROVISIONAL
+        # thresholds above -- this is the WP3-boundary exception design spec
+        # 6.1 documents (see this module's docstring / the D handoff doc):
+        # the survey flow now does claim DETECTOR_RAW for a real detector, in
+        # code, ahead of the design doc being revised to match (plan
+        # workstream F's job, not this one's).
+        raw_score_kind = str(item.get("score_kind", "")).strip().upper()
+        raw_score_value = item.get("score")
+        if raw_score_kind == "DETECTOR_RAW" and isinstance(raw_score_value, (int, float)) \
+                and not isinstance(raw_score_value, bool):
+            raw_score = float(raw_score_value)
+            score_kind = "DETECTOR_RAW"
+            if raw_score >= DETECTOR_RAW_HIGH_PROVISIONAL:
+                band = "high"
+            elif raw_score >= DETECTOR_RAW_MEDIUM_PROVISIONAL:
+                band = "medium"
+            else:
+                band = "low"
+        else:
+            band_str = str(item.get("confidence", "")).strip().lower()
+            raw_score = None
+            # A VLM band is never a detector score (WP3 section 2).
+            score_kind = "VLM_CONFIDENCE_BAND" if band_str in _BANDS else "NONE"
+            band = band_str if band_str in _BANDS else "low"
         detection = {
             "class": mapped,
             "matched_prompt": label,
-            # A VLM band is never a detector score (WP3 section 2).
-            "raw_score": None,
-            "score_kind": "VLM_CONFIDENCE_BAND" if band in _BANDS else "NONE",
+            "raw_score": raw_score,
+            "score_kind": score_kind,
             "bbox": _box(item, width, height),
             "bbox_coordinate_space": "PIXELS_TOP_LEFT",
             "description": item.get("description"),
             "provider_item_id": item.get("id"),
         }
-        pairs.append((detection, band if band in _BANDS else "low"))
+        pairs.append((detection, band))
     return NormaliseResult(tuple(pairs), tuple(dropped))
 
 

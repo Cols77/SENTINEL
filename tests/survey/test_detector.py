@@ -3,8 +3,10 @@ import json
 import jsonschema
 import pytest
 
-from sentinel.survey.detector import (CLASS_MAP, DetectionBatch, FallbackDetector, ReplayDetector,
-                                      ScriptedDetector, normalise)
+from sentinel.survey.detector import (CLASS_MAP, DETECTOR_RAW_HIGH_PROVISIONAL,
+                                      DETECTOR_RAW_MEDIUM_PROVISIONAL, DetectionBatch,
+                                      FallbackDetector, ReplayDetector, ScriptedDetector,
+                                      normalise)
 from sentinel.survey.providers import ModelIdentityMismatch, ProviderAuthError, ProviderTimeout
 from tests.survey.test_survey_contract import SCHEMA
 
@@ -79,6 +81,90 @@ def test_a_detection_produced_by_normalise_validates_against_the_contract():
     assert "band" not in detection
     assert band == "high"
     _validate_detection(detection)
+
+
+# -- DETECTOR_RAW banding (plan phase 4, section D) -------------------------
+
+def test_computer_monitor_is_a_distinct_class_map_entry_from_the_removed_monitor():
+    """The two-word phrase scripts/survey_detect_gdino.py sends Grounding
+    DINO is deliberately more specific than the bare "monitor" rev 3 R6
+    removed -- it must resolve, not join "monitor" in being dropped."""
+    assert CLASS_MAP["computer monitor"] == "computer"
+    result = normalise([{"label": "computer monitor", "x": 0.1, "y": 0.1,
+                        "width": 0.1, "height": 0.1}], 960, 720)
+    assert result.dropped == ()
+    assert result.pairs[0][0]["class"] == "computer"
+
+
+def _detector_raw_item(score: float) -> dict:
+    return {"label": "laptop", "x": 0.1, "y": 0.1, "width": 0.1, "height": 0.1,
+            "score": score, "score_kind": "DETECTOR_RAW"}
+
+
+def test_a_detector_raw_score_at_or_above_the_high_threshold_bands_high():
+    detection, band = normalise([_detector_raw_item(DETECTOR_RAW_HIGH_PROVISIONAL)],
+                                960, 720).pairs[0]
+    assert band == "high"
+    assert detection["score_kind"] == "DETECTOR_RAW"
+    assert detection["raw_score"] == DETECTOR_RAW_HIGH_PROVISIONAL
+
+
+def test_a_detector_raw_score_just_under_the_high_threshold_bands_medium():
+    detection, band = normalise(
+        [_detector_raw_item(DETECTOR_RAW_HIGH_PROVISIONAL - 0.001)], 960, 720).pairs[0]
+    assert band == "medium"
+    assert detection["raw_score"] == pytest.approx(DETECTOR_RAW_HIGH_PROVISIONAL - 0.001)
+
+
+def test_a_detector_raw_score_at_or_above_the_medium_threshold_bands_medium():
+    detection, band = normalise([_detector_raw_item(DETECTOR_RAW_MEDIUM_PROVISIONAL)],
+                                960, 720).pairs[0]
+    assert band == "medium"
+
+
+def test_a_detector_raw_score_just_under_the_medium_threshold_bands_low():
+    detection, band = normalise(
+        [_detector_raw_item(DETECTOR_RAW_MEDIUM_PROVISIONAL - 0.001)], 960, 720).pairs[0]
+    assert band == "low"
+
+
+def test_a_detector_raw_detection_still_validates_against_the_contract():
+    """The banding branch must not add a ninth key or otherwise diverge
+    from the Detection contract the VLM path already satisfies (mirrors
+    test_a_detection_produced_by_normalise_validates_against_the_contract)."""
+    detection, band = normalise([_detector_raw_item(0.9)], 960, 720).pairs[0]
+    assert "band" not in detection
+    _validate_detection(detection)
+
+
+def test_a_vlm_confidence_item_is_unaffected_by_the_detector_raw_branch():
+    """VLM items keep today's behaviour exactly -- no score/score_kind on
+    the input means the existing confidence-band path, unchanged."""
+    detection, band = normalise([{"label": "laptop", "x": 0.1, "y": 0.1, "width": 0.1,
+                                 "height": 0.1, "confidence": "high"}], 960, 720).pairs[0]
+    assert detection["score_kind"] == "VLM_CONFIDENCE_BAND"
+    assert detection["raw_score"] is None
+    assert band == "high"
+
+
+def test_the_replay_detector_reads_a_bridge_written_file(tmp_path):
+    """ReplayDetector serves a file shaped exactly like
+    scripts/survey_detect_gdino.py's to_response() output -- built from the
+    real function, not a hand reconstruction of its shape."""
+    from scripts.survey_detect_gdino import to_response
+
+    response = to_response(
+        [{"query": "laptop", "score": 0.5, "box_xyxy": (96.0, 72.0, 192.0, 144.0)}],
+        960, 720, "org/model", "deadbeef")
+    (tmp_path / "f0.json").write_text(json.dumps(response), encoding="utf-8")
+
+    batch = ReplayDetector(tmp_path).detect("frames/f0.png", ("computer",))
+
+    assert batch.status == "OK"
+    assert batch.detections[0]["class"] == "computer"
+    assert batch.detections[0]["score_kind"] == "DETECTOR_RAW"
+    assert batch.detections[0]["raw_score"] == 0.5
+    assert batch.bands == ("high",)
 
 
 def test_the_replay_detector_never_calls_out_and_returns_the_stored_response(tmp_path):
