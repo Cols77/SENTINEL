@@ -53,6 +53,13 @@ async function main(){
    }host.remove();return {race,revoked,failures};
   });
   assert.equal(evidenceResults.race,true);assert.equal(evidenceResults.revoked,true);assert.ok(evidenceResults.failures.every(Boolean));
+  await page.selectOption('#scenario','computers-followup');for(let i=0;i<5;i++)await page.locator('#next-snapshot').click();
+  const approval=await page.locator('#approval').innerText();
+  for(const expected of ['p2','illustrative-hash-p2','close-rail','1 m range','18 s','computer-6','Consent','Envelope','Preflight','None reported'])assert.ok(approval.includes(expected),expected);
+  const budget=await page.locator('#flight-budget').innerText();
+  await page.locator('#approve').click();assert.equal(await page.locator('#approve').isDisabled(),true);assert.equal(await page.locator('#reject').isDisabled(),true);
+  await page.selectOption('#fixture-decision-result','ACKNOWLEDGED');await page.locator('#resolve-fixture-decision').click();
+  assert.match(await page.locator('#approval').innerText(),/ACKNOWLEDGED/);assert.equal(await page.locator('#approve').isDisabled(),true);assert.equal(await page.locator('#flight-budget').innerText(),budget);
   await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   await page.evaluate(async()=>{const {renderShell}=await import('/examples/survey-console/shell.mjs');const {makeScenario}=await import('/examples/survey-console/fixtures.mjs');const s=makeScenario('computers-followup').snapshots[0];s.request_text='<img src=x onerror=alert(1)>';renderShell(document.getElementById('app'),{survey:s,events:[],needs_refresh:false,log_gaps:[],error:null},{});});
   assert.match(await page.locator('#request').innerText(),/<img src=x onerror=alert\(1\)>/);assert.equal(await page.locator('#request img').count(),0);
