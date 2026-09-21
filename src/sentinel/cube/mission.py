@@ -37,6 +37,8 @@ MIN_MOVE_CM = 20
 MAX_TRIM_ROUNDS = 2
 YAW_TRIM_THRESHOLD_DEG = 10.0
 PLAUSIBILITY_CM = 60.0
+TOLERANCE_CM = 15.0
+OUTER_TOLERANCE_CM = 30.0
 SETTLE_S = 1.5
 BURST_MAX_S = 12.0
 BURST_TARGET_REPORTS = 12
@@ -49,6 +51,10 @@ class PlanError(ValueError):
 
 class ContainmentAbort(RuntimeError):
     """The measured position left the operating cube."""
+
+
+class ToleranceAbort(RuntimeError):
+    """Both trims were spent and the drone is still beyond the outer tolerance circle."""
 
 
 class PoseImplausible(RuntimeError):
@@ -83,6 +89,13 @@ def load_mission(path) -> Mission:
     if not 1 <= len(waypoints) <= MAX_WAYPOINTS:
         raise ValueError(f"a mission has 1-{MAX_WAYPOINTS} waypoints, got {len(waypoints)}")
     return Mission(int(doc["start"]["x_cm"]), int(doc["start"]["y_cm"]), waypoints)
+
+
+def tolerance_verdict(arrival_error_cm: float) -> str:
+    """INSIDE the tolerance circle, in the OUTER ring (continue, logged), or OUTSIDE both."""
+    if arrival_error_cm <= TOLERANCE_CM:
+        return "INSIDE"
+    return "OUTER" if arrival_error_cm <= OUTER_TOLERANCE_CM else "OUTSIDE"
 
 
 def axis_move(delta_cm: float) -> int:
@@ -230,6 +243,7 @@ class CubeMissionRunner(FlightTestRunner):
                 "spread_p95_cm": round(result.spread_p95_cm, 2),
                 "arrival_error_cm": round(math.dist(fix, (wp.x_cm, wp.y_cm)), 1),
                 "containment": containment.value,
+                "tolerance": tolerance_verdict(math.dist(fix, (wp.x_cm, wp.y_cm))),
                 "proposed_trims": [list(t) for t in trims], "trim_rounds_sent": rounds,
             })
             if containment is Containment.OUTSIDE:
@@ -254,11 +268,21 @@ class CubeMissionRunner(FlightTestRunner):
             if rounds == 0 and abs(heading_error) > YAW_TRIM_THRESHOLD_DEG:
                 self._rotate("cw" if heading_error > 0 else "ccw", round(abs(heading_error)))
             if not trims or rounds >= MAX_TRIM_ROUNDS:
-                return
+                return self._accept_arrival(wp, entry)
             sent = [self._step(direction, distance, optional=True) for direction, distance in trims]
             if not any(sent):
-                return
+                return self._accept_arrival(wp, entry)
             rounds += 1
+
+    def _accept_arrival(self, wp: Waypoint, entry: dict) -> None:
+        """No trim is left to send: land if the drone is still beyond the outer circle."""
+        if entry["tolerance"] == "OUTSIDE":
+            raise ToleranceAbort(f"tolerance: {wp.name} is {entry['arrival_error_cm']} cm from its "
+                                 f"target after {entry['trim_rounds_sent']} trim rounds, beyond the "
+                                 f"{OUTER_TOLERANCE_CM:.0f} cm outer circle")
+        if entry["tolerance"] == "OUTER":
+            self._emit("alert", f"{wp.name}: arrived {entry['arrival_error_cm']} cm from its target, "
+                                "in the outer tolerance circle")
 
     # -- observation --------------------------------------------------------
     def _look(self, wp: Waypoint) -> None:
@@ -285,7 +309,8 @@ class CubeMissionRunner(FlightTestRunner):
             entry = {"waypoint": wp.name, "commanded_cm": [wp.x_cm, wp.y_cm, wp.z_cm],
                      "pose_mode": self.pose_mode, "status": "OPEN_LOOP", "fix_cm": None,
                      "heading_error_deg": None, "n": 0, "spread_p95_cm": None,
-                     "arrival_error_cm": None, "containment": None, "proposed_trims": None,
+                     "arrival_error_cm": None, "containment": None, "tolerance": None,
+                     "proposed_trims": None,
                      "trim_rounds_sent": 0, "looks_deg": list(wp.looks_deg)}
             try:
                 if self.pose_mode != "off" and wp.localise:

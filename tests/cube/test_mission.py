@@ -154,3 +154,34 @@ def test_load_mission(tmp_path):
                                 "start": {"x_cm": 270, "y_cm": 250}, "waypoints": []}))
     with pytest.raises(ValueError):
         load_mission(path)
+
+
+def test_arrival_inside_the_tolerance_circle_is_logged_inside(tmp_path):
+    runner, _ = _runner(tmp_path, "reanchor", [[_report(275, 301)] * 10, [_report(150, 300)] * 10])
+    assert runner.run(confirm=True).status == "PASS"
+    assert [e["tolerance"] for e in _log(tmp_path)] == ["INSIDE", "INSIDE"]
+
+
+def test_arrival_in_the_outer_circle_after_both_trims_continues_and_is_logged(tmp_path):
+    bursts = [[_report(270, 280)] * 10] * 3 + [[_report(150, 300)] * 10]   # 20 cm short, trims do nothing
+    runner, client = _runner(tmp_path, "reanchor", bursts)
+    assert runner.run(confirm=True).status == "PASS"
+    wp1, wp2 = _log(tmp_path)
+    assert wp1["trim_rounds_sent"] == 2 and wp1["tolerance"] == "OUTER"
+    assert wp2["tolerance"] == "INSIDE"
+
+
+def test_arrival_beyond_the_outer_circle_after_both_trims_lands_the_drone(tmp_path):
+    bursts = [[_report(270, 265)] * 10] * 3                                # 35 cm short, trims do nothing
+    runner, client = _runner(tmp_path, "reanchor", bursts)
+    report = runner.run(confirm=True)
+    assert report.status == "FAIL" and "tolerance" in report.error.lower()
+    assert "land" in client.commands and "left 120" not in client.commands
+    wp1 = _log(tmp_path)[0]
+    assert wp1["trim_rounds_sent"] == 2 and wp1["tolerance"] == "OUTSIDE"
+
+
+def test_passive_mode_logs_the_tolerance_verdict_but_never_lands_on_it(tmp_path):
+    runner, client = _runner(tmp_path, "passive", [[_report(270, 265)] * 10, [_report(150, 300)] * 10])
+    assert runner.run(confirm=True).status == "PASS"
+    assert [e["tolerance"] for e in _log(tmp_path)] == ["OUTSIDE", "INSIDE"]
