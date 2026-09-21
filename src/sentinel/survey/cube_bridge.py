@@ -73,10 +73,12 @@ def envelope_from_site(site: Site, standoff_cm: int) -> SweepEnvelope:
         min_z_cm=site.min_z_cm, max_z_cm=site.max_z_cm, standoff_cm=standoff_cm)
 
 
-def mission_from_option(option, start_x_cm: int, start_y_cm: int) -> Mission:
+def mission_from_option(option, start_x_cm: int | None, start_y_cm: int | None) -> Mission:
     """One Waypoint per stop, in order. ``localise=True`` always (V13: a
     pose burst at every stop, not only the ones an operator remembered to
-    ask for)."""
+    ask for). A ``None`` start is measured from the tags after takeoff
+    (``CubeMissionRunner._localise_start``), which is the only honest start
+    for a flight nobody tape-measured the pad of."""
     waypoints = tuple(
         Waypoint(f"{option.option_id}_{index}", x_cm, y_cm, option.z_cm,
                  looks_deg=option.looks_deg, localise=True)
@@ -90,7 +92,7 @@ class CubeFlight:
 
     def __init__(self, *, client, site: Site, mode: str, pose_mode: str,
                  run_id: str, mission_log, capture_dir=None,
-                 start_x_cm: int, start_y_cm: int,
+                 start_x_cm: int | None = None, start_y_cm: int | None = None,
                  surface_z_cm: float, sr063_amended: bool = False,
                  tag_map=None, conn=None, burst_fn: Callable[[], list] | None = None,
                  sleep_fn: Callable[[float], None] = time.sleep,
@@ -106,6 +108,11 @@ class CubeFlight:
             raise ValueError(
                 "--pose reanchor lets pose correct motion, which SR-063 forbids as "
                 "written. Amend SR-063 first, then pass sr063_amended=True.")
+        if (start_x_cm is None) != (start_y_cm is None):
+            raise ValueError("give both start coordinates or neither")
+        if start_x_cm is None and pose_mode == "off":
+            raise ValueError("pose mode 'off' cannot measure where the drone took off; "
+                             "give a tape-measured start")
         self.client, self.site, self.mode, self.pose_mode = client, site, mode, pose_mode
         self.run_id = run_id
         self.mission_log = Path(mission_log)
@@ -128,12 +135,30 @@ class CubeFlight:
             burst_fn=self.burst_fn, sleep_fn=self.sleep_fn)
         runner.run(confirm=self.confirm)
         new_lines = self.mission_log.read_text(encoding="utf-8").splitlines()[len(already):]
-        entries = [json.loads(line) for line in new_lines]
+        # A measured start writes its own START line; it is not a stop.
+        names = {waypoint.name for waypoint in mission.waypoints}
+        entries = [entry for entry in map(json.loads, new_lines) if entry.get("waypoint") in names]
+        self._carry_start_forward(entries)
         return [
             self._frame_from(stop_index, entry, frame)
             for stop_index, entry in enumerate(entries)
             for frame in entry.get("frames", ())
         ]
+
+    def _carry_start_forward(self, entries: list[dict]) -> None:
+        """A follow-up sweep takes off from wherever the last one landed,
+        not from the original pad. With a measured start nothing needs
+        carrying; with a given one, the next flight starts at the last
+        stop this one reached (its fix when it had one)."""
+        if self.start_x_cm is None:
+            return
+        reached = [entry for entry in entries if entry["status"] != "ABORTED_EN_ROUTE"]
+        if not reached:
+            return
+        last = reached[-1]
+        x_cm, y_cm = (last["fix_cm"] if last["status"] == "LOCALISED"
+                      else last["commanded_cm"][:2])
+        self.start_x_cm, self.start_y_cm = round(x_cm), round(y_cm)
 
     def _frame_from(self, stop_index: int, entry: dict, frame: dict) -> FlightFrame:
         measured = entry["status"] == "LOCALISED"

@@ -129,6 +129,51 @@ class _DefaultAdapter:
                            "reason": "default offline stand-in: first legal sweep"}}]}
 
 
+LIVE_JUDGE_BASE_URL = "https://openrouter.ai/api"
+LIVE_JUDGE_KEY_ENV = "OPENROUTER_API_KEY"
+
+
+def _live_judge(args):
+    """None (the offline default judge) unless the operator asked for a live one.
+
+    Only mode J has a live path. Its proposer takes a typed choice among the offered
+    sweeps and gates it on confidence and margin; the justification is written by
+    code. Mode E needs a model-written reason from a tool-calling adapter, which the
+    survey does not have, so a live E would mean inventing that reason here."""
+    if args.live_judge == "none":
+        return None
+    if args.mode != "J":
+        raise ValueError("--live-judge only applies to --mode J")
+    if not args.i_authorise_paid_calls:
+        raise ValueError("--live-judge makes paid calls (at most 3 per run); "
+                         "pass --i-authorise-paid-calls to go ahead")
+    from sentinel.env_file import load_env_file
+    from sentinel.judgment import JevJudge, LlmJudge
+    load_env_file()
+    if not os.environ.get(LIVE_JUDGE_KEY_ENV):
+        raise ValueError(f"--live-judge needs {LIVE_JUDGE_KEY_ENV} in the environment or .env")
+    if args.live_judge == "jev":
+        return JevJudge(api_key_env=LIVE_JUDGE_KEY_ENV, base_url=LIVE_JUDGE_BASE_URL,
+                        timeout_s=20.0)
+    return LlmJudge(api_key_env=LIVE_JUDGE_KEY_ENV, base_url=LIVE_JUDGE_BASE_URL,
+                    model=args.llm_model, timeout_s=120.0)
+
+
+def _start_pad(args, envelope) -> tuple[int | None, int | None]:
+    """Where the drone takes off. ``--start X,Y`` is a tape-measured pad. Without it a
+    real flight with pose on measures its start from the tags; a real flight with pose
+    off is refused, because dead reckoning from a guessed pad misplaces every stop and
+    every photograph. Only a dry run may fall back to a nominal pad."""
+    if args.start is not None:
+        x_text, _, y_text = args.start.partition(",")
+        return int(x_text), int(y_text)
+    if args.real:
+        if args.pose == "off":
+            raise ValueError("--real with --pose off needs a tape-measured --start X,Y")
+        return None, None
+    return (envelope.min_x_cm + envelope.max_x_cm) // 2, envelope.min_y_cm
+
+
 def build_policy(mode: str, *, judge=None, adapter=None, sink) -> SurveyPolicy:
     if mode == "F":
         return RuleProposer()
@@ -240,6 +285,18 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
     parser.add_argument("--surface-z-cm", type=float, default=None,
                         help="tape-measured surface height, for the per-frame delta_z_cm "
                              "(V12); required with --site")
+    parser.add_argument("--live-judge", choices=("none", "jev", "llm"), default="none",
+                        help="--mode J only: a live model reads the request and picks the "
+                             "sweep. jev = the Jev decision model, llm = a general LLM through "
+                             "the same typed-choice interface. PAID: needs OPENROUTER_API_KEY "
+                             "and --i-authorise-paid-calls (at most 3 calls per run)")
+    parser.add_argument("--llm-model", default="z-ai/glm-5.3",
+                        help="model id for --live-judge llm")
+    parser.add_argument("--i-authorise-paid-calls", action="store_true",
+                        help="the operator's explicit go-ahead for --live-judge")
+    parser.add_argument("--start", default=None, metavar="X,Y",
+                        help="tape-measured takeoff pad in room cm. Omit it on a real flight with "
+                             "pose on and the start is measured from the tags after takeoff")
     parser.add_argument("--real", action="store_true",
                         help="fly a real Tello instead of DryRunClient; --site only")
     parser.add_argument("--confirm", action="store_true",
@@ -319,12 +376,13 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
             conn = sqlite3.connect(args.pose_db)
             ensure_schema(conn)
         mission_log = args.mission_log or args.db.with_suffix(".cube-mission.jsonl")
+        start = _start_pad(args, envelope)
         capture_dir = args.capture_dir or (args.db.resolve().parent / "cube-frames")
         flight = CubeFlight(
             client=client, site=site, mode="real" if args.real else "dry-run",
             pose_mode=args.pose, run_id=run_id, mission_log=mission_log,
             capture_dir=capture_dir,
-            start_x_cm=(envelope.min_x_cm + envelope.max_x_cm) // 2, start_y_cm=envelope.min_y_cm,
+            start_x_cm=start[0], start_y_cm=start[1],
             surface_z_cm=args.surface_z_cm, sr063_amended=args.sr063_amended,
             tag_map=tag_map, conn=conn,
             # A real flight always requires the explicit --confirm flag
@@ -338,7 +396,7 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
 
     options = generate_options(envelope, camera)
     sink = JsonlAuditSink(args.db.with_suffix(".jsonl"))
-    policy = build_policy(args.mode, sink=sink)
+    policy = build_policy(args.mode, sink=sink, judge=_live_judge(args))
     detector = build_detector(args.detector, args.responses, environ=environ, session=session)
     if args.fallback != "none":
         fallback_detector = build_provider_detector(args.fallback, environ=environ,

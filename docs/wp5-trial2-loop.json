@@ -1,0 +1,11 @@
+{
+  "schema_version": "cube-mission-v1",
+  "_comment": "Enlarged square, 1 m x 1 m, reaching 2.5 m from the tags. No start: measured after takeoff.",
+  "waypoints": [
+    {"name": "RIGHT_NEAR", "x_cm": 300, "y_cm": 250, "z_cm": 100},
+    {"name": "RIGHT_BACK", "x_cm": 300, "y_cm": 150, "z_cm": 100},
+    {"name": "LEFT_BACK",  "x_cm": 200, "y_cm": 150, "z_cm": 100},
+    {"name": "LEFT_NEAR",  "x_cm": 200, "y_cm": 250, "z_cm": 100},
+    {"name": "HOME",       "x_cm": 250, "y_cm": 250, "z_cm": 100}
+  ]
+}

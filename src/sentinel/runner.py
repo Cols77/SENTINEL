@@ -381,8 +381,17 @@ class FlightTestRunner:
 
                 self._fly_sequence()
                 self._emit("flight", "sending hover/stop")
-                response = self._call(self.client.stop)
-                if not self._is_ok(response):
+                try:
+                    response = self._call(self.client.stop)
+                except Exception as exc:  # noqa: BLE001 - re-raised unless it is the one known reply
+                    if "unknown command" not in str(exc).lower():
+                        raise
+                    response = str(exc)
+                if "unknown command" in str(response).lower():
+                    # This Tello firmware has no `stop` (measured 2026-09-21); a Tello
+                    # already hovers once a move has completed, so there is nothing to stop.
+                    self._emit("flight", "firmware has no stop command; already hovering")
+                elif not self._is_ok(response):
                     raise RuntimeError(f"hover/stop failed: {response}")
                 self._emit("flight", "sending landing")
                 response = self._call(self.client.land)
