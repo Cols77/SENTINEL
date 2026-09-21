@@ -64,7 +64,7 @@ export function createEvidenceView(host, client) {
     const context = el("div", {}, [
       el("h2", {}, ["Evidence & provenance"]),
       meta(`${s.run_id} · ${selection.kind}: ${selection.id}`),
-      meta(`${rows.length} supporting sightings · synthetic fixture evidence`),
+      meta(`${rows.length} supporting sightings · ${s.mode ?? "synthetic fixture"} evidence`),
     ]);
     const choices = el("div", { class: "evidence-choices" }),
       imageHost = el("div"),

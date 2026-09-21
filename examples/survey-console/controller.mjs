@@ -6,7 +6,12 @@ const blank = () => ({
   log_gaps: [],
   error: null,
 });
-export function createController(client) {
+export function createController(client, contract = {}) {
+  const validate = contract.validate ?? validateSurvey;
+  const validateRow = contract.validateEvent ?? validateEvent;
+  const run = contract.run ?? (s => s?.run_id);
+  const version = contract.version ?? (s => s?.version);
+  const watermark = contract.watermark ?? (s => s?.event_sequence ?? 0);
   let state = blank(),
     epoch = 0,
     runId = null,
@@ -26,7 +31,7 @@ export function createController(client) {
   }
   function reconcileLog() {
     const present = new Set(state.events.map((e) => e.sequence));
-    const high = Math.max(state.survey?.event_sequence ?? 0, ...present, 0);
+    const high = Math.max(watermark(state.survey), ...present, 0);
     const gaps = [];
     // Report at most 200 gaps; pagination still starts at the first missing entry.
     for (let i = 1; i <= high && gaps.length < 200; i++)
@@ -39,7 +44,7 @@ export function createController(client) {
     const byId = new Map(state.events.map((e) => [e.id, e]));
     for (const e of rows) {
       if (e.run_id !== runId) continue;
-      validateEvent(e);
+      validateRow(e);
       for (const prior of [bySequence.get(e.sequence), byId.get(e.id)])
         if (prior && JSON.stringify(prior) !== JSON.stringify(e))
           throw new Error("Conflicting event identity");
@@ -51,7 +56,7 @@ export function createController(client) {
     );
     if (
       Math.max(0, ...state.events.map((e) => e.sequence)) >
-      (state.survey?.event_sequence ?? 0)
+      (watermark(state.survey))
     )
       state.needs_refresh = true;
     reconcileLog();
@@ -65,24 +70,24 @@ export function createController(client) {
     try {
       const candidate = await client.read_survey(id);
       if (!active()) return;
-      if (candidate.run_id !== id) throw new Error("Snapshot run mismatch");
-      validateSurvey(candidate);
+      if (run(candidate) !== id) throw new Error("Snapshot run mismatch");
+      validate(candidate);
       const prior = state.survey;
       if (
         prior &&
-        candidate.version === prior.version &&
+        version(candidate) === version(prior) &&
         JSON.stringify(candidate) !== JSON.stringify(prior)
       )
         throw new Error("Changed payload at same snapshot version");
-      if (!prior || candidate.version > prior.version) {
-        if (prior && candidate.event_sequence < prior.event_sequence)
+      if (!prior || version(candidate) > version(prior)) {
+        if (prior && watermark(candidate) < watermark(prior))
           throw new Error("Snapshot watermark regressed");
         state = {
           ...state,
           survey: structuredClone(candidate),
           error: null,
           needs_refresh: state.events.some(
-            (e) => e.sequence > candidate.event_sequence,
+            (e) => e.sequence > watermark(candidate),
           ),
         };
       }
@@ -98,7 +103,7 @@ export function createController(client) {
           throw new Error("Invalid event page");
         let next = cursor;
         for (const e of rows) {
-          validateEvent(e);
+          validateRow(e);
           if (e.run_id !== id || e.sequence <= next)
             throw new Error("Event page made no cursor progress");
           next = e.sequence;

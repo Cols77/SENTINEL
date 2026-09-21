@@ -33,6 +33,7 @@ function newAttemptAllowed(s, state, needsRefresh) {
 export function createDecisionController(
   client,
   newId = () => crypto.randomUUID(),
+  attemptContext = () => ({}),
 ) {
   let survey = null,
     needsRefresh = true,
@@ -107,6 +108,7 @@ export function createDecisionController(
         return;
       const id = newId();
       const attempt = Object.freeze({
+        ...attemptContext(id),
         run_id: survey.run_id,
         proposal_id: survey.proposal.id,
         proposal_sha256: survey.proposal.sha256,
@@ -127,6 +129,11 @@ export function createDecisionController(
         history,
       };
       await send(attempt);
+    },
+    async restore(attempt) {
+      if (state.pending || !attempt || attempt.run_id !== survey?.run_id) return;
+      state = {...state, attempt: Object.freeze(structuredClone(attempt))};
+      await send(state.attempt);
     },
     async retry() {
       if (
@@ -225,7 +232,7 @@ export function renderApproval(
       }),
       button("Reject", onReject, { id: "reject", disabled: !enabled }),
     ]),
-    meta("Fixture acknowledgement is not flight dispatch."),
+    meta(s.mode ? "Decision acknowledgement is not flight completion." : "Fixture acknowledgement is not flight dispatch."),
   );
   if (state.attempt) {
     nodes.push(
