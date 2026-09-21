@@ -601,6 +601,8 @@ def _run_decide(args: Any) -> int:
     finally:
         repository.close()
     print(f"decide OK: {result}")
+    return 0
+
 
 def _run_pose_stream(args: Any) -> int:
     """Run bounded video-only pose estimation without flight commands."""
