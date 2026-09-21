@@ -1,6 +1,35 @@
-import test from 'node:test';import assert from 'node:assert/strict';import {makeScenario} from '../../examples/survey-console/fixtures.mjs';import {countText} from '../../examples/survey-console/counts.mjs';
-const row=(scenario,index)=>makeScenario(scenario).snapshots.at(-1).counts[index];
-test('computer range is bounded and unknown is not zero',()=>{const c=row('computers-followup',0);assert.equal(countText(c),'at least 5, possibly 6');assert.equal(countText({...c,confirmed:null,uncertain:null}),'Unknown');assert.equal(countText({...c,confirmed:0,uncertain:0}),'at least 0, possibly 0');});
-test('people remain a timestamped single-view lower bound',()=>{const c=row('people-lower-bound',1);assert.equal(countText(c),'at least 3, as of 2026-09-21T00:00:04Z');assert.equal(countText({...c,captured_at:null}),'Unknown');});
-test('non-observable phone and pen are not zeros',()=>{const s=makeScenario('phone-closer');assert.equal(countText(s.snapshots[0].counts[2]),'NOT_OBSERVABLE');assert.equal(countText(s.snapshots.at(-1).counts[2]),'at least 0, possibly 1');assert.equal(countText(row('computers-followup',3)),'NOT_OBSERVABLE');});
-test('rejected report cannot alter authoritative count text',()=>{assert.equal(countText(row('report-rejected',0)),'at least 5, possibly 6');});
+import test from "node:test";
+import assert from "node:assert/strict";
+import { makeScenario } from "../../examples/survey-console/fixtures.mjs";
+import { countText } from "../../examples/survey-console/counts.mjs";
+const row = (scenario, index) =>
+  makeScenario(scenario).snapshots.at(-1).counts[index];
+test("computer range is bounded and unknown is not zero", () => {
+  const c = row("computers-followup", 0);
+  assert.equal(countText(c), "at least 5, possibly 6");
+  assert.equal(
+    countText({ ...c, confirmed: null, uncertain: null }),
+    "Unknown",
+  );
+  assert.equal(
+    countText({ ...c, confirmed: 0, uncertain: 0 }),
+    "at least 0, possibly 0",
+  );
+});
+test("people remain a timestamped single-view lower bound", () => {
+  const c = row("people-lower-bound", 1);
+  assert.equal(countText(c), "at least 3, as of 2026-09-21T00:00:04Z");
+  assert.equal(countText({ ...c, captured_at: null }), "Unknown");
+});
+test("non-observable phone and pen are not zeros", () => {
+  const s = makeScenario("phone-closer");
+  assert.equal(countText(s.snapshots[0].counts[2]), "NOT_OBSERVABLE");
+  assert.equal(
+    countText(s.snapshots.at(-1).counts[2]),
+    "at least 0, possibly 1",
+  );
+  assert.equal(countText(row("computers-followup", 3)), "NOT_OBSERVABLE");
+});
+test("rejected report cannot alter authoritative count text", () => {
+  assert.equal(countText(row("report-rejected", 0)), "at least 5, possibly 6");
+});
