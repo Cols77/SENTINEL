@@ -68,7 +68,16 @@ this task is small.
 - Modify: `src/sentinel/cli.py` — accept `--proposer jev`
 
 **Interfaces — Consumes:** `PolicyContext`, `LegalSet`, `Candidate`, `AuditSink`, and the existing
-`JevJudge.choice(instruction=, state=, criteria=)` surface.
+`JevJudge.choice(state, instruction, *, criteria=, name=)` surface.
+
+> **Correction, 2026-09-21.** An earlier version of this line omitted `name`, which is a
+> **required keyword-only** argument (`src/sentinel/judgment.py:178`). Calling without it raises
+> `TypeError`; inside a fail-closed `except Exception` that silently escalates **every** turn and
+> reads as a weak advisor — the bug class `judgment.py:308-311` records as the 2026-09-20 sweep's
+> `error_rate 1.0`. Copy the working call site, `coordinator/policies.py:171`:
+> `self.judge.choice(packet, instruction, criteria=criteria, name=point.lower())`, and test against
+> a real judge class, not only a `**kwargs` fake. The survey flow made this exact mistake in its
+> first plan; a reviewer caught it before any code ran.
 
 **Interfaces — Produces:** `JevProposer(judge, sink, act_at=0.60, min_margin=0.15)` exposing
 `decide(request, context) -> dict`, and `derive_reason(label, context) -> str`.
