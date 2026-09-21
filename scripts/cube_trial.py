@@ -29,6 +29,8 @@ def main() -> int:
     parser.add_argument("--mission", default=DEFAULTS["mission"])
     parser.add_argument("--tag-map", default=DEFAULTS["tag_map"])
     parser.add_argument("--local-ip", default="192.168.10.2")
+    parser.add_argument("--min-battery", type=int, default=40,
+                        help="cube-run takeoff floor, %% (operator allowed 20 for trials, 2026-09-21)")
     parser.add_argument("--note", default="", help="free text kept with the trial, e.g. 'windy'")
     args = parser.parse_args()
 
@@ -43,6 +45,7 @@ def main() -> int:
                "--mission-log", str(run_dir / "mission.jsonl"), "--log", str(run_dir / "run.jsonl")]
     if args.pose == "reanchor":
         command.append("--sr063-amended")
+    command += ["--min-battery", str(args.min_battery)]
     if args.real:
         command += ["--local-ip", args.local_ip, "--video-path", str(run_dir / "flight.h264")]
     if args.confirm:
