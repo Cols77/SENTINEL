@@ -59,9 +59,63 @@ MOBILE_CLASSES = frozenset({"person"})
 
 
 def _tolerance_cm(range_cm: float) -> float:
-    """Grows with distance: a 15 cm position error on a 75 cm baseline is a
-    20% depth error, so a fixed tolerance would be wrong at both ends."""
+    """ALONG the line of sight. Grows with distance: depth comes from a
+    shallow ray meeting a plane, so one degree of camera pitch is 9% of
+    range, and a fixed tolerance would be wrong at both ends."""
     return max(30.0, 0.25 * range_cm)
+
+
+#: Dead reckoning drifts about twice as far as a re-anchored stop (WP5 trials,
+#: 2026-09-21: 21 cm median open-loop against 10 cm).
+COMMANDED_LATERAL_FACTOR = 1.5
+
+
+def _lateral_tolerance_cm(range_cm: float, commanded: bool) -> float:
+    """ACROSS the line of sight, which is far better measured than depth:
+    a bearing error of a degree is under 2% of range, so what is left is
+    where the camera really was. rev 6: one round tolerance of 25% of range
+    fused any two laptops closer than ~75 cm at 3 m -- a whole desk."""
+    tolerance = max(30.0, 0.12 * range_cm)
+    return tolerance * COMMANDED_LATERAL_FACTOR if commanded else tolerance
+
+
+def _frame_key(sighting: dict):
+    frame_id = sighting.get("frame_id")
+    if frame_id is not None:
+        return frame_id
+    return (sighting.get("sweep_id"), sighting.get("stop_index"), sighting.get("look_deg", 0.0))
+
+
+def _iou(a: dict, b: dict) -> float:
+    left, top = max(a["x"], b["x"]), max(a["y"], b["y"])
+    right = min(a["x"] + a["width"], b["x"] + b["width"])
+    bottom = min(a["y"] + a["height"], b["y"] + b["height"])
+    overlap = max(0.0, right - left) * max(0.0, bottom - top)
+    union = a["width"] * a["height"] + b["width"] * b["height"] - overlap
+    return overlap / union if union > 0 else 0.0
+
+
+_BAND_RANK = {"high": 2, "medium": 1, "low": 0}
+IN_FRAME_DUPLICATE_IOU = 0.5
+
+
+def _without_in_frame_duplicates(sightings: list[dict]) -> tuple[list[dict], dict[str, list[str]]]:
+    """Two sightings in one frame are two objects -- unless they are the same
+    box twice, which a provider does produce. Heavily overlapping boxes in one
+    frame collapse onto the better-banded one; its duplicates stay attached to it."""
+    kept: list[dict] = []
+    absorbed: dict[str, list[str]] = {}
+    ranked = sorted(sightings, key=lambda s: -_BAND_RANK.get(s.get("band"), 0))
+    for sighting in ranked:
+        bbox = sighting.get("bbox")
+        twin = next((k for k in kept if bbox and k.get("bbox")
+                     and _frame_key(k) == _frame_key(sighting)
+                     and _iou(k["bbox"], bbox) >= IN_FRAME_DUPLICATE_IOU), None)
+        if twin is None:
+            kept.append(sighting)
+        else:
+            absorbed.setdefault(twin["sighting_id"], []).append(sighting["sighting_id"])
+    return kept, absorbed
 
 
 def _locate(sighting: dict, default_delta_z_cm: float,
@@ -114,6 +168,25 @@ def _object_from_group(group: dict, sighting_by_id: dict) -> dict:
     }
 
 
+def _separation(a: dict, b: dict, mean_depth: float) -> float:
+    """How far apart two groups are, in units of the tolerance: 1.0 is the
+    edge of being the same object. The gap is split along and across the
+    mean line of sight, because the two are measured very differently well.
+    With no camera position on record it falls back to the round tolerance."""
+    dx, dy = b["x_cm"] - a["x_cm"], b["y_cm"] - a["y_cm"]
+    cams = a["cams"] + b["cams"]
+    mid_x, mid_y = (a["x_cm"] + b["x_cm"]) / 2.0, (a["y_cm"] + b["y_cm"]) / 2.0
+    sight_x = sum(mid_x - cx for cx, _ in cams)
+    sight_y = sum(mid_y - cy for _, cy in cams)
+    norm = math.hypot(sight_x, sight_y)
+    if not cams or norm < 1e-6:
+        return math.hypot(dx, dy) / _tolerance_cm(mean_depth)
+    ux, uy = sight_x / norm, sight_y / norm
+    along, across = abs(dx * ux + dy * uy), abs(dx * uy - dy * ux)
+    lateral = _lateral_tolerance_cm(mean_depth, a["commanded"] or b["commanded"])
+    return math.hypot(along / _tolerance_cm(mean_depth), across / lateral)
+
+
 def associate(sightings: list[dict], delta_z_cm: float = 55.0,
               camera: CameraModel = SYNTHETIC_LEVEL) -> list[dict]:
     """Merge one class's sightings into distinct objects via
@@ -125,6 +198,7 @@ def associate(sightings: list[dict], delta_z_cm: float = 55.0,
         return []
 
     sighting_by_id = {s["sighting_id"]: s for s in sightings}
+    sightings, absorbed = _without_in_frame_duplicates(sightings)
     groups: dict[str, dict] = {}
     unpositioned: list[dict] = []
     for sighting in sightings:
@@ -134,7 +208,12 @@ def associate(sightings: list[dict], delta_z_cm: float = 55.0,
             continue
         x_cm, y_cm, depth_cm = located
         sid = sighting["sighting_id"]
-        groups[sid] = {"ids": [sid], "x_cm": x_cm, "y_cm": y_cm, "points": [(x_cm, y_cm)],
+        cam = (sighting.get("frame_x_cm", sighting.get("x_cm")),
+               sighting.get("frame_y_cm", sighting.get("y_cm")))
+        groups[sid] = {"ids": [sid, *absorbed.get(sid, [])], "x_cm": x_cm, "y_cm": y_cm,
+                       "points": [(x_cm, y_cm)], "frames": {_frame_key(sighting)},
+                       "cams": [cam] if None not in cam else [],
+                       "commanded": sighting.get("position_kind") == "COMMANDED",
                        # rev 6: a stop is a viewpoint of ONE sweep. Keyed on stop_index
                        # alone, a follow-up's stop 0 was the rail's stop 0 again, so a
                        # second look could never add the viewpoint that confirms.
@@ -149,12 +228,16 @@ def associate(sightings: list[dict], delta_z_cm: float = 55.0,
         for i, id_a in enumerate(ids):
             for id_b in ids[i + 1:]:
                 a, b = groups[id_a], groups[id_b]
-                distance = math.hypot(a["x_cm"] - b["x_cm"], a["y_cm"] - b["y_cm"])
+                # rev 6: two sightings of one class in ONE frame are two objects by
+                # definition, whatever the geometry says about how close they are.
+                if not a["frames"].isdisjoint(b["frames"]):
+                    continue
                 mean_depth = ((sum(a["depths"]) / len(a["depths"]))
                               + (sum(b["depths"]) / len(b["depths"]))) / 2.0
-                tolerance = _tolerance_cm(mean_depth)
-                if MERGE_MIN_RANGE_CM <= mean_depth <= MERGE_MAX_RANGE_CM \
-                        and distance <= tolerance:
+                if not MERGE_MIN_RANGE_CM <= mean_depth <= MERGE_MAX_RANGE_CM:
+                    continue
+                distance = _separation(a, b, mean_depth)
+                if distance <= 1.0:
                     candidates.append((distance, id_a, id_b))
                     compatible.add(frozenset((id_a, id_b)))
         if not candidates:
@@ -185,6 +268,9 @@ def associate(sightings: list[dict], delta_z_cm: float = 55.0,
             "x_cm": (a["x_cm"] * n_a + b["x_cm"] * n_b) / total,
             "y_cm": (a["y_cm"] * n_a + b["y_cm"] * n_b) / total,
             "points": a["points"] + b["points"],
+            "frames": a["frames"] | b["frames"],
+            "cams": a["cams"] + b["cams"],
+            "commanded": a["commanded"] or b["commanded"],
             "depths": a["depths"] + b["depths"],
             "stops": a["stops"] | b["stops"],
             "bands": a["bands"] + b["bands"],

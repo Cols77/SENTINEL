@@ -107,8 +107,12 @@ def test_each_sighting_belongs_to_exactly_one_object_even_when_two_are_plausible
     "accumulate into every cluster within reach" behaviour that let
     triangulated phantoms reach CONFIRMED in rev 1-2."""
     anchor_left = [_looking_at(i, i * 75.0, 0.0, 300.0, sighting_id=f"L{i}") for i in range(3)]
-    anchor_right = [_looking_at(i, i * 75.0, 90.0, 300.0, sighting_id=f"R{i}") for i in range(3)]
-    ambiguous = _looking_at(3, 225.0, 47.0, 300.0, sighting_id="M")
+    # rev 6: the tolerance is no longer round. Across the line of sight it is 12% of
+    # range (36 cm here), not 25% (75 cm), so for M to be plausibly either object the
+    # two must sit 60 cm apart, not 90 -- they are never fused with each other, because
+    # each stop sees both in one frame.
+    anchor_right = [_looking_at(i, i * 75.0, 60.0, 300.0, sighting_id=f"R{i}") for i in range(3)]
+    ambiguous = _looking_at(3, 225.0, 31.0, 300.0, sighting_id="M")
 
     objects = merge_sightings(anchor_left + anchor_right + [ambiguous])
 
@@ -118,18 +122,21 @@ def test_each_sighting_belongs_to_exactly_one_object_even_when_two_are_plausible
 
 
 def test_depth_spread_over_30_percent_marks_the_object_uncertain_and_degraded():
-    """Three stops that each put the object somewhere else: 60 cm apart in
-    depth, close enough to chain into one cluster, smeared over 120 cm at
-    a median depth of 360 cm. That is the geometry disagreeing with itself
+    """Four stops that each put the object somewhere else: 45 cm apart in
+    depth, close enough to chain into one cluster, smeared over 135 cm at
+    a median depth of 367 cm. That is the geometry disagreeing with itself
     (design spec 5.4). rev 5: this test used to build its disagreement
     from a slant-range projection no camera produces; the sightings it
     flagged agreed perfectly."""
-    sightings = [_looking_at(i, i * 75.0, 0.0, 300.0 + 60.0 * i, sighting_id=f"n{i}")
-                 for i in range(3)]
+    # rev 6: stops 10 cm apart keep the disagreement along the line of sight, where
+    # 25% of range still applies; spread 75 cm apart it also had a sideways part that
+    # the tighter across-sight tolerance no longer chains together.
+    sightings = [_looking_at(i, i * 10.0, 0.0, 300.0 + 45.0 * i, sighting_id=f"n{i}")
+                 for i in range(4)]
     objects = merge_sightings(sightings)
     assert len(objects) == 1
     obj = objects[0]
-    assert obj["distinct_stops"] == 3
+    assert obj["distinct_stops"] == 4
     assert obj["depth_spread_pct"] > 30.0
     assert obj["band"] == "UNCERTAIN"
 

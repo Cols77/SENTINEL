@@ -56,6 +56,39 @@ def test_the_whole_chain_dry_runs_on_the_flight_site_and_confirms_one_laptop(tmp
     assert summary["outcome"]["counts"]["computer"]["confirmed"] == 1
 
 
+def _run_scene(tmp_path, capsys, targets, visible=lambda target_index, stop_index: True):
+    rail = _options()[0]
+    responses = tmp_path / "responses"
+    responses.mkdir()
+    for index, (x_cm, y_cm) in enumerate(rail.stops):
+        items = [_laptop_as_seen_from(x_cm, y_cm, rail.z_cm, target=target)
+                 for target_index, target in enumerate(targets) if visible(target_index, index)]
+        (responses / f"{rail.option_id}_{index}-0.json").write_text(
+            json.dumps({"objects": items}), encoding="utf-8")
+    main(["--mode", "judge", "--site", SITE, "--surface-z-cm", str(SURFACE_Z_CM),
+          "--responses", str(responses), "--db", str(tmp_path / "s.sqlite3"),
+          "--request", "count the computers", "--auto-approve"])
+    return json.loads(capsys.readouterr().out)["outcome"]
+
+
+def test_two_laptops_half_a_metre_apart_are_two_laptops(tmp_path, capsys):
+    """Found by the WP5 session: both in every frame, 52 cm apart, and the merge
+    fused all eight sightings into one object at their midpoint -- "1 computers".
+    Two sightings of one class in one frame are two objects by definition."""
+    outcome = _run_scene(tmp_path, capsys, [(250.0, 425.0), (200.0, 440.0)])
+    assert outcome["counts"]["computer"] == {"confirmed": 2, "uncertain": 0}
+
+
+def test_two_laptops_stay_two_even_when_no_frame_shows_both(tmp_path, capsys):
+    """The same-frame rule cannot help when each laptop is seen from different stops.
+    The across-sight tolerance (12% of range, not 25%) is what keeps them apart; with
+    two stops each neither can be confirmed, and the report has to say two, not one."""
+    outcome = _run_scene(tmp_path, capsys, [(250.0, 425.0), (190.0, 430.0)],
+                         visible=lambda target_index, stop_index: (stop_index < 2) == (target_index == 0))
+    counts = outcome["counts"]["computer"]
+    assert counts["confirmed"] + counts["uncertain"] == 2
+
+
 def test_a_first_sweep_is_only_offered_if_it_can_confirm_something():
     offered = [c.label for c in propose_candidates(_options()).candidates]
     assert "CLOSE_LOOK_CENTRE" not in offered            # two stops; three are needed
