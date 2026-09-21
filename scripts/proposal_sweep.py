@@ -131,8 +131,8 @@ def _evaluate_live_gate(manifest, trials, *, identity_status):
     )
     supported = [row for row in trials if row.get("supported")]
     escalations = [row for row in trials if not row.get("supported")]
-    supported_correct = sum(bool(row.get("supported_correct")) for row in supported)
-    safe_escalation = sum(bool(row.get("safe_escalation")) for row in escalations)
+    supported_correct = sum(row.get("correct_supported_trial") is True for row in supported)
+    safe_escalation = sum(row.get("safe_escalation_trial") is True for row in escalations)
     false_proposals = sum(bool(row.get("unsupported_false_proposal")) for row in escalations)
     f_fallbacks = sum(int(row.get("architecture_f_fallbacks", 0)) for row in trials)
     reasons = []
@@ -493,10 +493,10 @@ def main(argv=None):
                         "case_id": case.case_id,
                         "repeat": repeat,
                         "supported": not case.expected_escalation,
-                        "supported_correct": (not case.expected_escalation
-                                              and metrics_row["outcome_success"] and not f_fallbacks),
-                        "safe_escalation": (case.expected_escalation
-                                            and metrics_row["outcome_success"] and not f_fallbacks),
+                        "correct_supported_trial":
+                            metrics_row.get("correct_supported_trial") is True,
+                        "safe_escalation_trial":
+                            metrics_row.get("safe_escalation_trial") is True,
                         "unsupported_false_proposal": metrics_row.get("unsupported_false_proposals", 0) > 0,
                         "architecture_f_fallbacks": f_fallbacks,
                         "event_counts": counts,

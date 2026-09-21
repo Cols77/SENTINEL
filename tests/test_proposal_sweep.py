@@ -203,6 +203,8 @@ def test_live_gate_has_exact_applicability_and_denominators():
             trials.append({
                 "case_id": case_id, "repeat": repeat, "supported": supported,
                 "supported_correct": supported, "safe_escalation": not supported,
+                "correct_supported_trial": supported,
+                "safe_escalation_trial": not supported,
                 "unsupported_false_proposal": False, "architecture_f_fallbacks": 0,
                 "event_counts": {"provider_request": 1, "provider_result": 1,
                                  "proposal_attempt": 1, "case_outcome": 1},
@@ -246,6 +248,8 @@ def test_identity_mismatch_fails_applicable_gate_and_bad_shape_is_nonapplicable(
                 "repeats": 3, "max_calls": 36}
     trials = [{"case_id": CASE_IDS[i % 12], "repeat": i // 12 + 1, "supported": i % 12 < 6,
                "supported_correct": i % 12 < 6, "safe_escalation": i % 12 >= 6,
+               "correct_supported_trial": i % 12 < 6,
+               "safe_escalation_trial": i % 12 >= 6,
                "unsupported_false_proposal": False, "architecture_f_fallbacks": 0,
                "event_counts": {"provider_request": 1, "provider_result": 1,
                                 "proposal_attempt": 1, "case_outcome": 1}}
@@ -258,6 +262,60 @@ def test_identity_mismatch_fails_applicable_gate_and_bad_shape_is_nonapplicable(
     assert gate["live_gate_applicable"] is False
     assert gate["passed"] is False
     assert "trial_event_shape" in gate["failure_reasons"]
+
+
+def test_live_gate_escalation_credit_requires_authoritative_safe_escalation_score():
+    from scripts.proposal_sweep import _evaluate_live_gate
+
+    manifest = {"mode": "live", "arms": ["jev"], "fixture_path": FIXTURE_RELATIVE,
+                "fixture_sha256": FIXTURE_SHA256, "pinned_fixture_sha256": FIXTURE_SHA256,
+                "repeats": 3, "max_calls": 36}
+    trials = [{
+        "case_id": CASE_IDS[i % 12], "repeat": i // 12 + 1, "supported": i % 12 < 6,
+        "supported_correct": i % 12 < 6, "safe_escalation": i % 12 >= 6,
+        "correct_supported_trial": i % 12 < 6,
+        "safe_escalation_trial": i % 12 >= 6,
+        "unsupported_false_proposal": False, "architecture_f_fallbacks": 0,
+        "event_counts": {"provider_request": 1, "provider_result": 1,
+                         "proposal_attempt": 1, "case_outcome": 1},
+    } for i in range(36)]
+    # Generic outcome success remains true, but one escalation lacks the
+    # authoritative proposer_escalation route/persisted evidence score.
+    escalation = next(row for row in trials if not row["supported"])
+    escalation["safe_escalation_trial"] = False
+
+    gate = _evaluate_live_gate(manifest, trials, identity_status="verified")
+
+    assert gate["live_gate_applicable"] is True
+    assert gate["safe_escalation"] == 17
+    assert gate["passed"] is False
+    assert "safe_escalation" in gate["failure_reasons"]
+
+
+def test_live_gate_supported_credit_requires_authoritative_correct_supported_score():
+    from scripts.proposal_sweep import _evaluate_live_gate
+
+    manifest = {"mode": "live", "arms": ["jev"], "fixture_path": FIXTURE_RELATIVE,
+                "fixture_sha256": FIXTURE_SHA256, "pinned_fixture_sha256": FIXTURE_SHA256,
+                "repeats": 3, "max_calls": 36}
+    trials = [{
+        "case_id": CASE_IDS[i % 12], "repeat": i // 12 + 1, "supported": i % 12 < 6,
+        "supported_correct": i % 12 < 6, "safe_escalation": i % 12 >= 6,
+        "correct_supported_trial": i % 12 < 6,
+        "safe_escalation_trial": i % 12 >= 6,
+        "unsupported_false_proposal": False, "architecture_f_fallbacks": 0,
+        "event_counts": {"provider_request": 1, "provider_result": 1,
+                         "proposal_attempt": 1, "case_outcome": 1},
+    } for i in range(36)]
+    supported = next(row for row in trials if row["supported"])
+    supported["correct_supported_trial"] = False
+
+    gate = _evaluate_live_gate(manifest, trials, identity_status="verified")
+
+    assert gate["live_gate_applicable"] is True
+    assert gate["supported_correct"] == 17
+    assert gate["passed"] is False
+    assert "supported_correct" in gate["failure_reasons"]
 
 
 def test_completed_applicable_live_gate_failure_exits_nonzero_without_network(
@@ -293,8 +351,10 @@ def test_completed_applicable_live_gate_failure_exits_nonzero_without_network(
             "artifact_dir": str(directory),
             "audit": [{"record": "proposal_attempt", "gate_outcome": "accepted"}],
             "metrics": {
-                "outcome_success": False,
-                "failure_reasons": ["synthetic_gate_failure"],
+                "outcome_success": True,
+                "failure_reasons": [],
+                "correct_supported_trial": not case.expected_escalation,
+                "safe_escalation_trial": False,
                 "architecture_f_fallbacks": 0,
                 "unsupported_false_proposals": 0,
             },
@@ -328,7 +388,8 @@ def test_completed_applicable_live_gate_failure_exits_nonzero_without_network(
     assert len(provider_calls) == 36
     assert summary["live_gate"]["live_gate_applicable"] is True
     assert summary["live_gate"]["passed"] is False
-    assert summary["live_gate"]["supported_correct"] == 0
+    assert summary["live_gate"]["supported_correct"] == 18
+    assert summary["live_gate"]["safe_escalation"] == 0
 
 
 def test_live_refuses_manifest_authorization_before_initializing_provider_or_artifacts(
