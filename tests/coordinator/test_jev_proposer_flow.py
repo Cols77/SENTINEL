@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from sentinel.coordinator import AgentLoop, JevProposer
+from sentinel.coordinator.architecture import ArchitectureRouter
 from sentinel.coordinator.boundary import CoordinatorBoundary
 from sentinel.coordinator.legal_tools import ESCALATE_LABEL, load_catalogue_plans
-from sentinel.coordinator.policy import bind_context
+from sentinel.coordinator.policy import PolicyContext, bind_context
 from sentinel.coordinator.proposal_review import pending_proposal_review
 from sentinel.coordinator.shadow import MemoryAuditSink
 
@@ -25,6 +26,27 @@ class ScriptedJudge:
                 ESCALATE_LABEL: 0.05,
             },
         }
+
+
+class EscalationJudge:
+    def choice(self, state, instruction, *, criteria, name):
+        return {
+            "value": ESCALATE_LABEL,
+            "confidence": 0.9,
+            "probabilities": {
+                label: 0.9 if label == ESCALATE_LABEL else 0.05
+                for label in criteria
+            },
+        }
+
+
+class CountingFallback:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def decide(self, request: dict, context: PolicyContext) -> dict:
+        self.calls += 1
+        raise AssertionError("architecture F must not handle explicit proposer escalation")
 
 
 def test_real_loop_persists_jev_proposal_then_stops_for_operator_approval(tmp_path) -> None:
@@ -64,5 +86,52 @@ def test_real_loop_persists_jev_proposal_then_stops_for_operator_approval(tmp_pa
                 "candidate_description": catalogue[1].description,
             },
         }
+    finally:
+        repo.close()
+
+
+def test_real_e_loop_returns_confident_jev_escalation_without_persisting_a_proposal(tmp_path) -> None:
+    repo, gateway = open_harness(tmp_path)
+    catalogue = load_catalogue_plans()
+    sink = MemoryAuditSink()
+    fallback = CountingFallback()
+    run_id = "44444444-4444-4444-8444-444444444444"
+    try:
+        gateway.submit(envelope(
+            "RUN_CREATE", {"request_text": "unsupported request"}, sequence=1,
+            run_id=run_id, actor_type="OPERATOR",
+        ))
+        events_before = repo.read_events(run_id, 0, 30)
+        router = ArchitectureRouter(fallback, JevProposer(EscalationJudge(), sink), sink)
+
+        result = AgentLoop(
+            CoordinatorBoundary(repo, gateway),
+            bind_context(router, repo, catalogue),
+            repository=repo,
+            catalogue=catalogue,
+        ).run(run_id, AGENT_RUN_ID, "unsupported request")
+
+        assert result == {
+            "status": "NEEDS_REVIEW",
+            "summary": "plan proposal needs operator review",
+        }
+        assert repo.read_events(run_id, 0, 30) == events_before
+        assert repo.read_state(run_id).to_dict()["run_status"] == "RUNNING"
+        for table in ("plans", "plan_approvals", "tasks"):
+            count = repo.connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE run_id = ?", (run_id,)
+            ).fetchone()[0]
+            assert count == 0
+        attempts = [record for record in sink.records if record["record"] == "proposal_attempt"]
+        assert len(attempts) == 1
+        assert attempts[0]["gate_outcome"] == "accepted"
+        assert attempts[0]["raw_choice"] == ESCALATE_LABEL
+        assert attempts[0]["policy_label"] == ESCALATE_LABEL
+        assert not [record for record in sink.records if record["record"] == "proposal_recommendation"]
+        routes = [record for record in sink.records if record["record"] == "architecture_route"]
+        assert len(routes) == 1
+        assert routes[0]["route"] == "proposer_escalation"
+        assert routes[0]["label"] == ESCALATE_LABEL
+        assert fallback.calls == 0
     finally:
         repo.close()

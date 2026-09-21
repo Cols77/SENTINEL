@@ -9,6 +9,7 @@ import pytest
 
 from sentinel.coordinator.architecture import (
     ARCHITECTURE_ENV,
+    ArchitectureRouter,
     ArchitectureUnavailable,
     build_policy,
     resolve_architecture,
@@ -23,7 +24,7 @@ from sentinel.coordinator.legal_tools import (
     load_catalogue_plans,
 )
 from sentinel.coordinator.policies import RulePolicy
-from sentinel.coordinator.policy import PolicyContext
+from sentinel.coordinator.policy import PolicyContext, one_call
 from sentinel.coordinator.shadow import MemoryAuditSink, ShadowLadder
 
 from .harness import AGENT_RUN_ID, ARTIFACT_ID, RESULT_ID, RUN_ID
@@ -103,6 +104,11 @@ def _escalate_result() -> dict:
     }
 
 
+def _finish_result(summary: str, *, agent_run_id: str = AGENT_RUN_ID) -> dict:
+    request = {**_request(), "agent_run_id": agent_run_id}
+    return one_call(request, "finish", {"status": "NEEDS_REVIEW", "summary": summary})
+
+
 class _ScriptedProposer:
     """Returns a fixed ``agent_result`` (or raises a fixed exception)."""
 
@@ -121,6 +127,15 @@ class _ScriptedProposer:
 class _NeverCallMe:
     def decide(self, request: dict, context: PolicyContext) -> dict:
         raise AssertionError("proposer must not be called off SELECT_PLAN")
+
+
+class _CountingLadder:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def decide(self, request: dict, context: PolicyContext) -> dict:
+        self.calls += 1
+        return _bare_ladder_result(context.legal)
 
 
 def _bare_ladder_result(legal: LegalSet) -> dict:
@@ -183,11 +198,35 @@ def test_e_at_select_plan_accepts_a_legal_proposal_with_no_judgment_record():
     }
 
 
+def test_e_at_select_plan_forwards_canonical_proposer_escalation_without_fallback():
+    sink = MemoryAuditSink()
+    ladder = _CountingLadder()
+    escalation = _finish_result("plan proposal needs operator review")
+    router = ArchitectureRouter(ladder, _ScriptedProposer(result=escalation), sink)
+
+    result = router.decide(
+        _request(), PolicyContext(state=_dummy_state(), legal=_select_plan_legal())
+    )
+
+    assert result is escalation
+    assert ladder.calls == 0
+    assert sink.records == [{
+        "record": "architecture_route", "architecture": "E", "run_id": RUN_ID,
+        "state_version": 1, "decision_point": SELECT_PLAN,
+        "route": "proposer_escalation", "label": "escalate",
+    }]
+
+
 # --- ArchitectureRouter: fallback reasons -------------------------------------
 
 @pytest.mark.parametrize("make_proposer, expected_reason", [
     (lambda: _ScriptedProposer(exc=RuntimeError("boom")), "exception:RuntimeError"),
     (lambda: _ScriptedProposer(result=_escalate_result()), "proposer_escalated"),
+    (lambda: _ScriptedProposer(result=_finish_result("provider asks for review")), "illegal_tool:finish"),
+    (lambda: _ScriptedProposer(result=_finish_result(
+        "plan proposal needs operator review",
+        agent_run_id="33333333-3333-4333-8333-333333333333",
+    )), "illegal_tool:finish"),
     (lambda: _ScriptedProposer(result=_task_create_result()), "illegal_tool:task.create"),
     (lambda: _ScriptedProposer(result=_propose_result("NOT_A_REAL_CATALOGUE_PLAN")), "unknown_plan"),
     (lambda: _ScriptedProposer(result={"status": "TOOL_CALLS", "tool_calls": []}), "malformed_result"),
