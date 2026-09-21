@@ -99,11 +99,13 @@ _PLURAL = {"computer": "computers", "person": "people", "phone": "phones", "pen"
 class _DefaultJudge:
     """Offline, no-network stand-in for ``--mode J`` when no live judge is
     wired in (Task 12's provider gate is separate and still closed).
-    Deterministic -- always the alphabetically-first candidate, at high
-    confidence -- so a replay run is repeatable."""
+    Deterministic -- always the first candidate offered, the same one
+    ``rules`` takes, at high confidence -- so a replay run is repeatable.
+    (It used to take the alphabetically first label, which is the two-stop
+    close look: a first sweep that cannot confirm anything.)"""
 
     def choice(self, state, instruction, *, criteria, name):
-        label = sorted(criteria)[0]
+        label = next(iter(criteria))
         return {"value": label, "confidence": 0.9,
                 "probabilities": {label: 0.9,
                                   **{k: 0.02 for k in criteria if k != label}}}
@@ -129,6 +131,22 @@ class _DefaultAdapter:
                            "reason": "default offline stand-in: first legal sweep"}}]}
 
 
+#: Who picks the sweep. The letters are the project's architecture names (F, E, J in
+#: the coordinator's specs and in every audit record) and stay valid as aliases; the
+#: words say what each one does.
+#:   rules (F) - code picks: the first legal sweep, no model involved.
+#:   judge (J) - a model picks ONE of the offered sweeps; code checks its confidence
+#:               and margin and writes the justification.
+#:   agent (E) - a model writes the tool call itself, with its own reason; code
+#:               validates that the call is legal.
+MODE_NAMES = {"rules": "F", "judge": "J", "agent": "E"}
+MODE_WORDS = {letter: word for word, letter in MODE_NAMES.items()}
+
+
+def _mode_letter(value: str) -> str:
+    return MODE_NAMES.get(value, value)
+
+
 LIVE_JUDGE_BASE_URL = "https://openrouter.ai/api"
 LIVE_JUDGE_KEY_ENV = "OPENROUTER_API_KEY"
 
@@ -143,7 +161,7 @@ def _live_judge(args):
     if args.live_judge == "none":
         return None
     if args.mode != "J":
-        raise ValueError("--live-judge only applies to --mode J")
+        raise ValueError("--live-judge only applies to --mode judge")
     if not args.i_authorise_paid_calls:
         raise ValueError("--live-judge makes paid calls (at most 3 per run); "
                          "pass --i-authorise-paid-calls to go ahead")
@@ -185,11 +203,22 @@ def build_policy(mode: str, *, judge=None, adapter=None, sink) -> SurveyPolicy:
 
 
 def _default_writer(results: dict) -> str:
-    parts = [f"{entry['confirmed']} {_PLURAL[entry['class']]}" for entry in results["class_counts"]
-             if entry["method"] != "NOT_OBSERVABLE"]
+    parts = []
+    for entry in results["class_counts"]:
+        noun = _PLURAL[entry["class"]]
+        if entry["method"] == "NOT_OBSERVABLE":
+            continue
+        if entry["method"] == "SINGLE_VIEW_LOWER_BOUND":
+            parts.append(f"at least {entry['uncertain']} {noun}")
+        elif entry["uncertain"]:
+            parts.append(f"{entry['confirmed']} {noun} confirmed and up to "
+                         f"{entry['confirmed'] + entry['uncertain']} {noun} counting the ones "
+                         "I could not confirm")
+        else:
+            parts.append(f"{entry['confirmed']} {noun}")
     if not parts:
         return "No observable classes were confirmed this run."
-    return "I found " + ", ".join(parts) + "."
+    return "I found " + "; ".join(parts) + "."
 
 
 def _real_tello_client(args):
@@ -267,7 +296,10 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
         session=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--mode", choices=("F", "E", "J"), default="F")
+    parser.add_argument("--mode", choices=(*MODE_NAMES, "F", "J", "E"), default="rules",
+                        help="who picks the sweep: rules (code; alias F), judge (a model picks "
+                             "one of the offered sweeps, code gates it; alias J), agent (a "
+                             "model writes the call and its reason; alias E)")
     parser.add_argument("--scene", type=Path, default=None,
                         help="a Scene json (Task 9); when given, the summary also carries "
                              "a score_episode result")
@@ -335,6 +367,7 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
     parser.add_argument("--auto-approve", action="store_true",
                         help="tests and replay only -- a real flight always prompts")
     args = parser.parse_args(argv)
+    args.mode = _mode_letter(args.mode)
 
     if bool(args.site) == bool(args.frames):
         parser.error("exactly one of --frames or --site is required")
@@ -416,7 +449,8 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
         "outer_tolerance": sum(1 for r in frame_rows if r["tolerance"] == "OUTER"),
     }
 
-    summary: dict[str, Any] = {"run_id": run_id, "mode": args.mode, "camera": camera.name,
+    summary: dict[str, Any] = {"run_id": run_id, "mode": args.mode,
+                               "mode_name": MODE_WORDS[args.mode], "camera": camera.name,
                                "frame_counts": frame_counts, "outcome": outcome}
     if args.scene is not None:
         scene = load_scene(args.scene)

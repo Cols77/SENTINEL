@@ -129,3 +129,28 @@ def check_report(body: str, counts: list[dict]) -> None:
             if any(re.search(rf"\b{re.escape(form)}\b", body, re.IGNORECASE) for form in forms):
                 raise ReportMismatch(
                     f"{class_name} is a single-view lower bound and may not be reported as exact")
+
+
+def unconfirmed_caveat(body: str, counts: list[dict]) -> str | None:
+    """What a report left out about objects the store could not confirm.
+
+    "I found 0 computers" with two unconfirmed ones on record is true to the
+    letter and misleading in effect. A writer is not rejected for it -- the
+    accepted-report contract is unchanged -- but the omission does not reach
+    the operator either: the loop appends this sentence, written by code from
+    the store, whenever the writer did not state the total itself."""
+    stated: dict[str, set[int]] = {}
+    for match in _CLASS_NUMBER.finditer(body):
+        stated.setdefault(_FORM_TO_CLASS[match.group(2).lower()], set()).add(int(match.group(1)))
+    left_out = []
+    for entry in counts:
+        if entry["method"] != "MERGED_MULTI_VIEW" or not entry["uncertain"]:
+            continue
+        if entry["confirmed"] + entry["uncertain"] in stated.get(entry["class"], set()):
+            continue
+        noun = _CLASS_FORMS[entry["class"]][-1] if entry["uncertain"] != 1 else entry["class"]
+        left_out.append(f"{entry['uncertain']} more possible {noun}")
+    if not left_out:
+        return None
+    return "Not confirmed: " + ", ".join(left_out) + "."
+

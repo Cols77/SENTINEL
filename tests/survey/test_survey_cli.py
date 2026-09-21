@@ -231,3 +231,19 @@ def test_a_live_judge_is_refused_without_an_api_key(tmp_path, monkeypatch):
     monkeypatch.setattr(env_file, "load_env_file", lambda *a, **k: {})
     with pytest.raises((SystemExit, ValueError)):
         main(_live_argv(tmp_path, "J", "--live-judge", "llm", "--i-authorise-paid-calls"))
+
+
+# -- mode names: words for people, letters kept as aliases ---------------------
+
+def test_mode_words_and_letters_are_the_same_modes(tmp_path, capsys):
+    import json as _json
+
+    for index, (word, letter) in enumerate((("rules", "F"), ("judge", "J"), ("agent", "E"))):
+        for spelling in (word, letter):
+            run_dir = tmp_path / f"{index}-{spelling}"
+            run_dir.mkdir()
+            argv, frames = _base_argv(run_dir)
+            argv[argv.index("--mode") + 1] = spelling
+            main(argv + ["--frames", str(frames)])
+            summary = _json.loads(capsys.readouterr().out)
+            assert (summary["mode"], summary["mode_name"]) == (letter, word)

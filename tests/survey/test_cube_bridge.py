@@ -122,7 +122,11 @@ def test_a_localised_stop_produces_measured_frames_with_heading(tmp_path):
     frame = frames[0]
     assert frame.position_kind == "MEASURED"
     assert (frame.x_cm, frame.y_cm) == (155.0, 303.0)         # the fix, not the commanded stop
-    assert frame.heading_deg == pytest.approx(95.0)           # the fix's heading, not FACING_DEG
+    # The fix's heading, not the nominal one -- and in the SURVEY's convention. The cube
+    # says 95 (5 degrees counter-clockwise of facing the tables, which is 90); the survey
+    # says -5 (0 faces the tables, clockwise positive). This assertion used to expect 95,
+    # which placed every object a quarter turn from where it was.
+    assert frame.heading_deg == pytest.approx(-5.0)
 
 
 def test_an_unlocalised_stop_falls_back_to_commanded_dead_reckoning(tmp_path):
@@ -133,7 +137,7 @@ def test_an_unlocalised_stop_falls_back_to_commanded_dead_reckoning(tmp_path):
     frame = frames[0]
     assert frame.position_kind == "COMMANDED"
     assert (frame.x_cm, frame.y_cm) == (150.0, 300.0)          # the commanded target
-    assert frame.heading_deg == FACING_DEG
+    assert frame.heading_deg == pytest.approx(0.0)            # facing the tables, survey convention
 
 
 def test_the_tolerance_verdict_is_carried_onto_the_frame(tmp_path):

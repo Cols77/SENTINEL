@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from sentinel.coordinator.legal_tools import Candidate, LegalSet
 
+from .merge import CONFIRM_MIN_STOPS
+
 PROPOSE_SWEEP = "PROPOSE_SWEEP"
 REVIEW_RESULTS = "REVIEW_RESULTS"
 ESCALATE_LABEL = "escalate"
@@ -35,6 +37,11 @@ def _escalate_candidate(reason: str) -> Candidate:
 
 
 def propose_candidates(options) -> LegalSet:
+    # An object is confirmed by agreement from CONFIRM_MIN_STOPS viewpoints, so a sweep
+    # with fewer stops can confirm nothing on its own: as a FIRST sweep it guarantees a
+    # count of zero whatever is in the room. Such options are follow-ups only.
+    able = [option for option in options if len(option.stops) >= CONFIRM_MIN_STOPS]
+    options = able or list(options)
     candidates = [
         Candidate("survey.propose_sweep",
                   {"option_id": option.option_id, "reason": ""},
@@ -75,7 +82,10 @@ def review_candidates(results: dict, options) -> LegalSet:
 
     uncertain = results.get("uncertain_objects", [])
     candidates = [report, escalate]
+    flown = set(results.get("flown_option_ids", ()))
     for option in options:
+        if option.option_id in flown:
+            continue        # the same stops again add no viewpoint, so nothing to gain
         addressed = _addresses(option, uncertain)
         candidates.append(Candidate(
             "survey.propose_sweep",
