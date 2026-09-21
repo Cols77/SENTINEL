@@ -513,6 +513,19 @@ def score_outcome(case, record):
         if isinstance(a.get("raw_choice"), str)
         and a.get("raw_choice") != "escalate"
     ]
+    raw_choice_attempts = raw_escalation_attempts + raw_plan_attempts
+    raw_semantic_correct_attempts = [
+        attempt for attempt in raw_choice_attempts
+        if (
+            attempt.get("raw_choice") == "escalate"
+            if case.expected_escalation
+            else attempt.get("raw_choice") in case.acceptable_plans
+        )
+    ]
+    confidence_filtered_correct_attempts = [
+        attempt for attempt in raw_semantic_correct_attempts
+        if attempt.get("gate_outcome") in {"low_confidence", "low_margin"}
+    ]
     accepted_escalation_attempts = [
         a for a in raw_escalation_attempts
         if a.get("gate_outcome") == "accepted"
@@ -632,9 +645,19 @@ def score_outcome(case, record):
             "accepted_escalation_attempts": len(accepted_escalation_attempts),
             "correct_proposals": correct_proposals,
             "explicit_escalations": len(accepted_escalation_attempts),
-            "raw_escalation_choices": len(raw_escalation_attempts),
-            "raw_plan_choices": len(raw_plan_attempts),
-            "confidence_gate_escalations": confidence_gate_escalations,
+             "raw_escalation_choices": len(raw_escalation_attempts),
+             "raw_plan_choices": len(raw_plan_attempts),
+             "raw_semantic_correct_choices": len(raw_semantic_correct_attempts),
+             "raw_semantic_choice_denominator": len(raw_choice_attempts),
+             "raw_semantic_choice_coverage_numerator": len(raw_choice_attempts),
+             "raw_semantic_choice_coverage_denominator": len(proposals),
+             "confidence_filtered_correct_choices": len(
+                 confidence_filtered_correct_attempts
+             ),
+             "confidence_filtered_correct_choice_denominator": len(
+                 raw_semantic_correct_attempts
+             ),
+             "confidence_gate_escalations": confidence_gate_escalations,
             "deterministic_refusals": deterministic_refusals,
             "provider_failures": provider_failures,
             "architecture_f_fallbacks": architecture_f_fallbacks,
@@ -668,6 +691,19 @@ def aggregate(records):
     )
     accepted = sum(m["accepted_proposals"] for m in metrics)
     correct = sum(m["correct_proposals"] for m in metrics)
+    raw_semantic_correct = sum(
+        m.get("raw_semantic_correct_choices", 0) for m in metrics
+    )
+    raw_semantic_denominator = sum(
+        m.get("raw_semantic_choice_denominator", 0) for m in metrics
+    )
+    raw_choice_coverage_numerator = sum(
+        m.get("raw_semantic_choice_coverage_numerator", 0) for m in metrics
+    )
+    raw_choice_coverage_denominator = sum(
+        m.get("raw_semantic_choice_coverage_denominator", m["proposal_calls"])
+        for m in metrics
+    )
     escalation_rows = [m for m in metrics if m.get("escalation_success") is not None]
     return {"case_denominator": len(metrics), "outcome_successes": sum(m["outcome_success"] for m in metrics),
             "outcome_success_rate": sum(m["outcome_success"] for m in metrics) / len(metrics) if metrics else None,
@@ -677,15 +713,35 @@ def aggregate(records):
             "escalation_case_denominator": len(escalation_rows),
             "escalation_successes": sum(m["escalation_success"] for m in escalation_rows),
             "proposal_call_denominator": sum(m["proposal_calls"] for m in metrics),
-            "plan_attempt_denominator": plan_choices,
-            "proposal_coverage_denominator": coverage_denominator,
+             "plan_attempt_denominator": plan_choices,
+             "proposal_coverage_denominator": coverage_denominator,
+             "proposal_coverage_numerator": coverage_numerator,
             "false_proposals": sum(m["false_proposals"] for m in metrics),
             "unsupported_false_proposals": sum(m.get("unsupported_false_proposals", 0) for m in metrics),
             "accepted_proposal_denominator": sum(m["accepted_proposals"] for m in metrics),
             "accepted_plan_attempts": sum(m.get("accepted_plan_attempts", m["accepted_proposals"]) for m in metrics),
             "accepted_escalation_attempts": sum(m.get("accepted_escalation_attempts", 0) for m in metrics),
-            "correct_proposals": sum(m["correct_proposals"] for m in metrics),
-            "proposal_accuracy": correct / accepted if accepted else None,
+             "correct_proposals": sum(m["correct_proposals"] for m in metrics),
+             "proposal_accuracy": correct / accepted if accepted else None,
+             "raw_semantic_correct_choices": raw_semantic_correct,
+             "raw_semantic_choice_denominator": raw_semantic_denominator,
+             "raw_semantic_accuracy": (
+                 raw_semantic_correct / raw_semantic_denominator
+                 if raw_semantic_denominator else None
+             ),
+             "raw_semantic_choice_coverage_numerator": raw_choice_coverage_numerator,
+             "raw_semantic_choice_coverage_denominator": raw_choice_coverage_denominator,
+             "raw_semantic_choice_coverage": (
+                 raw_choice_coverage_numerator / raw_choice_coverage_denominator
+                 if raw_choice_coverage_denominator else None
+             ),
+             "confidence_filtered_correct_choices": sum(
+                 m.get("confidence_filtered_correct_choices", 0) for m in metrics
+             ),
+             "confidence_filtered_correct_choice_denominator": sum(
+                 m.get("confidence_filtered_correct_choice_denominator", 0)
+                 for m in metrics
+             ),
             "proposal_coverage": (
                 coverage_numerator / coverage_denominator
                 if coverage_denominator else None

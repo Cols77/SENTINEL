@@ -263,6 +263,8 @@ def test_optional_confidence_uses_selected_probability(confidence):
     assert attempt["record"] == "proposal_attempt"
     assert attempt["judge_label"] == attempt["policy_label"] == ROUTE
     assert attempt["confidence"] == recommendation["confidence"] == 0.8
+    assert attempt["selected_probability"] == 0.8
+    assert attempt["confidence_source"] == "selected_probability_fallback"
     assert attempt["gate_outcome"] == "accepted"
     assert attempt["error_category"] is None
     assert attempt["latency_ms"] >= 0
@@ -310,6 +312,8 @@ def test_rejected_attempt_preserves_gate_metrics(confidence, probabilities, outc
     assert attempt["gate_outcome"] == outcome
     assert attempt["error_category"] is None
     assert attempt["confidence"] == confidence
+    assert attempt["selected_probability"] == probabilities[ROUTE]
+    assert attempt["confidence_source"] == "provider_distribution_confidence"
     assert attempt["probabilities"] == probabilities
     assert attempt["margin"] == pytest.approx(probabilities[ROUTE] - probabilities[FULL])
 

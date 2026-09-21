@@ -27,6 +27,8 @@ def _write_attempt(
     gate_outcome: str, policy_label: str, raw_choice: Any = None,
     confidence: float | None = None,
     probabilities: dict[str, float] | None = None, margin: float | None = None,
+    selected_probability: float | None = None,
+    confidence_source: str | None = None,
     provider_summary: str | None = None,
 ) -> None:
     """Keep provider attempts separate from reviewable recommendations.
@@ -54,6 +56,11 @@ def _write_attempt(
             "provider_error", "invalid_answer",
         } else None,
     }
+    if advisor == "jev":
+        record.update({
+            "selected_probability": selected_probability,
+            "confidence_source": confidence_source,
+        })
     if provider_summary is not None:
         record["provider_summary"] = provider_summary[:512]
     sink.write(record)
@@ -278,6 +285,9 @@ class JevProposer:
         raw_confidence = answer.get("confidence")
         confidence = self._probability(raw_confidence)
         assessment["confidence"] = confidence
+        assessment["confidence_source"] = (
+            "provider_distribution_confidence" if confidence is not None else None
+        )
         raw_probabilities = answer.get("probabilities")
         probabilities: dict[str, float] = {}
         if isinstance(raw_probabilities, Mapping):
@@ -286,6 +296,8 @@ class JevProposer:
                 if isinstance(key, str) and probability is not None:
                     probabilities[key] = probability
             assessment["probabilities"] = probabilities
+        if isinstance(label, str):
+            assessment["selected_probability"] = probabilities.get(label)
         if (
             not isinstance(label, str)
             or label not in labels
@@ -300,6 +312,7 @@ class JevProposer:
         if raw_confidence is None:
             confidence = probabilities[label]
             assessment["confidence"] = confidence
+            assessment["confidence_source"] = "selected_probability_fallback"
         if confidence is None:
             return assessment
         if max(probabilities, key=probabilities.get) != label:

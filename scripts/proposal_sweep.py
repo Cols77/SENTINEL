@@ -171,6 +171,119 @@ def _evaluate_live_gate(manifest, trials, *, identity_status):
     }
 
 
+def _evaluate_semantic_boundary_gate(manifest, trials, *, identity_status):
+    """Score provider label semantics before confidence and outcome policy."""
+    fixture_matches = (
+        manifest.get("fixture_path") == PINNED_FIXTURE_PATH
+        and manifest.get("fixture_sha256") == PINNED_FIXTURE_SHA256
+        and manifest.get("pinned_fixture_sha256") == PINNED_FIXTURE_SHA256
+    )
+    trial_keys = [(row.get("case_id"), row.get("repeat")) for row in trials]
+    complete_trials = (
+        len(trials) == 36
+        and sorted(trial_keys) == sorted(
+            (case_id, repeat)
+            for repeat in range(1, 4)
+            for case_id in PINNED_CASE_IDS
+        )
+        and all(row.get("event_counts") == {
+            "provider_request": 1, "provider_result": 1,
+            "proposal_attempt": 1, "case_outcome": 1,
+        } for row in trials)
+    )
+    applicable = (
+        manifest.get("mode") == "live"
+        and len(manifest.get("arms", [])) == 1
+        and manifest.get("arms", [None])[0].lower() in {"jev", "llm"}
+        and manifest.get("repeats") == 3
+        and manifest.get("max_calls") == 36
+        and fixture_matches
+        and complete_trials
+    )
+    supported = [row for row in trials if row.get("supported")]
+    unsupported = [row for row in trials if not row.get("supported")]
+    raw_supported_correct = sum(
+        row.get("raw_semantic_correct_choices") == 1
+        and row.get("raw_semantic_choice_denominator") == 1
+        for row in supported
+    )
+    raw_unsupported_escalations = sum(
+        row.get("raw_semantic_correct_choices") == 1
+        and row.get("raw_semantic_choice_denominator") == 1
+        and row.get("raw_escalation_choices") == 1
+        for row in unsupported
+    )
+    unsupported_raw_plans = sum(
+        int(row.get("raw_plan_choices", 0)) for row in unsupported
+    )
+    unsupported_accepted_plans = sum(
+        int(row.get("unsupported_false_proposals", 0)) for row in unsupported
+    )
+    filtered_correct = sum(
+        int(row.get("confidence_filtered_correct_choices", 0)) for row in trials
+    )
+    filtered_denominator = sum(
+        int(row.get("confidence_filtered_correct_choice_denominator", 0))
+        for row in trials
+    )
+    provider_failures = sum(
+        int(row.get("provider_failures", 0)) for row in trials
+    )
+    deterministic_refusals = sum(
+        int(row.get("deterministic_refusals", 0)) for row in trials
+    )
+    f_fallbacks = sum(
+        int(row.get("architecture_f_fallbacks", 0)) for row in trials
+    )
+    reasons = []
+    if not fixture_matches:
+        reasons.append("fixture_mismatch")
+    if len(trials) != 36:
+        reasons.append("terminal_trial_count")
+    if trials and not complete_trials:
+        reasons.append("trial_event_shape")
+    if identity_status != "verified":
+        reasons.append("identity_" + identity_status)
+    if raw_supported_correct != 18:
+        reasons.append("raw_supported_labels")
+    if raw_unsupported_escalations != 18:
+        reasons.append("raw_unsupported_escalations")
+    if unsupported_raw_plans:
+        reasons.append("unsupported_raw_plan_choices")
+    if unsupported_accepted_plans:
+        reasons.append("unsupported_accepted_plans")
+    if provider_failures:
+        reasons.append("provider_failures")
+    if deterministic_refusals:
+        reasons.append("deterministic_refusals")
+    if f_fallbacks:
+        reasons.append("architecture_f_fallbacks")
+    return {
+        "version": "semantic_boundary_gate.v1",
+        "applicable": applicable,
+        "passed": applicable and not reasons,
+        "raw_supported_correct": raw_supported_correct,
+        "raw_supported_denominator": 18,
+        "raw_unsupported_escalations": raw_unsupported_escalations,
+        "raw_unsupported_denominator": 18,
+        "unsupported_raw_plan_choices": unsupported_raw_plans,
+        "unsupported_raw_plan_choice_denominator": 18,
+        "unsupported_accepted_plans": unsupported_accepted_plans,
+        "unsupported_accepted_plan_denominator": 18,
+        "confidence_filtered_correct_choices": filtered_correct,
+        "confidence_filtered_correct_choice_denominator": filtered_denominator,
+        "provider_failures": provider_failures,
+        "provider_failure_credit": 0,
+        "deterministic_refusals": deterministic_refusals,
+        "malformed_credit": 0,
+        "architecture_f_fallbacks": f_fallbacks,
+        "f_credit": 0,
+        "terminal_trials": len(trials),
+        "identity_status": identity_status,
+        "failure_reasons": reasons,
+    }
+
+
 def _http_evidence(response, stream, *, error_category=None):
     if response is None:
         stream.write({"record": "provider_wire_result", "http_status": None,
@@ -232,7 +345,10 @@ def _live_transport(arm, config, stream, observations):
         config, client_factory=client_factory, observation_callback=observe)
 
 
-def _render(manifest, records, metrics, telemetry, live_gate):
+def _render(
+    manifest, records, metrics, telemetry, live_gate,
+    semantic_boundary_gate=None,
+):
     lines = ["# Inspection capability baseline", "",
              f"Mode: **{manifest['mode']}**. Revision: `{manifest['revision']}`; dirty: {manifest['dirty']}.",
              f"Manifest: `{manifest_digest(manifest)}`.", "",
@@ -247,8 +363,26 @@ def _render(manifest, records, metrics, telemetry, live_gate):
         usage = row.get("token_usage", {})
         latency = sum(row.get("provider_latency_ms", []))
         lines.append(f"| {row['case']['case_id']} | {row['arm']} | {row['repeat']} | {score['outcome_success']} | {row['provider_calls']} | {usage.get('prompt_tokens')} | {usage.get('completion_tokens')} | {usage.get('total_tokens')} | {latency:.3f} | {row.get('estimated_cost_usd')} | {str(score['failure_reasons']).replace('|', '/')} |")
-    lines += ["", "Aggregate metrics (explicit counts and denominators):", "", "```json",
-              json.dumps(metrics, indent=2), "```", "",
+    lines += [
+        "", "Decision layers (explicit counts and denominators):", "",
+        "| Arm | Raw semantic correct / valid raw choices | Correct raw choices filtered by confidence / correct raw choices | Accepted supported plans / supported proposal calls | Outcome successes / cases |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for arm, arm_metrics in metrics.items():
+        lines.append(
+            f"| {arm} | {arm_metrics.get('raw_semantic_correct_choices', 0)} / "
+            f"{arm_metrics.get('raw_semantic_choice_denominator', 0)} | "
+            f"{arm_metrics.get('confidence_filtered_correct_choices', 0)} / "
+            f"{arm_metrics.get('confidence_filtered_correct_choice_denominator', 0)} | "
+            f"{arm_metrics.get('proposal_coverage_numerator', 0)} / "
+            f"{arm_metrics.get('proposal_coverage_denominator', 0)} | "
+            f"{arm_metrics.get('outcome_successes', 0)} / "
+            f"{arm_metrics.get('case_denominator', 0)} |"
+        )
+    lines += [
+               "", "Raw semantic accuracy evaluates the provider's legal label before confidence and margin policy. A filtered correct choice remains a system escalation and earns no accepted-plan or outcome credit.",
+               "", "Aggregate metrics (explicit counts and denominators):", "", "```json",
+               json.dumps(metrics, indent=2), "```", "",
               "Provider telemetry:", "", "```json", json.dumps(telemetry, indent=2), "```", "",
               "Live gate (fixed denominators):", "",
               "| Applicable | Passed | Supported correct / 18 | Safe escalation / 18 | Unsupported false proposals / 18 | F credit |",
@@ -257,7 +391,12 @@ def _render(manifest, records, metrics, telemetry, live_gate):
               "Rationale completeness is measured separately; factual support remains unassessed unless independently checked.",
               "Resolved model identities are in each case's telemetry. Missing provider identity is unverified.",
               "Historical direct-adapter and shadow reports remain unchanged, are legacy regression evidence, and are not pooled here.",
-              "Survey counting is outside the supported inspection catalogue; see the separate survey readiness report."]
+               "Survey counting is outside the supported inspection catalogue; see the separate survey readiness report."]
+    if semantic_boundary_gate is not None:
+        lines += [
+            "", "Semantic boundary gate:", "",
+            "```json", json.dumps(semantic_boundary_gate, indent=2), "```",
+        ]
     return "\n".join(lines) + "\n"
 
 
@@ -502,6 +641,29 @@ def main(argv=None):
                         "safe_escalation_trial":
                             metrics_row.get("safe_escalation_trial") is True,
                         "unsupported_false_proposal": metrics_row.get("unsupported_false_proposals", 0) > 0,
+                        "raw_semantic_correct_choices": metrics_row.get(
+                            "raw_semantic_correct_choices", 0
+                        ),
+                        "raw_semantic_choice_denominator": metrics_row.get(
+                            "raw_semantic_choice_denominator", 0
+                        ),
+                        "raw_escalation_choices": metrics_row.get(
+                            "raw_escalation_choices", 0
+                        ),
+                        "raw_plan_choices": metrics_row.get("raw_plan_choices", 0),
+                        "confidence_filtered_correct_choices": metrics_row.get(
+                            "confidence_filtered_correct_choices", 0
+                        ),
+                        "confidence_filtered_correct_choice_denominator": metrics_row.get(
+                            "confidence_filtered_correct_choice_denominator", 0
+                        ),
+                        "unsupported_false_proposals": metrics_row.get(
+                            "unsupported_false_proposals", 0
+                        ),
+                        "provider_failures": metrics_row.get("provider_failures", 0),
+                        "deterministic_refusals": metrics_row.get(
+                            "deterministic_refusals", 0
+                        ),
                         "architecture_f_fallbacks": f_fallbacks,
                         "event_counts": counts,
                     })
@@ -544,12 +706,19 @@ def main(argv=None):
             }
         gate_identity = arm_identity_statuses.get(arms[0], "unverified") if len(arms) == 1 else "unverified"
         live_gate = _evaluate_live_gate(manifest, trials, identity_status=gate_identity)
+        semantic_boundary_gate = _evaluate_semantic_boundary_gate(
+            manifest, trials, identity_status=gate_identity,
+        )
         summary = {"manifest_sha256": manifest_digest(manifest), "calls_used": budget.used,
-                   "budget_exhausted": budget.exhausted, "metrics": metrics,
-                   "telemetry": telemetry, "live_gate": live_gate}
+                    "budget_exhausted": budget.exhausted, "metrics": metrics,
+                    "telemetry": telemetry, "live_gate": live_gate,
+                    "semantic_boundary_gate": semantic_boundary_gate}
         (args.output / "summary.json").write_text(canonical(sanitized(summary)) + "\n", encoding="utf-8")
         (args.output / "report.md").write_text(
-            _render(manifest, records, metrics, telemetry, live_gate), encoding="utf-8")
+            _render(
+                manifest, records, metrics, telemetry, live_gate,
+                semantic_boundary_gate,
+            ), encoding="utf-8")
         raw.write({"record": "run_complete", **summary})
         return 1 if budget.exhausted or live_gate["live_gate_applicable"] and not live_gate["passed"] else 0
     except (ValueError, PermissionError, FileExistsError) as exc:

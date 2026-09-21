@@ -48,6 +48,21 @@ failures, replay integrity, budget checks and provider telemetry are applied.
 Unknown resolved model identity is reported as unverified, even if a requested
 model name is pinned.
 
+For Jev, each `proposal_attempt` keeps the provider's distribution confidence,
+the selected label's probability and which value supplied the confidence gate.
+The selected probability is used only when the optional scalar confidence is
+absent or null. Reports separate raw semantic label accuracy, correct raw labels
+filtered by confidence or margin, accepted supported-plan coverage and final
+persisted outcome success. A correct raw label that the policy filters remains
+an escalation and receives no accepted-plan or outcome credit.
+
+`semantic_boundary_gate.v1` is reported beside the existing live outcome gate.
+It requires the complete pinned trial matrix, verified model identity, correct
+raw labels for supported and unsupported requests, no unsupported raw or
+accepted plan, and no provider failure, malformed answer or architecture-F
+fallback credit. Confidence-filtered correct labels are reported with their own
+denominator and do not make this semantic gate fail.
+
 Scoring checks persisted plan content, evidence/task/assignment targets, accepted
 commands, approval identity and event order. Rejected commands, wrong plans,
 missing evidence, incomplete execution and missing records fail their gates.

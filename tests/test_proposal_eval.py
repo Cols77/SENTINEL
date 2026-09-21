@@ -131,6 +131,38 @@ def test_aggregate_denominators_are_explicit():
     assert empty["outcome_success_rate"] is None
     assert empty["proposal_accuracy"] is None
     assert empty["proposal_coverage"] is None
+    assert empty["raw_semantic_accuracy"] is None
+    assert empty["raw_semantic_choice_coverage"] is None
+
+
+def test_raw_semantic_quality_is_separate_from_confidence_and_outcome_gates():
+    supported = next(c for c in load_cases() if c.case_id == "provider_failure")
+    unsupported = next(c for c in load_cases() if c.case_id == "ambiguous")
+    supported_record = _terminal_record(
+        supported,
+        _proposal_attempt("low_confidence", "PLAN_ROUTE_ONLY_2_ZONE"),
+        _route("proposer_escalation"),
+    )
+    unsupported_record = _terminal_record(
+        unsupported,
+        _proposal_attempt("accepted", "escalate", "escalate"),
+        _route("proposer_escalation"),
+    )
+
+    totals = aggregate([supported_record, unsupported_record])
+
+    assert totals["raw_semantic_correct_choices"] == 2
+    assert totals["raw_semantic_choice_denominator"] == 2
+    assert totals["raw_semantic_accuracy"] == 1.0
+    assert totals["raw_semantic_choice_coverage_numerator"] == 2
+    assert totals["raw_semantic_choice_coverage_denominator"] == 2
+    assert totals["raw_semantic_choice_coverage"] == 1.0
+    assert totals["confidence_filtered_correct_choices"] == 1
+    assert totals["confidence_filtered_correct_choice_denominator"] == 2
+    assert totals["proposal_coverage_numerator"] == 0
+    assert totals["proposal_coverage_denominator"] == 1
+    assert totals["outcome_successes"] == 1
+    assert totals["case_denominator"] == 2
 
 
 def test_complete_expected_escalation_scores_deliberate_choice():

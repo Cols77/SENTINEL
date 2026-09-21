@@ -323,6 +323,133 @@ def test_live_gate_supported_credit_requires_authoritative_correct_supported_sco
     assert "supported_correct" in gate["failure_reasons"]
 
 
+def _semantic_gate_inputs():
+    manifest = {
+        "mode": "live", "arms": ["jev"], "fixture_path": FIXTURE_RELATIVE,
+        "fixture_sha256": FIXTURE_SHA256,
+        "pinned_fixture_sha256": FIXTURE_SHA256,
+        "repeats": 3, "max_calls": 36,
+    }
+    trials = []
+    for repeat in range(1, 4):
+        for index, case_id in enumerate(CASE_IDS):
+            supported = index < 6
+            trials.append({
+                "case_id": case_id, "repeat": repeat, "supported": supported,
+                "raw_semantic_correct_choices": 1,
+                "raw_semantic_choice_denominator": 1,
+                "raw_escalation_choices": 0 if supported else 1,
+                "raw_plan_choices": 1 if supported else 0,
+                "confidence_filtered_correct_choices": 0,
+                "confidence_filtered_correct_choice_denominator": 1,
+                "unsupported_false_proposals": 0,
+                "provider_failures": 0, "deterministic_refusals": 0,
+                "architecture_f_fallbacks": 0,
+                "event_counts": {
+                    "provider_request": 1, "provider_result": 1,
+                    "proposal_attempt": 1, "case_outcome": 1,
+                },
+            })
+    return manifest, trials
+
+
+def test_semantic_boundary_gate_accepts_correct_raw_choice_filtered_by_confidence():
+    from scripts.proposal_sweep import _evaluate_semantic_boundary_gate
+
+    manifest, trials = _semantic_gate_inputs()
+    trials[0]["confidence_filtered_correct_choices"] = 1
+
+    gate = _evaluate_semantic_boundary_gate(
+        manifest, trials, identity_status="verified",
+    )
+
+    assert gate["version"] == "semantic_boundary_gate.v1"
+    assert gate["applicable"] is True
+    assert gate["passed"] is True
+    assert gate["raw_supported_correct"] == 18
+    assert gate["raw_supported_denominator"] == 18
+    assert gate["raw_unsupported_escalations"] == 18
+    assert gate["raw_unsupported_denominator"] == 18
+    assert gate["confidence_filtered_correct_choices"] == 1
+    assert gate["confidence_filtered_correct_choice_denominator"] == 36
+
+
+def test_semantic_boundary_gate_rejects_wrong_high_confidence_supported_choice():
+    from scripts.proposal_sweep import _evaluate_semantic_boundary_gate
+
+    manifest, trials = _semantic_gate_inputs()
+    trials[0]["raw_semantic_correct_choices"] = 0
+
+    gate = _evaluate_semantic_boundary_gate(
+        manifest, trials, identity_status="verified",
+    )
+
+    assert gate["passed"] is False
+    assert gate["raw_supported_correct"] == 17
+    assert "raw_supported_labels" in gate["failure_reasons"]
+
+
+def test_semantic_boundary_gate_rejects_safe_low_confidence_unsupported_plan():
+    from scripts.proposal_sweep import _evaluate_semantic_boundary_gate
+
+    manifest, trials = _semantic_gate_inputs()
+    unsupported = next(row for row in trials if not row["supported"])
+    unsupported.update(
+        raw_semantic_correct_choices=0,
+        raw_escalation_choices=0,
+        raw_plan_choices=1,
+        confidence_filtered_correct_choices=0,
+    )
+
+    gate = _evaluate_semantic_boundary_gate(
+        manifest, trials, identity_status="verified",
+    )
+
+    assert gate["passed"] is False
+    assert gate["unsupported_raw_plan_choices"] == 1
+    assert "raw_unsupported_escalations" in gate["failure_reasons"]
+    assert "unsupported_raw_plan_choices" in gate["failure_reasons"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("missing", "trial_event_shape"),
+        ("identity", "identity_mismatched"),
+        ("fallback", "architecture_f_fallbacks"),
+        ("provider", "provider_failures"),
+        ("malformed", "deterministic_refusals"),
+        ("unsupported_accepted", "unsupported_accepted_plans"),
+    ],
+)
+def test_semantic_boundary_gate_refuses_ineligible_credit(mutation, reason):
+    from scripts.proposal_sweep import _evaluate_semantic_boundary_gate
+
+    manifest, trials = _semantic_gate_inputs()
+    identity = "verified"
+    if mutation == "missing":
+        trials[0]["event_counts"]["proposal_attempt"] = 0
+    elif mutation == "identity":
+        identity = "mismatched"
+    elif mutation == "fallback":
+        trials[0]["architecture_f_fallbacks"] = 1
+    elif mutation == "provider":
+        trials[0]["provider_failures"] = 1
+    elif mutation == "malformed":
+        trials[0]["deterministic_refusals"] = 1
+    else:
+        next(row for row in trials if not row["supported"])[
+            "unsupported_false_proposals"
+        ] = 1
+
+    gate = _evaluate_semantic_boundary_gate(
+        manifest, trials, identity_status=identity,
+    )
+
+    assert gate["passed"] is False
+    assert reason in gate["failure_reasons"]
+
+
 def test_completed_applicable_live_gate_failure_exits_nonzero_without_network(
         tmp_path, monkeypatch, capsys):
     from dataclasses import asdict
@@ -543,6 +670,38 @@ def test_jev_dry_run_loads_env_without_artifacts_provider_or_secret_output(
 def test_recorded_mode_requires_capture_file(tmp_path):
     from scripts.proposal_sweep import main
     assert main(["--mode", "recorded", "--execute", "--output", str(tmp_path / "new")]) == 2
+
+
+def test_report_separates_raw_semantics_confidence_filtering_and_outcomes():
+    from scripts.proposal_sweep import _render
+
+    metrics = {"jev": {
+        "raw_semantic_correct_choices": 36,
+        "raw_semantic_choice_denominator": 36,
+        "confidence_filtered_correct_choices": 6,
+        "confidence_filtered_correct_choice_denominator": 36,
+        "proposal_coverage_numerator": 13,
+        "proposal_coverage_denominator": 18,
+        "outcome_successes": 31,
+        "case_denominator": 36,
+    }}
+    report = _render(
+        {"mode": "recorded", "revision": "abc", "dirty": False},
+        [], metrics, {},
+        {
+            "live_gate_applicable": False, "passed": False,
+            "supported_correct": 0, "safe_escalation": 0,
+            "unsupported_false_proposals": 0,
+        },
+        {"version": "semantic_boundary_gate.v1", "passed": True},
+    )
+
+    assert "Decision layers" in report
+    assert "36 / 36" in report
+    assert "6 / 36" in report
+    assert "13 / 18" in report
+    assert "31 / 36" in report
+    assert "semantic_boundary_gate.v1" in report
 
 
 @pytest.mark.parametrize(("provider_model", "expected"), [
