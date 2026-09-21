@@ -1,4 +1,5 @@
 import json
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -185,3 +186,109 @@ def test_passive_mode_logs_the_tolerance_verdict_but_never_lands_on_it(tmp_path)
     runner, client = _runner(tmp_path, "passive", [[_report(270, 265)] * 10, [_report(150, 300)] * 10])
     assert runner.run(confirm=True).status == "PASS"
     assert [e["tolerance"] for e in _log(tmp_path)] == ["OUTSIDE", "INSIDE"]
+
+
+# -- A3: additive log fields (frames, measured heading) ----------------------
+
+def test_off_mode_records_frames_but_no_heading(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100, looks_deg=(-10, 0, 10)),))
+    runner, _ = _runner(tmp_path, "off", [], mission=mission)
+    assert runner.run(confirm=True).status == "PASS"
+    wp1 = _log(tmp_path)[0]
+    assert wp1["heading_deg"] is None and wp1["heading_error_deg"] is None
+    assert [f["look_deg"] for f in wp1["frames"]] == [-10, 0, 10]
+    # DryRunClient, no capture_dir -> no recorder: path/sha256 are None, not omitted
+    assert all(f["path"] is None and f["sha256"] is None for f in wp1["frames"])
+    assert all(f["captured_at"] for f in wp1["frames"])
+
+
+def test_passive_mode_records_the_measured_heading_next_to_its_error(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),))
+    runner, _ = _runner(tmp_path, "passive", [[_report(270, 300, heading=104.0)] * 10], mission=mission)
+    assert runner.run(confirm=True).status == "PASS"
+    wp1 = _log(tmp_path)[0]
+    assert wp1["heading_deg"] == pytest.approx(104.0)
+    assert wp1["heading_error_deg"] == pytest.approx(14.0)
+
+
+# -- A4: in-move pose watchdog ------------------------------------------------
+
+def test_pose_mode_off_never_starts_the_watchdog(tmp_path):
+    calls = []
+    client = DryRunClient()
+    runner = CubeMissionRunner(client, "dry-run", mission=MISSION, site=SITE, pose_mode="off",
+                               mission_log=tmp_path / "mission.jsonl", sleep_fn=lambda seconds: None,
+                               watchdog_fix_fn=lambda: calls.append(1))
+    assert runner.run(confirm=True).status == "PASS"
+    assert calls == []
+
+
+class _SlowMoveClient(DryRunClient):
+    """A DryRunClient whose move() takes a moment -- DryRunClient otherwise
+    returns instantly, giving a short-interval watchdog no time to poll."""
+
+    def move(self, direction, distance_cm):
+        time.sleep(0.08)
+        return super().move(direction, distance_cm)
+
+
+def test_a_watchdog_trip_during_a_move_ends_in_the_landing_path(tmp_path):
+    client = _SlowMoveClient()
+    runner = CubeMissionRunner(
+        client, "dry-run", mission=MISSION, site=SITE, pose_mode="passive",
+        mission_log=tmp_path / "mission.jsonl", burst_fn=lambda: [_report(270, 300)] * 10,
+        sleep_fn=lambda seconds: None, watchdog_fix_fn=lambda: (1000.0, 1000.0),
+        watchdog_poll_interval_s=0.005)
+    report = runner.run(confirm=True)
+    assert report.status == "FAIL"
+    assert "watchdog" in report.error.lower()
+    assert "land" in client.commands
+    wp1 = _log(tmp_path)[0]
+    assert wp1["status"] == "ABORTED_EN_ROUTE"
+    assert wp1["fix_cm"] == [1000.0, 1000.0]      # the watchdog's last fix
+
+
+# -- F1: a waypoint aborted en route still gets a log line --------------------
+
+def test_an_abort_during_the_move_still_logs_a_line_for_that_waypoint(tmp_path):
+    """Previously the mission-log entry for a waypoint was only created AFTER
+    _go_to returned, so an abort raised while still travelling to it (the
+    watchdog, an envelope violation, ...) left no log line at all for the
+    stop the drone was heading to."""
+    client = DryRunClient()
+    real_move = client.move
+    calls = {"n": 0}
+
+    def failing_move(direction, distance_cm):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "error"
+        return real_move(direction, distance_cm)
+
+    client.move = failing_move
+    runner = CubeMissionRunner(client, "dry-run", mission=MISSION, site=SITE, pose_mode="off",
+                               mission_log=tmp_path / "mission.jsonl", sleep_fn=lambda seconds: None)
+    report = runner.run(confirm=True)
+    assert report.status == "FAIL" and "movement failed" in report.error.lower()
+    wp1 = _log(tmp_path)[0]
+    assert wp1["status"] == "ABORTED_EN_ROUTE"
+    assert wp1["commanded_cm"] == [270, 300, 100]
+    assert wp1["fix_cm"] is None        # pose_mode off: no watchdog, nothing measured
+
+
+# -- F2: a re-anchored fix outside the commanded bounds on one axis ----------
+
+def test_reanchor_recovers_an_axis_left_outside_the_bounds_before_the_other_axis_moves(tmp_path):
+    """A re-anchored fix a few cm beyond a commanded bound on one axis must
+    not block the NEXT waypoint's move on the other axis: validate_move
+    checks the WHOLE candidate position, so a stale out-of-bounds axis fails
+    a move that has nothing to do with it (reproduces in closed_loop_sim: a
+    waypoint 10 cm from a commanded edge, a fix 2 cm beyond it)."""
+    mission = Mission(270, 235, (
+        Waypoint("WP1", 270, 235, 100), Waypoint("WP2", 220, 235, 100)))
+    bursts = [[_report(270, 226)] * 10,     # WP1 fix: y is 4 cm beyond the 230 cm bound
+              [_report(220, 235)] * 10]     # WP2
+    runner, client = _runner(tmp_path, "reanchor", bursts, mission=mission)
+    report = runner.run(confirm=True)
+    assert report.status == "PASS", report.error
+    assert [e["status"] for e in _log(tmp_path)] == ["LOCALISED", "LOCALISED"]

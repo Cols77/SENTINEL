@@ -12,20 +12,24 @@ reanchor - additionally, at a stationary hover, a fix that passes the quality
 The drone translates only while facing +y, so forward = +y and right = +x and
 the inherited envelope bookkeeping is valid in the room frame.
 """
+import hashlib
 import json
 import math
 import time
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from sentinel.envelope import EnvelopeViolation
 from sentinel.models import Position
 from sentinel.pose.containment import Containment, check_containment
+from sentinel.pose.detector import NoTagDetected, estimate_pose
 from sentinel.pose.localise import LocalisationFix, localise
 from sentinel.pose.replay import FrameRecorder
 from sentinel.pose.scoring import heading_delta_deg
-from sentinel.pose.stream import run_pose_stream
+from sentinel.pose.stream import _to_bgr, run_pose_stream
+from sentinel.pose.watchdog import POLL_INTERVAL_S, PoseWatchdog
 from sentinel.runner import FlightTestRunner
 
 POSE_MODES = ("off", "passive", "reanchor")
@@ -43,6 +47,15 @@ SETTLE_S = 1.5
 BURST_MAX_S = 12.0
 BURST_TARGET_REPORTS = 12
 CM_PER_UNIT = 10.0
+#: F2: a re-anchored fix can land a few cm beyond a commanded x/y bound
+#: (still inside the cube footprint). A waypoint this close to a bound makes
+#: that likelier -- flagged in reanchor mode. wp5-flight1-loop.json does not
+#: clear this margin against wp5-flight1-site.json (RIGHT_NEAR/HOME are 20 cm
+#: from the y bound), so this is a logged warning, not a PlanError.
+REANCHOR_BOUND_MARGIN_CM = 25
+#: A4/W08-b: timeout for one frame read on the watchdog's own thread, while a
+#: blocking move is in progress on the main thread.
+WATCHDOG_FRAME_TIMEOUT_S = 2.0
 
 
 class PlanError(ValueError):
@@ -129,7 +142,10 @@ class CubeMissionRunner(FlightTestRunner):
                  pose_mode: str = "off", tag_map=None, conn=None, run_id: str = "",
                  mission_log: Path, capture_dir: Path | None = None,
                  burst_fn: Callable[[], list] | None = None,
-                 sleep_fn: Callable[[float], None] = time.sleep, **runner_kwargs) -> None:
+                 sleep_fn: Callable[[float], None] = time.sleep,
+                 watchdog_fix_fn: Callable[[], tuple[float, float] | None] | None = None,
+                 land_during_move: bool = False,
+                 watchdog_poll_interval_s: float = POLL_INTERVAL_S, **runner_kwargs) -> None:
         if pose_mode not in POSE_MODES:
             raise ValueError(f"pose_mode must be one of {POSE_MODES}, got {pose_mode!r}")
         if pose_mode != "off" and burst_fn is None and (tag_map is None or conn is None):
@@ -146,6 +162,26 @@ class CubeMissionRunner(FlightTestRunner):
         self.footprint = site.footprint()
         self._look_offset = 0
         self._implausible_streak = 0
+        # A4/W08-b: sending `land` from the watchdog thread mid-move is
+        # pending bench test B1 (does the Tello honour it?) -- see
+        # docs/wp5-rehearsal-manifest.md and coherence spec section 10.3.
+        # Until it passes this stays off and an abort takes effect once the
+        # blocking move returns, same as every other controlled landing here.
+        self.land_during_move = land_during_move
+        self._watchdog_poll_interval_s = watchdog_poll_interval_s
+        self._watchdog_last_fix_cm: list[float] | None = None
+        self._watchdog_land_error: Exception | None = None
+        if pose_mode not in ("passive", "reanchor"):
+            self._watchdog_fix_fn = None
+        elif watchdog_fix_fn is not None:
+            self._watchdog_fix_fn = watchdog_fix_fn
+        elif mode == "real":
+            self._watchdog_fix_fn = self._live_watchdog_fix
+        else:
+            # DryRunClient frames are an undecodable placeholder (see
+            # _live_burst); a dry run with no injected fix_fn honestly runs
+            # the watchdog off, same as pose_mode "off".
+            self._watchdog_fix_fn = None
         self._validate_mission()
 
     # -- planning -----------------------------------------------------------
@@ -159,6 +195,14 @@ class CubeMissionRunner(FlightTestRunner):
                 raise PlanError(f"waypoint {wp.name} is outside the commanded bounds")
             if any(abs(look) > MAX_LOOK_DEG for look in wp.looks_deg):
                 raise PlanError(f"waypoint {wp.name} has a look offset beyond {MAX_LOOK_DEG} degrees")
+            if self.pose_mode == "reanchor":
+                margin = min(wp.x_cm - env.min_x_cm, env.max_x_cm - wp.x_cm,
+                            wp.y_cm - env.min_y_cm, env.max_y_cm - wp.y_cm)
+                if margin < REANCHOR_BOUND_MARGIN_CM:
+                    self._emit("alert", f"{wp.name}: only {margin:.0f} cm from a commanded x/y "
+                                        f"bound in reanchor mode (recommended >= "
+                                        f"{REANCHOR_BOUND_MARGIN_CM:.0f} cm -- a re-anchored fix "
+                                        "can land outside the bounds; F2)")
 
     # -- commands -----------------------------------------------------------
     def _rotate(self, direction: str, degrees: int) -> None:
@@ -199,10 +243,82 @@ class CubeMissionRunner(FlightTestRunner):
         if self._look_offset != 0:
             raise RuntimeError("translation requires the drone to face +y")
         target = {"x_cm": wp.x_cm, "y_cm": wp.y_cm, "z_cm": wp.z_cm}
+        self._watchdog_last_fix_cm = None
+        env = self.envelope
+        origin = env.position.as_dict()
+        # F2: reanchoring can leave the tracked x/y a few cm outside the
+        # commanded bounds (still inside the cube footprint). Moving straight
+        # to the next waypoint validates the WHOLE candidate position on
+        # every axis (FlightEnvelope.contains), so if that axis's own delta
+        # to this waypoint happens to fall inside the dead band, axis_move
+        # sends it no corrective move at all -- and the OTHER axis's
+        # perfectly good move then fails on a reason of its own making.
+        # Recover any such axis first, non-optionally (never skipped as an
+        # overshoot), before the rest of the plan is validated against it.
+        for axis, negative, positive in _AXES:
+            if axis not in ("x_cm", "y_cm"):
+                continue
+            low, high = getattr(env, f"min_{axis}"), getattr(env, f"max_{axis}")
+            if low <= origin[axis] <= high:
+                continue
+            delta = target[axis] - origin[axis]
+            distance = max(MIN_MOVE_CM, round(abs(delta)))
+            self._step(positive if delta > 0 else negative, distance, optional=False)
         for direction, distance in self._moves_toward(target, self.envelope.position.as_dict()):
             # a minimum-move overshoot (delta under 20 cm) is optional; a real leg is not
             overshoot = distance == MIN_MOVE_CM
             self._step(direction, distance, optional=overshoot)
+
+    def move_checked(self, direction: str, distance_cm: int) -> None:
+        """A4/W08-b: while modes passive/reanchor move, a background watchdog
+        evaluates containment against an injectable pose-fix source; OUTSIDE
+        on 3 consecutive fixes ends in the existing controlled landing as
+        soon as this move returns. No tag in view -> no fix -> no action."""
+        if self._watchdog_fix_fn is None:
+            super().move_checked(direction, distance_cm)
+            return
+        watchdog = PoseWatchdog(
+            self._watchdog_fix_fn, self.footprint,
+            poll_interval_s=self._watchdog_poll_interval_s,
+            on_trip=self._send_land_during_move if self.land_during_move else None)
+        watchdog.start()
+        try:
+            super().move_checked(direction, distance_cm)
+        finally:
+            watchdog.stop()
+            if watchdog.last_fix is not None:
+                self._watchdog_last_fix_cm = [round(watchdog.last_fix[0], 1),
+                                              round(watchdog.last_fix[1], 1)]
+        if watchdog.abort_event.is_set():
+            raise ContainmentAbort("containment: the in-move watchdog observed the drone "
+                                   "leave the cube")
+
+    def _live_watchdog_fix(self) -> tuple[float, float] | None:
+        """Default in-move fix source (production, mode "real" only): one
+        frame, best-effort pose. Runs on the watchdog's own thread,
+        concurrently with the blocking move on the main thread -- reads the
+        client directly, not through self._call, which mutates self.history
+        and is not thread-safe. No tag in view is the routine case here, not
+        an error: NoTagDetected/ValueError both fail closed to "no fix",
+        matching _solve_mapped_tags's own contract."""
+        try:
+            frame = self.client.read_frame(timeout=WATCHDOG_FRAME_TIMEOUT_S)
+            report = estimate_pose(_to_bgr(frame), self.tag_map, run_id=self.run_id,
+                                   report_id="watchdog", source_kind="LIVE")
+        except (NoTagDetected, ValueError):
+            return None
+        return (report.point[0] * CM_PER_UNIT, report.point[1] * CM_PER_UNIT)
+
+    def _send_land_during_move(self) -> None:
+        """Best-effort `land` sent from the watchdog thread mid-move
+        (land_during_move=True only, still default off -- bench test B1).
+        Mirrors FlightTestRunner.trigger_emergency's pattern for a
+        cross-thread command: attempt once, record failure, never let an
+        exception escape the watchdog thread."""
+        try:
+            self.client.land()
+        except Exception as exc:  # noqa: BLE001 - must never kill the watchdog thread
+            self._watchdog_land_error = exc
 
     # -- pose ---------------------------------------------------------------
     def _live_burst(self) -> list:
@@ -239,6 +355,7 @@ class CubeMissionRunner(FlightTestRunner):
                                        {"x_cm": fix[0], "y_cm": fix[1]})
             entry.update({
                 "fix_cm": [round(fix[0], 1), round(fix[1], 1)],
+                "heading_deg": round(result.heading_deg, 1),
                 "heading_error_deg": round(heading_error, 1), "n": result.n,
                 "spread_p95_cm": round(result.spread_p95_cm, 2),
                 "arrival_error_cm": round(math.dist(fix, (wp.x_cm, wp.y_cm)), 1),
@@ -285,13 +402,19 @@ class CubeMissionRunner(FlightTestRunner):
                                 "in the outer tolerance circle")
 
     # -- observation --------------------------------------------------------
-    def _look(self, wp: Waypoint) -> None:
+    def _look(self, wp: Waypoint, entry: dict) -> None:
+        entry["frames"] = []
         for offset in wp.looks_deg:
             self._look_to(offset)
             self.sleep_fn(SETTLE_S)
             frame = self._call(lambda: self.client.read_frame(timeout=10))
+            path, digest = None, None
             if self.recorder is not None:
-                self.recorder.save(frame)
+                saved_path = self.recorder.save(frame)
+                path = str(saved_path)
+                digest = hashlib.sha256(saved_path.read_bytes()).hexdigest()
+            entry["frames"].append({"look_deg": offset, "path": path, "sha256": digest,
+                                    "captured_at": datetime.now(timezone.utc).isoformat()})
             self._emit("observe", f"{wp.name}: captured at look offset {offset}")
         self._look_to(0)
 
@@ -305,16 +428,28 @@ class CubeMissionRunner(FlightTestRunner):
         height = self.envelope.position.z_cm
         self.envelope.position = Position(self.mission.start_x_cm, self.mission.start_y_cm, height)
         for wp in self.mission.waypoints:
-            self._go_to(wp)
+            # F1: the entry is created BEFORE _go_to and always appended
+            # (try/finally). An abort raised while still travelling to this
+            # waypoint (the in-move watchdog, an envelope violation, ...)
+            # used to leave no log line at all for the stop the drone was
+            # heading to; "EN_ROUTE" is a sentinel this method never persists
+            # as-is -- _go_to succeeding replaces it with "OPEN_LOOP" below,
+            # and anything _localise reaches replaces it again.
             entry = {"waypoint": wp.name, "commanded_cm": [wp.x_cm, wp.y_cm, wp.z_cm],
-                     "pose_mode": self.pose_mode, "status": "OPEN_LOOP", "fix_cm": None,
-                     "heading_error_deg": None, "n": 0, "spread_p95_cm": None,
-                     "arrival_error_cm": None, "containment": None, "tolerance": None,
-                     "proposed_trims": None,
+                     "pose_mode": self.pose_mode, "status": "EN_ROUTE", "fix_cm": None,
+                     "heading_deg": None, "heading_error_deg": None, "n": 0,
+                     "spread_p95_cm": None, "arrival_error_cm": None, "containment": None,
+                     "tolerance": None, "proposed_trims": None,
                      "trim_rounds_sent": 0, "looks_deg": list(wp.looks_deg)}
             try:
+                self._go_to(wp)
+                entry["status"] = "OPEN_LOOP"
                 if self.pose_mode != "off" and wp.localise:
                     self._localise(wp, entry)
-                self._look(wp)
+                self._look(wp, entry)
             finally:
+                if entry["status"] == "EN_ROUTE":
+                    entry["status"] = "ABORTED_EN_ROUTE"
+                    if self._watchdog_last_fix_cm is not None:
+                        entry["fix_cm"] = self._watchdog_last_fix_cm
                 self._append_log(entry)
