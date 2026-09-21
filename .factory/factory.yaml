@@ -1,0 +1,6 @@
+# SENTINEL .factory/factory.yaml — unit gate only for the pose package
+planning:
+  feature: FEAT-021
+gates:
+  unit:
+    - { cmd: "{python} -m pytest tests/contracts tests/pose tests/integration -q" }

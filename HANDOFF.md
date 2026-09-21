@@ -37,6 +37,7 @@ A contributor may change code only inside the owned boundary unless the change i
 - **G2 Human surface** (Alan): pending — NiceGUI smoke fixture, click-through evidence, Confirm/Reject stale-version test.
 - **G3 Perception** (execution Dzivha; approved/reviewed Colin + Dzivha): **BLOCKED** — only the `UNAPPROVED` template is checked in; requires a named joint approval over a versioned test-image-set hash plus reproducible evaluation-manifest evidence.
 - **G4 Physical** (Colin): pending — supervised one-Tello rehearsal using WP0 operation/evidence contracts; cannot be substituted by dry-run success.
+- **WP5 Pose** (Colin): pending — contracts, tag map, detector/PnP, room-frame composition, run-scoped pose persistence and the synthetic-frame→database E2E proof are implemented and unit-tested; `uv run python -m pytest tests/contracts tests/pose tests/integration -q` passes (see `docs/wp5-rehearsal-manifest.md`). G4 live rehearsal remains the acceptance gate — dry-run/synthetic success does not substitute for the user-approved supervised physical run.
 
 ## Verification
 

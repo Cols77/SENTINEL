@@ -63,7 +63,7 @@ The JSON Schema is authoritative for wire representation. Frozen Python dataclas
 
 ### 3.2 Envelopes
 
-The public root is a directly-validatable `oneOf` registry keyed by `wire_type`; every entry is closed (`additionalProperties: false`) and every command/event/result payload is a typed closed object. Concrete public IDs are `https://sentinel.local/contracts/sentinel-v0-wire.schema.json#CommandEnvelope`, `#ResultEnvelope`, `#EventEnvelope`, `#PerceptionRequest`, `#PerceptionResult`, `#StateSnapshot`, `#MountainStateSnapshot`, `#ApprovalReadModel`, `#HazardReadModel`, `#OperationRecord`, `#ReconciliationResult`, `#EmergencySignal`, `#AgentRequest`, `#AgentModelResult`, `#WorkerDispatch`, `#SurveyPlanReference`, `#PreflightReport`, `#StationCaptureProvenance`, `#PlanApproval`, `#PlanReadModel`, `#VideoStatus`, and `#SafeVideoStreamHandle`. The approved catalogue for a plan validates against [`survey-catalogue-v1.schema.json`](contracts/survey-catalogue-v1.schema.json). Cross-WP ports MUST reference these IDs, not an unconstrained object.
+The public root is a directly-validatable `oneOf` registry keyed by `wire_type`; every entry is closed (`additionalProperties: false`) and every command/event/result payload is a typed closed object. Concrete public IDs are `https://sentinel.local/contracts/sentinel-v0-wire.schema.json#CommandEnvelope`, `#ResultEnvelope`, `#EventEnvelope`, `#PerceptionRequest`, `#PerceptionResult`, `#StateSnapshot`, `#MountainStateSnapshot`, `#ApprovalReadModel`, `#HazardReadModel`, `#OperationRecord`, `#ReconciliationResult`, `#EmergencySignal`, `#AgentRequest`, `#AgentModelResult`, `#WorkerDispatch`, `#SurveyPlanReference`, `#PreflightReport`, `#StationCaptureProvenance`, `#PlanApproval`, `#PlanReadModel`, `#VideoStatus`, and `#SafeVideoStreamHandle`. The WP5 amendment adds `#DronePoseReport`. The approved catalogue for a plan validates against [`survey-catalogue-v1.schema.json`](contracts/survey-catalogue-v1.schema.json). Cross-WP ports MUST reference these IDs, not an unconstrained object.
 
 The registry defines separate objects:
 
@@ -84,6 +84,11 @@ StateSnapshot(run_id, state_version, run_status, agent_phase,
 
 LocalPoint(x: float[0..100], y: float[0..100])
 LocalPose(point: LocalPoint, heading_deg: float|None, observed_at, source_kind)
+
+DronePoseReport(report_id, run_id, observed_at, source_kind,
+                pose: (point: LocalPoint, heading_deg: float|None, altitude_m: float|None),
+                method: APRILTAG_36H11_PNP, tag_observations[1..8],
+                reprojection_error_px)
 
 SectionState(section_id, name, polygon, status, coverage_percent|None,
              last_observation_id|None, stale: bool)
@@ -126,7 +131,7 @@ The only V0 terminal run outcomes are `COMPLETED`, `FAILED` and `EMERGENCY`; an 
 
 ### 3.5 Controlled vocabularies
 
-Persisted events use the schema enum, including `RUN_CREATED`, parent-compatible `DETECTION_RECORDED`, `DRONE_DISPATCH_REQUESTED`, `DRONE_COMMAND_COMPLETED`, `PATROLLER_ASSIGNMENT_CONFIRMED`, the plan lifecycle `PLAN_PROPOSED`/`PLAN_CREATED`/`PLAN_APPROVED`/`PLAN_REJECTED`, `PREFLIGHT_REPORTED`, and V0 `OPERATOR_ASSIGNMENT_REJECTED`. Reconciliation has exactly `OPERATION_RECONCILED_SUCCEEDED`, `OPERATION_RECONCILED_FAILED`, or `OPERATION_RECONCILIATION_UNKNOWN`; adapter-local activities are not persisted as substitute event names.
+Persisted events use the schema enum, including `RUN_CREATED`, parent-compatible `DETECTION_RECORDED`, `DRONE_DISPATCH_REQUESTED`, `DRONE_COMMAND_COMPLETED`, `PATROLLER_ASSIGNMENT_CONFIRMED`, the plan lifecycle `PLAN_PROPOSED`/`PLAN_CREATED`/`PLAN_APPROVED`/`PLAN_REJECTED`, `PREFLIGHT_REPORTED`, V0 `OPERATOR_ASSIGNMENT_REJECTED`, and the WP5 amendment `DRONE_POSE_REPORTED` (payload: typed `DronePoseReport`; the report is also a first-class wire object in the root oneOf registry). Reconciliation has exactly `OPERATION_RECONCILED_SUCCEEDED`, `OPERATION_RECONCILED_FAILED`, or `OPERATION_RECONCILIATION_UNKNOWN`; adapter-local activities are not persisted as substitute event names.
 
 Stable error codes include `INVALID_CONTRACT`, `FORBIDDEN_ACTOR_COMMAND`, `NOT_FOUND`, `FORBIDDEN`, `IDEMPOTENCY_KEY_CONFLICT`, `STALE_STATE_VERSION`, `INVALID_STATE_TRANSITION`, `ARTIFACT_HASH_MISMATCH`, `MISSING_EVIDENCE`, `EVIDENCE_HANDLE_EXPIRED`, `EVIDENCE_HANDLE_REVOKED`, `UNSUPPORTED_MEDIA`, `EVIDENCE_TOO_LARGE`, `UNSCORED_PERCEPTION`, `PERCEPTION_PROVIDER_UNAVAILABLE`, `AGENT_PROVIDER_UNAVAILABLE`, `WORKER_UNAVAILABLE`, `OPERATION_IN_DOUBT`, `REPLAY_NOT_ALLOWED` and `EMERGENCY_LATCHED`. The LLM adapter codes `LLM_CONFIG_MISSING`, `LLM_CONFIG_INVALID`, `LLM_DEPENDENCY_MISSING` and `LLM_CREDENTIAL_MISSING` are adapter-local (WP1 §3.1); they are not part of the shared coordinator registry.
 
