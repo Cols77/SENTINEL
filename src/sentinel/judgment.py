@@ -6,10 +6,38 @@ authority over mission-state transitions or flight actions.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
+
+
+_MODEL_ID_CHAR_BUDGET = 256
+_TOKEN_COUNT_LIMIT = 1_000_000_000_000
+
+
+def _provider_observation(raw: Any) -> dict[str, Any]:
+    """Return only bounded identity and usage metadata from an HTTP result."""
+    document = raw if isinstance(raw, Mapping) else {}
+    model = document.get("model")
+    if not isinstance(model, str) or not model.strip():
+        model = None
+    else:
+        model = model[:_MODEL_ID_CHAR_BUDGET]
+    usage = document.get("usage")
+    if not isinstance(usage, Mapping):
+        usage = {}
+
+    def count(name: str) -> int | float | None:
+        value = usage.get(name)
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0 or value > _TOKEN_COUNT_LIMIT):
+            return None
+        return value
+
+    return {"model": model, "usage": {name: count(name) for name in (
+        "prompt_tokens", "completion_tokens", "total_tokens")}}
 
 
 class BoundedJudge(Protocol):
@@ -98,7 +126,8 @@ class JevJudge:
 
     def __init__(self, api_key_env: str, base_url: str = "https://ai-gateway.vercel.sh",
                  model: str | None = None, timeout_s: float = 5.0,
-                 boolean_threshold: float = 0.5, transport=None) -> None:
+                 boolean_threshold: float = 0.5, transport=None,
+                 observation_callback=None) -> None:
         if not api_key_env:
             raise ValueError("api_key_env must name an environment variable (never embed the key)")
         self._api_key_env = api_key_env
@@ -107,6 +136,7 @@ class JevJudge:
         self._timeout_s = timeout_s
         self.boolean_threshold = boolean_threshold
         self._transport = transport  # injected callable for tests; real one built lazily
+        self._observation_callback = observation_callback
 
     @property
     def endpoint_path(self) -> str:
@@ -136,6 +166,11 @@ class JevJudge:
                 entry["criteria"] = q["criteria"]
             wire[q["name"]] = entry
         raw = self._post({"model": self._model, "state": state, "questions": wire})
+        if self._observation_callback is not None:
+            try:
+                self._observation_callback(_provider_observation(raw))
+            except Exception:
+                pass  # observations cannot alter the judgment path
         try:
             responses = raw["answers"]
         except (KeyError, TypeError) as exc:

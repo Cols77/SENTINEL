@@ -49,6 +49,54 @@ def test_jev_judge_boolean_via_injected_transport(monkeypatch):
     assert seen["payload"]["questions"]["hazard_relevant"]["type"] == "noul"
 
 
+def test_jev_judge_transport_observation_is_sanitized_and_pre_normalization(monkeypatch):
+    from sentinel.judgment import JevJudge
+
+    monkeypatch.setenv("SENTINEL_TEST_KEY", "fake-not-a-real-key")
+    observations = []
+
+    def transport(payload):
+        return {
+            "model": "typesafe/jev-1.13-20260917",
+            "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12},
+            "answers": {"q": {"type": "noul", "noul": 0.8, "provider_content": "private"}},
+            "credentials": "must-not-escape",
+        }
+
+    judge = JevJudge(
+        api_key_env="SENTINEL_TEST_KEY",
+        transport=transport,
+        observation_callback=observations.append,
+    )
+    assert judge.boolean({}, "q?", name="q")["value"] is True
+    assert observations == [{
+        "model": "typesafe/jev-1.13-20260917",
+        "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12},
+    }]
+    assert "private" not in repr(observations)
+    assert "must-not-escape" not in repr(observations)
+
+
+def test_jev_judge_transport_observation_rejects_invalid_numeric_usage(monkeypatch):
+    from sentinel.judgment import JevJudge
+
+    monkeypatch.setenv("SENTINEL_TEST_KEY", "fake-not-a-real-key")
+    observations = []
+    judge = JevJudge(
+        api_key_env="SENTINEL_TEST_KEY",
+        transport=lambda payload: {
+            "answers": {"q": {"type": "noul", "noul": 0.2}},
+            "usage": {"prompt_tokens": True, "completion_tokens": float("inf"), "total_tokens": -1},
+        },
+        observation_callback=observations.append,
+    )
+    judge.boolean({}, "q?", name="q")
+    assert observations == [{
+        "model": None,
+        "usage": {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None},
+    }]
+
+
 def test_jev_judge_posts_to_decisions_endpoint(monkeypatch):
     from sentinel.judgment import JevJudge
 

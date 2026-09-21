@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import json
+import math
 import os
 from typing import Any, Callable
 
@@ -30,6 +31,38 @@ ENDPOINTS = {
 # field. Both caps are enforced on every append.
 _DEFAULT_HISTORY_TURNS = 4
 _HISTORY_CHAR_BUDGET = 12_000
+_MODEL_ID_CHAR_BUDGET = 256
+_TOKEN_COUNT_LIMIT = 1_000_000_000_000
+
+
+def _observation_from_mapping(response: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Project provider metadata without retaining content or request data."""
+    model = response.get("model") if response is not None else None
+    if not isinstance(model, str) or not model.strip():
+        model = None
+    else:
+        model = model[:_MODEL_ID_CHAR_BUDGET]
+    usage: Any = response.get("usage") if response is not None else None
+    if not isinstance(usage, Mapping):
+        for method_name in ("model_dump", "to_dict"):
+            method = getattr(usage, method_name, None)
+            if callable(method):
+                converted = method()
+                if isinstance(converted, Mapping):
+                    usage = converted
+                    break
+    if not isinstance(usage, Mapping):
+        usage = {}
+
+    def count(name: str) -> int | float | None:
+        value = usage.get(name)
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0 or value > _TOKEN_COUNT_LIMIT):
+            return None
+        return value
+
+    return {"model": model, "usage": {name: count(name) for name in (
+        "prompt_tokens", "completion_tokens", "total_tokens")}}
 
 
 class OpenAICompatibleAgentModel:
@@ -43,6 +76,7 @@ class OpenAICompatibleAgentModel:
         base_url: str | None = None,
         environ: Mapping[str, str] | None = None,
         history_turns: int = _DEFAULT_HISTORY_TURNS,
+        observation_callback: Callable[[dict[str, Any]], None] | None = None,
     ):
         if not isinstance(config, LLMConfig):
             raise TypeError("config must be an LLMConfig")
@@ -57,6 +91,7 @@ class OpenAICompatibleAgentModel:
         self._client: Any | None = None
         self.last_request: dict[str, Any] | None = None
         self.history_turns = max(1, history_turns)
+        self._observation_callback = observation_callback
         # agent_run_id -> [(AgentToolCall, agent_tool_result dict | None), ...]
         self._history: dict[str, list[tuple[Any, Any]]] = {}
         # agent_run_id -> the AgentToolCall issued last turn, awaiting the
@@ -136,6 +171,15 @@ class OpenAICompatibleAgentModel:
             }
         )
 
+    def _observe(self, mapped: Mapping[str, Any] | None) -> None:
+        if self._observation_callback is None:
+            return
+        try:
+            self._observation_callback(_observation_from_mapping(mapped))
+        except Exception:
+            # Telemetry is deliberately best-effort and cannot change a model result.
+            return
+
     def propose(
         self,
         request: AgentRequest,
@@ -192,6 +236,7 @@ class OpenAICompatibleAgentModel:
             return result
 
         mapped = self._response_mapping(response)
+        self._observe(mapped)
         if mapped is None:
             return AgentModelResult.from_dict(
                 {

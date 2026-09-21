@@ -55,12 +55,57 @@ An operator-recovered task does not prove the model selected a correct proposal.
 Invalid or unavailable answers cannot establish model-quality escalation success.
 Rationale completeness is separate from factual support, which is unassessed.
 
-The default cases are explicitly synthetic. The optional existing hand-label
+The default is the fixed 12-case
+`fixtures/proposal_eval/generated-requests-v1.json` pack. Its path and current
+computed SHA-256 (`1b1089694fd74a82924c020bacfefc2e7a8b905077f05b8bbe01135777822f70`)
+are recorded independently; a matching filename is never treated as hash
+evidence. The cases are explicitly synthetic. The optional existing hand-label
 importer preserves labels and describes its request-only adaptation; it excludes
 incompatible context, draft candidates, pending labels and other decision points
 with reasons. It does not manufacture independently labelled observations.
 No release threshold, model-default change or autonomous-action promotion follows
 from this baseline.
+
+## Reviewed live gate
+
+Both model arms bind the shared SELECT_PLAN semantic revision
+`select_plan.complete_constraints.v2`. The LLM arm additionally requires
+`SENTINEL_LLM_PROMPT_REVISION=prompt-v4-complete-constraints` and
+`SENTINEL_LLM_TOOL_POLICY_REVISION=legal-tools-v2`. Jev's policy thresholds are
+recorded separately as `act_at=0.60` and `min_margin=0.15`.
+
+Each live arm is authorized separately. First run a dry run with the exact
+provider identity reviewed by the operator and a concise decision note:
+
+```powershell
+rtk proxy C:\coding\sentinel\.venv\Scripts\python.exe scripts/proposal_sweep.py --mode live --arms jev --max-calls 36 --cost-per-call-usd 0.025 --expected-resolved-model jev=typesafe/jev-1.13-20260917 --identity-decision-note "jev=reviewed pinned Jev release" --dry-run
+```
+
+Copy the printed `authorization_sha256` into
+`SENTINEL_PROPOSAL_EVAL_CONSENT`, set the existing provider-specific consent,
+then repeat the identical arguments with `--execute` and a new `--output` path.
+The LLM form uses `--arms llm`, for example
+`--expected-resolved-model llm=z-ai/glm-5.3` and a matching
+`--identity-decision-note llm=...`. Identity comparison is exact:
+`~typesafe/jev-latest` does not verify `typesafe/jev-1.13-20260917`, and
+`z-ai/glm-5.3-flash` is not pooled with `z-ai/glm-5.3`.
+
+The pass/fail gate applies only to a fresh live run of exactly one model arm on
+the pinned path and digest, with three repeats, 36 terminal trials, one provider
+request/result pair and one proposal attempt/outcome per trial, and exactly 18
+supported plus 18 escalation-required trials. It reports supported correctness,
+safe escalation and unsupported false proposals with fixed `/18` denominators;
+architecture-F recovery receives zero gate credit. Any observed identity
+mismatch fails an otherwise applicable gate. Scripted, recorded, partial,
+multi-arm or alternate-fixture runs are always marked non-applicable and cannot
+claim a passing live gate.
+
+The manifest binds requested and expected identities plus the review note before
+authorization. Observed identities are append-only run evidence and never rewrite
+that manifest. Reports retain provider calls, nullable prompt/completion/total
+tokens, latency, and actual-call cost estimates. Missing usage stays null. Cost
+remains an operator estimate rather than provider billing evidence, and model
+identity metadata is provider-asserted rather than cryptographic attestation.
 
 ## Survey scope
 
