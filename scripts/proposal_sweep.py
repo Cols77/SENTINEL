@@ -24,6 +24,7 @@ from sentinel.adapter.llm.config import LLMConfig, load_config
 from sentinel.adapter.llm.openai_compatible import _observation_from_mapping
 from sentinel.coordinator.proposer_factory import build_proposer, require_proposer_consent, JEV_PROPOSER_MODEL
 from sentinel.decision_prompt import DECISION_PROMPT_REVISION
+from sentinel.env_file import load_env_file
 from sentinel.evaluation_run import (CallBudget, RawStream, RecordedTransport, MeasuredTransport,
     build_manifest, canonical, file_digest, manifest_digest, require_authorization, sanitized)
 from sentinel.proposal_eval import load_case_bundle, run_case, score_outcome, aggregate, make_scripted_transport
@@ -313,6 +314,7 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="explicitly validate and print the manifest without execution")
     args = parser.parse_args(argv)
     try:
+        load_env_file()
         if DECISION_PROMPT_REVISION != REQUIRED_DECISION_PROMPT_REVISION:
             raise ValueError(
                 "decision prompt revision must be "

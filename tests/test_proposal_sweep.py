@@ -1,6 +1,7 @@
 """CLI consent, immutable telemetry, and live-gate boundaries."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import pytest
 
@@ -406,6 +407,132 @@ def test_live_refuses_manifest_authorization_before_initializing_provider_or_art
         *_identity_args("jev", "typesafe/jev-1.13-20260917"),
     ]) == 2
     assert "SENTINEL_PROPOSAL_EVAL_CONSENT" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_jev_execute_loads_nearest_env_before_authorization_and_process_env_wins(
+        tmp_path, monkeypatch, capsys):
+    from dataclasses import asdict
+    from types import SimpleNamespace
+    from scripts import proposal_sweep
+
+    isolated_env = dict(os.environ)
+    isolated_env.pop("SENTINEL_PROPOSAL_EVAL_CONSENT", None)
+    isolated_env.pop("SENTINEL_JEV_PROPOSER_CONSENT", None)
+    monkeypatch.setattr(os, "environ", isolated_env)
+    monkeypatch.chdir(tmp_path)
+    fixture = _escalation_fixture(tmp_path)
+    common = [
+        "--mode", "live", "--arms", "jev", "--fixtures", str(fixture),
+        *_identity_args("jev", "typesafe/jev-1.13-20260917"),
+    ]
+
+    assert proposal_sweep.main([*common, "--dry-run"]) == 0
+    authorization = json.loads(capsys.readouterr().out)["authorization_sha256"]
+    file_consent = "jev-consent-from-nearest-env"
+    (tmp_path / ".env").write_text(
+        f"SENTINEL_PROPOSAL_EVAL_CONSENT={authorization}\n"
+        f"SENTINEL_JEV_PROPOSER_CONSENT={file_consent}\n",
+        encoding="utf-8",
+    )
+    provider_environments = []
+
+    def fake_transport(*args, **kwargs):
+        provider_environments.append((
+            os.environ.get("SENTINEL_PROPOSAL_EVAL_CONSENT"),
+            os.environ.get("SENTINEL_JEV_PROPOSER_CONSENT"),
+        ))
+        return SimpleNamespace()
+
+    def fake_run_case(case, arm, output_dir, proposer_factory=None, **kwargs):
+        directory = output_dir / case.case_id / arm
+        directory.mkdir(parents=True)
+        proposer_factory(arm, SimpleNamespace(write=lambda row: None), case)
+        return {
+            "case": asdict(case), "artifact_dir": str(directory), "audit": [],
+            "metrics": {
+                "outcome_success": False, "failure_reasons": ["fixture-only"],
+                "correct_supported_trial": False, "safe_escalation_trial": False,
+                "architecture_f_fallbacks": 0, "unsupported_false_proposals": 0,
+            },
+        }
+
+    monkeypatch.setattr(proposal_sweep, "_live_transport", fake_transport)
+    monkeypatch.setattr(proposal_sweep, "run_case", fake_run_case)
+    monkeypatch.setattr(
+        proposal_sweep, "aggregate",
+        lambda records: {"case_denominator": len(records),
+                         "plan_attempt_denominator": len(records)},
+    )
+    from_file = tmp_path / "from-file"
+    assert proposal_sweep.main([*common, "--execute", "--output", str(from_file)]) == 0
+    printed = capsys.readouterr()
+    assert provider_environments == [(authorization, file_consent)] * 3
+    assert file_consent not in printed.out + printed.err
+    persisted = "".join(
+        path.read_text(encoding="utf-8")
+        for path in from_file.rglob("*") if path.is_file()
+    )
+    assert file_consent not in persisted
+
+    explicit_consent = "explicit-process-consent"
+    isolated_env["SENTINEL_PROPOSAL_EVAL_CONSENT"] = authorization
+    isolated_env["SENTINEL_JEV_PROPOSER_CONSENT"] = explicit_consent
+    (tmp_path / ".env").write_text(
+        "SENTINEL_PROPOSAL_EVAL_CONSENT=wrong-file-authorization\n"
+        "SENTINEL_JEV_PROPOSER_CONSENT=wrong-file-consent\n",
+        encoding="utf-8",
+    )
+    provider_environments.clear()
+    from_process = tmp_path / "from-process"
+    assert proposal_sweep.main([
+        *common, "--execute", "--output", str(from_process),
+    ]) == 0
+    printed = capsys.readouterr()
+    assert provider_environments == [(authorization, explicit_consent)] * 3
+    assert explicit_consent not in printed.out
+    assert explicit_consent not in printed.err
+    persisted = "".join(
+        path.read_text(encoding="utf-8")
+        for path in from_process.rglob("*") if path.is_file()
+    )
+    assert explicit_consent not in persisted
+
+
+def test_jev_dry_run_loads_env_without_artifacts_provider_or_secret_output(
+        tmp_path, monkeypatch, capsys):
+    from scripts import proposal_sweep
+
+    isolated_env = dict(os.environ)
+    isolated_env.pop("SENTINEL_PROPOSAL_EVAL_CONSENT", None)
+    isolated_env.pop("SENTINEL_JEV_PROPOSER_CONSENT", None)
+    monkeypatch.setattr(os, "environ", isolated_env)
+    monkeypatch.chdir(tmp_path)
+    manifest_secret = "dry-run-manifest-secret"
+    provider_secret = "dry-run-provider-secret"
+    (tmp_path / ".env").write_text(
+        f"SENTINEL_PROPOSAL_EVAL_CONSENT={manifest_secret}\n"
+        f"SENTINEL_JEV_PROPOSER_CONSENT={provider_secret}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        proposal_sweep, "_live_transport",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("dry run initialized provider")),
+    )
+    out = tmp_path / "must-not-exist"
+
+    status = proposal_sweep.main([
+        "--mode", "live", "--arms", "jev", "--dry-run", "--output", str(out),
+        *_identity_args("jev", "typesafe/jev-1.13-20260917"),
+    ])
+
+    printed = capsys.readouterr()
+    assert status == 0
+    assert isolated_env["SENTINEL_PROPOSAL_EVAL_CONSENT"] == manifest_secret
+    assert isolated_env["SENTINEL_JEV_PROPOSER_CONSENT"] == provider_secret
+    assert manifest_secret not in printed.out + printed.err
+    assert provider_secret not in printed.out + printed.err
     assert not out.exists()
 
 
