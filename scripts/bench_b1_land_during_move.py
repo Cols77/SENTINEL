@@ -38,7 +38,7 @@ class Bench:
         self.lock = threading.Lock()
         self.done = threading.Event()
         self.cmd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.cmd.bind((local_ip, 0))
+        self.cmd.bind((local_ip, 8889))   # the Tello answers the port that sent its first command
         self.cmd.settimeout(0.2)
         self.state = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.state.bind((local_ip, 8890))
