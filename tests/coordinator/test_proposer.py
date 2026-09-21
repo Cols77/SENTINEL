@@ -221,6 +221,7 @@ def test_valid_provider_escalation_is_canonicalized_and_audited_without_recommen
     ) == provider_summary.strip()[:512]
     attempt, = sink.records
     assert attempt["raw_choice"] == ESCALATE_LABEL
+    assert attempt["judge_label"] == ESCALATE_LABEL
     assert attempt["policy_label"] == ESCALATE_LABEL
     assert attempt["gate_outcome"] == "accepted"
     assert attempt["provider_summary"] == provider_summary.strip()[:512]
@@ -237,6 +238,8 @@ def test_finish_with_done_status_fails_closed_and_is_audited_as_invalid():
     _assert_local_escalation(result)
     assert result != model_result.to_dict()
     attempt, = sink.records
+    assert attempt["raw_choice"] is None
+    assert attempt["judge_label"] is None
     assert attempt["gate_outcome"] == "invalid_answer"
     assert attempt["policy_label"] == ESCALATE_LABEL
     assert not [r for r in sink.records if r["record"] == "proposal_recommendation"]

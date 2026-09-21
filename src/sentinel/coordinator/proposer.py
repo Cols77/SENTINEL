@@ -319,8 +319,6 @@ class LlmProposer:
                 if isinstance(raw_calls, list) and len(raw_calls) == 1:
                     raw_call = raw_calls[0]
                     if isinstance(raw_call, Mapping):
-                        if raw_call.get("tool_name") == "finish":
-                            raw_choice = ESCALATE_LABEL
                         raw_arguments = raw_call.get("arguments")
                         if (
                             raw_call.get("tool_name") == "inspection.propose_plan"
@@ -331,6 +329,7 @@ class LlmProposer:
                 model_result, agent_run_id=typed_request.agent_run_id
             )
             if provider_summary is not None:
+                raw_choice = ESCALATE_LABEL
                 gate_outcome = "accepted"
             else:
                 accepted = self._accepted_proposal(
