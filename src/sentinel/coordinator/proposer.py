@@ -94,9 +94,14 @@ def parse_provider_escalation(result: Any, *, agent_run_id: str) -> str | None:
 
 def is_canonical_escalation(result: Any, *, agent_run_id: str) -> bool:
     """Recognize only the controller-owned escalation emitted by this boundary."""
-    return parse_provider_escalation(
-        result, agent_run_id=agent_run_id
-    ) == _ESCALATION_SUMMARY
+    if type(result) is not dict:
+        return False
+    expected = one_call(
+        {"agent_run_id": agent_run_id},
+        "finish",
+        {"status": "NEEDS_REVIEW", "summary": _ESCALATION_SUMMARY},
+    )
+    return result == expected
 
 
 def _select_plan_tools(context: PolicyContext) -> list[str]:

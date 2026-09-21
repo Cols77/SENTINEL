@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from sentinel.contracts import AgentModelResult
 from sentinel.coordinator.architecture import (
     ARCHITECTURE_ENV,
     ArchitectureRouter,
@@ -222,6 +223,16 @@ def test_e_at_select_plan_forwards_canonical_proposer_escalation_without_fallbac
 @pytest.mark.parametrize("make_proposer, expected_reason", [
     (lambda: _ScriptedProposer(exc=RuntimeError("boom")), "exception:RuntimeError"),
     (lambda: _ScriptedProposer(result=_escalate_result()), "proposer_escalated"),
+    (lambda: _ScriptedProposer(result=AgentModelResult.from_dict(
+        _finish_result("plan proposal needs operator review")
+    )), "malformed_result"),
+    (lambda: _ScriptedProposer(result=_finish_result(
+        " plan proposal needs operator review "
+    )), "illegal_tool:finish"),
+    (lambda: _ScriptedProposer(result={
+        **_finish_result("plan proposal needs operator review"),
+        "intent": None,
+    }), "illegal_tool:finish"),
     (lambda: _ScriptedProposer(result=_finish_result("provider asks for review")), "illegal_tool:finish"),
     (lambda: _ScriptedProposer(result=_finish_result(
         "plan proposal needs operator review",
