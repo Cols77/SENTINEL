@@ -223,7 +223,7 @@ differences between W08's 2026-09-17 text and the implementation were found on 2
 
 | # | 2026-09-17 text | Implemented | Status |
 |---|---|---|---|
-| W08-a | the reflex is the *terminal emergency hard stop* (motor cut, W05 latch) | a measured position outside the cube raises an abort that ends in a **controlled landing** | **decided 2026-09-21 (Colin): controlled landing.** A single-tag fix has an 11 cm spread at 1.1 m, so a false `OUTSIDE` is realistic, and a motor cut at up to 1.8 m near people is the more harmful failure. W08 amended |
+| W08-a | the reflex is the *terminal emergency hard stop* (motor cut, W05 latch) | a measured position outside the cube raises an abort that ends in a **controlled landing** | **decided 2026-09-21 (Colin): controlled landing.** A single-tag fix is realistically noisy wherever only one tag is in view (measured 10.4-12.5 cm spread off-axis), so a false `OUTSIDE` is realistic there; with two tags in view the joint solve measured 0.45 cm at the same range, so a false `OUTSIDE` is implausible at a stop where both are seen. A motor cut at up to 1.8 m near people is the more harmful failure regardless. W08 amended |
 | W08-c | the envelope is *the 1 m demo cube of W03* | the envelope is derived from the site file | **decided 2026-09-21 (Colin): the configured envelope.** W08 amended |
 | W08-b | the worker verifies position *continuously* | checked only at localised stops | **decided 2026-09-21 (Colin): at every localised stop, and during moves whenever tags are in view.** W08 amended; the in-move half (level 2 below) is not built yet |
 
