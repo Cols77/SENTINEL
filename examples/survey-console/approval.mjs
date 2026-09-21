@@ -139,9 +139,8 @@ export function createDecisionController(
       if (
         !state.attempt ||
         state.pending ||
-        state.detached ||
         state.result?.status !== "IN_DOUBT" ||
-        !canDecide(survey, needsRefresh)
+        state.attempt.run_id !== survey?.run_id
       )
         return;
       await send(state.attempt);
@@ -266,7 +265,7 @@ export function renderApproval(
         button("Retry same attempt", onRetry, {
           id: "retry-decision",
           disabled:
-            state.pending || state.detached || !canDecide(s, needsRefresh),
+            state.pending || state.attempt?.run_id !== s?.run_id,
         }),
       );
   }

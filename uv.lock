@@ -1888,8 +1888,10 @@ dependencies = [
     { name = "av" },
     { name = "djitellopy" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "nicegui" },
     { name = "opencv-contrib-python" },
+    { name = "pillow" },
     { name = "psutil" },
 ]
 
@@ -1913,10 +1915,12 @@ requires-dist = [
     { name = "av", specifier = "==14.2.0" },
     { name = "djitellopy", specifier = "==2.5.0" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "jsonschema", specifier = ">=4.23" },
     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.23" },
     { name = "nicegui", specifier = ">=3.6,<4" },
     { name = "openai", marker = "extra == 'llm'", specifier = ">=1,<2" },
     { name = "opencv-contrib-python", specifier = ">=5.0.0.93" },
+    { name = "pillow", specifier = ">=10" },
     { name = "psutil", specifier = ">=5.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
 ]

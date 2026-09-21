@@ -111,7 +111,16 @@ class MissionControlService:
     def close(self):
         if not self.closed:
             self.closed=True
-            self.registry.latch_all()
+            runners=self.registry.stop_admission()
+            for runner in runners:
+                if not self.registry.emergency.is_set():
+                    try:
+                        runner.request_controlled_land()
+                    except Exception:
+                        # Failed controlled landing must not become a silent latch.
+                        identity=str(uuid4())
+                        self.safety.trigger_emergency(self.session_id,dict(command_id=identity,
+                            correlation_id=identity,idempotency_key=identity),self.config.run_id)
             self.approval.cancel(self.config.run_id)
             self.worker.close()
             self.safety.close()

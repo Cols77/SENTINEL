@@ -28,7 +28,7 @@ class ChatService:
             reply=self.session.respond(command['text'],snapshot)
             if reply.kind=='PROPOSE':
                 row=svc.store.read_run(run_id)
-                if row['status']!='ACTIVE' or svc.registry.emergency.is_set() or row['decision_version']!=command['expected_version']:
+                if row['status']!='ACTIVE' or svc.registry.closing or svc.registry.emergency.is_set() or row['decision_version']!=command['expected_version']:
                     result=conflict
                 else:
                     svc.worker.start(dict(run_id=run_id,request_text=reply.request_text,correlation_id=command['correlation_id']))

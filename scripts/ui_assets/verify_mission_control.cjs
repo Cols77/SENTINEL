@@ -56,6 +56,35 @@ async function stopHost(){if(server){server.kill('SIGTERM');await new Promise(r=
   assert.equal(snapshot.results.counts.find(c=>c.class_name==='computer').confirmed,1);
   assert.equal(snapshot.report.status,'ACCEPTED');
   assert.equal(snapshot.mission.flights.used,1);
+  const evidenceLabels=await page.evaluate(async()=>{
+   const {createEvidenceView}=await import('/console/evidence.mjs');
+   const {createHttpClient}=await import('/console/http-client.mjs');
+   const {toSurveyView}=await import('/console/view-model.mjs');
+   const client=createHttpClient();const session=await client.session();const s=await client.read_survey(session.active_run_id);
+   const viewSnapshot=toSurveyView(s);viewSnapshot.mode='LIVE';viewSnapshot.source='LIVE';viewSnapshot.frames.forEach(f=>f.source_kind='LIVE');
+   const host=document.createElement('div');document.body.append(host);const view=createEvidenceView(host,client);
+   await view.select(viewSnapshot,{kind:'frame',id:viewSnapshot.frames[0].id});
+   const result={alt:host.querySelector('img')?.alt,text:host.textContent};view.dispose();host.remove();return result;
+  });
+  assert.match(evidenceLabels.alt,/LIVE capture/);assert.doesNotMatch(evidenceLabels.text,/Synthetic image only/);
+  const poseRevocation=await page.evaluate(async()=>{
+   const {createLocalizationView}=await import('/console/localization.mjs');
+   const {createHttpClient}=await import('/console/http-client.mjs');
+   const client=createHttpClient();const session=await client.session();const s=await client.read_survey(session.active_run_id);
+   const host=document.createElement('div');document.body.append(host);
+   const canvas=document.createElement('canvas');canvas.width=1;canvas.height=1;
+   const bytes=Uint8Array.from(atob(canvas.toDataURL().split(',')[1]),c=>c.charCodeAt(0));
+   s.localization.pose_evidence={artifact_id:'a',report_id:'r',width_px:1,height_px:1,tags:[]};
+   let release;const view=createLocalizationView(host,{read_pose_evidence:()=>new Promise(r=>release=r)});
+   const pending=view.render(s);const revoked=structuredClone(s);revoked.localization.pose_evidence=null;
+   await view.render(revoked);release({bytes,media_type:'image/png'});await pending;
+   const lateRemoved=!host.querySelector('img');
+   const display=view.render(s);release({bytes,media_type:'image/png'});await display;
+   const initiallyVisible=!!host.querySelector('img');await view.render(revoked);
+   const removed=!host.querySelector('img');view.dispose();host.remove();return {lateRemoved,initiallyVisible,removed};
+  });
+  assert.deepEqual(poseRevocation,{lateRemoved:true,initiallyVisible:true,removed:true});
+
   const emergency=page.locator('#emergency-stop');
   await emergency.focus();await page.keyboard.down('Space');await page.waitForTimeout(1250);await page.keyboard.up('Space');
   await page.getByText('Emergency: ACKNOWLEDGED · simulated transport',{exact:true}).waitFor();

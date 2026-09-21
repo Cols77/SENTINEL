@@ -125,9 +125,10 @@ export function createEvidenceView(host, client) {
           new Blob([result.bytes], { type: result.media_type }),
         );
         url = objectUrl;
+        const live = s.mode === "LIVE" && f.source_kind === "LIVE";
         const img = el("img", {
           src: objectUrl,
-          alt: `Synthetic fixture evidence · ${s.run_id} / ${frameId}`,
+          alt: `${live ? "LIVE capture evidence" : "Synthetic evidence"} · ${s.run_id} / ${frameId}`,
         });
         await Promise.race([img.decode(), expiration]);
         if (disposed || loadToken !== token) {
@@ -142,7 +143,7 @@ export function createEvidenceView(host, client) {
         const stage = el("div", { class: "image-stage" }, [img]);
         imageHost.replaceChildren(
           stage,
-          meta("Synthetic image only; not a lecture-room photograph."),
+          meta(live ? "LIVE captured image; see frame provenance below." : "Synthetic image only; not a lecture-room photograph."),
         );
         const boxes = rows
           .filter((x) => x.frame_id === frameId && x.bbox)

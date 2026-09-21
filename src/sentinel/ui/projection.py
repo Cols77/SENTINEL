@@ -82,7 +82,12 @@ class ProjectionService:
                 s['report'].update(status='REJECTED',reason='Report failed runtime validation')
             if svc.pose_feed:
                 pose=svc.pose_feed.projection()
-                if pose:s['localization']=pose
+                if pose:
+                    pose=deepcopy(pose)
+                    capability=pose.get('pose_evidence')
+                    if capability and svc.evidence_status.get(capability['artifact_id']) in {'REVOKED','FORBIDDEN'}:
+                        pose['pose_evidence']=None
+                    s['localization']=pose
             s['legal_actions']=[dict(action=a,enabled=e,reasons=[] if e else ['Unavailable in current state']) for a,e in [('CHAT',True),('APPROVE',bool(offer)),('REJECT',bool(offer)),('LAND',s['safety']['land']['available']),('EMERGENCY',s['safety']['emergency']['available'])]]
             validate_snapshot(s)
             return svc.store.publish_snapshot(run_id,s)

@@ -10,10 +10,11 @@ class SafetyRegistry:
         self._lock = RLock()
         self._runners = {}
         self.emergency = Event()
+        self.closing = False
 
     def bind(self, run_id, runner):
         with self._lock:
-            if self.emergency.is_set():
+            if self.closing or self.emergency.is_set():
                 runner.latch_emergency()
                 raise EmergencyAborted('SESSION_EMERGENCY')
             if self._runners and self._runners.get(run_id) is not runner:
@@ -28,6 +29,12 @@ class SafetyRegistry:
     def get(self, run_id):
         with self._lock:
             return self._runners.get(run_id)
+
+    def stop_admission(self):
+        """Close admission atomically without suppressing controlled landing."""
+        with self._lock:
+            self.closing = True
+            return tuple(self._runners.values())
 
     def latch_all(self):
         with self._lock:

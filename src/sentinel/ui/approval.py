@@ -99,9 +99,9 @@ class ApprovalBroker:
 
     def recover_interrupted_runs(self):
         with self.store.connection(write=True) as conn:
-            rows = conn.execute("SELECT run_id FROM ui_runs WHERE mode='LIVE' AND status='ACTIVE'").fetchall()
+            rows = conn.execute("SELECT run_id,mode FROM ui_runs WHERE status='ACTIVE'").fetchall()
             for row in rows:
-                conn.execute("UPDATE ui_runs SET status='RECOVERY_REQUIRED',decision_version=decision_version+1 WHERE run_id=?", (row[0],))
+                conn.execute("UPDATE ui_runs SET status=?,decision_version=decision_version+1 WHERE run_id=?", ('RECOVERY_REQUIRED' if row[1]=='LIVE' else 'ABORTED',row[0]))
                 conn.execute("UPDATE ui_offers SET status='CANCELLED' WHERE run_id=?", (row[0],))
         for row in rows:
             self.cancel(row[0])

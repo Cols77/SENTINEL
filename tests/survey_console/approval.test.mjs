@@ -137,7 +137,7 @@ test("conflict requires newer snapshot and a deliberate new identity", async () 
   assert.equal(calls.length, 2);
   assert.notEqual(calls[0].idempotency_key, calls[1].idempotency_key);
 });
-test("wrong attempt response is uncertain and detached retries are blocked", async () => {
+test("wrong attempt response stays uncertain and detached retries reconcile", async () => {
   let calls = 0;
   const d = createDecisionController(
     {
@@ -159,7 +159,7 @@ test("wrong attempt response is uncertain and detached retries are blocked", asy
   s.proposal.id = "p3";
   d.update(s, false);
   await d.retry();
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
 });
 test("eligibility and payloads cannot be mutated outside the controller", async () => {
   const s = snapshot();
@@ -180,4 +180,14 @@ test("eligibility and payloads cannot be mutated outside the controller", async 
   const copy = d.getState();
   copy.attempt.proposal_id = "tampered";
   assert.equal(d.getState().attempt.proposal_id, "p2");
+});
+
+test('lost committed response reconciles after proposal changes and permits follow-up',async()=>{
+ const calls=[];let n=0;
+ const d=createDecisionController({submit_decision:async a=>{calls.push(a);if(calls.length===1)throw Error('response lost');return result(a);}},()=>`lost-${++n}`);
+ const s=snapshot();d.update(s,false);await d.submit('APPROVE');
+ const next=structuredClone(s);next.proposal.id='followup';next.proposal.sha256='b'.repeat(64);next.version++;
+ d.update(next,false);await d.submit('APPROVE');assert.equal(calls.length,1);
+ await d.retry();assert.equal(calls.length,2);assert.deepEqual(calls[1],calls[0]);
+ await d.submit('APPROVE');assert.equal(calls.length,3);assert.equal(calls[2].proposal_id,'followup');
 });

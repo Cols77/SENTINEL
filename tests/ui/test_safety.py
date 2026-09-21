@@ -58,3 +58,15 @@ def test_blocked_audit_does_not_block_emergency():
     finally:
         release.set()
         adapter.close()
+
+
+def test_service_shutdown_lands_active_runner_before_cleanup(tmp_path):
+    from sentinel.ui.bootstrap import SessionConfig,build_service
+    service=build_service(SessionConfig(data_dir=tmp_path))
+    runner=FlightTestRunner(_FakeClient(),'dry-run')
+    service.registry.bind('mission',runner)
+    service.close()
+    assert [r.command for r in runner.client.records]==['land']
+    assert not runner.emergency_triggered
+    with pytest.raises(EmergencyAborted):
+        service.registry.bind('mission',FlightTestRunner(_FakeClient(),'dry-run'))

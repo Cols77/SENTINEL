@@ -90,3 +90,14 @@ def test_independent_transport_failure_refuses_startup(live_config,monkeypatch):
     def fail(c):raise OSError('interface missing')
     monkeypatch.setattr(live,'check_emergency_transport',fail)
     with pytest.raises(bootstrap.StartupError,match='EMERGENCY'):bootstrap.build_service(live_config)
+
+
+def test_rehearsal_restart_cannot_acknowledge_an_orphaned_offer(tmp_path):
+    config=bootstrap.SessionConfig(data_dir=tmp_path)
+    service=bootstrap.build_service(config)
+    service.close()
+    restarted=bootstrap.build_service(config)
+    try:
+        assert restarted.read_snapshot('mission')['run']['status']=='ABORTED'
+        assert restarted.approval.current('mission') is None
+    finally:restarted.close()
