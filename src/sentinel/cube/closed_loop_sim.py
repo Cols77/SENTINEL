@@ -113,27 +113,32 @@ def fly_once(mission, site, pose_mode: str, model: DriftModel, seed: int, log_pa
     result = runner.run(confirm=True)
     rows = ([json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
             if log_path.exists() else [])
-    return {"status": result.status, "rows": rows,
+    return {"status": result.status, "rows": rows, "error": result.error,
             "moves": sum(1 for c in client.commands if c.split()[0] in _BODY_AXES)}
 
 
 def monte_carlo(mission, site, pose_mode: str, model: DriftModel, runs: int,
                 tolerance_cm: float) -> dict:
     errors: dict[str, list[float]] = {wp.name: [] for wp in mission.waypoints}
-    completed = trims = moves = 0
+    completed = trims = moves = outer = 0
+    landings: dict[str, int] = {}
     with tempfile.TemporaryDirectory() as tmp:
         for seed in range(runs):
             flight = fly_once(mission, site, pose_mode, model, seed, Path(tmp) / f"{seed}.jsonl")
             finished = flight["status"] == "PASS" and len(flight["rows"]) == len(mission.waypoints)
             completed += finished
+            if not finished:
+                cause = str(flight["error"]).split(":")[0]
+                landings[cause] = landings.get(cause, 0) + 1
             moves += flight["moves"]
             for row in flight["rows"]:
                 trims += row["trim_rounds_sent"]
+                outer += row.get("tolerance") == "OUTER"
                 if finished:
                     errors[row["waypoint"]].append(row["true_error_cm"])
     summary = {"pose_mode": pose_mode, "runs": runs, "completed": completed,
                "mean_moves": round(moves / runs, 1), "mean_trim_rounds": round(trims / runs, 2),
-               "waypoints": {}}
+               "outer_circle_stops": outer, "landings": landings, "waypoints": {}}
     for name, values in errors.items():
         if values:
             ordered = sorted(values)
@@ -159,6 +164,8 @@ def main(argv=None) -> int:
         summary = monte_carlo(mission, site, pose_mode, model, args.runs, args.tolerance_cm)
         print(f"\n{pose_mode}: {summary['completed']}/{summary['runs']} flights completed, "
               f"{summary['mean_moves']} moves and {summary['mean_trim_rounds']} trim rounds per flight")
+        print(f"  stops accepted in the outer circle: {summary['outer_circle_stops']}; "
+              f"early landings by cause: {summary['landings'] or 'none'}")
         for name, stats in summary["waypoints"].items():
             print(f"  {name:<12} true error median {stats['median_cm']:5.1f} cm  "
                   f"p95 {stats['p95_cm']:5.1f} cm  inside {args.tolerance_cm:.0f} cm circle "
