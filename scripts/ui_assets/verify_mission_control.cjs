@@ -39,6 +39,10 @@ async function stopHost(){if(server){server.kill('SIGTERM');await new Promise(r=
   await page.getByRole('button',{name:'Send',exact:true}).click();
   await page.getByRole('button',{name:'Approve flight',exact:true}).waitFor();
   await page.reload();
+  await page.locator('#localization .pose-stale').waitFor({timeout:10000});
+  await page.locator('#localization .pose-fresh').waitFor({timeout:10000});
+  assert.equal(await page.getByRole('button',{name:'Approve flight',exact:true}).isEnabled(),true);
+  await page.locator('#localization svg polygon').first().waitFor();
   await page.route('**/decisions',async route=>{await route.fetch();await route.abort();},{times:1});
   await page.getByRole('button',{name:'Approve flight',exact:true}).click();
   await page.locator('#accepted-report').waitFor();

@@ -8,6 +8,7 @@ import {renderCounts} from './counts.mjs';
 import {createChatView} from './chat.mjs';
 import {createSafetyView} from './safety.mjs';
 import {createLocalizationView} from './localization.mjs';
+import {missionMapModel,renderMissionMap} from './mission-map.mjs';
 const root=document.getElementById('app');
 root.classList.add('mission-console');document.title='SENTINEL · Mission Control';
 const status=el('p',{id:'mission-state',role:'status',class:'meta'},['Connecting to local runtime…']);
@@ -41,7 +42,7 @@ controller.subscribe(state=>{
  if(!state.survey){if(state.error)status.textContent=`Connection unavailable: ${state.error}`;return;}
  snapshot=state.survey;
  status.textContent=`${snapshot.session.mode} · ${snapshot.source.kind} · ${snapshot.run.phase} · ${snapshot.run.id}${state.needs_refresh?' · refresh required':''}`;
- safety.render(snapshot);localization.render(snapshot);
+ safety.render(snapshot);localization.render(snapshot);renderMissionMap(mapHost,missionMapModel(snapshot));
  const view=toSurveyView(snapshot);
  chat.render(snapshot.chat.messages);decision.update(view,state.needs_refresh);drawDecision();
  renderCounts(counts,view,{onClass:id=>select('class',id),onObject:id=>select('object',id)});

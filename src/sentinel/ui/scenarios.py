@@ -69,7 +69,8 @@ def build_rehearsal_adapters(scenario_path, artifact_root):
             payload=path.read_bytes();digest=hashlib.sha256(payload).hexdigest()
             artifact=f'{scene["id"]}:{option.option_id}:{i}'
             frames[option.option_id].append(FlightFrame(i,0,x,y,option.z_cm,0,'COMMANDED',str(path),artifact,digest,delta_z_cm=55))
-            script[name]=[detection]
+            if scene.get('missing_stop')!=i:
+                script[name]=[detection]
             artifacts[artifact]=dict(path=path,sha256=digest,width=IMAGE_WIDTH,height=IMAGE_HEIGHT)
     flight=ScenarioFlight(frames,artifacts)
     def writer(results):
@@ -77,4 +78,15 @@ def build_rehearsal_adapters(scenario_path, artifact_root):
         if row['uncertain']:
             return f"Between {row['confirmed']} and {row['confirmed']+row['uncertain']} computers; unresolved observations remain."
         return f"I found {row['confirmed']} computers."
-    return ScenarioAdapters(options,RuleProposer(),flight,ScriptedDetector(script),writer,SYNTHETIC_LEVEL,'SIMULATED')
+    policy=ScenarioPolicy() if scene.get('follow_up') else RuleProposer()
+    return ScenarioAdapters(options,policy,flight,ScriptedDetector(script),writer,SYNTHETIC_LEVEL,'SIMULATED')
+
+
+class ScenarioPolicy(RuleProposer):
+    """A scripted proposer selects only a candidate supplied by runtime legality."""
+    def decide(self, request, context):
+        if context.results.get('flights_used')==1 and context.results.get('uncertain_objects'):
+            candidate=next((c for c in context.legal.candidates if c.tool_name=='survey.propose_sweep' and c.arguments.get('option_id')=='CLOSE_LOOK_CENTRE'),None)
+            if candidate:
+                return {'status':'TOOL_CALLS','tool_calls':[{'tool_name':candidate.tool_name,'arguments':{**candidate.arguments,'reason':candidate.description}}]}
+        return super().decide(request,context)

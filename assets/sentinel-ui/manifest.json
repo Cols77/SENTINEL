@@ -528,6 +528,50 @@
       "sha256": "851e43244e15c34b5d8d92f0447add2142bbcc41b71e3b47844c2968db736f86"
     },
     {
+      "id": "fonts.IBMPlexMono-Regular.woff2",
+      "path": "fonts/IBMPlexMono-Regular.woff2",
+      "format": "woff2",
+      "category": "fonts",
+      "purpose": "IBMPlexMono Regular",
+      "provenance": "Local kit documentation or illustrative review; no coordinator integration.",
+      "variant": "default",
+      "bytes": 49248,
+      "sha256": "ba204497f16b6d334cee9d1e963a831b73e3a56e1d6300a8489d18df7214b350"
+    },
+    {
+      "id": "fonts.IBMPlexSans-Regular.woff2",
+      "path": "fonts/IBMPlexSans-Regular.woff2",
+      "format": "woff2",
+      "category": "fonts",
+      "purpose": "IBMPlexSans Regular",
+      "provenance": "Local kit documentation or illustrative review; no coordinator integration.",
+      "variant": "default",
+      "bytes": 63020,
+      "sha256": "ba711a3085ff9f27440b6b9c4550cfc47c97bf36591d5da958b975bb3add8c1a"
+    },
+    {
+      "id": "fonts.OFL.txt",
+      "path": "fonts/OFL.txt",
+      "format": "txt",
+      "category": "fonts",
+      "purpose": "OFL",
+      "provenance": "Local kit documentation or illustrative review; no coordinator integration.",
+      "variant": "default",
+      "bytes": 4456,
+      "sha256": "7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da"
+    },
+    {
+      "id": "fonts.README.md",
+      "path": "fonts/README.md",
+      "format": "md",
+      "category": "fonts",
+      "purpose": "README",
+      "provenance": "Local kit documentation or illustrative review; no coordinator integration.",
+      "variant": "default",
+      "bytes": 405,
+      "sha256": "d8c4356407e15d92b8d32d7d9409ffe9adefc482be352d354442facf77409931"
+    },
+    {
       "id": "icons.approve.svg",
       "path": "icons/approve.svg",
       "format": "svg",

@@ -35,7 +35,7 @@ class ProjectionService:
             last=facts['sweeps'][-1] if facts['sweeps'] else None
             option=chosen or (options[last['option_id']] if last else svc.adapters.options[0])
             if offer:
-                s['proposal']=dict(id=offer['id'],sha256=offer['sha256'],option_id=option.option_id,stops=[stop_view(option,i) for i in range(len(option.stops))],range_m=option.range_cm/100,altitude_m=option.z_cm/100,extent_m=option.viewed_width_cm/100,duration_s=option.estimated_seconds,resolvable_classes=list(option.resolvable_classes),proposer=dict(mode='F',source=svc.adapters.source_kind),justification=offer['candidate'].get('description',''),guardrail_disagreements=[],target_object_ids=[],eligibility=dict(consent=True,envelope=True,preflight=True,current=True),disabled_reasons=[],run_id=run_id,decision_version=offer['decision_version'],correlation_id=offer['correlation_id'])
+                s['proposal']=dict(id=offer['id'],sha256=offer['sha256'],option_id=option.option_id,stops=[stop_view(option,i) for i in range(len(option.stops))],range_m=option.range_cm/100,altitude_m=option.z_cm/100,extent_m=option.viewed_width_cm/100,duration_s=option.estimated_seconds,resolvable_classes=list(option.resolvable_classes),proposer=dict(mode='F',source=svc.adapters.source_kind),justification=offer['candidate'].get('description',''),guardrail_disagreements=[],target_object_ids=offer['candidate'].get('arguments',{}).get('addresses',[]),eligibility=dict(consent=True,envelope=True,preflight=True,current=True),disabled_reasons=[],run_id=run_id,decision_version=offer['decision_version'],correlation_id=offer['correlation_id'])
             route=[dict(stop_id=f'{option.option_id}:{i}',x=x,y=y) for i,(x,y) in enumerate(option.stops)]
             xs=[x for o in options.values() for x,y in o.stops];ys=[y for o in options.values() for x,y in o.stops]
             s['mission'].update(route=route,envelope=dict(min_x=min(xs),max_x=max(xs),min_y=min(ys),max_y=max(ys)),flights=dict(used=facts['results']['flights_used'],max=2))
@@ -68,6 +68,12 @@ class ProjectionService:
                 s['results']['counts'].append(dict(class_name=c['class'],semantics='UNKNOWN' if unknown else ('SINGLE_VIEW_LOWER_BOUND' if lower else 'RANGE'),confirmed=None if unknown else c['confirmed'],uncertain=None if unknown else c['uncertain'],lower_bound=c['uncertain'] if lower and not unknown else None,captured_at=facts['frames'][-1]['captured_at'] if facts['frames'] else None,observability='UNKNOWN' if not facts['frames'] else ('NOT_OBSERVABLE' if unknown else 'OBSERVABLE'),projected_px=None,min_px=None,reason=c['method'],arithmetic=None,sighting_ids=[x['id'] for x in seen],distinct_stops=None,geometry_degraded=False))
             analysed=sum(f['analysis_status']=='OK' for f in facts['frames'])
             s['evidence']['analysis'].update(analysed=analysed,total=len(facts['frames']))
+            gaps=len(facts['frames'])-analysed
+            if gaps:
+                s['evidence']['failures'].append(f'{gaps} frame analyses unavailable; counts do not cover missing evidence')
+                for count in s['results']['counts']:
+                    if count['semantics']=='RANGE':
+                        count.update(semantics='UNKNOWN',uncertain=None,observability='LIMITED',reason=f"{count['confirmed']} confirmed observations; upper bound unavailable due to analysis gaps")
             s['evidence']['provider'].update(name=svc.config.detector_name,model=svc.adapters.source_kind,source_kind=svc.adapters.source_kind)
             if facts['report']:
                 s['report'].update(status='ACCEPTED',text=facts['report']['body'],id=facts['report']['report_id'])
