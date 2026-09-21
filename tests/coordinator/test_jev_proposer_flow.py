@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from sentinel.coordinator import AgentLoop, JevProposer
 from sentinel.coordinator.boundary import CoordinatorBoundary
-from sentinel.coordinator.legal_tools import load_catalogue_plans
+from sentinel.coordinator.legal_tools import ESCALATE_LABEL, load_catalogue_plans
 from sentinel.coordinator.policy import bind_context
 from sentinel.coordinator.proposal_review import pending_proposal_review
 from sentinel.coordinator.shadow import MemoryAuditSink
@@ -19,7 +19,11 @@ class ScriptedJudge:
         return {
             "value": ROUTE,
             "confidence": 0.91,
-            "probabilities": {ROUTE: 0.8, "PLAN_MARKER_VERIFIED_6": 0.2},
+            "probabilities": {
+                ROUTE: 0.8,
+                "PLAN_MARKER_VERIFIED_6": 0.15,
+                ESCALATE_LABEL: 0.05,
+            },
         }
 
 

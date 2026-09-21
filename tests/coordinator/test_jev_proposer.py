@@ -7,7 +7,13 @@ import math
 import pytest
 
 from sentinel.coordinator.decision_state import DecisionState
-from sentinel.coordinator.legal_tools import Candidate, EVIDENCE_GATE, LegalSet, SELECT_PLAN
+from sentinel.coordinator.legal_tools import (
+    ESCALATE_LABEL,
+    Candidate,
+    EVIDENCE_GATE,
+    LegalSet,
+    SELECT_PLAN,
+)
 from sentinel.coordinator.policy import ContextualPolicy, PolicyContext
 from sentinel.coordinator.proposer import JevProposalGates, JevProposer
 from sentinel.coordinator.shadow import MemoryAuditSink
@@ -39,7 +45,7 @@ def _context(point: str = SELECT_PLAN) -> PolicyContext:
         Candidate("inspection.propose_plan", {"catalogue_plan_id": FULL}, FULL,
                   "full marker-verified plan"),
         Candidate("finish", {"status": "NEEDS_REVIEW", "summary": "ask"},
-                  "escalate", "ask the operator"),
+                  ESCALATE_LABEL, "ask the operator"),
     )))
 
 
@@ -48,7 +54,7 @@ class Judge:
         self.answer = {
             "value": ROUTE,
             "confidence": 0.8,
-            "probabilities": {ROUTE: 0.7, FULL: 0.3},
+            "probabilities": {ROUTE: 0.7, FULL: 0.2, ESCALATE_LABEL: 0.1},
         } if answer is None else answer
         self.error = error
         self.calls = []
@@ -66,7 +72,7 @@ def _assert_escalation(result: dict) -> None:
     assert call["arguments"]["status"] == "NEEDS_REVIEW"
 
 
-def test_calls_jev_with_packet_described_candidates_and_no_escalate() -> None:
+def test_calls_jev_with_packet_and_every_described_legal_candidate() -> None:
     judge = Judge()
     proposer = JevProposer(judge, MemoryAuditSink())
 
@@ -76,9 +82,14 @@ def test_calls_jev_with_packet_described_candidates_and_no_escalate() -> None:
     state, instruction, criteria, name = judge.calls[0]
     assert state == _state().to_packet()
     assert name == "select_plan"
-    assert criteria == {ROUTE: "route-only plan", FULL: "full marker-verified plan"}
+    assert criteria == {
+        ROUTE: "route-only plan",
+        FULL: "full marker-verified plan",
+        ESCALATE_LABEL: "ask the operator",
+    }
     assert "SELECT_PLAN" in instruction
-    assert "escalate" not in criteria
+    assert "fully satisfy every explicit operator constraint" in instruction
+    assert "closest" in instruction
 
 
 def test_accepts_top_ranked_answer_and_preserves_arguments_with_derived_reason_and_audit() -> None:
@@ -106,25 +117,69 @@ def test_accepts_top_ranked_answer_and_preserves_arguments_with_derived_reason_a
         "judge_label": ROUTE,
         "policy_label": ROUTE,
         "confidence": 0.8,
-        "probabilities": {ROUTE: 0.7, FULL: 0.3},
-        "margin": pytest.approx(0.4),
+        "probabilities": {ROUTE: 0.7, FULL: 0.2, ESCALATE_LABEL: 0.1},
+        "margin": pytest.approx(0.5),
     }]
+
+
+def test_accepts_jev_escalation_without_writing_a_recommendation() -> None:
+    sink = MemoryAuditSink()
+    answer = {
+        "value": ESCALATE_LABEL,
+        "confidence": 0.85,
+        "probabilities": {ROUTE: 0.05, FULL: 0.10, ESCALATE_LABEL: 0.85},
+    }
+
+    result = JevProposer(Judge(answer), sink).decide(_request(), _context())
+
+    assert result == {
+        "contract_version": "sentinel.v0",
+        "wire_type": "agent_result",
+        "agent_run_id": AGENT_RUN_ID,
+        "status": "TOOL_CALLS",
+        "tool_calls": [{
+            "contract_version": "sentinel.v0",
+            "wire_type": "agent_tool_call",
+            "tool_name": "finish",
+            "arguments": {
+                "status": "NEEDS_REVIEW",
+                "summary": "plan proposal needs operator review",
+            },
+        }],
+    }
+    attempt, = sink.records
+    assert attempt["raw_choice"] == ESCALATE_LABEL
+    assert attempt["policy_label"] == ESCALATE_LABEL
+    assert attempt["gate_outcome"] == "accepted"
+    assert not [r for r in sink.records if r["record"] == "proposal_recommendation"]
 
 
 @pytest.mark.parametrize("answer", [
     ["invalid"],
     {},
-    {"value": "UNKNOWN", "confidence": 0.9, "probabilities": {ROUTE: 0.1, FULL: 0.9}},
-    {"value": ROUTE, "confidence": 0.59, "probabilities": {ROUTE: 0.8, FULL: 0.2}},
-    {"value": ROUTE, "confidence": 0.9, "probabilities": {ROUTE: 0.55, FULL: 0.45}},
-    {"value": ROUTE, "confidence": 0.9, "probabilities": {ROUTE: 0.4, FULL: 0.6}},
-    {"value": ROUTE, "confidence": float("nan"), "probabilities": {ROUTE: 0.8, FULL: 0.2}},
-    {"value": ROUTE, "confidence": 0.9, "probabilities": {ROUTE: math.inf, FULL: 0.2}},
+    {"value": "UNKNOWN", "confidence": 0.9,
+     "probabilities": {ROUTE: 0.1, FULL: 0.1, ESCALATE_LABEL: 0.8}},
+    {"value": ROUTE, "confidence": 0.59,
+     "probabilities": {ROUTE: 0.8, FULL: 0.1, ESCALATE_LABEL: 0.1}},
+    {"value": ROUTE, "confidence": 0.9,
+     "probabilities": {ROUTE: 0.55, FULL: 0.45, ESCALATE_LABEL: 0.0}},
+    {"value": ROUTE, "confidence": 0.9,
+     "probabilities": {ROUTE: 0.4, FULL: 0.5, ESCALATE_LABEL: 0.1}},
+    {"value": ROUTE, "confidence": float("nan"),
+     "probabilities": {ROUTE: 0.8, FULL: 0.1, ESCALATE_LABEL: 0.1}},
+    {"value": ROUTE, "confidence": 0.9,
+     "probabilities": {ROUTE: math.inf, FULL: 0.1, ESCALATE_LABEL: 0.1}},
+    # Intentionally missing the legal escalation label.
     {"value": ROUTE, "confidence": 0.9, "probabilities": {ROUTE: 0.8}},
-    {"value": ROUTE, "confidence": 0.9, "probabilities": {ROUTE: 0.8, FULL: 0.2, "extra": 0.0}},
-    {"value": ROUTE, "probabilities": {ROUTE: 0.59, FULL: 0.41}},
-    {"value": ROUTE, "confidence": None, "probabilities": {ROUTE: 0.55, FULL: 0.45}},
-    {"value": ROUTE, "probabilities": {ROUTE: True, FULL: 0.2}},
+    # Intentionally includes a non-legal extra label.
+    {"value": ROUTE, "confidence": 0.9,
+     "probabilities": {ROUTE: 0.8, FULL: 0.1, ESCALATE_LABEL: 0.1, "extra": 0.0}},
+    {"value": ROUTE,
+     "probabilities": {ROUTE: 0.59, FULL: 0.31, ESCALATE_LABEL: 0.10}},
+    {"value": ROUTE, "confidence": None,
+     "probabilities": {ROUTE: 0.55, FULL: 0.35, ESCALATE_LABEL: 0.10}},
+    {"value": ROUTE,
+     "probabilities": {ROUTE: True, FULL: 0.1, ESCALATE_LABEL: 0.1}},
 ])
 def test_invalid_or_below_gate_answers_fail_closed_with_attempt_audit(answer) -> None:
     sink = MemoryAuditSink()
@@ -156,7 +211,8 @@ def test_provider_error_is_audited_but_non_select_plan_does_not_attempt() -> Non
 
 @pytest.mark.parametrize("confidence", [None, "absent"])
 def test_optional_confidence_uses_selected_probability(confidence):
-    answer = {"value": ROUTE, "probabilities": {ROUTE: 0.8, FULL: 0.2}}
+    answer = {"value": ROUTE,
+              "probabilities": {ROUTE: 0.8, FULL: 0.1, ESCALATE_LABEL: 0.1}}
     if confidence != "absent":
         answer["confidence"] = confidence
     sink = MemoryAuditSink()
@@ -175,16 +231,18 @@ def test_optional_confidence_uses_selected_probability(confidence):
 def test_explicit_malformed_confidence_does_not_fall_back(confidence):
     sink = MemoryAuditSink()
     answer = {"value": ROUTE, "confidence": confidence,
-              "probabilities": {ROUTE: 0.8, FULL: 0.2}}
+              "probabilities": {ROUTE: 0.8, FULL: 0.1, ESCALATE_LABEL: 0.1}}
     _assert_escalation(JevProposer(Judge(answer), sink).decide(_request(), _context()))
     assert sink.records[0]["gate_outcome"] == "invalid_answer"
     assert sink.records[0]["judge_label"] == ROUTE
-    assert sink.records[0]["probabilities"] == {ROUTE: 0.8, FULL: 0.2}
+    assert sink.records[0]["probabilities"] == {
+        ROUTE: 0.8, FULL: 0.1, ESCALATE_LABEL: 0.1,
+    }
 
 
 @pytest.mark.parametrize("confidence, probabilities, outcome", [
-    (0.59, {ROUTE: 0.8, FULL: 0.2}, "low_confidence"),
-    (0.9, {ROUTE: 0.55, FULL: 0.45}, "low_margin"),
+    (0.59, {ROUTE: 0.8, FULL: 0.1, ESCALATE_LABEL: 0.1}, "low_confidence"),
+    (0.9, {ROUTE: 0.55, FULL: 0.45, ESCALATE_LABEL: 0.0}, "low_margin"),
 ])
 def test_rejected_attempt_preserves_gate_metrics(confidence, probabilities, outcome):
     sink = MemoryAuditSink()
@@ -207,8 +265,8 @@ def test_gates_are_frozen_and_have_the_approved_defaults() -> None:
 
 
 @pytest.mark.parametrize("probabilities", [
-    {ROUTE: True, FULL: False},
-    {ROUTE: "0.9", FULL: "0.1"},
+    {ROUTE: True, FULL: False, ESCALATE_LABEL: 0.0},
+    {ROUTE: "0.9", FULL: "0.1", ESCALATE_LABEL: 0.0},
 ])
 def test_real_judge_transport_cannot_coerce_invalid_probability_types(monkeypatch, probabilities):
     from sentinel.judgment import JevJudge

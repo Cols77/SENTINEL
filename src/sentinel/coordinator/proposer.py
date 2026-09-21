@@ -8,27 +8,31 @@ import time
 from typing import Any
 
 from sentinel.contracts import AgentModelResult, AgentRequest
+from sentinel.decision_prompt import SELECT_PLAN_INSTRUCTION
 
-from .legal_tools import Candidate, SELECT_PLAN
+from .legal_tools import ESCALATE_LABEL, Candidate, SELECT_PLAN
 from .policy import PolicyContext, one_call
 from .shadow import AuditSink
 
-_PROPOSER_TOOLS = ["inspection.propose_plan", "finish"]
 _ESCALATION_SUMMARY = "plan proposal needs operator review"
+_SELECT_PLAN_TOOLS = frozenset({"inspection.propose_plan", "finish"})
 
 
 def _write_attempt(
     sink: AuditSink, context: PolicyContext, *, advisor: str, started: float,
-    raw_choice: Any = None, gate_outcome: str, confidence: float | None = None,
+    gate_outcome: str, policy_label: str, raw_choice: Any = None,
+    confidence: float | None = None,
     probabilities: dict[str, float] | None = None, margin: float | None = None,
+    provider_summary: str | None = None,
 ) -> None:
     """Keep provider attempts separate from reviewable recommendations.
 
-    Record only a string choice and finite metrics, never provider payloads or
-    exception messages. Error categories are fixed boundary outcomes.
+    Record only a string choice, a bounded accepted escalation summary, and
+    finite metrics, never provider payloads or exception messages. Error
+    categories are fixed boundary outcomes.
     """
     label = raw_choice if isinstance(raw_choice, str) else None
-    sink.write({
+    record = {
         "record": "proposal_attempt",
         "run_id": context.state.run_id,
         "state_version": context.state.state_version,
@@ -36,7 +40,7 @@ def _write_attempt(
         "advisor": advisor,
         "raw_choice": label,
         "judge_label": label,
-        "policy_label": label if gate_outcome == "accepted" else "escalate",
+        "policy_label": policy_label,
         "gate_outcome": gate_outcome,
         "confidence": confidence,
         "probabilities": probabilities,
@@ -45,7 +49,64 @@ def _write_attempt(
         "error_category": gate_outcome if gate_outcome in {
             "provider_error", "invalid_answer",
         } else None,
-    })
+    }
+    if provider_summary is not None:
+        record["provider_summary"] = provider_summary[:512]
+    sink.write(record)
+
+
+def _as_valid_result(result: Any) -> dict[str, Any] | None:
+    try:
+        if isinstance(result, AgentModelResult):
+            document = result.to_dict()
+        elif isinstance(result, Mapping):
+            document = dict(result)
+        else:
+            return None
+        return AgentModelResult.from_dict(document).to_dict()
+    except Exception:  # noqa: BLE001 -- untrusted adapter output is fail-closed
+        return None
+
+
+def parse_provider_escalation(result: Any, *, agent_run_id: str) -> str | None:
+    """Return a bounded provider explanation for one valid escalation call."""
+    document = _as_valid_result(result)
+    if (
+        document is None
+        or document.get("agent_run_id") != agent_run_id
+        or document.get("status") != "TOOL_CALLS"
+    ):
+        return None
+    calls = document.get("tool_calls")
+    if not isinstance(calls, list) or len(calls) != 1:
+        return None
+    call = calls[0]
+    if not isinstance(call, Mapping) or call.get("tool_name") != "finish":
+        return None
+    arguments = call.get("arguments")
+    if not isinstance(arguments, Mapping) or arguments.get("status") != "NEEDS_REVIEW":
+        return None
+    summary = arguments.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        return None
+    return summary.strip()[:512]
+
+
+def is_canonical_escalation(result: Any, *, agent_run_id: str) -> bool:
+    """Recognize only the controller-owned escalation emitted by this boundary."""
+    return parse_provider_escalation(
+        result, agent_run_id=agent_run_id
+    ) == _ESCALATION_SUMMARY
+
+
+def _select_plan_tools(context: PolicyContext) -> list[str]:
+    tools: list[str] = []
+    for candidate in context.legal.candidates:
+        if candidate.tool_name not in _SELECT_PLAN_TOOLS:
+            raise ValueError(f"unsupported SELECT_PLAN tool: {candidate.tool_name}")
+        if candidate.tool_name not in tools:
+            tools.append(candidate.tool_name)
+    return tools
 
 
 @dataclass(frozen=True)
@@ -76,9 +137,13 @@ class JevProposer:
         candidates = {
             candidate.label: candidate
             for candidate in context.legal.candidates
-            if candidate.tool_name == "inspection.propose_plan"
+            if candidate.tool_name in _SELECT_PLAN_TOOLS
         }
         if not candidates:
+            _write_attempt(
+                self.sink, context, advisor="jev", started=time.perf_counter(),
+                gate_outcome="invalid_answer", policy_label=ESCALATE_LABEL,
+            )
             return self._escalate(request)
 
         criteria = {
@@ -88,22 +153,28 @@ class JevProposer:
         try:
             answer = self.judge.choice(
                 state=context.state.to_packet(),
-                instruction=(
-                    "At SELECT_PLAN, choose the one catalogue plan that best satisfies "
-                    "the operator request. Use only the supplied criteria."
-                ),
+                instruction=f"At {SELECT_PLAN}, {SELECT_PLAN_INSTRUCTION}",
                 criteria=criteria,
                 name="select_plan",
             )
         except Exception:  # noqa: BLE001 -- provider boundary is fail-closed
             _write_attempt(self.sink, context, advisor="jev", started=started,
-                           gate_outcome="provider_error")
+                           gate_outcome="provider_error",
+                           policy_label=ESCALATE_LABEL)
             return self._escalate(request)
         try:
             assessment = self._assess_answer(answer, tuple(candidates))
         except Exception:  # noqa: BLE001 -- untrusted answer is fail-closed
             assessment = {"gate_outcome": "invalid_answer"}
-        _write_attempt(self.sink, context, advisor="jev", started=started, **assessment)
+        policy_label = (
+            assessment.get("raw_choice")
+            if assessment["gate_outcome"] == "accepted"
+            else ESCALATE_LABEL
+        )
+        _write_attempt(
+            self.sink, context, advisor="jev", started=started,
+            policy_label=policy_label, **assessment,
+        )
         if assessment["gate_outcome"] != "accepted":
             return self._escalate(request)
 
@@ -112,6 +183,8 @@ class JevProposer:
         probabilities = assessment["probabilities"]
         margin = assessment["margin"]
         candidate = candidates[label]
+        if candidate.tool_name == "finish":
+            return self._escalate(request)
         reason = f"{context.legal.decision_point}: {candidate.description}"[:512]
         arguments = {**candidate.arguments, "reason": reason}
         result = one_call(request, candidate.tool_name, arguments)
@@ -222,7 +295,7 @@ class LlmProposer:
         if context.legal.decision_point != SELECT_PLAN:
             return self._escalate(request)
 
-        narrowed = {**request, "legal_tools": list(_PROPOSER_TOOLS)}
+        narrowed = {**request, "legal_tools": _select_plan_tools(context)}
         typed_request = AgentRequest.from_dict(narrowed)
         # The adapter's legacy `read_tools` parameter intentionally carries
         # PolicyContext so its prompt can render the current decision packet.
@@ -231,9 +304,12 @@ class LlmProposer:
             model_result = self.adapter.propose(typed_request, context)
         except Exception:  # noqa: BLE001 -- the adapter boundary is fail-closed
             _write_attempt(self.sink, context, advisor="llm", started=started,
-                           gate_outcome="provider_error")
+                           gate_outcome="provider_error",
+                           policy_label=ESCALATE_LABEL)
             return self._escalate(request)
         raw_choice = None
+        provider_summary = None
+        accepted = None
         gate_outcome = "invalid_answer"
         try:
             raw_document = (model_result.to_dict() if isinstance(model_result, AgentModelResult)
@@ -243,20 +319,39 @@ class LlmProposer:
                 if isinstance(raw_calls, list) and len(raw_calls) == 1:
                     raw_call = raw_calls[0]
                     if isinstance(raw_call, Mapping):
+                        if raw_call.get("tool_name") == "finish":
+                            raw_choice = ESCALATE_LABEL
                         raw_arguments = raw_call.get("arguments")
-                        if isinstance(raw_arguments, Mapping):
+                        if (
+                            raw_call.get("tool_name") == "inspection.propose_plan"
+                            and isinstance(raw_arguments, Mapping)
+                        ):
                             raw_choice = raw_arguments.get("catalogue_plan_id")
-            accepted = self._accepted_proposal(model_result, context)
-            if accepted is not None:
+            provider_summary = parse_provider_escalation(
+                model_result, agent_run_id=typed_request.agent_run_id
+            )
+            if provider_summary is not None:
                 gate_outcome = "accepted"
             else:
-                document = self._as_dict(model_result)
-                if document is not None and document.get("status") == "UNAVAILABLE":
-                    gate_outcome = "provider_error"
+                accepted = self._accepted_proposal(
+                    model_result, context, agent_run_id=typed_request.agent_run_id
+                )
+                if accepted is not None:
+                    gate_outcome = "accepted"
+                else:
+                    document = self._as_dict(model_result)
+                    if document is not None and document.get("status") == "UNAVAILABLE":
+                        gate_outcome = "provider_error"
         except Exception:  # noqa: BLE001 -- untrusted adapter output is fail-closed
             accepted = None
         _write_attempt(self.sink, context, advisor="llm", started=started,
-                       raw_choice=raw_choice, gate_outcome=gate_outcome)
+                       raw_choice=raw_choice, gate_outcome=gate_outcome,
+                       policy_label=(
+                           raw_choice if accepted is not None else ESCALATE_LABEL
+                       ),
+                       provider_summary=provider_summary)
+        if provider_summary is not None:
+            return self._escalate(request)
         if accepted is None:
             return self._escalate(request)
         plan_id, reason, candidate = accepted
@@ -287,10 +382,14 @@ class LlmProposer:
         return AgentModelResult.from_dict(result).to_dict()
 
     def _accepted_proposal(
-        self, model_result: Any, context: PolicyContext,
+        self, model_result: Any, context: PolicyContext, *, agent_run_id: str,
     ) -> tuple[str, str, Candidate] | None:
         document = self._as_dict(model_result)
-        if document is None or document.get("status") != "TOOL_CALLS":
+        if (
+            document is None
+            or document.get("agent_run_id") != agent_run_id
+            or document.get("status") != "TOOL_CALLS"
+        ):
             return None
 
         calls = document.get("tool_calls")
@@ -321,16 +420,7 @@ class LlmProposer:
 
     @staticmethod
     def _as_dict(result: Any) -> dict[str, Any] | None:
-        try:
-            if isinstance(result, AgentModelResult):
-                document = result.to_dict()
-            elif isinstance(result, Mapping):
-                document = dict(result)
-            else:
-                return None
-            return AgentModelResult.from_dict(document).to_dict()
-        except Exception:  # noqa: BLE001 -- untrusted adapter output is fail-closed
-            return None
+        return _as_valid_result(result)
 
     @staticmethod
     def _escalate(request: dict[str, Any]) -> dict[str, Any]:
@@ -346,4 +436,10 @@ class LlmProposer:
             forget(agent_run_id)
 
 
-__all__ = ["JevProposalGates", "JevProposer", "LlmProposer"]
+__all__ = [
+    "JevProposalGates",
+    "JevProposer",
+    "LlmProposer",
+    "is_canonical_escalation",
+    "parse_provider_escalation",
+]

@@ -3,7 +3,7 @@ from dataclasses import replace
 
 from sentinel.adapter.llm.config import load_config
 from sentinel.adapter.llm.openai_compatible import OpenAICompatibleAgentModel
-from sentinel.adapter.llm.parser import APPROVED_TOOL_NAMES, wire_tool_name
+from sentinel.adapter.llm.parser import wire_tool_name
 from sentinel.adapter.llm.prompt import build_chat_request
 from sentinel.contracts import AgentRequest
 from sentinel.coordinator.decision_state import DecisionState
@@ -51,9 +51,48 @@ REQUEST = AgentRequest.from_dict(
 )
 
 
+def _select_plan_context() -> PolicyContext:
+    state = DecisionState(
+        run_id=UUID,
+        state_version=7,
+        run_status="ACTIVE",
+        agent_phase="PLAN",
+        emergency_latched=False,
+        request_text="Survey the route.",
+        plan_id=None,
+        plan_mode=None,
+        plan_station_ids=(),
+        plan_approved=False,
+        detection=None,
+        open_task_station_ids=(),
+        task_id=None,
+        task_status=None,
+    )
+    legal = LegalSet(
+        SELECT_PLAN,
+        (
+            Candidate(
+                "inspection.propose_plan",
+                {"catalogue_plan_id": "PLAN_ROUTE_ONLY_2_ZONE"},
+                "PLAN_ROUTE_ONLY_2_ZONE",
+                "inspect both route stations",
+            ),
+            Candidate(
+                "finish",
+                {"status": "NEEDS_REVIEW", "summary": "no plan fits"},
+                "escalate",
+                "ask the operator to choose",
+            ),
+        ),
+    )
+    return PolicyContext(state, legal)
+
+
 def test_prompt_request_has_exact_static_tools_and_bounded_dynamic_feedback():
     payload = build_chat_request(REQUEST, prompt_revision="prompt-v1", tool_policy_revision="tools-v1")
-    assert [item["function"]["name"] for item in payload["tools"]] == [wire_tool_name(name) for name in APPROVED_TOOL_NAMES]
+    assert [item["function"]["name"] for item in payload["tools"]] == [
+        wire_tool_name(name) for name in REQUEST.legal_tools
+    ]
     exported = json.dumps(payload["tools"], sort_keys=True)
     for forbidden in ("dispatch_drone", "raw_sdk", "sqlite", "filesystem", "credential", "emergency_clear", "operator_decision"):
         assert forbidden not in exported.lower()
@@ -70,7 +109,10 @@ def test_prompt_request_has_exact_static_tools_and_bounded_dynamic_feedback():
 
 
 def test_system_prompt_states_decision_protocol():
-    payload = build_chat_request(REQUEST, prompt_revision="prompt-v2", tool_policy_revision="tools-v1")
+    payload = build_chat_request(
+        REQUEST, prompt_revision="prompt-v2", tool_policy_revision="tools-v1",
+        context=_select_plan_context(),
+    )
     prompt = payload["messages"][0]["content"].lower()
     # (1) decision-point executor framing: advance the workflow with one state-appropriate action.
     assert "decision-point executor" in prompt
@@ -85,16 +127,11 @@ def test_system_prompt_states_decision_protocol():
     assert "exactly one actionable domain tool" in prompt
     assert "identifier already present in the context" in prompt
     assert "instead of re-inspecting state" in prompt
-    # (4) anti-premature-finish: finish is terminal while a deliverable is unfulfilled.
+    # (4) finish/escalation semantics require complete constraint satisfaction.
     assert "terminal action" in prompt
-    assert "never call it while the request still describes an unfulfilled deliverable" in prompt
-    assert "a plan to propose, a task to create, a task awaiting ranking" in prompt
-    assert "prefer the domain tool that matches the request over state-inspection" in prompt
-    # (5) escalation semantics: NEEDS_REVIEW is correct only for genuinely contradictory constraints.
-    assert "genuinely contradictory constraints" in prompt
-    assert "cannot be resolved with the available tools" in prompt
+    assert "fully satisfy every explicit operator constraint" in prompt
+    assert "partial, approximate, or merely closest available coverage" in prompt
     assert "finish with status needs_review" in prompt
-    assert "not correct as a way to avoid a fulfillable" in prompt
     # (6) invariants: one tool call, legal tools only, facts only, no invented evidence/identifiers.
     assert "exactly one tool call per response" in prompt
     assert "only a legal tool" in prompt
@@ -103,15 +140,40 @@ def test_system_prompt_states_decision_protocol():
 
 
 def test_system_prompt_states_escalation_semantics():
-    payload = build_chat_request(REQUEST, prompt_revision="prompt-v2", tool_policy_revision="tools-v1")
+    payload = build_chat_request(
+        REQUEST, prompt_revision="prompt-v2", tool_policy_revision="tools-v1",
+        context=_select_plan_context(),
+    )
     prompt = payload["messages"][0]["content"].lower()
-    assert "genuinely contradictory constraints" in prompt
+    assert "fully satisfy every explicit operator constraint" in prompt
+    assert "partial, approximate, or merely closest available coverage" in prompt
     assert "finish with status needs_review" in prompt
-    assert "not correct as a way to avoid a fulfillable" in prompt
+
+
+def test_provider_tools_are_exactly_filtered_in_requested_order():
+    plan_and_finish = replace(
+        REQUEST, legal_tools=["inspection.propose_plan", "finish"]
+    )
+    finish_only = replace(REQUEST, legal_tools=["finish"])
+
+    first = build_chat_request(
+        plan_and_finish, prompt_revision="prompt-v1", tool_policy_revision="tools-v1"
+    )
+    second = build_chat_request(
+        finish_only, prompt_revision="prompt-v1", tool_policy_revision="tools-v1"
+    )
+
+    assert [item["function"]["name"] for item in first["tools"]] == [
+        wire_tool_name("inspection.propose_plan"), wire_tool_name("finish"),
+    ]
+    assert [item["function"]["name"] for item in second["tools"]] == [
+        wire_tool_name("finish"),
+    ]
 
 
 def test_reason_argument_is_advertised_for_task_create_and_rank():
-    payload = build_chat_request(REQUEST, prompt_revision="prompt-v1", tool_policy_revision="tools-v1")
+    request = replace(REQUEST, legal_tools=["task.create", "patroller.rank_for_task"])
+    payload = build_chat_request(request, prompt_revision="prompt-v1", tool_policy_revision="tools-v1")
     schemas = {item["function"]["name"]: item["function"]["parameters"] for item in payload["tools"]}
 
     for tool in ("task.create", "patroller.rank_for_task"):
@@ -165,40 +227,9 @@ def test_prompt_context_text_fields_are_bounded_to_default_limit():
 
 
 def test_adapter_forwards_optional_policy_context_to_prompt():
-    state = DecisionState(
-        run_id=UUID,
-        state_version=7,
-        run_status="ACTIVE",
-        agent_phase="PLAN",
-        emergency_latched=False,
-        request_text="Survey the route.",
-        plan_id=None,
-        plan_mode=None,
-        plan_station_ids=(),
-        plan_approved=False,
-        detection=None,
-        open_task_station_ids=(),
-        task_id=None,
-        task_status=None,
-    )
-    legal = LegalSet(
-        SELECT_PLAN,
-        (
-            Candidate(
-                "inspection.propose_plan",
-                {"catalogue_plan_id": "PLAN_ROUTE_ONLY_2_ZONE"},
-                "PLAN_ROUTE_ONLY_2_ZONE",
-                "inspect both route stations",
-            ),
-            Candidate(
-                "finish",
-                {"status": "NEEDS_REVIEW", "summary": "no plan fits"},
-                "escalate",
-                "ask the operator to choose",
-            ),
-        ),
-    )
-    policy_context = PolicyContext(state, legal)
+    policy_context = _select_plan_context()
+    state = policy_context.state
+    legal = policy_context.legal
 
     class Completions:
         def create(self, **_kwargs):
@@ -229,6 +260,12 @@ def test_adapter_forwards_optional_policy_context_to_prompt():
     assert adapter.last_request is not None
     rendered = json.loads(adapter.last_request["messages"][-1]["content"])
     assert rendered["decision_point"] == SELECT_PLAN
+    assert rendered["decision_prompt_revision"] == "select_plan.complete_constraints.v2"
+    assert (
+        "fully satisfy every explicit operator constraint"
+        in rendered["decision_instruction"]
+    )
+    assert "closest" in rendered["decision_instruction"]
     assert rendered["decision_packet"] == state.to_packet()
     assert [item["label"] for item in rendered["options"]] == list(legal.labels)
 
