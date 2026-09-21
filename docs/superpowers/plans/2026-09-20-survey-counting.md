@@ -3049,3 +3049,35 @@ Implemented on `docs/coherence-alignment`:
   altitude minus the tape-measured surface height.
 - First flight: tape-measure two object positions and compare; a consistent long or short bias is
   hover pitch, and is corrected in `TELLO_MEASURED.pitch_down_deg`, nowhere else.
+
+**V13. Every frame carries the freshest position available (operator requirement, 2026-09-21).**
+Two different things consume position, and they are refreshed differently.
+
+*The counting arithmetic* (`merge`, `geometry.position_of`) places each object at
+`frame position + ground point`. Since rev 3 an error in the frame position moves the object by
+the same amount, 1:1; it is no longer amplified as it was under triangulation. Task 11's
+`CubeFlight` therefore:
+
+- flies the sweep with the cube runner in `--pose passive` at least (never `off` when tags are
+  up), so a pose burst runs at every stop;
+- stamps each `FlightFrame` with the **measured** `x_cm`, `y_cm` **and `heading_deg`** of that
+  stop's fix and `position_kind="MEASURED"` when the fix is reliable and plausible, and with the
+  dead-reckoned values and `"COMMANDED"` otherwise. Task 11's body names the `position_kind` but
+  not the values; both are required. Heading matters as much as position: 5 degrees of unmeasured
+  yaw is 26 cm of lateral error at 3 m;
+- takes `z_cm` from the height sensor reading the runner already makes.
+
+This uses pose as evidence about where a photograph was taken. It sends nothing to the drone and
+needs no requirement change (coherence spec 10.2, first row).
+
+The run summary reports how many frames were `MEASURED` and how many `COMMANDED`, so a count
+built on dead reckoning is visibly that. Without tags (the garden, if no stands are set up) every frame
+is `COMMANDED`; that is acceptable for a sparse scene and not for a row of laptops 60 cm apart.
+
+*Navigation* (reaching the next stop, and above all the follow-up close look) uses the runner's
+tracked position, which in `passive` mode is dead-reckoned and **never refreshed**, so error
+accumulates leg after leg. Only `--pose reanchor` refreshes it, and that needs the SR-063
+amendment C1 on the operator's recorded consent. Until then the sweep tolerates drift by keeping
+the rail short (at most 8 stops) and re-deriving nothing from the tracked position except the
+envelope check.
+
