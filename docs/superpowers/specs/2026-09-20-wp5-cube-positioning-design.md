@@ -48,9 +48,10 @@ changes; WP1 coordinator wiring; the counting/perception itself.
 | E8 | A flat line of tags, joint-solved, is self-compensating: near the line one head-on tag suffices; far from it several tags give a metre-scale baseline. Pitch between tags must stay ≤ ~0.6 m where coverage is wanted. | simulated |
 | E9 | Detector change spiked against the repo: suite stays 220 green; truth recovered to 1.7 cm on a rendered two-tag frame; wrong map falls back to single-tag. | verified |
 | E10 | **Stands only in front of the table blocks, alley mouths open (assumed 1.2 m), two tags stacked per stand at 0.90 + 1.45 m:** altitude 1.0–1.8 m all usable; in front of table blocks 1–8 cm from 0.8 m standoff; in front of an alley mouth **blind closer than ~1.6–2.0 m**, 1–6 cm beyond; outer line ends at 3.0 m standoff 9–13 cm. With a single tag height, altitudes above ~1.4 m lose the tags at close range — the narrow band in rev 2 was an artefact of one row. | simulated 2026-09-20 |
+| E12 | **Stand test, 2026-09-21, first real horizontal baseline** (two tags 688 mm apart, four viewpoints 1.1-2.0 m): position error 2.6-5.6 cm, all PASS at 15 cm. Off-axis the single-tag solve wanders 10.4-12.5 cm while the joint solve holds 0.7-2.6 cm. Measured error is 1.5-2.2x the simulation, so the 2.5x factor in E7 is conservative. Tag size confirmed; heading reads +2 to +3.4 deg high throughout, unexplained. Details in `docs/wp5-rehearsal-manifest.md`. | measured |
 | E11 | Tags flat on the floor were simulated and rejected: above 1 m altitude most of the cube is blind (floor only visible ≥ 1.36 × altitude ahead, and grazing views are undecodable). | simulated |
 
-E8/E10 are predictions with assumed room dimensions. **Stage 1 (§7) measures them; the layout
+E12 measured E5/E8's core claim for the first time and supports it; E8/E10 remain predictions with assumed room dimensions. **Stage 1 (§7) measures them; the layout
 tool (§3.2) re-runs them with the real dimensions.**
 
 ## 3. Architecture
