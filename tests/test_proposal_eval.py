@@ -233,6 +233,54 @@ def test_aggregate_uses_applicable_case_and_attempt_denominators():
     assert totals["escalation_successes"] == 1
 
 
+def test_false_plan_on_escalation_case_enters_plan_denominators(tmp_path):
+    supported = next(c for c in load_cases() if c.case_id == "route_complete")
+    record = run_case(supported, "llm", tmp_path)
+    escalation_case = Case(
+        case_id=supported.case_id,
+        request=supported.request,
+        expected_escalation=True,
+        expected_terminal="COMPLETED",
+        expected_effects=(),
+    )
+    record["case"] = escalation_case
+    record.pop("metrics")
+
+    metrics = score_outcome(escalation_case, record)
+    totals = aggregate([record])
+
+    assert metrics["proposal_quality_success"] is None
+    assert metrics["false_proposals"] == 1
+    assert metrics["accepted_proposals"] == 1
+    assert metrics["proposal_denominator"] == 1
+    assert totals["proposal_case_denominator"] == 1
+    assert totals["accepted_proposal_denominator"] == 1
+    assert totals["proposal_call_denominator"] == 1
+    assert totals["proposal_coverage"] == 1.0
+
+
+def test_supported_explicit_escalation_is_not_a_plan_denominator():
+    case = next(c for c in load_cases() if c.case_id == "provider_failure")
+    record = _terminal_record(
+        case,
+        _proposal_attempt("accepted", "escalate", "escalate"),
+        _route("proposer_escalation"),
+    )
+
+    metrics = score_outcome(case, record)
+    totals = aggregate([record])
+
+    assert metrics["proposal_quality_success"] is False
+    assert metrics["explicit_escalations"] == 1
+    assert metrics["accepted_proposals"] == 0
+    assert metrics["proposal_denominator"] == 0
+    assert totals["proposal_case_denominator"] == 1
+    assert totals["accepted_proposal_denominator"] == 0
+    assert totals["proposal_call_denominator"] == 0
+    assert totals["proposal_accuracy"] is None
+    assert totals["proposal_coverage"] is None
+
+
 def test_audit_interruption_reopens_durable_state(tmp_path):
     case = next(c for c in load_cases() if c.setup == "audit_interruption")
     record = run_case(case, "jev", tmp_path)

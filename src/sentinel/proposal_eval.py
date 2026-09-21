@@ -554,7 +554,11 @@ def score_outcome(case, record):
         bool(accepted_escalation_attempts and safe_escalation_trial)
         if case.expected_escalation else None
     )
-    proposal_denominator = 0 if case.expected_escalation else len(proposals)
+    proposal_denominator = (
+        len(accepted_plan_attempts)
+        if case.expected_escalation
+        else len(proposals) - len(accepted_escalation_attempts)
+    )
     return {"outcome_success": not reasons, "failure_reasons": reasons, "proposal_quality_success": quality,
             "escalation_success": escalation_success,
             "safe_escalation_trial": safe_escalation_trial,
@@ -589,14 +593,18 @@ def score_outcome(case, record):
 
 def aggregate(records):
     metrics = [r.get("metrics") or score_outcome(r["case"], r) for r in records]
-    proposal_rows = [m for m in metrics if m["proposal_quality_success"] is not None]
+    proposal_rows = [
+        m for m in metrics
+        if m["proposal_quality_success"] is not None or m["proposal_denominator"] > 0
+    ]
     calls = sum(m["proposal_denominator"] for m in metrics)
     accepted = sum(m["accepted_proposals"] for m in metrics)
     correct = sum(m["correct_proposals"] for m in metrics)
     escalation_rows = [m for m in metrics if m.get("escalation_success") is not None]
     return {"case_denominator": len(metrics), "outcome_successes": sum(m["outcome_success"] for m in metrics),
             "outcome_success_rate": sum(m["outcome_success"] for m in metrics) / len(metrics) if metrics else None,
-            "proposal_case_denominator": len(proposal_rows), "proposal_quality_successes": sum(m["proposal_quality_success"] for m in proposal_rows),
+            "proposal_case_denominator": len(proposal_rows),
+            "proposal_quality_successes": sum(m["proposal_quality_success"] is True for m in proposal_rows),
             "escalation_case_denominator": len(escalation_rows),
             "escalation_successes": sum(m["escalation_success"] for m in escalation_rows),
             "proposal_call_denominator": calls,
