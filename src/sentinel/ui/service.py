@@ -29,6 +29,8 @@ class MissionControlService:
         self.projection=ProjectionService(self)
         self.artifacts=getattr(adapters.flight,'artifacts',{})
         self.evidence_status={}
+        from .chat import ChatService
+        self.chat=ChatService(self)
         self.closed=False
 
     def require_run(self, run_id):
@@ -80,7 +82,7 @@ class MissionControlService:
 
     def submit_chat(self, run_id, command):
         self.require_run(run_id)
-        return dict(status='UNAVAILABLE',message='Chat adapter not configured')
+        return self.chat.submit(run_id,command)
 
     def request_land(self, run_id, command):
         self.require_run(run_id)

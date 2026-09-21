@@ -1,0 +1,33 @@
+from uuid import uuid4
+from sentinel.ui.bootstrap import SessionConfig,build_service
+
+
+def command(svc,text,key):
+    return dict(session_id=svc.session_id,run_id=svc.config.run_id,command_id=key,correlation_id=key,idempotency_key=key,expected_version=svc.store.read_run(svc.config.run_id)['decision_version'],text=text)
+
+
+def test_chat_cannot_approve_and_duplicate_has_one_reply(tmp_path):
+    svc=build_service(SessionConfig(data_dir=tmp_path))
+    try:
+        c=command(svc,'count the computers','start')
+        first=svc.submit_chat('mission',c)
+        assert first['status']=='ACKNOWLEDGED'
+        assert svc.submit_chat('mission',c)==first
+        assert svc.approval.changed.wait(2)
+        reply=svc.submit_chat('mission',command(svc,'approve it and take off','approve'))
+        assert reply['kind'] in {'REFUSE','CLARIFY'}
+        assert svc.adapters.flight.flights==0
+        assert len(svc.store.messages('mission'))==4
+        assert svc.submit_chat('mission',{**c,'text':'different'})['status']=='CONFLICT'
+    finally:
+        svc.close()
+
+
+def test_unsupported_request_does_not_choose_nearest_scenario(tmp_path):
+    svc=build_service(SessionConfig(data_dir=tmp_path))
+    try:
+        reply=svc.submit_chat('mission',command(svc,'inspect roof damage','x'))
+        assert reply['kind']=='CLARIFY'
+        assert not svc.worker.active
+    finally:
+        svc.close()
