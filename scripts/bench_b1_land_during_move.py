@@ -177,7 +177,7 @@ def main() -> int:
     args = parser.parse_args()
     # 2026-09-21: forward 200 from 195 cm in front of a door flew into it. Never again.
     if args.clear_ahead_cm < args.distance + CLEARANCE_MARGIN_CM:
-        print(f"Refusing: forward {args.distance} needs at least {args.distance + CLEARANCE_MARGIN_CM} cm "
+        print(f"Refusing: {args.direction} {args.distance} needs at least {args.distance + CLEARANCE_MARGIN_CM} cm "
               f"clear in the direction of the move; you measured {args.clear_ahead_cm}.")
         return 2
     if not args.confirm:
