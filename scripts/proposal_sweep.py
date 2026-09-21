@@ -529,11 +529,16 @@ def main(argv=None):
             metric["decision_outcomes"] = {
                 "accepted_plan": metric.get("accepted_plan_attempts", 0),
                 "explicit_escalation": metric.get("explicit_escalations", 0),
+                "raw_escalation_choice": metric.get("raw_escalation_choices", 0),
+                "raw_plan_choice": metric.get("raw_plan_choices", 0),
                 "confidence_gate": metric.get("confidence_gate_escalations", 0),
                 "deterministic_refusal": metric.get("deterministic_refusals", 0),
                 "provider_failure": metric.get("provider_failures", 0),
                 "architecture_f_fallback": metric.get("architecture_f_fallbacks", 0),
                 "plan_attempt_denominator": metric.get("plan_attempt_denominator", 0),
+                "proposal_coverage_denominator": metric.get(
+                    "proposal_coverage_denominator", 0
+                ),
                 "case_denominator": metric.get("case_denominator", 0),
             }
         gate_identity = arm_identity_statuses.get(arms[0], "unverified") if len(arms) == 1 else "unverified"

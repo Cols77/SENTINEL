@@ -72,10 +72,19 @@ from this baseline.
 ## Reviewed live gate
 
 Both model arms bind the shared SELECT_PLAN semantic revision
-`select_plan.complete_constraints.v2`. The LLM arm additionally requires
+`select_plan.complete_constraints.v3`. It treats catalogue entries as future
+work, so empty pre-execution plan, task, detection, and result fields are not
+reasons to escalate. Jev's candidate criteria describe plan capabilities as
+future actions and make escalation conditional on no complete match,
+contradictory constraints, or insufficient request detail. Confidence and
+margin gates still apply uniformly to plan and escalation choices. The LLM arm additionally requires
 `SENTINEL_LLM_PROMPT_REVISION=prompt-v4-complete-constraints` and
 `SENTINEL_LLM_TOOL_POLICY_REVISION=legal-tools-v2`. Jev's policy thresholds are
 recorded separately as `act_at=0.60` and `min_margin=0.15`.
+Reports keep accepted explicit escalations separate from raw escalation and
+plan choices. Proposal coverage uses every provider attempt on supported cases,
+so provider failures, malformed answers, and model escalation cannot disappear
+from its denominator.
 The Jev manifest retains the historical `configurations.jev.prompt_revision`
 field for report-reader compatibility; it has the same value as the explicit
 `decision_prompt_revision`. The runner rejects any runtime drift from the

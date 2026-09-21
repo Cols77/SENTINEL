@@ -189,14 +189,14 @@ def test_explicit_escalation_requires_complete_persisted_route_evidence(mutation
 @pytest.mark.parametrize(
     ("audit", "expected"),
     [
-        ((_proposal_attempt("low_confidence", "escalate"), _route("proposer_escalation")), {"explicit_escalations": 1, "confidence_gate_escalations": 1}),
-        ((_proposal_attempt("low_margin", "escalate"), _route("proposer_escalation")), {"explicit_escalations": 1, "confidence_gate_escalations": 1}),
-        ((_proposal_attempt("invalid_answer", "escalate"), _route("proposer_escalation")), {"explicit_escalations": 1, "deterministic_refusals": 1}),
+        ((_proposal_attempt("low_confidence", "escalate"), _route("proposer_escalation")), {"confidence_gate_escalations": 1}),
+        ((_proposal_attempt("low_margin", "escalate"), _route("proposer_escalation")), {"confidence_gate_escalations": 1}),
+        ((_proposal_attempt("invalid_answer", "escalate"), _route("proposer_escalation")), {"deterministic_refusals": 1}),
         ((_proposal_attempt("provider_error"), _route("proposer_escalation")), {"provider_failures": 1}),
         ((_proposal_attempt("accepted", "PLAN_ROUTE_ONLY_2_ZONE", "PLAN_ROUTE_ONLY_2_ZONE"), _route("fallback_F")), {"architecture_f_fallbacks": 1}),
     ],
 )
-def test_raw_choice_and_gate_counters_are_orthogonal(audit, expected):
+def test_accepted_escalation_and_failure_counters_are_disjoint(audit, expected):
     case = next(c for c in load_cases() if c.case_id == "ambiguous")
     metrics = score_outcome(case, _terminal_record(case, *audit))
     counters = {
@@ -261,6 +261,7 @@ def test_aggregate_uses_applicable_case_and_attempt_denominators():
     assert totals["escalation_case_denominator"] == 1
     assert totals["proposal_call_denominator"] == 2
     assert totals["plan_attempt_denominator"] == 0
+    assert totals["proposal_coverage_denominator"] == 1
     assert totals["accepted_proposal_denominator"] == 0
     assert totals["explicit_escalations"] == 1
     assert totals["provider_failures"] == 1
@@ -293,7 +294,8 @@ def test_false_plan_on_escalation_case_enters_plan_denominators(tmp_path):
     assert totals["accepted_proposal_denominator"] == 1
     assert totals["proposal_call_denominator"] == 1
     assert totals["plan_attempt_denominator"] == 1
-    assert totals["proposal_coverage"] == 1.0
+    assert totals["proposal_coverage_denominator"] == 0
+    assert totals["proposal_coverage"] is None
 
 
 def test_supported_explicit_escalation_is_not_a_plan_denominator():
@@ -317,8 +319,9 @@ def test_supported_explicit_escalation_is_not_a_plan_denominator():
     assert totals["accepted_proposal_denominator"] == 0
     assert totals["proposal_call_denominator"] == 1
     assert totals["plan_attempt_denominator"] == 0
+    assert totals["proposal_coverage_denominator"] == 1
     assert totals["proposal_accuracy"] is None
-    assert totals["proposal_coverage"] is None
+    assert totals["proposal_coverage"] == 0.0
 
 
 def test_low_confidence_raw_escalation_is_counted_as_escalation_not_plan_attempt():
@@ -332,12 +335,18 @@ def test_low_confidence_raw_escalation_is_counted_as_escalation_not_plan_attempt
     metrics = score_outcome(case, record)
     totals = aggregate([record])
 
-    assert metrics["explicit_escalations"] == 1
+    assert metrics["explicit_escalations"] == 0
+    assert metrics["raw_escalation_choices"] == 1
+    assert metrics["raw_plan_choices"] == 0
     assert metrics["confidence_gate_escalations"] == 1
     assert metrics["plan_attempt_denominator"] == 0
-    assert totals["explicit_escalations"] == 1
+    assert metrics["proposal_coverage_denominator"] == 1
+    assert totals["explicit_escalations"] == 0
+    assert totals["raw_escalation_choices"] == 1
+    assert totals["raw_plan_choices"] == 0
     assert totals["plan_attempt_denominator"] == 0
-    assert totals["proposal_coverage"] is None
+    assert totals["proposal_coverage_denominator"] == 1
+    assert totals["proposal_coverage"] == 0.0
 
 
 def test_supported_plan_without_persisted_plan_or_gateway_intent_gets_no_credit():
@@ -396,11 +405,13 @@ def test_mixed_attempts_keep_event_counts_and_denominators_coherent(tmp_path):
     assert metrics["provider_failures"] == 0
     assert metrics["confidence_gate_escalations"] == 0
     assert metrics["plan_attempt_denominator"] == 1
+    assert metrics["proposal_coverage_denominator"] == 2
     assert totals["proposal_case_denominator"] == 1
     assert totals["proposal_call_denominator"] == 2
     assert totals["plan_attempt_denominator"] == 1
+    assert totals["proposal_coverage_denominator"] == 2
     assert totals["proposal_accuracy"] == 1.0
-    assert totals["proposal_coverage"] == 1.0
+    assert totals["proposal_coverage"] == 0.5
 
 
 def test_audit_interruption_reopens_durable_state(tmp_path):

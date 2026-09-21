@@ -609,6 +609,10 @@ def score_outcome(case, record):
         if case.expected_escalation else None
     )
     plan_attempt_denominator = len(raw_plan_attempts)
+    proposal_coverage_denominator = len(proposals) if not case.expected_escalation else 0
+    proposal_coverage_numerator = (
+        len(accepted_plan_attempts) if not case.expected_escalation else 0
+    )
     return {"outcome_success": not reasons, "failure_reasons": reasons, "proposal_quality_success": quality,
             "escalation_success": escalation_success,
             "safe_escalation_trial": safe_escalation_trial,
@@ -618,6 +622,8 @@ def score_outcome(case, record):
             "unsupported_false_proposals": false_proposals if case.expected_escalation else 0,
             "proposal_calls": len(proposals), "proposal_denominator": len(proposals),
             "plan_attempt_denominator": plan_attempt_denominator,
+            "proposal_coverage_denominator": proposal_coverage_denominator,
+            "proposal_coverage_numerator": proposal_coverage_numerator,
             "proposal_latency_ms": sum(a.get("latency_ms", 0) for a in proposals),
             "retries": sum(r.get("previous_result", {}).get("status") == "REJECTED" for r in record.get("requests", []) if r.get("previous_result")),
             "reproposals": max(0, len(proposals) - 1),
@@ -625,7 +631,9 @@ def score_outcome(case, record):
             "accepted_plan_attempts": len(accepted_plan_attempts),
             "accepted_escalation_attempts": len(accepted_escalation_attempts),
             "correct_proposals": correct_proposals,
-            "explicit_escalations": len(raw_escalation_attempts),
+            "explicit_escalations": len(accepted_escalation_attempts),
+            "raw_escalation_choices": len(raw_escalation_attempts),
+            "raw_plan_choices": len(raw_plan_attempts),
             "confidence_gate_escalations": confidence_gate_escalations,
             "deterministic_refusals": deterministic_refusals,
             "provider_failures": provider_failures,
@@ -650,7 +658,14 @@ def aggregate(records):
         m for m in metrics
         if m["proposal_quality_success"] is not None or plan_attempts(m) > 0
     ]
-    calls = sum(plan_attempts(m) for m in metrics)
+    plan_choices = sum(plan_attempts(m) for m in metrics)
+    coverage_denominator = sum(
+        m.get("proposal_coverage_denominator", plan_attempts(m)) for m in metrics
+    )
+    coverage_numerator = sum(
+        m.get("proposal_coverage_numerator", m["accepted_proposals"])
+        for m in metrics
+    )
     accepted = sum(m["accepted_proposals"] for m in metrics)
     correct = sum(m["correct_proposals"] for m in metrics)
     escalation_rows = [m for m in metrics if m.get("escalation_success") is not None]
@@ -662,7 +677,8 @@ def aggregate(records):
             "escalation_case_denominator": len(escalation_rows),
             "escalation_successes": sum(m["escalation_success"] for m in escalation_rows),
             "proposal_call_denominator": sum(m["proposal_calls"] for m in metrics),
-            "plan_attempt_denominator": calls,
+            "plan_attempt_denominator": plan_choices,
+            "proposal_coverage_denominator": coverage_denominator,
             "false_proposals": sum(m["false_proposals"] for m in metrics),
             "unsupported_false_proposals": sum(m.get("unsupported_false_proposals", 0) for m in metrics),
             "accepted_proposal_denominator": sum(m["accepted_proposals"] for m in metrics),
@@ -670,8 +686,13 @@ def aggregate(records):
             "accepted_escalation_attempts": sum(m.get("accepted_escalation_attempts", 0) for m in metrics),
             "correct_proposals": sum(m["correct_proposals"] for m in metrics),
             "proposal_accuracy": correct / accepted if accepted else None,
-            "proposal_coverage": accepted / calls if calls else None,
+            "proposal_coverage": (
+                coverage_numerator / coverage_denominator
+                if coverage_denominator else None
+            ),
             "explicit_escalations": sum(m["explicit_escalations"] for m in metrics),
+            "raw_escalation_choices": sum(m.get("raw_escalation_choices", 0) for m in metrics),
+            "raw_plan_choices": sum(m.get("raw_plan_choices", 0) for m in metrics),
             "confidence_gate_escalations": sum(m.get("confidence_gate_escalations", 0) for m in metrics),
             "deterministic_refusals": sum(m.get("deterministic_refusals", 0) for m in metrics),
             "provider_failures": sum(m.get("provider_failures", 0) for m in metrics),

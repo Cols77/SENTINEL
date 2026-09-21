@@ -281,7 +281,7 @@ def test_explicit_malformed_confidence_does_not_fall_back(confidence):
     }
 
 
-def test_explicit_escalation_is_honoured_without_plan_confidence_gates():
+def test_explicit_escalation_remains_subject_to_confidence_gates():
     sink = MemoryAuditSink()
     answer = {
         "value": ESCALATE_LABEL,
@@ -295,7 +295,7 @@ def test_explicit_escalation_is_honoured_without_plan_confidence_gates():
     attempt, = sink.records
     assert attempt["raw_choice"] == ESCALATE_LABEL
     assert attempt["policy_label"] == ESCALATE_LABEL
-    assert attempt["gate_outcome"] == "accepted"
+    assert attempt["gate_outcome"] == "low_confidence"
 
 
 @pytest.mark.parametrize("confidence, probabilities, outcome", [

@@ -308,9 +308,7 @@ class JevProposer:
         runners_up = [value for key, value in probabilities.items() if key != label]
         margin = probabilities[label] - (max(runners_up) if runners_up else 0.0)
         assessment["margin"] = margin
-        if label == ESCALATE_LABEL:
-            assessment["gate_outcome"] = "accepted"
-        elif confidence < self.gates.act_at:
+        if confidence < self.gates.act_at:
             assessment["gate_outcome"] = "low_confidence"
         elif margin < self.gates.min_margin:
             assessment["gate_outcome"] = "low_margin"
