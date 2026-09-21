@@ -4,6 +4,7 @@ fake object built in this file. Running the adapters against a live
 provider (Task 12 step 5, ``scripts/provider_spike.py``) is a separate,
 operator-gated action and is not exercised here.
 """
+import base64
 import json
 
 import pytest
@@ -49,10 +50,12 @@ def frame(tmp_path):
 
 
 def test_a_well_formed_moondream_response_normalises_correctly(frame):
+    """Real Moondream shape (C1): fractional x_min/y_min/x_max/y_max
+    corners, no label of its own -- the requested class becomes the
+    detection's label."""
     response = FakeResponse(json_data={
-        "model": "moondream-3",
-        "objects": [{"label": "laptop", "x": 0.25, "y": 0.5, "width": 0.1, "height": 0.2,
-                    "confidence": "high", "description": "silver laptop"}],
+        "request_id": "r1",
+        "objects": [{"x_min": 0.25, "y_min": 0.5, "x_max": 0.35, "y_max": 0.7}],
     })
     detector = MoondreamDetector(api_key="k", model="moondream-3", session=FakeSession(response))
 
@@ -60,10 +63,10 @@ def test_a_well_formed_moondream_response_normalises_correctly(frame):
 
     assert batch.status == "OK"
     assert batch.detections[0]["class"] == "computer"
-    assert batch.detections[0]["matched_prompt"] == "laptop"
+    assert batch.detections[0]["matched_prompt"] == "computer"
+    # 0.25*960=240, (0.35-0.25)*960=96, 0.5*720=360, (0.7-0.5)*720=144
     assert batch.detections[0]["bbox"] == {"x": 240, "y": 360, "width": 96, "height": 144}
     assert batch.detections[0]["bbox_coordinate_space"] == "PIXELS_TOP_LEFT"
-    assert batch.raw == response._json_data
 
 
 def test_gemini_box_2d_scaled_0_to_1000_converts_to_top_left_pixels(frame):
@@ -138,10 +141,12 @@ def test_an_oversize_response_is_refused_not_parsed(frame):
     assert batch.status == "PROVIDER_ERROR"
 
 
-def test_an_item_without_coordinates_yields_bbox_none(frame):
+def test_a_moondream_item_missing_a_corner_yields_bbox_none(frame):
+    """A real Moondream item always carries all four corners (C1); this
+    keeps the defensive "never guess a box" behaviour under test for a
+    malformed response."""
     response = FakeResponse(json_data={
-        "model": "moondream-3",
-        "objects": [{"label": "laptop", "description": "a laptop somewhere, exact spot unclear"}],
+        "objects": [{"x_min": 0.1, "y_min": 0.1, "x_max": 0.2}],
     })
     detector = MoondreamDetector(api_key="k", model="moondream-3", session=FakeSession(response))
 
@@ -186,16 +191,114 @@ def test_a_non_json_content_type_is_a_schema_failure_not_an_empty_scene(frame):
     assert batch.status == "PROVIDER_ERROR"
 
 
-def test_the_replay_free_use_of_the_shared_normaliser_still_maps_unknown_labels_away(frame):
+def test_gemini_also_drops_an_unmapped_label_but_traces_it(frame):
     """Whatever the provider calls it, an unmapped label is dropped, not
     guessed (pipeline spec 4.1) -- the same rule Task 3's ``normalise``
-    already enforces, exercised here through the adapter boundary."""
+    already enforces, exercised here through the adapter boundary. Unlike
+    Moondream (C1: it never returns its own label -- see
+    ``moondream.py``'s module docstring), Gemini's JSON items *do* carry an
+    arbitrary model-supplied label, so this rule stays reachable here."""
+    body = {"objects": [{"label": "sandwich", "box_2d": [100, 100, 200, 200]}]}
     response = FakeResponse(json_data={
-        "model": "moondream-3",
-        "objects": [{"label": "sandwich", "x": 0.1, "y": 0.1, "width": 0.1, "height": 0.1}],
+        "modelVersion": "gemini-2.0-flash",
+        "candidates": [{"content": {"parts": [{"text": json.dumps(body)}]}}],
     })
-    detector = MoondreamDetector(api_key="k", model="moondream-3", session=FakeSession(response))
+    detector = GeminiDetector(api_key="k", model="gemini-2.0-flash", session=FakeSession(response))
 
     batch = detector.detect(str(frame), ("computer",))
 
     assert batch.detections == ()
+    assert batch.dropped == ("sandwich",)
+
+
+def test_moondream_payload_image_field_base64_decodes_to_the_exact_file_bytes(frame):
+    """The mandatory C2 regression test: the original defect sent a byte
+    count instead of the image."""
+    response = FakeResponse(json_data={"objects": []})
+    session = FakeSession(response)
+    MoondreamDetector(api_key="k", model="moondream-3", session=session).detect(
+        str(frame), ("computer",))
+
+    sent = session.calls[0]["json"]["image_url"]
+    prefix, _, b64 = sent.partition(",")
+    assert prefix.startswith("data:image/") and prefix.endswith(";base64")
+    assert base64.b64decode(b64) == frame.read_bytes()
+
+
+def test_gemini_payload_inline_data_base64_decodes_to_the_exact_file_bytes(frame):
+    """The mandatory C2 regression test, Gemini side: the original defect
+    sent ``data_size_bytes`` instead of the image."""
+    body = {"objects": []}
+    response = FakeResponse(json_data={
+        "modelVersion": "gemini-2.0-flash",
+        "candidates": [{"content": {"parts": [{"text": json.dumps(body)}]}}],
+    })
+    session = FakeSession(response)
+    GeminiDetector(api_key="k", model="gemini-2.0-flash", session=session).detect(
+        str(frame), ("computer",))
+
+    parts = session.calls[0]["json"]["contents"][0]["parts"]
+    image_part = next(p for p in parts if "inline_data" in p)
+    assert base64.b64decode(image_part["inline_data"]["data"]) == frame.read_bytes()
+
+
+def test_moondream_asks_once_per_class_and_a_second_class_failure_fails_the_whole_batch(frame):
+    ok = FakeResponse(json_data={"objects": [{"x_min": 0.1, "y_min": 0.1, "x_max": 0.2,
+                                              "y_max": 0.2}]})
+    rate_limited = FakeResponse(status_code=429, json_data={"error": "rate limited"})
+
+    class _SequencedSession:
+        def __init__(self, responses):
+            self._responses = list(responses)
+            self.calls = []
+
+        def post(self, url, *, headers, json, timeout):
+            self.calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+            return self._responses.pop(0)
+
+    session = _SequencedSession([ok, rate_limited])
+    detector = MoondreamDetector(api_key="k", model="moondream-3", session=session)
+
+    batch = detector.detect(str(frame), ("computer", "phone"))
+
+    assert batch.status == "PROVIDER_ERROR"
+    assert len(session.calls) == 2
+    assert session.calls[0]["json"]["object"] == "computer"
+    assert session.calls[1]["json"]["object"] == "phone"
+
+
+def test_moondream_sightings_are_not_banded_low_so_they_can_confirm_an_object(frame):
+    """Moondream's detect has no confidence field at all. Banded "low" -- the
+    default for a missing confidence -- none of its sightings could ever
+    confirm an object, and a Moondream-only run would count nothing. The
+    honest reading is "no confidence claimed" (score_kind NONE), with
+    confirmation left to agreement from three stops."""
+    from sentinel.survey.merge import merge_sightings
+
+    response = FakeResponse(json_data={
+        "request_id": "r1",
+        "objects": [{"x_min": 0.48, "y_min": 0.60, "x_max": 0.52, "y_max": 0.66}],
+    })
+    detector = MoondreamDetector(api_key="k", model="moondream-3", session=FakeSession(response))
+    batch = detector.detect(str(frame), ("computer",))
+
+    assert batch.bands == ("medium",)
+    assert batch.detections[0]["score_kind"] == "NONE"
+    assert batch.detections[0]["raw_score"] is None
+
+    sightings = [{"sighting_id": f"s{i}", "class": "computer", "stop_index": i,
+                  "band": batch.bands[0], "bbox": batch.detections[0]["bbox"],
+                  "frame_x_cm": 0.0, "frame_y_cm": 0.0, "heading_deg": 0.0, "look_deg": 0.0}
+                 for i in range(3)]
+    assert merge_sightings(sightings)[0]["band"] == "CONFIRMED"
+
+
+def test_a_vlm_that_omits_its_confidence_is_still_banded_low():
+    """Gemini is asked for a confidence word. Leaving it out is not the same
+    as having no such field, and stays "low"."""
+    from sentinel.survey.detector import normalise
+
+    result = normalise([{"label": "laptop", "x": 0.1, "y": 0.1, "width": 0.1, "height": 0.1}])
+    assert result.pairs[0][1] == "low"
+    with pytest.raises(ValueError):
+        normalise([], unscored_band="certain")

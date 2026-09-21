@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS frames (
     captured_at TEXT NOT NULL,
     command_completed_at TEXT,
     delta_z_cm REAL NOT NULL,
+    tolerance TEXT,
     analysis_status TEXT NOT NULL DEFAULT 'PENDING',
     person_regions_blurred INTEGER NOT NULL DEFAULT 0
 );

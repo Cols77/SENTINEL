@@ -6,12 +6,15 @@ Both ``MoondreamDetector`` (``moondream.py``) and ``GeminiDetector``
 for a scripted or replayed frame, so nothing downstream of ``detect()`` can
 tell which provider, if any, answered.
 
-Nothing in this package ever makes a network call on its own. The only
-production call site is ``scripts/provider_spike.py`` (Task 12 step 5),
+Nothing in this package ever makes a network call on its own. There are two
+production call sites: ``scripts/provider_spike.py`` (Task 12 step 5),
 which runs exactly once, only after the operator has explicitly granted
-G-provider-spike for a stated frame count and cost. Every test in
-``tests/survey/test_providers.py`` passes a fake, in-memory session and
-never reaches a socket.
+G-provider-spike for a stated frame count and cost; and
+``scripts/survey_run.py`` (plan section C4), reached only when the
+operator passes ``--detector``/``--fallback`` as ``moondream`` or
+``gemini``, gated on a present API key and recorded filming consent.
+Every test in ``tests/survey/test_providers.py`` passes a fake, in-memory
+session and never reaches a socket.
 
 Adapter rules, unchanged from pipeline spec Sec 6.3 / this plan's Task 12:
 pin the model version; bounded connect/read/total timeouts; cap image and
@@ -22,6 +25,7 @@ schema failures; never log image bytes or credentials.
 """
 from __future__ import annotations
 
+import base64
 import json as _json
 from pathlib import Path
 from typing import Any
@@ -92,6 +96,25 @@ MAX_IMAGE_BYTES = 8 * 1024 * 1024
 #: A detection list for one frame, not a novel. Checked against the raw
 #: response body before it is parsed.
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+
+
+#: Every frame this system writes today is a JPEG (survey.observability's
+#: capture path); the other entries cover a hand-supplied still.
+_MIME_BY_SUFFIX = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                   ".webp": "image/webp"}
+
+
+def guess_mime_type(image_path: str | Path) -> str:
+    """Best-effort MIME type from the file's suffix; ``image/jpeg`` when the
+    suffix is unrecognised."""
+    return _MIME_BY_SUFFIX.get(Path(image_path).suffix.lower(), "image/jpeg")
+
+
+def encode_image_base64(image_bytes: bytes) -> str:
+    """Base64-encodes raw image bytes for a provider payload. Never logs
+    ``image_bytes`` or the result (adapter rule: image bytes are never
+    logged or stored)."""
+    return base64.b64encode(image_bytes).decode("ascii")
 
 
 def read_image_bytes(image_path: str | Path) -> bytes:

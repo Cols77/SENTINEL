@@ -59,17 +59,19 @@ class SurveyStore:
                   position_kind: str, artifact_id: str, sha256: str,
                   image_path: str = "", captured_at: str | None = None,
                   command_completed_at: str | None = None, delta_z_cm: float = 0.0,
+                  tolerance: str | None = None,
                   person_regions_blurred: bool = False) -> str:
         frame_id = new_id()
         with self.connection:
             self.connection.execute(
                 "INSERT INTO frames(frame_id, sweep_id, stop_index, look_deg, x_cm, y_cm, "
                 "z_cm, heading_deg, position_kind, artifact_id, sha256, image_path, "
-                "captured_at, command_completed_at, delta_z_cm, person_regions_blurred) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "captured_at, command_completed_at, delta_z_cm, tolerance, "
+                "person_regions_blurred) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (frame_id, sweep_id, stop_index, look_deg, x_cm, y_cm, z_cm, heading_deg,
                  position_kind, artifact_id, sha256, image_path, captured_at or utc_now(),
-                 command_completed_at, delta_z_cm, int(person_regions_blurred)))
+                 command_completed_at, delta_z_cm, tolerance, int(person_regions_blurred)))
         return frame_id
 
     def set_frame_analysis(self, frame_id: str, status: str) -> None:
@@ -106,7 +108,7 @@ class SurveyStore:
     def sightings(self, run_id: str) -> list[dict]:
         rows = self.connection.execute(
             "SELECT g.*, f.stop_index, f.x_cm AS frame_x_cm, f.y_cm AS frame_y_cm, "
-            "f.heading_deg, f.look_deg "
+            "f.heading_deg, f.look_deg, f.delta_z_cm "
             "FROM sightings g JOIN frames f ON f.frame_id = g.frame_id "
             "JOIN sweeps s ON s.sweep_id = f.sweep_id WHERE s.run_id = ?", (run_id,))
         return [dict(row) for row in rows]

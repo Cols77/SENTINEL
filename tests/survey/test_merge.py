@@ -2,6 +2,7 @@ import math
 
 import pytest
 
+from sentinel.survey.detector import DETECTOR_RAW_MEDIUM_PROVISIONAL, normalise
 from sentinel.survey.merge import CONFIRM_MIN_STOPS, associate, majority_degraded, merge_sightings
 from sentinel.survey.observability import FOCAL_PX, PRINCIPAL_X, PRINCIPAL_Y
 
@@ -74,6 +75,21 @@ def test_a_sighting_without_a_box_cannot_be_merged_and_stays_uncertain():
 
 def test_a_low_band_sighting_cannot_confirm_an_object():
     sightings = [_looking_at(i, i * 75.0, 100.0, 300.0, band="low") for i in range(3)]
+    assert merge_sightings(sightings)[0]["band"] == "UNCERTAIN"
+
+
+def test_a_low_band_detector_raw_sighting_cannot_confirm_an_object():
+    """Plan phase 4 (D), end-to-end: a real ``DETECTOR_RAW`` score below
+    DETECTOR_RAW_MEDIUM_PROVISIONAL bands "low" through the actual
+    ``normalise()`` path (not a hand-set ``band="low"`` dict, which
+    test_a_low_band_sighting_cannot_confirm_an_object already covers for
+    the VLM path), and that band still blocks CONFIRMED once merged."""
+    item = {"label": "laptop", "x": 0.1, "y": 0.1, "width": 0.05, "height": 0.05,
+            "score": DETECTOR_RAW_MEDIUM_PROVISIONAL - 0.01, "score_kind": "DETECTOR_RAW"}
+    _detection, band = normalise([item], 960, 720).pairs[0]
+    assert band == "low"
+
+    sightings = [_looking_at(i, i * 75.0, 100.0, 300.0, band=band) for i in range(3)]
     assert merge_sightings(sightings)[0]["band"] == "UNCERTAIN"
 
 

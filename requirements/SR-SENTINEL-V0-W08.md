@@ -36,16 +36,34 @@ simulation, real-drone proof is human/live).
 **Amendment record (2026-09-21, Colin Aubé, in the coherence-alignment session).**
 
 - **W08-a, decided:** the reflex is a controlled landing, not the terminal emergency hard stop the
-  2026-09-17 text named. A measured single-tag fix has an 11 cm spread at 1.1 m, so a false
-  "outside" is a realistic event, and a motor cut at up to 1.8 m near people is the more harmful
-  failure. This is also what the cube mission already implements.
+  2026-09-17 text named. A single-tag fix is realistically noisy wherever only one tag is in view
+  (measured 10.4-12.5 cm spread off-axis, docs/wp5-rehearsal-manifest.md stand test), so a false
+  "outside" is a realistic event there; with two tags in view the joint solve measured 0.45 cm at
+  the same range, so a false "outside" is implausible at a stop where both are seen. A motor cut
+  at up to 1.8 m near people is the more harmful failure regardless. This is also what the cube
+  mission already implements.
 - **W08-c, decided:** "the 1 m demo cube of W03" becomes "the configured safety envelope", the
   operating cube derived from the site file.
 - **W08-b, decided:** "continuously" becomes "at every localised stop and during moves whenever
   tags are in view", which is what a camera-based fix can honestly deliver.
 
-**Implementation status (2026-09-21): half built.** The stop-time check exists (`passive` and
-`reanchor` modes). The in-move watchdog does not: it needs a thread evaluating the pose stream
-beside the blocking `move`, and a motors-on bench test that the Tello honours `land` while a
-`move` is executing. It is owed by WP5. Until it is built and tested this requirement is **not
-satisfied** and must not be reported as satisfied.
+**Implementation status (2026-09-21, updated later the same day): the in-move watchdog now exists
+in software; the requirement is still not satisfied.** The stop-time check exists (`passive` and
+`reanchor` modes). The in-move watchdog is now built: `sentinel.pose.watchdog.PoseWatchdog` runs on
+a background thread beside the blocking `move` (`CubeMissionRunner.move_checked`), evaluating the
+already-open pose stream and debouncing on 2 consecutive `OUTSIDE` **joint (two-tag)** fixes before
+it sets an abort event, ending in the existing controlled landing.
+
+**Bench test B1 (`docs/wp5-rehearsal-manifest.md`, flown by the WP5 session) has so far shown**
+that the Tello honours `land` sent while a `move` executes: the move answers `error Auto land`
+within 0.3 s and the drone travels a further 12 cm at the missions' `speed 20` (about 35 cm at
+`speed 50`). `stop` is not a command on this firmware. From that the software now has: a
+lock-free `land` (`DjitellopyClient.land_now`; the ordinary `land()` waits for the lock the
+in-flight move holds and could never interrupt it), `error Auto land` reported as the
+containment abort it is, and a trip line `trip_margin_cm(speed)` inside the cube edge, about
+26 cm at mission speed: (debounce + 0.2 s video lag) x speed + travel after `land`.
+
+Sending `land` mid-move stays behind a constructor flag that defaults **off**: B1's pass bar is
+9 runs and 2 are flown. With the flag off an abort takes effect when the move returns. Until B1
+passes and the flag is on for flights, this requirement is **not satisfied** and must not be
+reported as satisfied.

@@ -21,6 +21,16 @@ class FlightFrame:
     image_path: str
     artifact_id: str
     sha256: str
+    #: The per-frame height above the tape-measured surface (plan Task 11,
+    #: V12): ``None`` (the default) falls back to ``loop.DELTA_Z_CM``, so
+    #: every existing construction of a FlightFrame -- positional or
+    #: keyword -- and every replay fixture without the field are unaffected.
+    delta_z_cm: float | None = None
+    #: The stop's tolerance verdict ("INSIDE"/"OUTER"/"OUTSIDE"/None) from
+    #: cube/mission.py's tolerance_verdict, carried through so a photo shot
+    #: from an OUTER-circle stop is visibly that (plan Task 11, tolerance
+    #: circles). Does not change how merge.py treats a sighting.
+    tolerance: str | None = None
 
 
 @runtime_checkable

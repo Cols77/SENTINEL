@@ -223,9 +223,9 @@ differences between W08's 2026-09-17 text and the implementation were found on 2
 
 | # | 2026-09-17 text | Implemented | Status |
 |---|---|---|---|
-| W08-a | the reflex is the *terminal emergency hard stop* (motor cut, W05 latch) | a measured position outside the cube raises an abort that ends in a **controlled landing** | **decided 2026-09-21 (Colin): controlled landing.** A single-tag fix has an 11 cm spread at 1.1 m, so a false `OUTSIDE` is realistic, and a motor cut at up to 1.8 m near people is the more harmful failure. W08 amended |
+| W08-a | the reflex is the *terminal emergency hard stop* (motor cut, W05 latch) | a measured position outside the cube raises an abort that ends in a **controlled landing** | **decided 2026-09-21 (Colin): controlled landing.** A single-tag fix is realistically noisy wherever only one tag is in view (measured 10.4-12.5 cm spread off-axis), so a false `OUTSIDE` is realistic there; with two tags in view the joint solve measured 0.45 cm at the same range, so a false `OUTSIDE` is implausible at a stop where both are seen. A motor cut at up to 1.8 m near people is the more harmful failure regardless. W08 amended |
 | W08-c | the envelope is *the 1 m demo cube of W03* | the envelope is derived from the site file | **decided 2026-09-21 (Colin): the configured envelope.** W08 amended |
-| W08-b | the worker verifies position *continuously* | checked only at localised stops | **decided 2026-09-21 (Colin): at every localised stop, and during moves whenever tags are in view.** W08 amended; the in-move half (level 2 below) is not built yet |
+| W08-b | the worker verifies position *continuously* | checked only at localised stops | **decided 2026-09-21 (Colin): at every localised stop, and during moves whenever tags are in view.** W08 amended; the in-move half (level 2 below) is built, not yet bench-tested |
 
 **W08-b: what "continuously" can mean.** Navigation is open-loop. A waypoint is reached with at
 most three blocking Tello `move` commands (x, then y, then z), each validated against the envelope
@@ -237,7 +237,7 @@ only at a stop, after the drone has settled. Three levels are possible:
 | Level | What pose does | Requirement impact | State |
 |---|---|---|---|
 | 1. Stop-time check (`passive`) | measured at each localised stop; outside the cube means a controlled landing | none: SR-063 as written | implemented |
-| 2. In-leg watchdog | the pose stream, which already stays open all flight, is also evaluated *during* legs whenever tags are in view; outside the cube means a controlled landing. It can end the flight and nothing else | none on SR-063; **required by W08 since 2026-09-21**. Needs a second thread beside the blocking `move`, and a bench test that the Tello honours `land` while a `move` is executing | not built |
+| 2. In-leg watchdog | the pose stream, which already stays open all flight, is also evaluated *during* legs whenever tags are in view; outside the cube means a controlled landing. It can end the flight and nothing else | none on SR-063; **required by W08 since 2026-09-21**. Needs a second thread beside the blocking `move`, and a bench test that the Tello honours `land` while a `move` is executing | built (`sentinel.pose.watchdog` + `CubeMissionRunner.move_checked`): 2 consecutive joint fixes, a speed-based trip margin (about 26 cm at `speed 20`), a lock-free `land`. Bench test B1 has shown the Tello honours `land` mid-move (12 cm further travel at `speed 20`); 2 of its 9 runs are flown, so sending `land` mid-move stays behind a flag defaulting off |
 | 3. Stop-time correction (`reanchor`) | a good fix replaces the dead-reckoned position at a hover and sends at most two bounded trim moves toward the approved waypoint | SR-063 amendment C1, **consented 2026-09-21 (Colin)** | implemented; run with `cube-run --pose reanchor --sr063-amended`; not yet flown (cube design Stage 3) |
 
 Continuous *steering* from pose — a velocity loop on `rc` commands — is excluded from V0 by SR-063
@@ -285,10 +285,15 @@ Known non-conforming artifacts as of this revision, each to be corrected by its 
 
 | Artifact | Uses | Consequence |
 |---|---|---|
-| WP5 cube design E4 and `sentinel.cube.observe` | field of view 70.2° x 55.6° | view width per unit of range is taken as 1.41 where the measured figure is 1.08, so a "back-and-wide" stop stands about 30 % too close to span the alley mouth it promises to; and the bottom of the view is taken as 36.4° below the horizon where the measured figure is about 31° |
+| Dzivha's `fixtures/perception` package, `sentinel_perception.config.CameraConfig` | field of view 70.2° x 55.6° (`hfov_deg`, `vfov_deg` defaults) | the same wrong FOV as the two rows below carried until 2026-09-21; her bearing arithmetic is skewed by it until her package adopts the measured model. Out of scope for this repository's owner to fix directly — `fixtures/perception` is her package, read-only from here (survey design §D handoff, `docs/handoffs/2026-09-21-HANDOFF-to-dzivha-camera-and-survey.md`) |
 
-(The survey-counting design carried the same error, f = 683 px with a level optical axis, until
-its rev 5 of the same date; see that document's §5.1.)
+> **Rev (2026-09-21, live-integration workstream A2).** `sentinel.cube.observe` is no longer in this
+> table: `WIDTH_PER_RANGE` and `BELOW_HORIZON_DEG` now derive from `sentinel.camera.TELLO_MEASURED`
+> (≈1.076 of width per unit range and ≈30.9° below the horizon, matching the measured figures this
+> table used to contrast them against), pinned by `tests/cube/test_observe.py`'s
+> `test_observe_constants_agree_with_the_calibrated_camera`. The survey-counting design carried the
+> same error, f = 683 px with a level optical axis, until its rev 5 of the same date; see that
+> document's §5.1.
 
 ### 10.6 Acceptance and gates
 

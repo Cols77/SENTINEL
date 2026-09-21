@@ -48,8 +48,13 @@ class DryRunClient:
         return self._emergency_latched
 
     def connect(self) -> None:
-        if self._closed:
-            raise ClientStateError("client is closed")
+        # Mirrors djitellopy_backend.DjiTelloPyClient.connect(), which
+        # genuinely reconnects and resets ``_closed`` -- a caller that
+        # flies more than once in a session (survey.cube_bridge.CubeFlight,
+        # up to two approved sweeps) closes and reconnects the same client
+        # object between flights, and the dry-run double must accept that
+        # too, not diverge into a stricter one-shot contract.
+        self._closed = False
         if self._connected:
             return
         self._connected = True

@@ -127,12 +127,18 @@ def _fly_and_ingest(store, run_id, option, flight, detector,
     sweep_id = store.add_sweep(run_id, option.option_id, len(option.stops))
     dropped: list[str] = []
     for frame in flight.fly(option):
+        # Task 11/V12: a real flight port stamps its own per-frame delta_z
+        # (height above the tape-measured surface); a replay frame with no
+        # such field (every fixture written before Task 11) falls back to
+        # the one run-level constant exactly as before.
+        delta_z_cm = frame.delta_z_cm if frame.delta_z_cm is not None else DELTA_Z_CM
         frame_id = store.add_frame(
             sweep_id, stop_index=frame.stop_index, look_deg=frame.look_deg,
             x_cm=frame.x_cm, y_cm=frame.y_cm, z_cm=frame.z_cm,
             heading_deg=frame.heading_deg, position_kind=frame.position_kind,
             artifact_id=frame.artifact_id, sha256=frame.sha256,
-            image_path=frame.image_path, delta_z_cm=DELTA_Z_CM)
+            image_path=frame.image_path, delta_z_cm=delta_z_cm,
+            tolerance=frame.tolerance)
         batch = detector.detect(frame.image_path, option.resolvable_classes)
         store.set_frame_analysis(frame_id, "OK" if batch.status == "OK" else batch.status)
         # R3: the band detector.normalise attached to each detection is

@@ -62,6 +62,7 @@
         "z_cm": {"type": "number"},
         "heading_deg": {"type": "number"},
         "position_kind": {"enum": ["COMMANDED", "MEASURED"]},
+        "tolerance": {"enum": ["INSIDE", "OUTER", "OUTSIDE", null]},
         "artifact_id": {"type": "string"},
         "sha256": {"type": "string"},
         "image_path": {"type": "string"},

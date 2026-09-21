@@ -101,12 +101,20 @@ class _ScoredRunner(CubeMissionRunner):
 
     def _append_log(self, entry: dict) -> None:
         entry["true_cm"] = [round(self.client.x_cm, 1), round(self.client.y_cm, 1)]
-        entry["true_error_cm"] = round(math.dist(entry["true_cm"], entry["commanded_cm"][:2]), 1)
+        if "commanded_cm" in entry:
+            entry["true_error_cm"] = round(math.dist(entry["true_cm"], entry["commanded_cm"][:2]), 1)
         super()._append_log(entry)
 
 
 def fly_once(mission, site, pose_mode: str, model: DriftModel, seed: int, log_path: Path) -> dict:
-    client = DriftingClient(mission.start_x_cm, mission.start_y_cm, model, random.Random(seed))
+    rng = random.Random(seed)
+    if mission.start_x_cm is None:
+        # a start-free mission: the operator put the drone anywhere in the commanded area
+        env = site.envelope()
+        start = (rng.uniform(env.min_x_cm, env.max_x_cm), rng.uniform(env.min_y_cm, env.max_y_cm))
+    else:
+        start = (mission.start_x_cm, mission.start_y_cm)
+    client = DriftingClient(start[0], start[1], model, rng)
     runner = _ScoredRunner(client, "dry-run", mission=mission, site=site, pose_mode=pose_mode,
                            mission_log=log_path, burst_fn=client.burst,
                            sleep_fn=lambda seconds: None)
@@ -125,13 +133,15 @@ def monte_carlo(mission, site, pose_mode: str, model: DriftModel, runs: int,
     with tempfile.TemporaryDirectory() as tmp:
         for seed in range(runs):
             flight = fly_once(mission, site, pose_mode, model, seed, Path(tmp) / f"{seed}.jsonl")
-            finished = flight["status"] == "PASS" and len(flight["rows"]) == len(mission.waypoints)
+            finished = flight["status"] == "PASS" and sum(r["waypoint"] != "START" for r in flight["rows"]) == len(mission.waypoints)
             completed += finished
             if not finished:
                 cause = str(flight["error"]).split(":")[0]
                 landings[cause] = landings.get(cause, 0) + 1
             moves += flight["moves"]
             for row in flight["rows"]:
+                if row["waypoint"] == "START":
+                    continue
                 trims += row["trim_rounds_sent"]
                 outer += row.get("tolerance") == "OUTER"
                 if finished:
@@ -161,6 +171,9 @@ def main(argv=None) -> int:
     mission, site = load_mission(args.mission), load_site(args.site)
     model = DriftModel().scaled(args.drift_factor)
     for pose_mode in ("off", "passive", "reanchor"):
+        if pose_mode == "off" and mission.start_x_cm is None:
+            print("\noff: skipped - a mission without a start pad needs a pose mode")
+            continue
         summary = monte_carlo(mission, site, pose_mode, model, args.runs, args.tolerance_cm)
         print(f"\n{pose_mode}: {summary['completed']}/{summary['runs']} flights completed, "
               f"{summary['mean_moves']} moves and {summary['mean_trim_rounds']} trim rounds per flight")

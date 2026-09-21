@@ -354,3 +354,40 @@ def test_review_decision_quality_is_one_when_the_best_addressing_follow_up_is_ch
                          detector=ScriptedDetector(_single_stop_script()),
                          on_approval=lambda call: True, writer=_writer([]))
     assert outcome["decision_quality"] == 1.0
+
+
+# -- Task 11/V12: a per-frame delta_z_cm, falling back to loop.DELTA_Z_CM ----
+
+class _OneFrameWithDeltaZ:
+    """A single stop carrying its own measured delta_z_cm, as a real flight
+    port (survey.cube_bridge.CubeFlight) would."""
+
+    def fly(self, option):
+        return [FlightFrame(stop_index=0, look_deg=0.0, x_cm=0.0, y_cm=0.0,
+                            z_cm=option.z_cm, heading_deg=0.0, position_kind="MEASURED",
+                            image_path="frames/f0.png", artifact_id="A0",
+                            sha256="0" * 64, delta_z_cm=42.0)]
+
+
+def test_a_frame_without_delta_z_cm_falls_back_to_the_run_constant(tmp_path):
+    """FlightFrame.delta_z_cm defaults to None -- every fixture and flight
+    port written before Task 11 (``_StaticFlight`` included) must keep
+    storing exactly ``loop.DELTA_Z_CM``, unchanged."""
+    store = SurveyStore.open(tmp_path / "s.sqlite3")
+    outcome = run_survey(store=store, run_id="RUN1", request_text="count",
+                         options=OPTIONS, policy=RuleProposer(), flight=_StaticFlight(),
+                         detector=ScriptedDetector(_one_computer_script()),
+                         on_approval=lambda call: True, writer=_writer([]))
+    assert outcome["status"] == "REPORTED"
+    frames = store.frames("RUN1")
+    assert frames and all(f["delta_z_cm"] == DELTA_Z_CM for f in frames)
+
+
+def test_a_frame_with_delta_z_cm_uses_its_own_value(tmp_path):
+    store = SurveyStore.open(tmp_path / "s.sqlite3")
+    run_survey(store=store, run_id="RUN1", request_text="count",
+              options=OPTIONS, policy=RuleProposer(), flight=_OneFrameWithDeltaZ(),
+              detector=ScriptedDetector({"f0.png": []}),
+              on_approval=lambda call: True, writer=_writer([]))
+    frames = store.frames("RUN1")
+    assert frames[0]["delta_z_cm"] == 42.0
