@@ -23,6 +23,7 @@ class ProjectionService:
             s=empty_snapshot(svc.session_id,run_id,svc.config.mode)
             s['run'].update(request_text=state.get('request_text',facts['run']['request_text'] if facts['run'] else ''),status=row['status'],phase='APPROVAL' if offer else state.get('phase','REQUEST'),decision_version=row['decision_version'],updated_at=state.get('updated_at','1970-01-01T00:00:00+00:00'))
             s['source']['kind']=svc.adapters.source_kind
+            s['session']['startup_summary'].update(site_id=svc.config.site_path.stem if svc.config.site_path else None,pose_mode=svc.config.pose_mode,detector_name=svc.config.detector_name)
             s['chat']['messages']=svc.store.messages(run_id)
             s['safety']=deepcopy(svc.safety.state)
             s['safety']['land']['available']=svc.registry.get(run_id) is not None and not svc.registry.emergency.is_set()

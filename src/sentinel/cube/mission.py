@@ -157,7 +157,8 @@ class CubeMissionRunner(FlightTestRunner):
                  sleep_fn: Callable[[float], None] = time.sleep,
                  watchdog_fix_fn: Callable[[], tuple[float, float] | None] | None = None,
                  land_during_move: bool = False,
-                 watchdog_poll_interval_s: float = POLL_INTERVAL_S, **runner_kwargs) -> None:
+                 watchdog_poll_interval_s: float = POLL_INTERVAL_S,
+                 on_stop=None,on_pose=None,on_pose_health=None, **runner_kwargs) -> None:
         if pose_mode not in POSE_MODES:
             raise ValueError(f"pose_mode must be one of {POSE_MODES}, got {pose_mode!r}")
         if pose_mode != "off" and burst_fn is None and (tag_map is None or conn is None):
@@ -165,6 +166,7 @@ class CubeMissionRunner(FlightTestRunner):
         runner_kwargs["retain_video_stream"] = True
         runner_kwargs["envelope"] = site.envelope()
         super().__init__(client, mode, minimum_battery, **runner_kwargs)
+        self.on_stop,self.on_pose,self.on_pose_health=on_stop,on_pose,on_pose_health
         self.mission, self.site, self.pose_mode = mission, site, pose_mode
         self.tag_map, self.conn, self.run_id = tag_map, conn, run_id
         self.mission_log = Path(mission_log)
@@ -402,7 +404,8 @@ class CubeMissionRunner(FlightTestRunner):
         return run_pose_stream(
             _StreamHeld(self.client), self.tag_map, self.conn, run_id=self.run_id,
             max_frames=None, duration_s=BURST_MAX_S, source_kind="LIVE",
-            on_frame=lambda _frame: count["n"] < BURST_TARGET_REPORTS, on_report=on_report)
+            on_frame=lambda _frame: count["n"] < BURST_TARGET_REPORTS, on_report=on_report,
+            on_estimate=self.on_pose,on_health=self.on_pose_health)
 
     def _localise(self, wp: Waypoint, entry: dict) -> None:
         started = time.monotonic()
@@ -545,6 +548,7 @@ class CubeMissionRunner(FlightTestRunner):
         self.mission_log.parent.mkdir(parents=True, exist_ok=True)
         with self.mission_log.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry) + "\n")
+        if self.on_stop:self.on_stop(dict(entry))
 
     def _fly_sequence(self) -> None:
         self._enter_altitude_band()

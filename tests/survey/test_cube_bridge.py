@@ -236,3 +236,30 @@ def test_a_follow_up_sweep_starts_where_the_last_one_ended_not_at_the_pad(tmp_pa
     assert (flight.start_x_cm, flight.start_y_cm) == (250, 300)
     frames = flight.fly(second)
     assert (frames[0].x_cm, frames[0].y_cm) == (250, 330)
+
+
+def test_managed_runner_registered_until_cleanup_and_stop_events(tmp_path):
+    flight=_flight(tmp_path)
+    events=[];active=[]
+    def bind(runner):active.append(runner);events.append('bind')
+    def stop(entry):
+        assert active
+        events.append(entry['waypoint'])
+    def done(runner):
+        assert runner.client._closed
+        active.remove(runner);events.append('done')
+    flight.on_runner,flight.on_runner_done,flight.on_stop=bind,done,stop
+    option=SweepOption('ONE','one',((150,300),),120,(0,),100,22,(),300)
+    assert flight.fly(option)
+    assert events==['bind','ONE_0','done'] and not active
+
+
+def test_managed_runner_safety_abort_cannot_return_success(tmp_path):
+    from sentinel.client import EmergencyAborted
+    flight=_flight(tmp_path)
+    flight.on_runner=lambda runner:runner.latch_emergency()
+    done=[];flight.on_runner_done=lambda runner:done.append(runner)
+    option=SweepOption('ONE','one',((150,300),),120,(0,),100,22,(),300)
+    with pytest.raises(EmergencyAborted):flight.fly(option)
+    assert done
+    assert 'takeoff' not in flight.client.commands

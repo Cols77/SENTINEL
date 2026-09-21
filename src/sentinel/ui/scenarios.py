@@ -22,6 +22,10 @@ class ScenarioAdapters:
     writer: object
     camera: object
     source_kind: str
+    emergency_sender: object = None
+    pose_feed: object = None
+    location: str | None = None
+    consent_date: str | None = None
 
 class ScenarioFlight:
     def __init__(self, frames, artifacts):
@@ -39,7 +43,7 @@ class ScenarioFlight:
         try:
             result=[]
             for frame in self.frames[option.option_id]:
-                runner._raise_if_emergency()
+                runner.check_interruption()
                 self.emit('STOP_ARRIVED',dict(stop_index=frame.stop_index,x_cm=frame.x_cm,y_cm=frame.y_cm,option_id=option.option_id))
                 result.append(frame)
             return result

@@ -15,22 +15,22 @@ from .projection import ProjectionService
 class MissionControlService:
     def __init__(self, *, config, adapters):
         self.config,self.adapters=config,adapters
-        self.store=UIStore.open(config.data_dir/'ui.sqlite')
+        self.store=UIStore.open(config.ui_db or config.data_dir/'ui.sqlite')
         try:
             self.session_id=self.store.read_run(config.run_id)['session_id']
         except KeyError:
             self.session_id=str(uuid4())
-        self.store.ensure_run(self.session_id,config.run_id,config.mode)
         self.approval=ApprovalBroker(self.store)
         self.approval.recover_interrupted_runs()
+        self.store.ensure_run(self.session_id,config.run_id,config.mode)
         self.registry=SafetyRegistry()
-        self.safety=RunnerSafetyAdapter(self.registry,lambda:9,self.session_id,self._audit_safety)
-        self.runtime=SurveyRuntime(config.data_dir/'survey.sqlite',self.store,adapters,self.approval,self.registry)
+        self.safety=RunnerSafetyAdapter(self.registry,(lambda:9) if config.mode=='REHEARSAL' else adapters.emergency_sender,self.session_id,self._audit_safety)
+        self.runtime=SurveyRuntime(config.survey_db or config.data_dir/'survey.sqlite',self.store,adapters,self.approval,self.registry)
         self.worker=MissionWorker(self.runtime.execute)
         self.projection=ProjectionService(self)
         self.artifacts=getattr(adapters.flight,'artifacts',{})
         self.evidence_status={}
-        self.pose_feed=None
+        self.pose_feed=adapters.pose_feed
         if config.mode=='REHEARSAL':
             from .rehearsal_pose import RehearsalPoseFeed
             fixture_root=Path(__file__).resolve().parents[3]/'fixtures/mission-control'
@@ -104,7 +104,8 @@ class MissionControlService:
         return self.safety.trigger_emergency(command['session_id'],command['identity'],command.get('active_run_id'))
 
     def _audit_safety(self, result):
-        self.approval.cancel(self.config.run_id)
+        if result['status'] != 'UNAVAILABLE':
+            self.approval.cancel(self.config.run_id)
         self.store.append_event(self.config.run_id,'SAFETY',{'summary':f"{result['action']}: {result['status']}"})
 
     def close(self):

@@ -116,6 +116,7 @@ def run_pose_stream(
     on_health=None,
     on_evidence=None,
     artifact_sink=None,
+    on_estimate=None,
 ) -> list[DronePoseReport]:
     """Stream ``max_frames`` frames from ``client`` and persist good poses.
 
@@ -143,8 +144,9 @@ def run_pose_stream(
     def publish_evidence(estimate):
         if artifact_sink is not None:
             artifact_sink(estimate.evidence.artifact_id, estimate.encoded_png)
-        on_evidence(estimate.evidence)
-    evidence_display = LatestDisplaySink(publish_evidence) if on_evidence else None
+        if on_evidence:on_evidence(estimate.evidence)
+        if on_estimate:on_estimate(estimate)
+    evidence_display = LatestDisplaySink(publish_evidence) if on_evidence or on_estimate else None
     health_display = LatestDisplaySink(on_health) if on_health else None
     gated_frames, total_timeouts = 0, 0
     last_health = 0.0
@@ -202,7 +204,6 @@ def run_pose_stream(
                         report_id=report_id, artifact_id=f"pose:{run_id}:{report_id}",
                         captured_at=datetime.now(timezone.utc).isoformat(), source_kind=source_kind)
                     report = estimate.report
-                    evidence_display.push(estimate)
                 else:
                     report = estimate_pose(bgr, tag_map, run_id=run_id,
                         report_id=str(uuid.uuid4()), source_kind=source_kind)
@@ -221,6 +222,8 @@ def run_pose_stream(
                 except ValueError as exc:  # contract rejects the reading; keep z=None
                     logger.debug("altitude %r rejected: %s", altitude, exc)
             append_pose_event(conn, report)
+            if evidence_display:
+                evidence_display.push(dataclasses.replace(estimate,report=report))
             reports.append(report)
             if on_report is not None:
                 on_report(report)

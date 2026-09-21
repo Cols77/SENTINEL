@@ -47,7 +47,7 @@ class SurveyRuntime:
             a=self.adapters
             outcome=run_survey(store=store,run_id=run_id,request_text=request['request_text'],options=a.options,
                 policy=a.policy,flight=a.flight,detector=a.detector,writer=a.writer,camera=a.camera,
-                on_approval=approve,emit=lambda kind,payload:self._publish_event(run_id,kind,payload))
+                location=a.location,consent_date=a.consent_date,on_approval=approve,emit=lambda kind,payload:self._publish_event(run_id,kind,payload))
         except (EmergencyAborted,ControlledLandRequested):
             outcome=dict(status='ABORTED',counts=store.counts(run_id),report=None)
         except Exception:

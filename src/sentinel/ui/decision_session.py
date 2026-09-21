@@ -29,4 +29,4 @@ class SurveyDecisionSession:
             return reply
         if words & {'count','many'} and words & {'computer','computers','laptop','laptops'} and not words & {'not','except','without','person','people','phone','phones','pen','pens'}:
             return DecisionReply('PROPOSE','Preparing a legal survey proposal for your review.',text)
-        return DecisionReply('CLARIFY','This rehearsal supports counting computers. Ask “count the computers”, or ask for status.')
+        return DecisionReply('CLARIFY','This console supports counting computers. Ask “count the computers”, or ask for status.')

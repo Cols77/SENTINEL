@@ -256,6 +256,14 @@ class FlightTestRunner:
 
         self.envelope.position = Position(0, 0, height)
 
+    def check_interruption(self) -> None:
+        """Public adapter boundary: refuse work after either safety latch."""
+        self._raise_if_emergency()
+
+    def preflight(self) -> None:
+        """Validate the existing no-takeoff preflight; caller owns client cleanup."""
+        self._preflight()
+
     def _preflight(self) -> None:
         self._emit("preflight", "connecting to Tello")
         self._call(self.client.connect)
