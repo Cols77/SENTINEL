@@ -340,7 +340,7 @@ class CubeMissionRunner(FlightTestRunner):
             super().move_checked(direction, distance_cm)
         except (EnvelopeViolation, EmergencyAborted):
             raise
-        except RuntimeError as exc:
+        except Exception as exc:  # noqa: BLE001 - DJITelloPy raises its own non-RuntimeError type
             move_error = exc
         finally:
             watchdog.stop()
