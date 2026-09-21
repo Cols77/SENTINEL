@@ -282,3 +282,62 @@ p2 and p5 saw both tags in 100% of frames. Not yet recorded: 2.0 m centred, and 
 6. **The Wi-Fi link dropped three times**, all at low battery. A mission runner must
    survive a dropout. Where the laptop holds both the home network and the drone's at
    once, `--interface-name` is needed to select the drone's adapter.
+
+## Bench test B1 — does a Tello honour `land` while a `move` is executing?
+
+**Why.** SR-SENTINEL-V0-W08 requires containment to be checked *during moves* when tags are in
+view, and to end the flight with a controlled landing. The in-move watchdog
+(`src/sentinel/pose/watchdog.py`) can only act inside a move if the drone accepts a command while a
+blocking `move` is in flight. Nobody has established that it does. Until this test passes, the
+watchdog's send-during-move flag stays **off** and an abort takes effect when the move returns.
+
+**Gate.** Motors on, so **G4 live-rehearsal consent** and the operator present at the controller
+with the emergency cut to hand. Not a pose test: no tags needed.
+
+**Preconditions.** Battery >= 50% (it drops fast and a dying Tello ignores commands — see the
+2026-09-21 stand test). At least 3 m of clear run in the move direction plus 1 m either side.
+Soft floor or a mat. Nobody within the run. Propellers guarded if available.
+
+**Harness.** A throwaway script, not committed to the flight path: take off, hover 3 s, send
+`forward 200` on the main thread, and from a second thread send the abort command after a set
+delay. Record, with timestamps: when each command was sent, the exact response string and arrival
+time for each, `height?` every 100 ms, and the wall-clock moment the motors stop.
+
+**Matrix.** Two abort commands x three delays x 3 repeats = 18 runs, in this order:
+
+| variant | abort command sent during the move | delay after the move was sent |
+|---|---|---|
+| A | `land` | 0.5 s, 2.0 s, and ~0.5 s before the move would finish |
+| B | `stop` then `land` 0.3 s later | same three delays |
+
+Start with variant B at the 2.0 s delay: `stop` is the gentler command and the mid-move delay is
+the least marginal case. Abandon the matrix and report if any run ends with the drone unresponsive,
+still moving after the motors should have stopped, or requiring the emergency cut.
+
+**Record per run.** Response to the abort command (`ok`, `error`, or nothing); whether the original
+`move` response still arrived and what it said; latency from abort sent to descent starting;
+**ground distance travelled after the abort was sent**, by tape, from a floor mark under the drone
+at the moment of sending; time to motors off; the drone's state afterwards (does it still answer
+`battery?`).
+
+**The number that matters most is the post-abort travel distance.** It sizes the containment
+margin: a watchdog that fires at the envelope edge is useless if the drone carries on another 40 cm.
+Feed it to the watchdog's margin and to `Site.commanded` inset (currently 30 cm).
+
+**Pass, all 18 runs.** The abort is acknowledged or acted on; the drone descends under control
+without the emergency cut; no motion command follows the landing; the drone still answers telemetry
+afterwards. Then the send-during-move flag may be enabled, with the margin set from the measured
+travel distance.
+
+**Fail, or any inconsistency.** Leave the flag off. The watchdog still satisfies W08's
+stop-time obligation, and an in-move exit is acted on when the move returns. Say so plainly in the
+W08 implementation status rather than reporting the requirement satisfied.
+
+### Note on the simulations in this document
+
+Every predicted figure here and in `cube-layout-check` is computed from this repository's chessboard
+calibration matrix (fx 892.6, 960x720), so it already uses the true ~56.5° x 43.9° field of view,
+not the datasheet-derived 70.2° x 55.6° that E4 corrects. The narrow field is why 688 mm of tag
+separation outperformed 1 m at close range, and why the p1-p6 viewpoints were chosen where they
+were. Any hand-calculation in older notes using "1.406 x range" for horizontal coverage is
+optimistic; the calibrated figure is about 1.08 x range.
