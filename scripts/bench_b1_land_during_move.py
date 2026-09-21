@@ -139,7 +139,7 @@ def tello_local_ip() -> str:
 
 def summarise(bench: Bench, variant: str, delay: float) -> dict:
     sends = {e["text"]: e["t"] for e in bench.events if e["kind"] == "send"}
-    move_t = next((t for text, t in sends.items() if text.startswith("forward")), None)
+    move_t = next((t for text, t in sends.items() if text.split()[0] in ("forward", "back", "left", "right")), None)
     abort_t = sends.get("stop" if variant == "B" else "land") if variant != "N" else None
     replies = [e for e in bench.events if e["kind"] == "recv" and move_t is not None and e["t"] > move_t]
     summary = {"variant": variant, "delay_s": delay, "move_sent_t": move_t, "abort_sent_t": abort_t,
@@ -165,10 +165,12 @@ def main() -> int:
     parser.add_argument("--variant", choices=("N", "A", "B"), required=True)
     parser.add_argument("--delay", type=float, default=2.0, help="seconds after the move is sent")
     parser.add_argument("--distance", type=int, default=200)
+    parser.add_argument("--direction", choices=("forward", "back", "left", "right"), default="forward",
+                        help="back = fly away from the tags while facing them, so the video localises every frame")
     parser.add_argument("--speed", type=int, default=50, help="cm/s (measured: a 200 cm move takes ~10 s regardless)")
     parser.add_argument("--local-ip", default=None)
     parser.add_argument("--clear-ahead-cm", type=int, required=True,
-                        help="tape-measured free distance IN FRONT of the drone's nose")
+                        help="tape-measured free distance in the direction of the move")
     parser.add_argument("--out", default="artifacts/b1")
     parser.add_argument("--confirm", action="store_true",
                         help="I hold G4 consent, the run is clear, and I am at the keyboard")
@@ -176,7 +178,7 @@ def main() -> int:
     # 2026-09-21: forward 200 from 195 cm in front of a door flew into it. Never again.
     if args.clear_ahead_cm < args.distance + CLEARANCE_MARGIN_CM:
         print(f"Refusing: forward {args.distance} needs at least {args.distance + CLEARANCE_MARGIN_CM} cm "
-              f"clear ahead of the nose; you measured {args.clear_ahead_cm}.")
+              f"clear in the direction of the move; you measured {args.clear_ahead_cm}.")
         return 2
     if not args.confirm:
         print("Refusing: motors-on test. Pass --confirm once the area is clear.")
@@ -208,7 +210,7 @@ def main() -> int:
         airborne = True
         time.sleep(HOVER_S)
 
-        bench.send(f"forward {args.distance}")
+        bench.send(f"{args.direction} {args.distance}")
         move_sent = time.monotonic()
         if args.variant != "N":
             time.sleep(args.delay)
