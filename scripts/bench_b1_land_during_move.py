@@ -27,6 +27,7 @@ MIN_BATTERY = 50
 HOVER_S = 3.0
 FAILSAFE_LAND_S = 12.0      # after the move is sent, land regardless
 GIVE_UP_S = 30.0
+CLEARANCE_MARGIN_CM = 100
 
 
 class Bench:
@@ -42,7 +43,12 @@ class Bench:
         self.state = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.state.bind((local_ip, 8890))
         self.state.settimeout(0.2)
-        for target in (self._receive, self._receive_state, self._keys):
+        self.video = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.video.bind((local_ip, 11111))
+        self.video.settimeout(0.2)
+        self.video_file = None
+        self.video_index: list[list] = []   # [t, byte_offset] per packet, for frame timing offline
+        for target in (self._receive, self._receive_state, self._keys, self._record_video):
             threading.Thread(target=target, daemon=True).start()
 
     def now(self) -> float:
@@ -95,6 +101,18 @@ class Bench:
                     except ValueError:
                         pass
             self.states.append(row)
+
+    def _record_video(self) -> None:
+        offset = 0
+        while not self.done.is_set():
+            try:
+                data, _ = self.video.recvfrom(4096)
+            except (socket.timeout, OSError):
+                continue
+            if self.video_file is not None:
+                self.video_index.append([self.now(), offset])
+                self.video_file.write(data)
+                offset += len(data)
 
     def _keys(self) -> None:
         if os.name != "nt":
@@ -149,10 +167,17 @@ def main() -> int:
     parser.add_argument("--distance", type=int, default=200)
     parser.add_argument("--speed", type=int, default=50, help="cm/s (measured: a 200 cm move takes ~10 s regardless)")
     parser.add_argument("--local-ip", default=None)
+    parser.add_argument("--clear-ahead-cm", type=int, required=True,
+                        help="tape-measured free distance IN FRONT of the drone's nose")
     parser.add_argument("--out", default="artifacts/b1")
     parser.add_argument("--confirm", action="store_true",
                         help="I hold G4 consent, the run is clear, and I am at the keyboard")
     args = parser.parse_args()
+    # 2026-09-21: forward 200 from 195 cm in front of a door flew into it. Never again.
+    if args.clear_ahead_cm < args.distance + CLEARANCE_MARGIN_CM:
+        print(f"Refusing: forward {args.distance} needs at least {args.distance + CLEARANCE_MARGIN_CM} cm "
+              f"clear ahead of the nose; you measured {args.clear_ahead_cm}.")
+        return 2
     if not args.confirm:
         print("Refusing: motors-on test. Pass --confirm once the area is clear.")
         return 2
@@ -168,6 +193,13 @@ def main() -> int:
             print(f"Battery {battery}% is below {MIN_BATTERY}%. Not taking off.")
             return 1
         bench.ask(f"speed {args.speed}")
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%H%M%S")
+        video_path = out / f"b1-{args.variant}-{args.delay:g}s-{stamp}.h264"
+        bench.video_file = video_path.open("wb")
+        if bench.ask("streamon") != "ok":
+            bench.log("note", "streamon not acknowledged; no video this run")
         print("\n  E = emergency motor cut     L = land now\n", flush=True)
         if bench.ask("takeoff", timeout=20.0) != "ok":
             print("Takeoff was not acknowledged. Sending land.")
@@ -207,12 +239,16 @@ def main() -> int:
         bench.send("land")
     finally:
         bench.done.set()
+        time.sleep(0.3)
+        if bench.video_file is not None:
+            bench.video_file.close()
         summary = summarise(bench, args.variant, args.delay)
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
         path = out / f"b1-{args.variant}-{args.delay:g}s-{time.strftime('%H%M%S')}.json"
         path.write_text(json.dumps({"summary": summary, "events": bench.events,
-                                    "states": bench.states}, indent=1), encoding="utf-8")
+                                    "states": bench.states,
+                                    "video_packets": bench.video_index}, indent=1), encoding="utf-8")
         print("\n" + json.dumps(summary, indent=2))
         print(f"\nsaved {path}\nNow tape the distance from the takeoff mark to where it landed.")
     return 0
