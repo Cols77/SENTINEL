@@ -84,7 +84,7 @@ class Bench:
                 data, _ = self.cmd.recvfrom(1024)
             except (socket.timeout, OSError):
                 continue
-            self.log("recv", data.decode("ascii", errors="replace").strip())
+            self.log("recv", data.decode("ascii", errors="backslashreplace").strip())
 
     def _receive_state(self) -> None:
         while not self.done.is_set():
