@@ -303,7 +303,9 @@ Soft floor or a mat. Nobody within the run. Propellers guarded if available.
 delay. Record, with timestamps: when each command was sent, the exact response string and arrival
 time for each, `height?` every 100 ms, and the wall-clock moment the motors stop.
 
-**Matrix.** Two abort commands x three delays x 3 repeats = 18 runs, in this order:
+**Matrix (revised 2026-09-21 after the first runs).** `stop` is not a command on this firmware, so variant B is variant A delayed by 0.3 s and is dropped. **Pass = 9 runs of variant A**: `forward 100` (the clear run available), `land` at 0.5 s, 1.2 s and 2.0 s after the move (early, mid, near the end of a ~2.5 s move), 3 repeats each, every run launched with `--clear-ahead-cm` measured. Original matrix kept below for the record:
+
+**Original matrix.** Two abort commands x three delays x 3 repeats = 18 runs, in this order:
 
 | variant | abort command sent during the move | delay after the move was sent |
 |---|---|---|
