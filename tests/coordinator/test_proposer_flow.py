@@ -97,30 +97,6 @@ class _LegalProposalAdapter:
         })
 
 
-class _UnsupportedRequestAdapter:
-    def __init__(self) -> None:
-        self.calls: list[tuple[AgentRequest, PolicyContext]] = []
-        self.provider_summary = "  provider cannot safely choose a plan  "
-
-    def propose(self, request: AgentRequest, context: PolicyContext) -> AgentModelResult:
-        self.calls.append((request, context))
-        return AgentModelResult.from_dict({
-            "contract_version": "sentinel.v0",
-            "wire_type": "agent_result",
-            "agent_run_id": request.agent_run_id,
-            "status": "TOOL_CALLS",
-            "tool_calls": [{
-                "contract_version": "sentinel.v0",
-                "wire_type": "agent_tool_call",
-                "tool_name": "finish",
-                "arguments": {
-                    "status": "NEEDS_REVIEW",
-                    "summary": self.provider_summary,
-                },
-            }],
-        })
-
-
 class _CountingFallback:
     def __init__(self) -> None:
         self.calls = 0
@@ -246,9 +222,40 @@ def test_e_proposal_crosses_agent_loop_and_gateway_before_two_operator_approvals
 
 
 def test_real_e_loop_normalizes_llm_escalation_without_persisting_a_proposal(tmp_path):
+    from sentinel.adapter.llm.config import load_config
+    from sentinel.adapter.llm.openai_compatible import OpenAICompatibleAgentModel
+    from sentinel.adapter.llm.parser import wire_tool_name
+
     repo, gateway = open_harness(tmp_path)
     run_id = "88888888-8888-4888-8888-888888888888"
-    adapter = _UnsupportedRequestAdapter()
+    provider_summary = "provider cannot safely choose a plan"
+    response = {"choices": [{"message": {"tool_calls": [{
+        "type": "function", "function": {
+            "name": wire_tool_name("finish"),
+            "arguments": json.dumps({
+                "status": "NEEDS_REVIEW", "summary": provider_summary,
+            }),
+        },
+    }]}}]}
+    env = {
+        "SENTINEL_LLM_PROVIDER": "openrouter",
+        "SENTINEL_LLM_MODEL": "test-model",
+        "SENTINEL_LLM_TIMEOUT_MS": "1000",
+        "SENTINEL_LLM_PROMPT_REVISION": "test-prompt",
+        "SENTINEL_LLM_TOOL_POLICY_REVISION": "test-tools",
+        "SENTINEL_LLM_API_KEY_ENV": "TEST_API_KEY",
+        "TEST_API_KEY": "offline-test-only",
+    }
+    transport_calls: list[dict] = []
+
+    def create(**kwargs):
+        transport_calls.append(kwargs)
+        return response
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    adapter = OpenAICompatibleAgentModel(
+        load_config(env), client_factory=lambda **kwargs: client, environ=env,
+    )
     sink = MemoryAuditSink()
     fallback = _CountingFallback()
     try:
@@ -270,10 +277,13 @@ def test_real_e_loop_normalizes_llm_escalation_without_persisting_a_proposal(tmp
             "status": "NEEDS_REVIEW",
             "summary": "plan proposal needs operator review",
         }
-        assert len(adapter.calls) == 1
-        request, context = adapter.calls[0]
-        assert request.agent_run_id == AGENT_RUN_ID
-        assert context.legal.decision_point == SELECT_PLAN
+        assert len(transport_calls) == 1
+        assert wire_tool_name("finish") in {
+            tool["function"]["name"] for tool in transport_calls[0]["tools"]
+        }
+        rendered_request = json.loads(adapter.last_request["messages"][-1]["content"])
+        assert rendered_request["agent_run_id"] == AGENT_RUN_ID
+        assert AGENT_RUN_ID not in json.dumps(response)
         assert repo.read_events(run_id, 0, 30) == events_before
         assert repo.read_state(run_id).to_dict()["run_status"] == "RUNNING"
         for table in ("plans", "plan_approvals", "tasks"):
@@ -286,7 +296,7 @@ def test_real_e_loop_normalizes_llm_escalation_without_persisting_a_proposal(tmp
         assert attempts[0]["gate_outcome"] == "accepted"
         assert attempts[0]["raw_choice"] == "escalate"
         assert attempts[0]["policy_label"] == "escalate"
-        assert attempts[0]["provider_summary"] == adapter.provider_summary.strip()
+        assert attempts[0]["provider_summary"] == provider_summary
         assert not [record for record in sink.records if record["record"] == "proposal_recommendation"]
         routes = [record for record in sink.records if record["record"] == "architecture_route"]
         assert len(routes) == 1
