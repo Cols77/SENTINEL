@@ -467,10 +467,15 @@ class CubeMissionRunner(FlightTestRunner):
                      "spread_p95_cm": None, "arrival_error_cm": None, "containment": None,
                      "tolerance": None, "proposed_trims": None,
                      "trim_rounds_sent": 0, "looks_deg": list(wp.looks_deg),
-                     "watchdog_land_error": None}
+                     "watchdog_land_error": None, "height_cm": None}
             try:
                 self._go_to(wp)
                 entry["status"] = "OPEN_LOOP"
+                # survey bridge (Task 11): the measured altitude telemetry
+                # move_checked already stamped into self.envelope.position,
+                # not the commanded target -- they agree within DEAD_BAND_CM
+                # by construction but are not the same number.
+                entry["height_cm"] = self.envelope.position.z_cm
                 if self.pose_mode != "off" and wp.localise:
                     self._localise(wp, entry)
                 self._look(wp, entry)

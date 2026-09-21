@@ -334,3 +334,34 @@ def test_reanchor_recovers_both_axes_left_outside_the_bounds_at_once(tmp_path):
     report = runner.run(confirm=True)
     assert report.status == "PASS", report.error
     assert [e["status"] for e in _log(tmp_path)] == ["LOCALISED", "LOCALISED"]
+
+
+# -- survey bridge (Phase 2): the mission log carries the measured height ----
+
+def test_a_stop_that_is_reached_logs_the_measured_height(tmp_path):
+    """cube_bridge.CubeFlight needs "the runner's height reading" for z_cm
+    (plan Task 11, V12) -- the mission log otherwise only carries the
+    commanded target height, not what altitude telemetry actually measured
+    after the move (they agree within DEAD_BAND_CM by construction, but are
+    not the same number)."""
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 140),))
+    runner, _ = _runner(tmp_path, "off", [], mission=mission)
+    assert runner.run(confirm=True).status == "PASS"
+    wp1 = _log(tmp_path)[0]
+    assert wp1["height_cm"] == 140
+
+
+def test_a_stop_aborted_en_route_has_no_measured_height(tmp_path):
+    client = DryRunClient()
+
+    def failing_move(direction, distance_cm):
+        raise RuntimeError("simulated link drop")
+
+    client.move = failing_move
+    runner = CubeMissionRunner(client, "dry-run", mission=MISSION, site=SITE, pose_mode="off",
+                               mission_log=tmp_path / "mission.jsonl", sleep_fn=lambda seconds: None)
+    report = runner.run(confirm=True)
+    assert report.status == "FAIL"
+    wp1 = _log(tmp_path)[0]
+    assert wp1["status"] == "ABORTED_EN_ROUTE"
+    assert wp1["height_cm"] is None
