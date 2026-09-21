@@ -25,6 +25,13 @@ The generic `AgentLoop` already feeds schema and gateway failures into `previous
 
 The LLM prompt builder also sends all approved tool definitions even when the request's legal-tool list is narrower. Provider-visible tools and deterministically legal tools can therefore disagree.
 
+Survey has the same semantic gap. Its Jev proposer removes escalation and asks for
+the sweep that "best answers" the request. Its LLM proposer has validation logic
+but no production survey-specific provider prompt or adapter; current E/J CLI
+modes use scripted stand-ins. The survey loop is multi-stage, but it automatically
+injects site and result payloads rather than letting either selector dispatch the
+advertised reads.
+
 ## Invariants
 
 - The repository and gateway are the only authoritative workflow state.
@@ -149,6 +156,42 @@ This makes transport different while authority remains equal:
 - Jev transport: fixed-choice response to a deterministic candidate menu.
 - LLM transport: tool call normalized to the same deterministic candidate menu.
 
+### Shared read, act, or escalate instruction
+
+The models are expected to know general tool-use patterns, but they cannot infer
+Sentinel's local meaning of a legal candidate, approval boundary, result freshness,
+or capability limit. Both selectors therefore receive the same short decision
+rule rather than a catalogue of scenario-specific examples:
+
+> Choose one currently legal final action only when the supplied current facts
+> fully support it and it satisfies every stated constraint and requested
+> deliverable. Otherwise choose one legal read only when its declared result could
+> materially resolve a specific missing, stale, or contradictory fact required
+> for a final decision. Otherwise escalate. Escalate when the request needs an
+> unavailable capability or its constraints cannot all be satisfied. Do not choose
+> a closest or partial match, do not read merely because a read is available, and
+> do not repeat a read without a relevant state or version change. A read reveals
+> facts; it does not create evidence or capability. After rejected or failed
+> feedback, reassess the current facts and remaining candidates.
+
+Candidate descriptions state what each read returns and its freshness/version.
+The packet marks facts as current, stale, absent, or contradictory. This lets the
+selector apply the general rule without guessing whether another read can help.
+The deterministic candidate builder offers a read only when the packet declares
+the gap it can resolve. Jev does not produce a free-form explanation of why a read
+is useful, so confidence and margin alone are not treated as proof of materiality.
+
+Prompt tests assert the decision semantics, not exact prose. Behavioral tests pin
+the important distinctions:
+
+- sufficient current facts select a final action without a redundant read;
+- a useful read is selected before escalation when it can resolve the named gap;
+- unsupported capability or irreconcilable constraints escalate even when reads
+  remain available;
+- after a read, the selector reassesses rather than repeating it;
+- exhausted, failed, or irrelevant reads lead to escalation rather than an
+  unsupported final action.
+
 ### Initial inspection reads
 
 The first implementation exposes the two existing read tools:
@@ -159,6 +202,13 @@ The first implementation exposes the two existing read tools:
 A read is offered only when legal and not already satisfied by the session transcript. Repeating an identical read without a state or cursor change is refused. Additional catalogue, evidence, site, or results reads require their own typed repository interfaces and scenarios proving that the initial packet omits decision-relevant information; they are not simulated by prompt text.
 
 This means the first multi-turn implementation primarily handles reconciliation, concurrent state changes, and corrective feedback. It is not expected to improve cases where the initial packet already contains all relevant facts.
+
+At the current inspection `SELECT_PLAN` point, `state.get_summary` and
+`state.get_recent_events` normally repeat facts already present in the request.
+They are therefore suppressed unless the packet identifies a stale, missing, or
+contradictory state/event fact that the read can resolve. An unsupported request
+such as computer counting cannot become supported through these reads and must
+escalate immediately.
 
 ### Turn and budget rules
 
@@ -276,13 +326,51 @@ The shared session and candidate protocol must be domain-neutral, but the first 
 
 Survey then maps its existing legal candidates into the same action/escalation registry and makes the existing `get_site` and `get_results` functions dispatchable typed reads. Their results must correspond to the selected run, sweep option, and current store state.
 
-For bounded E/J sessions, the request contains only the applicable version and
-reference before a read. `survey.get_site` is offered at sweep selection and
-`survey.get_results` at result review; selecting each executes the real function
-and places its typed payload in the next turn. The full equivalent payload is not
-also auto-injected on those paths. F uses the same dispatcher under its scripted
-policy without a provider call. This gives both reads a real production and
-evaluation dispatch path.
+For bounded E/J sessions, a read is offered only when its full equivalent payload
+is absent, stale, or contradictory. `survey.get_site` is useful at sweep selection
+only when the visible option descriptions do not already contain the required
+current site facts. `survey.get_results` is useful at result review when the packet
+contains a results version/reference rather than the full payload. Selecting a
+read executes the real function and places its typed payload in the next turn. F
+uses the same dispatcher under its scripted policy without a provider call.
+
+The site packet may already contain enough current option metadata to choose a
+sweep; in that case `get_site` is not offered. After a completed sweep, the bounded
+path advertises a results version but does not ask the model to infer counts from
+lifecycle events. `survey.get_results` returns merged unique-object counts,
+uncertainty bands, unanalysed-frame status, and remaining flight budget. The
+deterministic validator requires a matching current results version in the session
+transcript before accepting a report or follow-up.
+
+The current survey loop already implements the required multi-stage lifecycle by
+automatically injecting site and full results. Model-directed reads are not
+required by the current implementation. The following is the proposed bounded
+tool-using migration:
+
+1. Select a prebuilt sweep, reading site detail first only if the supplied option
+   facts do not resolve the request.
+2. Present that exact sweep for operator approval.
+3. After approval, deterministic flight and perception code captures frames,
+   stores sightings, and merges repeated sightings into object hypotheses.
+4. On the next policy turn, read the current merged results.
+5. Submit a grounded report when the result supports it; propose an approved
+   follow-up sweep when a resolvable uncertainty remains within budget; otherwise
+   escalate.
+
+The model does not directly dispatch the aircraft, and it does not answer from the
+number of raw detections. Several detections may be sightings of the same computer.
+The report is grounded in merged unique-object results and preserves lower-bound
+or uncertainty semantics.
+
+Once a real survey LLM adapter exists, its prompt adds two domain rules to the
+shared instruction:
+
+> A sweep is supported only when current site facts show that its coverage and
+> resolvable classes can satisfy the requested survey; option availability alone
+> is not proof of whole-room coverage. Submit a report only from current merged
+> unique-object results, never a raw detection count. Choose a follow-up only when
+> it can resolve a named uncertainty within the remaining flight budget; otherwise
+> escalate.
 
 Survey keeps its two-flight budget and requires approval before every sweep. A missing or mismatched replay observation remains unevaluable and cannot be repaired by substituting frames from another option.
 
@@ -465,8 +553,10 @@ harness, projection, replay, merge, and scoring behavior only.
 - Recording request mismatch, exhaustion, and unused responses are reported.
 - Selector and detector identities are verified, unverified, or mismatched
   explicitly.
-- `survey.get_site` and `survey.get_results` dispatch through the bounded session
-  and their current typed results reach the next decision.
+- When a declared resolvable site or result gap exists, `survey.get_site` and
+  `survey.get_results` dispatch through the bounded session and their current typed
+  results reach the next decision. When equivalent facts are already current, the
+  redundant read is not offered.
 - Approval occurs before every flight, and the declared flight budget is enforced.
 - Empty databases, missing raw records, rejected final decisions, exhausted
   budgets, and absent reports cannot become successes.
