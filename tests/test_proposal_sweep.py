@@ -414,6 +414,40 @@ def test_recorded_mode_requires_capture_file(tmp_path):
     assert main(["--mode", "recorded", "--execute", "--output", str(tmp_path / "new")]) == 2
 
 
+@pytest.mark.parametrize(("provider_model", "expected"), [
+    ("typesafe/jev-1.13-20260917", ["typesafe/jev-1.13-20260917"]),
+    ("m" * 256 + "-different-release", [None]),
+])
+def test_recorded_model_identity_uses_live_observation_sanitizer(
+        tmp_path, provider_model, expected):
+    from types import SimpleNamespace
+    from scripts.proposal_sweep import _load_recording
+
+    source_manifest = {"fixture_sha256": "f" * 64, "catalogue_sha256": "c" * 64}
+    key_fields = {"case_id": "case", "arm": "jev", "repeat": 1}
+    rows = [
+        {"record": "run_manifest", "manifest": source_manifest},
+        {"record": "provider_request", **key_fields, "request": {"state": "bounded"}},
+        {"record": "provider_result", **key_fields, "result": {"value": "plan"}},
+        {"record": "provider_wire_result", **key_fields,
+         "response": {"model": provider_model, "choices": ["must-not-be-projected"]}},
+    ]
+    recording = tmp_path / "raw.jsonl"
+    recording.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    _captured, identities, _source = _load_recording(
+        recording,
+        source_manifest,
+        [SimpleNamespace(case_id="case")],
+        ["jev"],
+        1,
+    )
+
+    assert identities[("case", "jev", 1)] == expected
+    if expected == [None]:
+        assert provider_model not in json.dumps(identities[("case", "jev", 1)])
+
+
 def _escalation_fixture(tmp_path):
     path = tmp_path / "cases.json"
     path.write_text(json.dumps({"version": "proposal-outcomes.v1", "cases": [{"case_id": "unsupported", "request": "count computers",

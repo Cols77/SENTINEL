@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11, dataclasses, SQLite, pytest, OpenAI-compatible adapter, Jev fixed-choice API, JSONL evaluation artifacts.
 
-**Dependency:** Approved design `docs/superpowers/specs/2026-09-21-proposer-escalation-and-bounded-multiturn-design.md` at or after commit `1965cbf`.
+**Dependency:** Approved design `docs/superpowers/specs/2026-09-21-proposer-escalation-and-bounded-multiturn-design.md` at or after commit `2261f12`.
 
 ---
 

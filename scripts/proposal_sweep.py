@@ -21,6 +21,7 @@ for path in (ROOT / "src", ROOT):
         sys.path.insert(0, str(path))
 
 from sentinel.adapter.llm.config import LLMConfig, load_config
+from sentinel.adapter.llm.openai_compatible import _observation_from_mapping
 from sentinel.coordinator.proposer_factory import build_proposer, require_proposer_consent, JEV_PROPOSER_MODEL
 from sentinel.decision_prompt import DECISION_PROMPT_REVISION
 from sentinel.evaluation_run import (CallBudget, RawStream, RecordedTransport, MeasuredTransport,
@@ -283,7 +284,7 @@ def _load_recording(path, manifest, cases, arms, repeats):
         if row.get("record") == "provider_wire_result":
             model = row.get("response", {}).get("model") if isinstance(row.get("response"), dict) else None
             if isinstance(model, str):
-                identities[key].append(model)
+                identities[key].append(_observation_from_mapping({"model": model})["model"])
     if pending:
         raise ValueError("recording ends with an unfinished request")
     if not source_manifest or source_manifest.get("fixture_sha256") != manifest["fixture_sha256"] or source_manifest.get("catalogue_sha256") != manifest["catalogue_sha256"]:

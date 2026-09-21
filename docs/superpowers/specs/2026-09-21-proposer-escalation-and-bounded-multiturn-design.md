@@ -1,7 +1,7 @@
 # Proposer escalation and bounded multi-turn design
 
-**Status:** approved direction; written specification pending operator review  
-**Target branch:** `feat/proposer-bounded-multiturn`, based on `integration/survey-demo` at `d354372`  
+**Status:** approved
+**Target branch:** `feat/proposer-bounded-multiturn`, based on `integration/survey-demo` at `f01e7a3`
 **Date:** 2026-09-21
 
 ## Goal
