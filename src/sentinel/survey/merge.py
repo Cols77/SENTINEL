@@ -65,9 +65,19 @@ def _tolerance_cm(range_cm: float) -> float:
     return max(30.0, 0.25 * range_cm)
 
 
-#: Dead reckoning drifts about twice as far as a re-anchored stop (WP5 trials,
-#: 2026-09-21: 21 cm median open-loop against 10 cm).
-COMMANDED_LATERAL_FACTOR = 1.5
+#: ACROSS the line of sight the error is where the camera really was, so it
+#: depends on whether the frame's position was measured from the tags or
+#: dead-reckoned. Set from the WP5 session's Monte Carlo of 2026-09-22 (300
+#: trials per cell; 12 cm per-axis drift for a commanded stop, 6 cm for a
+#: measured one; boxes perfect; one look per stop): with COMMANDED frames a
+#: lower floor splits single laptops faster than it separates pairs (at a
+#: 20 cm floor 27% of single laptops split while 35 cm pairs still fuse
+#: 76%), so nothing closer than ~60 cm can be told apart and the floor stays
+#: wide. With MEASURED frames 22 cm / 9% separates 35-40 cm pairs at no
+#: split cost in that model. Real drift is correlated along a leg, which the
+#: model ignores; the first real flight is what checks these.
+LATERAL_FLOOR_CM = {"MEASURED": 22.0, "COMMANDED": 45.0}
+LATERAL_FRACTION = {"MEASURED": 0.09, "COMMANDED": 0.18}
 
 
 def _lateral_tolerance_cm(range_cm: float, commanded: bool) -> float:
@@ -75,8 +85,8 @@ def _lateral_tolerance_cm(range_cm: float, commanded: bool) -> float:
     a bearing error of a degree is under 2% of range, so what is left is
     where the camera really was. rev 6: one round tolerance of 25% of range
     fused any two laptops closer than ~75 cm at 3 m -- a whole desk."""
-    tolerance = max(30.0, 0.12 * range_cm)
-    return tolerance * COMMANDED_LATERAL_FACTOR if commanded else tolerance
+    kind = "COMMANDED" if commanded else "MEASURED"
+    return max(LATERAL_FLOOR_CM[kind], LATERAL_FRACTION[kind] * range_cm)
 
 
 def _frame_key(sighting: dict):

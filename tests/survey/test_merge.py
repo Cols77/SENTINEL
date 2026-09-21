@@ -107,12 +107,12 @@ def test_each_sighting_belongs_to_exactly_one_object_even_when_two_are_plausible
     "accumulate into every cluster within reach" behaviour that let
     triangulated phantoms reach CONFIRMED in rev 1-2."""
     anchor_left = [_looking_at(i, i * 75.0, 0.0, 300.0, sighting_id=f"L{i}") for i in range(3)]
-    # rev 6: the tolerance is no longer round. Across the line of sight it is 12% of
-    # range (36 cm here), not 25% (75 cm), so for M to be plausibly either object the
-    # two must sit 60 cm apart, not 90 -- they are never fused with each other, because
-    # each stop sees both in one frame.
-    anchor_right = [_looking_at(i, i * 75.0, 60.0, 300.0, sighting_id=f"R{i}") for i in range(3)]
-    ambiguous = _looking_at(3, 225.0, 31.0, 300.0, sighting_id="M")
+    # rev 6: the tolerance is no longer round. Across the line of sight it is 9% of
+    # range for a measured frame (27 cm here), not 25% (75 cm), so for M to be
+    # plausibly either object the two must sit 44 cm apart, not 90 -- they are never
+    # fused with each other, because each stop sees both in one frame.
+    anchor_right = [_looking_at(i, i * 75.0, 44.0, 300.0, sighting_id=f"R{i}") for i in range(3)]
+    ambiguous = _looking_at(3, 225.0, 23.0, 300.0, sighting_id="M")
 
     objects = merge_sightings(anchor_left + anchor_right + [ambiguous])
 
