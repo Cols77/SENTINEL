@@ -114,6 +114,15 @@ def _select_plan_tools(context: PolicyContext) -> list[str]:
     return tools
 
 
+def _matches_context(
+    *, run_id: str, state_version: int, context: PolicyContext,
+) -> bool:
+    return (
+        run_id == context.state.run_id
+        and state_version == context.state.state_version
+    )
+
+
 def _bound_jev_state(
     request: Mapping[str, Any], context: PolicyContext,
 ) -> dict[str, Any] | None:
@@ -127,8 +136,9 @@ def _bound_jev_state(
         or not agent_run_id.strip()
         or isinstance(state_version, bool)
         or not isinstance(state_version, int)
-        or run_id != context.state.run_id
-        or state_version != context.state.state_version
+        or not _matches_context(
+            run_id=run_id, state_version=state_version, context=context,
+        )
     ):
         return None
     return {
@@ -338,6 +348,16 @@ class LlmProposer:
         # The adapter's legacy `read_tools` parameter intentionally carries
         # PolicyContext so its prompt can render the current decision packet.
         started = time.perf_counter()
+        if not _matches_context(
+            run_id=typed_request.run_id,
+            state_version=typed_request.state_version,
+            context=context,
+        ):
+            _write_attempt(
+                self.sink, context, advisor="llm", started=started,
+                gate_outcome="invalid_answer", policy_label=ESCALATE_LABEL,
+            )
+            return self._escalate(request)
         try:
             model_result = self.adapter.propose(typed_request, context)
         except Exception:  # noqa: BLE001 -- the adapter boundary is fail-closed

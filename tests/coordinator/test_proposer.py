@@ -151,6 +151,33 @@ def test_proposer_is_a_contextual_policy_and_narrows_legal_tools_without_mutatin
     assert request == original
 
 
+@pytest.mark.parametrize("field, mismatched", [
+    ("run_id", "33333333-3333-4333-8333-333333333333"),
+    ("state_version", 8),
+])
+def test_request_and_context_binding_mismatch_never_reaches_llm(field, mismatched):
+    request = _request()
+    request[field] = mismatched
+    adapter = FakeAdapter(_result(
+        "inspection.propose_plan",
+        {"catalogue_plan_id": PLAN_ID, "reason": "must not be used"},
+    ))
+    sink = MemoryAuditSink()
+
+    result = LlmProposer(adapter, sink).decide(request, _select_plan_context())
+
+    _assert_local_escalation(result)
+    assert proposer_module.is_canonical_escalation(
+        result, agent_run_id=AGENT_RUN_ID
+    )
+    assert adapter.calls == []
+    attempt, = sink.records
+    assert attempt["gate_outcome"] == "invalid_answer"
+    assert attempt["raw_choice"] is None
+    assert attempt["policy_label"] == ESCALATE_LABEL
+    assert not [r for r in sink.records if r["record"] == "proposal_recommendation"]
+
+
 def test_select_plan_rejects_an_unsupported_legal_candidate_tool():
     context = _select_plan_context()
     legal = LegalSet(SELECT_PLAN, context.legal.candidates + (
