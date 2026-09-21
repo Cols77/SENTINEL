@@ -8,7 +8,7 @@ export function countText(c){
 export function renderCounts(host,survey,{onClass,onObject}={}){
  const rows=survey.counts.map(c=>{
   const action=button('',()=>onClass?.(c.class_name),{id:`count-${c.class_name}`,class:'count-action','data-class':c.class_name});action.append(el('strong',{},[c.class_name]),el('span',{},[countText(c)]));
-  const details=el('details',{},[el('summary',{},['Observability & support']),meta(`${c.observability} · ${c.semantics}`),meta(c.reason),meta(`${c.sighting_ids.length} supporting sightings · ${c.distinct_stops??'—'} distinct stops`)]);
+  const details=el('details',{open:c.observability==='NOT_OBSERVABLE'},[el('summary',{},['Observability & support']),meta(`${c.observability} · ${c.semantics}`),meta(c.reason),meta(`${c.sighting_ids.length} supporting sightings · ${c.distinct_stops??'—'} distinct stops`)]);
   if(c.projected_px!==null)details.append(meta(`Projected: ${c.projected_px} px · threshold: ${c.min_px??'—'} px`));
   if(c.arithmetic)details.append(meta(c.arithmetic));if(c.geometry_degraded)details.append(el('p',{class:'warning'},['Geometry degraded']));
   return el('section',{class:'count-row'},[action,details]);
