@@ -3,6 +3,7 @@
 survey package (plan Task 11, V12 + V13). Runs the whole path against
 ``DryRunClient``, with an injected burst function standing in for a live
 pose stream: no hardware, no network."""
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -200,3 +201,38 @@ def test_reanchor_without_the_amendment_is_refused(tmp_path):
 
 def test_reanchor_with_the_amendment_is_permitted(tmp_path):
     _flight(tmp_path, pose_mode="reanchor", sr063_amended=True)   # must not raise
+
+
+# -- the takeoff position: measured, or carried forward between sweeps ----------
+
+def test_a_flight_with_no_start_measures_it_and_keeps_stop_indices_honest(tmp_path):
+    """The runner logs a START line for a measured start. It is not a stop:
+    counted as one, every frame's stop_index would be off by one."""
+    option = SweepOption("TWO_STOPS", "two stops", ((150, 300), (200, 300)), 120, (0,), 100, 44,
+                         (), 300)
+    flight = _flight(tmp_path, pose_mode="passive", start_x_cm=None, start_y_cm=None,
+                     burst_fn=lambda: [_report(152, 262)] * 10)
+    frames = flight.fly(option)
+    assert [frame.stop_index for frame in frames] == [0, 1]
+    log = [json.loads(line) for line in (tmp_path / "mission.jsonl").read_text().splitlines()]
+    assert log[0]["waypoint"] == "START" and log[0]["fix_cm"] == [152.0, 262.0]
+
+
+def test_pose_off_cannot_measure_a_start_and_says_so(tmp_path):
+    with pytest.raises(ValueError, match="tape-measured start"):
+        _flight(tmp_path, pose_mode="off", start_x_cm=None, start_y_cm=None)
+    with pytest.raises(ValueError, match="both start coordinates"):
+        _flight(tmp_path, pose_mode="passive", start_x_cm=150, start_y_cm=None)
+
+
+def test_a_follow_up_sweep_starts_where_the_last_one_ended_not_at_the_pad(tmp_path):
+    """The drone lands at the last stop of the first sweep. Planning the
+    second sweep from the original pad would dead-reckon every leg from a
+    place the drone is not."""
+    first = SweepOption("FIRST", "rail", ((150, 300), (250, 300)), 120, (0,), 100, 44, (), 300)
+    second = SweepOption("SECOND", "close look", ((250, 330),), 120, (0,), 100, 22, (), 150)
+    flight = _flight(tmp_path, pose_mode="off", start_x_cm=150, start_y_cm=250)
+    flight.fly(first)
+    assert (flight.start_x_cm, flight.start_y_cm) == (250, 300)
+    frames = flight.fly(second)
+    assert (frames[0].x_cm, frames[0].y_cm) == (250, 330)

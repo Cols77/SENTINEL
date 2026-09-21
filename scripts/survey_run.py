@@ -129,6 +129,21 @@ class _DefaultAdapter:
                            "reason": "default offline stand-in: first legal sweep"}}]}
 
 
+def _start_pad(args, envelope) -> tuple[int | None, int | None]:
+    """Where the drone takes off. ``--start X,Y`` is a tape-measured pad. Without it a
+    real flight with pose on measures its start from the tags; a real flight with pose
+    off is refused, because dead reckoning from a guessed pad misplaces every stop and
+    every photograph. Only a dry run may fall back to a nominal pad."""
+    if args.start is not None:
+        x_text, _, y_text = args.start.partition(",")
+        return int(x_text), int(y_text)
+    if args.real:
+        if args.pose == "off":
+            raise ValueError("--real with --pose off needs a tape-measured --start X,Y")
+        return None, None
+    return (envelope.min_x_cm + envelope.max_x_cm) // 2, envelope.min_y_cm
+
+
 def build_policy(mode: str, *, judge=None, adapter=None, sink) -> SurveyPolicy:
     if mode == "F":
         return RuleProposer()
@@ -240,6 +255,9 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
     parser.add_argument("--surface-z-cm", type=float, default=None,
                         help="tape-measured surface height, for the per-frame delta_z_cm "
                              "(V12); required with --site")
+    parser.add_argument("--start", default=None, metavar="X,Y",
+                        help="tape-measured takeoff pad in room cm. Omit it on a real flight with "
+                             "pose on and the start is measured from the tags after takeoff")
     parser.add_argument("--real", action="store_true",
                         help="fly a real Tello instead of DryRunClient; --site only")
     parser.add_argument("--confirm", action="store_true",
@@ -319,12 +337,13 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
             conn = sqlite3.connect(args.pose_db)
             ensure_schema(conn)
         mission_log = args.mission_log or args.db.with_suffix(".cube-mission.jsonl")
+        start = _start_pad(args, envelope)
         capture_dir = args.capture_dir or (args.db.resolve().parent / "cube-frames")
         flight = CubeFlight(
             client=client, site=site, mode="real" if args.real else "dry-run",
             pose_mode=args.pose, run_id=run_id, mission_log=mission_log,
             capture_dir=capture_dir,
-            start_x_cm=(envelope.min_x_cm + envelope.max_x_cm) // 2, start_y_cm=envelope.min_y_cm,
+            start_x_cm=start[0], start_y_cm=start[1],
             surface_z_cm=args.surface_z_cm, sr063_amended=args.sr063_amended,
             tag_map=tag_map, conn=conn,
             # A real flight always requires the explicit --confirm flag
