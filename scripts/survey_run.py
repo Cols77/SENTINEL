@@ -151,25 +151,42 @@ LIVE_JUDGE_BASE_URL = "https://openrouter.ai/api"
 LIVE_JUDGE_KEY_ENV = "OPENROUTER_API_KEY"
 
 
+def _require_paid_go_ahead(args, flag: str) -> None:
+    if not args.i_authorise_paid_calls:
+        raise ValueError(f"{flag} makes paid calls (at most 3 per run); "
+                         "pass --i-authorise-paid-calls to go ahead")
+    from sentinel.env_file import load_env_file
+    load_env_file()
+    if not os.environ.get(LIVE_JUDGE_KEY_ENV):
+        raise ValueError(f"{flag} needs {LIVE_JUDGE_KEY_ENV} in the environment or .env")
+
+
+def _live_agent(args):
+    """None (the offline stand-in) unless the operator asked for the live agent:
+    a model writes the tool call and its reason (survey.llm_adapter). Approved by
+    the operator 2026-09-22; every run's paid calls still need the flag."""
+    if not args.live_agent:
+        return None
+    if args.mode != "E":
+        raise ValueError("--live-agent only applies to --mode agent")
+    _require_paid_go_ahead(args, "--live-agent")
+    from sentinel.survey.llm_adapter import LlmAdapter
+    return LlmAdapter(api_key_env=LIVE_JUDGE_KEY_ENV, base_url=LIVE_JUDGE_BASE_URL,
+                      model=args.llm_model)
+
+
 def _live_judge(args):
     """None (the offline default judge) unless the operator asked for a live one.
 
-    Only mode J has a live path. Its proposer takes a typed choice among the offered
-    sweeps and gates it on confidence and margin; the justification is written by
-    code. Mode E needs a model-written reason from a tool-calling adapter, which the
-    survey does not have, so a live E would mean inventing that reason here."""
+    Mode J's proposer takes a typed choice among the offered sweeps and gates it on
+    confidence and margin; the justification is written by code. Mode E's live path
+    is ``_live_agent``."""
     if args.live_judge == "none":
         return None
     if args.mode != "J":
         raise ValueError("--live-judge only applies to --mode judge")
-    if not args.i_authorise_paid_calls:
-        raise ValueError("--live-judge makes paid calls (at most 3 per run); "
-                         "pass --i-authorise-paid-calls to go ahead")
-    from sentinel.env_file import load_env_file
+    _require_paid_go_ahead(args, "--live-judge")
     from sentinel.judgment import JevJudge, LlmJudge
-    load_env_file()
-    if not os.environ.get(LIVE_JUDGE_KEY_ENV):
-        raise ValueError(f"--live-judge needs {LIVE_JUDGE_KEY_ENV} in the environment or .env")
     if args.live_judge == "jev":
         return JevJudge(api_key_env=LIVE_JUDGE_KEY_ENV, base_url=LIVE_JUDGE_BASE_URL,
                         timeout_s=20.0)
@@ -322,8 +339,12 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
                              "sweep. jev = the Jev decision model, llm = a general LLM through "
                              "the same typed-choice interface. PAID: needs OPENROUTER_API_KEY "
                              "and --i-authorise-paid-calls (at most 3 calls per run)")
+    parser.add_argument("--live-agent", action="store_true",
+                        help="--mode agent only: a live model writes the tool call and the "
+                             "reason the operator reads at approval. PAID: needs "
+                             "OPENROUTER_API_KEY and --i-authorise-paid-calls (at most 3 calls)")
     parser.add_argument("--llm-model", default="z-ai/glm-5.3",
-                        help="model id for --live-judge llm")
+                        help="model id for --live-judge llm and --live-agent")
     parser.add_argument("--i-authorise-paid-calls", action="store_true",
                         help="the operator's explicit go-ahead for --live-judge")
     parser.add_argument("--start", default=None, metavar="X,Y",
@@ -429,7 +450,7 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
 
     options = generate_options(envelope, camera)
     sink = JsonlAuditSink(args.db.with_suffix(".jsonl"))
-    policy = build_policy(args.mode, sink=sink, judge=_live_judge(args))
+    policy = build_policy(args.mode, sink=sink, judge=_live_judge(args), adapter=_live_agent(args))
     detector = build_detector(args.detector, args.responses, environ=environ, session=session)
     if args.fallback != "none":
         fallback_detector = build_provider_detector(args.fallback, environ=environ,

@@ -247,3 +247,15 @@ def test_mode_words_and_letters_are_the_same_modes(tmp_path, capsys):
             main(argv + ["--frames", str(frames)])
             summary = _json.loads(capsys.readouterr().out)
             assert (summary["mode"], summary["mode_name"]) == (letter, word)
+
+
+def test_a_live_agent_is_refused_without_the_go_ahead_and_outside_agent_mode(tmp_path, monkeypatch):
+    with pytest.raises((SystemExit, ValueError)):
+        main(_live_argv(tmp_path, "agent", "--live-agent"))
+    with pytest.raises((SystemExit, ValueError)):
+        main(_live_argv(tmp_path, "judge", "--live-agent", "--i-authorise-paid-calls"))
+    import sentinel.env_file as env_file
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(env_file, "load_env_file", lambda *a, **k: {})
+    with pytest.raises((SystemExit, ValueError)):
+        main(_live_argv(tmp_path, "agent", "--live-agent", "--i-authorise-paid-calls"))
