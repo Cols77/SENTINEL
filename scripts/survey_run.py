@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 import uuid
 from pathlib import Path
@@ -45,24 +46,33 @@ for _path in (REPO_ROOT / "src", REPO_ROOT):
 
 from sentinel.coordinator.shadow import JsonlAuditSink  # noqa: E402 -- reused read-only (Global Constraints)
 
+from sentinel.cube.site import load_site  # noqa: E402
+from sentinel.dry_run import DryRunClient  # noqa: E402
+from sentinel.pose.persistence import ensure_schema  # noqa: E402
+from sentinel.pose.tagmap import load_tag_map  # noqa: E402
 from sentinel.survey.candidates import ESCALATE_LABEL  # noqa: E402
 from sentinel.survey.consent import consent_policy  # noqa: E402
 from sentinel.survey.context import SurveyPolicy  # noqa: E402
+from sentinel.survey.cube_bridge import CubeFlight, envelope_from_site  # noqa: E402
 from sentinel.survey.detector import ReplayDetector  # noqa: E402
 from sentinel.survey.envelope import SweepEnvelope  # noqa: E402
 from sentinel.survey.eval import load_scene, score_episode  # noqa: E402
 from sentinel.survey.flight import ReplayFlight  # noqa: E402
 from sentinel.survey.loop import run_survey  # noqa: E402
-from sentinel.survey.observability import CAMERAS, SYNTHETIC_LEVEL  # noqa: E402
+from sentinel.survey.observability import CAMERAS, SYNTHETIC_LEVEL, TELLO_MEASURED  # noqa: E402
 from sentinel.survey.options import generate_options  # noqa: E402
 from sentinel.survey.proposer import JevProposer, LlmProposer, RuleProposer  # noqa: E402
 from sentinel.survey.store import SurveyStore  # noqa: E402
 
 #: The same fixed envelope used across the survey test suite (tests/survey/
-#: test_loop.py, test_eval.py). ``survey.cube_bridge`` (Task 11, blocked on
-#: the WP5 merge) is the only place a real site's envelope is derived
-#: instead of this fixed replay stand-in.
+#: test_loop.py, test_eval.py). ``--site`` (Task 11) is the only place a
+#: real site's envelope is derived instead of this fixed replay stand-in.
 DEFAULT_ENVELOPE = SweepEnvelope(-150, 150, 0, 100, 80, 180, 300)
+
+#: Distance from the rail to what it looks at (survey.envelope.SweepEnvelope
+#: .standoff_cm) -- matches DEFAULT_ENVELOPE's own value; a Site file itself
+#: carries no standoff (it is a survey concept, not a WP5 one).
+DEFAULT_STANDOFF_CM = 300
 
 _PLURAL = {"computer": "computers", "person": "people", "phone": "phones", "pen": "pens"}
 
@@ -118,6 +128,16 @@ def _default_writer(results: dict) -> str:
     return "I found " + ", ".join(parts) + "."
 
 
+def _real_tello_client(args):
+    """Thin constructor for ``--real`` (hard rule for this phase: no drone
+    connection, so this path is untested here). Mirrors the public
+    ``DjitellopyClient`` shape used elsewhere in this codebase for the
+    real backend -- not the adapter auto-selection wired around it
+    (``--local-ip`` is passed explicitly instead)."""
+    from sentinel.djitellopy_backend import DjitellopyClient
+    return DjitellopyClient(local_ip=args.local_ip, tello_ip=args.tello_ip)
+
+
 def _make_on_approval(auto_approve: bool):
     if auto_approve:
         return lambda call: True
@@ -138,8 +158,34 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scene", type=Path, default=None,
                         help="a Scene json (Task 9); when given, the summary also carries "
                              "a score_episode result")
-    parser.add_argument("--frames", type=Path, required=True,
-                        help="a ReplayFlight frames dir (frames.json manifest)")
+    parser.add_argument("--frames", type=Path, default=None,
+                        help="a ReplayFlight frames dir (frames.json manifest); exactly one "
+                             "of --frames or --site is required")
+    parser.add_argument("--site", type=Path, default=None,
+                        help="a cube-site-v1 json (WP5, Task 11); flies a real (or dry-run) "
+                             "cube mission instead of replaying --frames")
+    parser.add_argument("--pose", choices=("off", "passive", "reanchor"), default="off",
+                        help="cube pose mode -- only meaningful with --site")
+    parser.add_argument("--sr063-amended", action="store_true",
+                        help="assert that SR-063 has been amended to permit re-anchoring "
+                             "(required for --pose reanchor)")
+    parser.add_argument("--surface-z-cm", type=float, default=None,
+                        help="tape-measured surface height, for the per-frame delta_z_cm "
+                             "(V12); required with --site")
+    parser.add_argument("--real", action="store_true",
+                        help="fly a real Tello instead of DryRunClient; --site only")
+    parser.add_argument("--confirm", action="store_true",
+                        help="passed through to CubeMissionRunner.run(); --site only")
+    parser.add_argument("--tag-map", type=Path, default=Path("calibration/tag-map-calibrated.json"),
+                        help="read only when --pose != off and --real")
+    parser.add_argument("--pose-db", type=Path, default=Path("artifacts/pose.db"),
+                        help="separate from --db, which is the survey's own store")
+    parser.add_argument("--mission-log", type=Path, default=None,
+                        help="default: <db>.cube-mission.jsonl")
+    parser.add_argument("--capture-dir", type=Path, default=None,
+                        help="default: <db's parent>/cube-frames")
+    parser.add_argument("--local-ip", default=None, help="--real only")
+    parser.add_argument("--tello-ip", default="192.168.10.1", help="--real only")
     parser.add_argument("--responses", type=Path, required=True,
                         help="a ReplayDetector responses dir (one json per frame)")
     parser.add_argument("--db", type=Path, required=True)
@@ -152,10 +198,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--camera", choices=sorted(CAMERAS), default=SYNTHETIC_LEVEL.name,
                         help="the model the frames were produced with: synthetic-level for "
                              "rendered scenes, tello-measured for anything the drone filmed "
-                             "(coherence spec 10.5). The wrong one misplaces every object.")
+                             "(coherence spec 10.5). The wrong one misplaces every object. "
+                             "Ignored with --site, which always uses tello-measured (V12).")
     parser.add_argument("--auto-approve", action="store_true",
                         help="tests and replay only -- a real flight always prompts")
     args = parser.parse_args(argv)
+
+    if bool(args.site) == bool(args.frames):
+        parser.error("exactly one of --frames or --site is required")
+    if args.site and args.surface_z_cm is None:
+        parser.error("--site requires --surface-z-cm")
+    if args.pose == "reanchor" and not args.sr063_amended:
+        parser.error("--pose reanchor requires --sr063-amended")
 
     store = SurveyStore.open(args.db)
 
@@ -167,22 +221,60 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--retain-person-frames requires --location and --date")
         consent_policy(store, args.location, args.date)
 
-    camera = CAMERAS[args.camera]
-    options = generate_options(DEFAULT_ENVELOPE, camera)
+    run_id = str(uuid.uuid4())
+
+    if args.site:
+        # V12: a CubeFlight always uses the measured camera -- there is no
+        # flag to pass a different one; the adapter, not the caller, fixes
+        # the model (CubeFlight itself also refuses anything else).
+        site = load_site(args.site)
+        envelope = envelope_from_site(site, standoff_cm=DEFAULT_STANDOFF_CM)
+        camera = TELLO_MEASURED
+        client = _real_tello_client(args) if args.real else DryRunClient()
+        tag_map = load_tag_map(str(args.tag_map)) if args.pose != "off" and args.real else None
+        conn = None
+        if tag_map is not None:
+            args.pose_db.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(args.pose_db)
+            ensure_schema(conn)
+        mission_log = args.mission_log or args.db.with_suffix(".cube-mission.jsonl")
+        capture_dir = args.capture_dir or (args.db.resolve().parent / "cube-frames")
+        flight = CubeFlight(
+            client=client, site=site, mode="real" if args.real else "dry-run",
+            pose_mode=args.pose, run_id=run_id, mission_log=mission_log,
+            capture_dir=capture_dir,
+            start_x_cm=(envelope.min_x_cm + envelope.max_x_cm) // 2, start_y_cm=envelope.min_y_cm,
+            surface_z_cm=args.surface_z_cm, sr063_amended=args.sr063_amended,
+            tag_map=tag_map, conn=conn,
+            # A real flight always requires the explicit --confirm flag
+            # (CubeMissionRunner.run() refuses without it regardless of
+            # mode); a dry run needs no operator confirmation.
+            confirm=args.confirm if args.real else True)
+    else:
+        camera = CAMERAS[args.camera]
+        envelope = DEFAULT_ENVELOPE
+        flight = ReplayFlight(args.frames)
+
+    options = generate_options(envelope, camera)
     sink = JsonlAuditSink(args.db.with_suffix(".jsonl"))
     policy = build_policy(args.mode, sink=sink)
-    flight = ReplayFlight(args.frames)
     detector = ReplayDetector(args.responses)
 
-    run_id = str(uuid.uuid4())
     outcome = run_survey(store=store, run_id=run_id, request_text=args.request,
                          options=options, policy=policy, flight=flight, detector=detector,
                          on_approval=_make_on_approval(args.auto_approve),
                          writer=_default_writer,
                          location=args.location, consent_date=args.date, camera=camera)
 
+    frame_rows = store.frames(run_id)
+    frame_counts = {
+        "measured": sum(1 for r in frame_rows if r["position_kind"] == "MEASURED"),
+        "commanded": sum(1 for r in frame_rows if r["position_kind"] == "COMMANDED"),
+        "outer_tolerance": sum(1 for r in frame_rows if r["tolerance"] == "OUTER"),
+    }
+
     summary: dict[str, Any] = {"run_id": run_id, "mode": args.mode, "camera": camera.name,
-                               "outcome": outcome}
+                               "frame_counts": frame_counts, "outcome": outcome}
     if args.scene is not None:
         scene = load_scene(args.scene)
         summary["score"] = score_episode(scene, outcome, store, run_id)
