@@ -1,11 +1,13 @@
 ---
 id: sentinel-mission-control-design
 title: "SENTINEL mission control center"
-status: review-pending
+status: approved
 date: 2026-09-21
 ---
 
 # SENTINEL mission control center — design
+
+> Approved by the operator on 2026-09-21. Implementation ownership is handed to LightCode.
 
 ## 1. Purpose and release boundary
 
