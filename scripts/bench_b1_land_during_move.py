@@ -129,9 +129,12 @@ def summarise(bench: Bench, variant: str, delay: float) -> dict:
     if abort_t is not None:
         after = [s for s in bench.states if s["t"] >= abort_t]
         still = next((s["t"] for s in after if abs(s.get("vgx", 0)) <= 1 and abs(s.get("vgy", 0)) <= 1), None)
-        start_h = after[0].get("h") if after else None
-        descending = next((s["t"] for s in after if start_h is not None and s.get("h", start_h) <= start_h - 10), None)
-        landed = next((s["t"] for s in after if s.get("h", 1) <= 0 and s.get("tof", 100) <= 15), None)
+        # the state stream's h field reads 0-10 while hovering at 90 cm; the time-of-flight
+        # sensor (tof, cm) is the honest height. 6553 means out of range (on the ground, tilted).
+        start_tof = next((s["tof"] for s in after if s.get("tof", 6553) < 500), None)
+        descending = next((s["t"] for s in after if start_tof is not None
+                           and s.get("tof", 6553) < start_tof - 15), None)
+        landed = next((s["t"] for s in after if s.get("tof", 6553) <= 15 or s.get("tof") == 6553), None)
         summary.update({
             "abort_to_horizontal_stop_s": None if still is None else round(still - abort_t, 2),
             "abort_to_descent_s": None if descending is None else round(descending - abort_t, 2),
@@ -144,7 +147,7 @@ def main() -> int:
     parser.add_argument("--variant", choices=("N", "A", "B"), required=True)
     parser.add_argument("--delay", type=float, default=2.0, help="seconds after the move is sent")
     parser.add_argument("--distance", type=int, default=200)
-    parser.add_argument("--speed", type=int, default=50, help="cm/s, so the move lasts about 4 s")
+    parser.add_argument("--speed", type=int, default=50, help="cm/s (measured: a 200 cm move takes ~10 s regardless)")
     parser.add_argument("--local-ip", default=None)
     parser.add_argument("--out", default="artifacts/b1")
     parser.add_argument("--confirm", action="store_true",
@@ -188,7 +191,7 @@ def main() -> int:
         while time.monotonic() - move_sent < GIVE_UP_S:
             height, elapsed = bench.height_cm(), time.monotonic() - move_sent
             tof = bench.states[-1].get("tof", 100) if bench.states else 100
-            if elapsed > 3.0 and height is not None and height <= 0 and tof <= 15:
+            if elapsed > 3.0 and (tof <= 15 or tof == 6553):
                 airborne = False
                 break
             if not failsafe_sent and elapsed > FAILSAFE_LAND_S:
