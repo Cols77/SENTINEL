@@ -11,7 +11,7 @@ Make Jev and the LLM safe, comparable decision selectors over the same determini
 The work lands in two sequential increments:
 
 1. Both proposers can explicitly say that no catalogue plan fully satisfies the request. Prompts require complete constraint satisfaction rather than the nearest available plan.
-2. Both proposers can make a bounded sequence of read decisions before selecting one prebuilt final action or escalating. Validation failures and rejected tool calls return as typed feedback to the next turn instead of being hidden by architecture-F fallback.
+2. Both proposers can make a bounded sequence of read decisions before selecting one prebuilt terminal response, workflow finalization, proposal, or escalation. Validation failures and rejected tool calls return as typed feedback to the next turn instead of being hidden by architecture-F fallback.
 
 The gateway, persistent repository, legal-set computation, and operator approval remain authoritative. A model never constructs an unrestricted mutation and never executes an approved operation.
 
@@ -122,6 +122,11 @@ A `BoundedDecisionSession` is controller state for one `agent_run_id`. It does n
 DecisionPacket
   run_id
   agent_run_id
+  conversation_id
+  root_request_id
+  parent_agent_run_id?
+  request_revision
+  clarification_round
   state_version
   operator_request
   decision_point
@@ -135,6 +140,18 @@ DecisionPacket
 
 The packet contains bounded descriptions and stable candidate IDs. A final candidate maps to an existing legal-set `Candidate`. A read candidate maps to one exact read tool with controller-owned arguments. The session transcript contains bounded typed results and validation feedback; provider payloads and credentials are excluded.
 
+Conversation linkage is durable even though session state is not. Selecting
+`CLARIFY` appends a `decision_clarification` record containing the conversation and
+root-request IDs, current agent-run ID, question candidate and packet hashes,
+request revision, `clarification_round=1`, and `AWAITING_RESPONSE`. The resume
+entry point requires the conversation ID and expected request revision, persists
+the operator's response as the next request revision, and creates a new
+`agent_run_id` whose `parent_agent_run_id` names the clarifying run. The resumed
+session receives a fresh per-session call budget but offers no further `CLARIFY`
+candidate. If the single response leaves the request ambiguous, it suggests or
+escalates. This record remains after `forget(agent_run_id)` clears the transient
+selector history.
+
 The session is cleared through the existing `forget(agent_run_id)` boundary on every terminal return, approval wait, deadline, emergency, or exhausted budget.
 
 ### Normalized candidate protocol
@@ -143,7 +160,11 @@ Both selectors operate over the same candidate registry:
 
 ```text
 READ:<stable-id>     -> exact whitelisted read call
-ACTION:<stable-id>   -> exact current legal final action
+ANSWER:<stable-id>   -> grounded controller-rendered answer
+SUGGEST:<stable-id>  -> non-mutating legal alternatives with disclosed gaps
+CLARIFY:<stable-id>  -> one bounded controller-authored user question
+REPORT:<stable-id>   -> deterministic survey-report finalization
+PROPOSE:<stable-id>  -> exact current legal action pending approval
 ESCALATE             -> canonical finish(NEEDS_REVIEW)
 ```
 
@@ -151,28 +172,47 @@ Jev receives those IDs as fixed-choice criteria and returns one ID with probabil
 
 The LLM receives schemas only for tools represented by active candidates. Its tool call is normalized to an active candidate ID. Identity-bearing arguments must match the prebuilt candidate. A free-text rationale may be accepted, bounded, and audited, but it cannot change the candidate's executable arguments.
 
+`ANSWER`, `SUGGEST`, and `CLARIFY` are terminal response tools, not gateway
+commands. Their IDs resolve to controller-built packets and cannot mutate state.
+`CLARIFY` pauses the request until a user response starts one linked, versioned
+session. The first implementation allows one clarification round. `SUGGEST`
+lists only current legal alternatives and explicitly records which original
+constraints they do not satisfy; it can never be scored as fulfilling the
+original request. `REPORT` is a separate, controller-finalized workflow outcome:
+it may persist only the deterministic report already represented by a current
+`survey.submit_report` candidate, after matching its results version and report
+payload hash. It does not call the mutation gateway or require a new approval,
+because it records the result of an already approved sweep; it writes a dedicated
+append-only finalization audit record. `PROPOSE` is the only outcome that can reach
+the gateway, and it retains operator approval.
+
 This makes transport different while authority remains equal:
 
 - Jev transport: fixed-choice response to a deterministic candidate menu.
 - LLM transport: tool call normalized to the same deterministic candidate menu.
 
-### Shared read, act, or escalate instruction
+### Shared decision instruction
 
 The models are expected to know general tool-use patterns, but they cannot infer
 Sentinel's local meaning of a legal candidate, approval boundary, result freshness,
 or capability limit. Both selectors therefore receive the same short decision
 rule rather than a catalogue of scenario-specific examples:
 
-> Choose one currently legal final action only when the supplied current facts
-> fully support it and it satisfies every stated constraint and requested
-> deliverable. Otherwise choose one legal read only when its declared result could
-> materially resolve a specific missing, stale, or contradictory fact required
-> for a final decision. Otherwise escalate. Escalate when the request needs an
-> unavailable capability or its constraints cannot all be satisfied. Do not choose
-> a closest or partial match, do not read merely because a read is available, and
-> do not repeat a read without a relevant state or version change. A read reveals
-> facts; it does not create evidence or capability. After rejected or failed
-> feedback, reassess the current facts and remaining candidates.
+> Answer directly when supplied authoritative facts fully resolve an informational
+> request. Finalize a workflow report only from its matching current result packet.
+> Propose an action only when the operator explicitly requests it or has clarified
+> that action is wanted, and the action satisfies every stated constraint. Choose
+> one legal read only when its declared result could materially resolve a specific
+> missing, stale, or contradictory fact needed for one of those outcomes. Clarify
+> one material ambiguity in the operator's request when its answer could make a
+> supported outcome possible. Suggest only current legal partial alternatives,
+> disclosing every unmet constraint. An unavailable persisted informational field
+> is answered as unavailable from the declared capability registry. Otherwise
+> escalate, including when a requested action needs an unavailable capability, no
+> reliable grounded informational answer exists, or constraints are irreconcilable. Do not choose
+> a closest match, read merely because a read is available, repeat an unchanged
+> read, or treat a read as creating evidence or capability. After rejected or
+> failed feedback, reassess the current facts and remaining candidates.
 
 Candidate descriptions state what each read returns and its freshness/version.
 The packet marks facts as current, stale, absent, or contradictory. This lets the
@@ -184,13 +224,47 @@ is useful, so confidence and margin alone are not treated as proof of materialit
 Prompt tests assert the decision semantics, not exact prose. Behavioral tests pin
 the important distinctions:
 
-- sufficient current facts select a final action without a redundant read;
+- sufficient authoritative facts select an answer, report, or requested action
+  without a redundant read;
+- a factual question with sufficient current facts selects a grounded answer;
 - a useful read is selected before escalation when it can resolve the named gap;
+- a user ambiguity selects clarification, and an unsupported action with useful
+  legal partial options selects a non-mutating suggestion;
 - unsupported capability or irreconcilable constraints escalate even when reads
   remain available;
 - after a read, the selector reassesses rather than repeating it;
 - exhausted, failed, or irrelevant reads lead to escalation rather than an
-  unsupported final action.
+  unsupported terminal outcome.
+
+### Low-confidence recovery
+
+Increment 1 has no model-directed reads, so its existing confidence and margin
+gates continue to fail closed to escalation. Increment 2 changes recovery when a
+real information-gathering path exists.
+
+Every Jev selection kind uses the same finite-probability, selected-label
+confidence, and margin gates. A low-confidence answer, report, suggestion,
+clarification, read, or proposal is not accepted. Low confidence by itself is not
+evidence that state is missing. When at least one provider call remains and the
+candidate registry identifies one declared discriminating read, a material user
+ambiguity, or useful legal alternatives, the controller records
+`gate_outcome=low_confidence` and `recovery_offered=true`; the next turn receives
+the corresponding restricted subset of `READ|CLARIFY|SUGGEST|ESCALATE`. Otherwise
+it terminates in escalation. A low-confidence selection on provider call three
+records `recovery_offered=false`, `reason=CALL_BUDGET_EXHAUSTED`, and terminates
+`NEEDS_REVIEW` without a fourth call.
+A failed or unchanged read is removed and cannot loop. Malformed probabilities
+and provider failure escalate immediately because there is no trustworthy choice
+to recover from. An explicit adequately confident escalation remains terminal.
+
+The LLM transport does not return calibrated choice probabilities, so it does not
+invent a confidence gate. It must still pass schema, active-candidate, identity,
+authority, and source-version validation for every selection kind. The candidate
+builder offers answer and report candidates only for the controller-parsed class,
+room, and run. An ambiguous target produces clarification candidates instead of
+several guessable answer candidates. Reads retain Jev's confidence and margin
+gates; their lower mutation risk does not justify accepting an arbitrary
+low-confidence read.
 
 ### Initial inspection reads
 
@@ -213,7 +287,8 @@ escalate immediately.
 ### Turn and budget rules
 
 - At most two accepted reads occur before a terminal decision.
-- A normal path therefore uses at most three productive provider calls: two reads and one action or escalation.
+- A normal path therefore uses at most three productive provider calls: two reads
+  and one terminal response, report finalization, proposal, or escalation.
 - The existing shared correction budget permits at most two retries, but retries
   are inside the provider-call ceiling rather than additional to it.
 - The hard provider-call ceiling per decision session is three.
@@ -222,7 +297,8 @@ escalate immediately.
   how many reads remain possible in that session.
 - A refusal on provider call three is persisted and audited, but no fourth
   provider turn exists to consume it; the session terminates `NEEDS_REVIEW`.
-- After two accepted reads, only final actions and escalation are offered.
+- After two accepted reads, only grounded answer, suggestion, clarification,
+  report finalization, proposal, and escalation outcomes are offered.
 - After the correction budget or hard call budget is exhausted, the session terminates as `NEEDS_REVIEW`; it does not invoke F.
 - Provider unavailability and unusable Jev probability output escalate immediately because no actionable choice exists to correct.
 
@@ -273,7 +349,7 @@ For a read:
 4. Append it to the bounded session transcript.
 5. Refresh repository state, legal candidates, cursor, and state version before the next selection.
 
-For a final action:
+For a proposal:
 
 1. Refresh authoritative state.
 2. Recompute the legal set.
@@ -288,11 +364,24 @@ reuse an idempotency key derived from stale state.
 
 For escalation, return the canonical `finish(NEEDS_REVIEW)` result without invoking the gateway or F.
 
+For an answer, suggestion, or clarification, resolve the selected response ID to
+its controller-built packet and persist its source references. Do not call the
+gateway. An answer completes the read-only request, a suggestion completes with
+unmet constraints visible, and a clarification pauses until new user input.
+
+For a survey report, re-read the current survey results, require the candidate's
+run ID, results version, payload hash, option-registry hash, and deterministic
+report body to match, then persist that body through the existing survey store.
+The selector cannot author or alter the body. A stale or mismatched candidate is
+rejected through `decision.validate`; a successful write emits an append-only
+`survey_report_finalized` record and ends the workflow.
+
 ### Architecture-router role
 
 `ArchitectureRouter` remains the architecture-E boundary, but it no longer converts correctable model mistakes into architecture-F decisions. It performs protocol validation and either:
 
-- forwards a legal read, final action, or escalation;
+- forwards a legal read, grounded response, workflow finalization, proposal, or
+  escalation;
 - raises the typed `DecisionRejected` signal for loop feedback; or
 - returns canonical escalation for an unavailable provider or exhausted proposer gate.
 
@@ -300,7 +389,8 @@ Architecture F remains unchanged and separately measurable.
 
 ### Auditing
 
-Each provider selection writes one attempt record with:
+Each provider selection in Increment 2 writes one append-only `decision_attempt`
+record with:
 
 - session and run IDs;
 - state version and event cursor;
@@ -313,18 +403,35 @@ Each provider selection writes one attempt record with:
 - call index, reads used, corrections used, and latency.
 
 The stable taxonomy uses `gate_outcome=accepted` with
-`decision_kind=plan|read|escalation` for accepted decisions. Accepted-proposal
-denominators include only plans. Gate-derived low-confidence, thin-margin,
-malformed, and provider-failure escalations remain distinct from explicit model
-escalation.
+`decision_kind=read|answer|suggestion|clarification|report|proposal|escalation`
+for accepted decisions. Accepted-proposal denominators include only proposals.
+Gate-derived low-confidence and thin-margin attempts retain their actual gate
+outcome and may link to a later recovered terminal decision; only unrecoverable or
+budget-exhausted cases are terminal escalations. Malformed and provider-failure
+escalations remain distinct from explicit model escalation.
 
-Each read writes an execution record linked to the attempt and resulting audit/event reference. Each deterministic refusal writes its error code and next-turn linkage. Accepted plan recommendations retain their existing record. Evaluation reports model-only outcomes separately from any deterministic or scripted fallback.
+Each read writes an execution record linked to the attempt and resulting
+audit/event reference. Each deterministic refusal writes its error code and
+next-turn linkage. Every accepted `ANSWER`, `SUGGEST`, or `CLARIFY` writes an
+append-only `decision_response` containing the decision kind, candidate ID and
+packet hash, rendered-template revision, source references and versions,
+observation time or freshness status where applicable, disclosed unmet
+constraints, and terminal disposition. A successful `REPORT` writes the same
+fields plus the persisted report ID in `survey_report_finalized`. Increment 1
+retains `proposal_attempt`; accepted plan recommendations retain
+`proposal_recommendation`. Increment 2's general record name avoids treating
+nonproposal turns as proposals. Evaluation reports model-only outcomes separately
+from any deterministic or scripted fallback.
 
 ## Survey extension
 
 The shared session and candidate protocol must be domain-neutral, but the first production connection is inspection. Survey integration follows after the inspection protocol passes its regression and evaluation gates.
 
-Survey then maps its existing legal candidates into the same action/escalation registry and makes the existing `get_site` and `get_results` functions dispatchable typed reads. Their results must correspond to the selected run, sweep option, and current store state.
+Survey then maps its existing legal candidates into the same registry: sweep and
+follow-up candidates become `PROPOSE`, `survey.submit_report` becomes `REPORT`,
+and the existing `get_site` and `get_results` functions become dispatchable typed
+reads. Their results must correspond to the selected run, sweep option, pinned
+option registry, and current store state.
 
 For bounded E/J sessions, a read is offered only when its full equivalent payload
 is absent, stale, or contradictory. `survey.get_site` is useful at sweep selection
@@ -371,6 +478,99 @@ shared instruction:
 > unique-object results, never a raw detection count. Choose a follow-up only when
 > it can resolve a named uncertainty within the remaining flight budget; otherwise
 > escalate.
+
+### Demo conversational scope
+
+The initial question-answering surface is intentionally limited to one
+manifest-bound demo room. A versioned `DemoContext` supplies `room_id`, one
+`survey_run_id`, and an optional independent `pose_run_id`; its canonical hash is
+included in each decision packet and response audit record. The two run IDs are
+never inferred from one another, and sharing a `DemoContext` does not claim that
+the survey and pose samples were captured simultaneously. It supports:
+
+- observed counts for computers, people/humans, and phones;
+- whether those counts are confirmed, uncertain, lower bounds, incomplete, or not
+  observable at the flown range;
+- the latest persisted drone pose for the configured pose run, its observation
+  time, source, quality, and read-time staleness;
+- simple deterministic comparisons over non-overlapping count intervals.
+
+It does not claim arbitrary mountain-state question answering.
+
+`room.get_observation_counts` wraps the authoritative survey
+`class_counts(store, run_id, options)` result rather than raw sightings or the
+store's unqualified count dictionary. Before the first sweep, the run persists the
+canonical option-registry revision and hash in run metadata. Every count read
+loads options through that pinned registry, verifies that every flown option ID
+exists in it, and rejects a missing or mismatched registry rather than computing a
+different result from the same database. With controller-owned run and option IDs
+it returns:
+
+```text
+room_id, run_id, results_version/data_digest,
+option_registry_revision/hash, latest_capture_at,
+analysed_frames, unanalysed_frames, flights_used,
+flown_options[{option_id, range_cm}],
+classes[{class, confirmed, uncertain, method}]
+```
+
+The accepted aliases are bounded: computer/laptop, human/person/people, and
+phone/mobile phone. Answer templates preserve the class-specific semantics:
+
+- Computer and phone answers report confirmed objects plus uncertain objects as a
+  supported interval. They include unanalysed-frame and flown-range
+  qualifications.
+- Person answers report the maximum people visible simultaneously in one analysed
+  frame as a lower bound. They do not claim unique-person identity or live room
+  occupancy.
+- `NOT_OBSERVABLE` reports that the flown range cannot support that class count.
+- Zero with unanalysed frames, missing selected frames, or an unobservable class is
+  never rendered as "none in the room."
+
+These are historical observations from captured frames, never a claim about live
+occupancy. The response always says "observed" and includes `latest_capture_at`.
+It may state whether this is the latest persisted result version for the bound run,
+but it has no occupancy-freshness threshold and never labels the room count fresh.
+"Current results" elsewhere in this design means only the latest persisted result
+version for that run.
+
+Computer and phone intervals are `[confirmed, confirmed + uncertain]`. A person
+result is `[maximum_simultaneously_visible, unknown]`: it has no finite upper
+bound. A deterministic comparison is emitted only when the intervals prove the
+ordering. In particular, people can be proven more numerous than a computer or
+phone class only when the people lower bound exceeds that class's finite maximum;
+the reverse cannot be proven from a people lower bound. Overlapping or unbounded
+comparisons are rendered indeterminate.
+
+`drone.get_latest_pose` wraps the authoritative persisted pose read for the
+`DemoContext.pose_run_id`. It returns that run ID, the normalized room point,
+heading, optional altitude, observation time, source kind, method, reprojection
+quality, snapshot version, and read-time stale flag. The pose staleness threshold
+is configuration- and manifest-bound. Answer templates distinguish a fresh pose,
+a stale last-known pose, and no available pose. A stale pose means the current
+location is unknown. If the context has no pose run, or the request names a
+different or ambiguous run, the controller offers clarification or reports the
+pose unavailable; it never substitutes the survey run ID.
+
+The current integrated state cannot substantiate battery, airborne/landed state,
+speed, temperature, current waypoint, active cube-mission progress, or a unified
+survey/pose/mission run state. Client methods and historical logs are not treated
+as current persisted facts. `drone.get_runtime_state` remains blocked until a
+run-bound telemetry and mission snapshot exists. The bounded supported drone
+intents are position/location/pose, heading, last observation time, and pose
+quality. An unqualified "drone state" question gets one clarification listing
+those supported properties; a question about an unsupported property receives a
+grounded unavailable `ANSWER` from the capability registry. Because an answer is
+terminal, a pose alternative is offered only if the operator makes a later request.
+
+For Jev and the LLM, the controller prebuilds the same answer IDs and renders the
+same grounded templates. Jev therefore needs no free-form text generation for
+this scope. If no latest persisted survey result can answer a count question, the
+agent may suggest a legal sweep. An informational question alone does not
+authorize a flight proposal: `PROPOSE` is offered only when the operator explicitly
+asks to survey, or answers a clarification confirming that a survey should be
+prepared for approval. The agent must not answer from absent data. If the room or
+run reference is ambiguous, it uses one bounded clarification instead of guessing.
 
 Survey keeps its two-flight budget and requires approval before every sweep. A missing or mismatched replay observation remains unevaluable and cannot be repaired by substituting frames from another option.
 
@@ -582,7 +782,8 @@ Implementation follows test-driven, task-sized commits:
 6. Add failing loop tests for router refusal, illegal tool, unknown candidate, argument mismatch, duplicate read, stale state, gateway rejection, correction recovery, and exhausted budgets.
 7. Implement the shared session/candidate registry and Jev/LLM selector adapters.
 8. Add end-to-end tests in which each proposer reads, receives the typed result, then chooses a different legal action or escalation.
-9. Verify pending approval produces no additional provider call and no final action bypasses approval.
+9. Verify pending approval produces no additional provider call and no proposal or
+   aircraft mutation bypasses approval.
 10. Extend the inspection evaluation manifest and raw record stream with turn, read, correction, and call-budget fields.
 11. Run scripted and recorded one-shot versus bounded multi-turn inspection arms on identical cases. Cases must genuinely require a read before they support claims about multi-turn quality.
 12. Upgrade the integrated survey evaluator, strict replay, scene manifest, execution modes, and stage-separated scoring; then connect survey reads and run its scripted/recorded acceptance baseline.
@@ -597,15 +798,41 @@ Implementation follows test-driven, task-sized commits:
   never as an accepted plan or unsupported-request false proposal.
 - The LLM sees exactly the currently legal provider tools.
 - Jev and the LLM receive the same semantic candidate set for the same state.
-- Both can perform up to two validated reads and then select a final candidate or
-  escalate when no earlier rejection consumed the shared three-call budget.
+- Both can perform up to two validated reads and then select a terminal response,
+  report finalization, proposal, or escalation when no earlier rejection consumed
+  the shared three-call budget.
+- Demo questions about computer, person/human, and phone observations return the
+  correct class-specific interval or lower-bound template with capture time,
+  flown-option range, and unanalysed-frame qualifications. They are labelled as
+  historical observations, not live occupancy.
+- Count reads reject an absent or mismatched option-registry hash, and identical
+  persisted run data cannot be reinterpreted with a different option registry.
+- People comparisons respect the unbounded upper interval: only a people lower
+  bound above another class's finite maximum proves people are more numerous;
+  unsupported orderings are indeterminate.
+- Drone questions return the latest persisted pose for the explicitly bound pose
+  run with source and read-time staleness, or honestly report that no pose exists.
+  Survey and pose run IDs are never substituted for one another. Unsupported
+  runtime fields such as battery or airborne state are never inferred.
+- `ANSWER`, `SUGGEST`, and `CLARIFY` never call the gateway; suggestions disclose
+  unmet constraints and cannot count as fulfilling the original request.
+- An informational question alone cannot create a sweep proposal; explicit action
+  intent or a positive clarification response is required before `PROPOSE` is
+  offered.
+- `REPORT` persists only a deterministic body whose run, result version, report
+  hash, and option-registry hash still match; stale report candidates are rejected.
+- A low-confidence Jev selection of any kind can recover through one declared
+  useful read, clarification, or suggestion when at least one provider call
+  remains; call-three failures terminate without exceeding the hard ceiling. Low
+  confidence alone does not trigger arbitrary exploration.
 - Deterministic refusals and gateway rejections appear as typed feedback on the next turn.
 - A corrected next-turn decision can succeed within the shared correction budget.
 - Exhausted read, correction, turn, or provider-call budgets end in `NEEDS_REVIEW`.
 - No router fallback can convert a proposer failure into model success.
 - Repeated or stale reads and stale final candidates cannot execute.
 - Pending approval causes zero further provider calls.
-- All attempts and reads are auditable and replayable without credentials.
+- All attempts, reads, terminal responses, and report finalizations are auditable
+  and replayable without credentials.
 - Architecture F behavior and historical evaluation artifacts remain unchanged.
 
 ## Evaluation interpretation
@@ -653,3 +880,12 @@ release-readiness claim.
 The multi-turn arm is compared with the one-shot arm using identical model identities, prompts except for protocol instructions, cases, repeats, budgets, and legal candidates. Reports show provider calls, accepted reads, rejected decisions, corrections, latency, escalation, proposal accuracy, unsupported-request false proposals, and final workflow outcomes with denominators.
 
 A successful correction after deterministic feedback is reported as a retry, not a first-pass success. A read that merely repeats already injected context does not count as evidence that multi-turn reasoning improved model quality.
+
+The broader response protocol intentionally accepts a more complex evaluator.
+Trajectory scoring reports whether each read addressed a declared gap, whether it
+was redundant, whether newly read evidence changed the outcome appropriately,
+whether an answer cited current source versions, whether stale facts were qualified,
+whether clarification was necessary, and whether suggestions were legal and
+disclosed unmet constraints. Final-answer correctness, trajectory efficiency, and
+mutation/approval safety remain separate metrics. Jev's deterministic answer
+templates are scored for factual support rather than prose quality.
