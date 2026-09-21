@@ -1,3 +1,9 @@
+---
+id: sentinel-wp5-cube-positioning-design
+title: "WP5 cube navigation and positioning - design"
+status: review-pending
+---
+
 # WP5 cube navigation and positioning — design (rev 3)
 
 Date: 2026-09-20 · Branch: `feat/sentinel-wp5-drone-pose` · Status: draft for operator review
@@ -41,7 +47,7 @@ changes; WP1 coordinator wiring; the counting/perception itself.
 | E1 | Single-tag static accuracy: 40 cm → 1.0 cm spread; 80 cm → 2.1 cm; 111 cm → 11.1 cm. | measured |
 | E2 | The single-tag error driver is viewing obliquity (planar PnP lateral/yaw degeneracy of one small head-on tag): 14.4° → 1.45 cm, 6.8° → 8.66 cm on the same frames. | measured |
 | E3 | Reprojection error does not predict pose accuracy. | measured |
-| E4 | Camera pitched 8.6° down; FOV 70.2° × 55.6°; view spans 19.2° above to 36.4° below horizon. | measured / spec |
+| E4 | Camera pitched 8.6° down; FOV 70.2° × 55.6°; view spans 19.2° above to 36.4° below horizon. **Corrected 2026-09-21:** only the pitch was measured. The FOV was derived from the datasheet's 82.6° and contradicts this repository's own chessboard calibration (fx 892.6), which gives 56.5° × 43.9° and a view from about 13° above to 31° below the horizon (coherence spec §10.5). `sentinel.cube.observe` still uses 55.6° and over-promises what is in frame at close range; owed by the WP5 fix session. | pitch measured; FOV was spec-derived and is wrong |
 | E5 | Joint PnP over several tags removes the degeneracy. | simulated |
 | E6 | Joint solve on the real two-tag recording is robust to the degenerate tag (1.06 vs 3.77 cm); joint reprojection 1.19 px vs ~0.5 px single — the residual exposes tape-measure map error. | measured |
 | E7 | Simulation under-predicts real scatter ~2.5×. All predictions below include this factor. | derived |

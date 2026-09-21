@@ -34,3 +34,12 @@ no non-stop autonomous action exists; position source is the W07 AprilTag pose.
 
 **Evidence class:** implementation-pending (worker behavior; the reflex itself is
 testable in simulation, real-drone proof is human/live).
+
+**Coherence note (2026-09-21; the statement above is unchanged).** The V0 spec §10.3 records
+three differences between this statement and what is implemented: W08-a, the reflex is written
+as the terminal emergency hard stop but implemented as a controlled landing through the existing
+abort path; W08-b, "continuously" is written but a fix exists only with tags in view and is
+checked at localised stops; W08-c, "the 1 m demo cube" is written but the envelope is now derived
+from the site file. Each awaits the operator's decision. Until then this requirement is **not
+satisfied** and must not be reported as satisfied. The position source in practice is the WP5
+`DronePoseReport` (SR-060), which generalises W07's per-station marker mode.

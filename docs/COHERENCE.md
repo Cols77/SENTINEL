@@ -16,7 +16,7 @@ Ordered from most to least authoritative, per the [V0 coherence spec](superpower
 1. **V0 coherence spec** — selects and defines the V0 product/integration profile (`sentinel.v0` contract revision). It is the canonical profile document and the top of the hierarchy.
 2. **Indoor-alley survey design** ([2026-09-16-sentinel-v0-indoor-alley-survey-design.md](superpowers/specs/2026-09-16-sentinel-v0-indoor-alley-survey-design.md)) — the V0 decision record for the room-demo (six-zone route, station capture, layout modes, preflight/force-run/emergency semantics). It ranks just below the coherence spec and everything below must conform to it.
 3. **WP0 shared-coherence contracts** ([2026-09-16-sentinel-wp0-shared-coherence-contracts.md](superpowers/specs/2026-09-16-sentinel-wp0-shared-coherence-contracts.md)) **plus** its machine-readable contract artifacts (`docs/superpowers/specs/contracts/`) — define executable shared semantics: the directly-validatable public root [`sentinel-v0-contract.schema.json`](superpowers/specs/contracts/sentinel-v0-contract.schema.json), the `oneOf` wire registry [`sentinel-v0-wire.schema.json`](superpowers/specs/contracts/sentinel-v0-wire.schema.json), the mountain fixture, the survey-catalogue, the provider-profile and evaluation-manifest schemas, and the DDL/constraint manifest.
-4. **WP1–WP3 component specs** — define component behavior only within WP0; they may not contradict WP0 or the survey design.
+4. **WP1–WP3 component specs** — define component behavior only within WP0; they may not contradict WP0 or the survey design. The **WP5 cube design** and the **survey-counting design** (both 2026-09-20) rank here: they refine within the coherence spec §10 and WP0 and may not widen either. By PM decision D-011 the survey-counting flow is the *demonstrated* scenario; the indoor-alley design in item 2 still defines the *judged* V0 path.
 5. **Parent database specification** ([SENTINEL_Demo_State_Database_Spec_v0.2.md](SENTINEL_Demo_State_Database_Spec_v0.2.md)) — remains the persistence/safety source except where the V0 mapping table explicitly defines a V0 representation.
 6. **Historical broad component drafts** — supporting design history, not current V0 authority (this includes the retained [DJITelloPy backend plan](superpowers/plans/2026-09-15-sentinel-djitellopy-backend.md), classified retained/deferred/non-authoritative in place).
 
@@ -38,6 +38,7 @@ The parent→V0 compatibility mapping table in the coherence spec §3 is binding
 | plan lifecycle | `PLAN_PROPOSED → PLAN_CREATED → PLAN_APPROVED\|PLAN_REJECTED` | wire schema event enum; probe test |
 | evidence artifact lifecycle | `put_selected_frame`: JPEG/PNG < 10 MiB, SHA-256, run-scoped `storage_key` → `ArtifactRef`; retention is run-lifetime plus explicit manual cleanup | WP0 §5 |
 | document status | `review-pending` for the documents in this preparation set (coherence spec, WP0 spec, this map) | frontmatter of each document |
+| camera model: `tello-measured` / `synthetic-level` / `nominal` | `tello-measured` is the chessboard calibration plus the measured 8.6° pitch and is the only model valid for real Tello pixels; `synthetic-level` (survey) and `nominal` (pose, fx 547) are valid only for frames rendered with them | coherence spec §10.5; `calibration/tag-map-calibrated.json`; `sentinel.survey.observability`; `tests/survey/test_camera_model.py` |
 
 ## 3. Ownership and change order
 
@@ -62,10 +63,47 @@ The parent→V0 compatibility mapping table in the coherence spec §3 is binding
 - **Evidence demonstrates conformance; it does not grant authority.** Evaluation manifests and gate evidence make a claim reproducible and reviewable, but the only artifact that authorizes a provider in the judged path is the named joint Colin+Dzivha approval over a versioned test-image-set hash (coherence spec D-007/G3; WP0 §5). An `approval_status: APPROVED` value inside a simulated fixture is fixture data, not a joint approval record.
 - **Fixture validity ≠ provider authorization or benchmark evidence.** A schema-valid fixture or profile instance is not authorization, and no checked-in data set constitutes benchmark evidence (fixtures README).
 
-## 6. Native catalog / projections / evidence: blocked until upstream capability lands
+## 6. Native catalog / projections / evidence
+
+> **Status 2026-09-21.** The text below this note describes the state on 2026-09-17 and is kept as history. Since then the upstream capability landed (pinned at `pi-agent-factory` `cb76075`), the contract catalogue `.factory/contracts.yaml` was authored (KB-BOOT-09), and 37 requirements exist under `requirements/`, all still `proposed` with no binding. What the tooling says today, and how to run it, is in §7.
+
+### 6.1 As of 2026-09-17: blocked until upstream capability lands
 
 The Coherence **contract-artifact capability** — native generation of semantic requirements (SRs) and projections from contract documents — is an upstream capability that is **not landed** in this baseline. Consequences, stated here so no later step invents otherwise:
 
 - **No SRs or native projections are authored** as part of this preparation; the map above and the document frontmatter are the preparation surface.
 - **Native catalog, projections, and evidence remain blocked** (i.e., are not produced, consumed, or claimed) until the upstream capability is landed **and independently verified** — verified meaning demonstrated against this repository's contracts by an independent check, not by the capability's own self-report.
 - Until then, the authority map in this document, the spec frontmatter, and the fixture classifications are documentation-only and subordinate to the documents in §1.
+
+## 7. Running the Coherence tooling, and what it can and cannot tell you
+
+The CLI is not a dependency of this repository. Run it from the pinned upstream worktree, with
+this repository as the project root:
+
+```
+uv run --project C:/coding/pi-agent-factory-wt/contract-capability-main python -m coherence <group> ...
+```
+
+| Command | What it checks | State on `integration/survey-demo`, 2026-09-21 |
+|---|---|---|
+| `trace check --project-root .` | every plan, spec, feature and requirement is reachable in the trace graph | runs; health 23 %. Before 2026-09-21 it **crashed**: two proposal documents carried frontmatter that was not valid YAML and had no `id`/`title`, which the tool treats as fatal for the whole graph |
+| `register check --project-root .` | each requirement is accounted for by a measurement, a task or a deferral | fails by design: all 37 requirements are `proposed` and undecided |
+| `mirrors check --project-root .` | derived blocks in feature dossiers match the graph | passes (FEAT-021 regenerated 2026-09-21) |
+| `navigate freshness --repo-root .` | declared contract artifacts exist and have provenance and validation evidence | warnings only: no consumer has recorded validation evidence yet |
+
+**What this tooling does not do.** It checks *structure*: that artifacts exist, parse, and point at
+each other. It does not read prose, so it cannot see that two documents contradict each other.
+None of the contradictions fixed on 2026-09-21 (pose as "never a flight-control input" against the
+W08 carve-out; three focal lengths for one camera; G3 named as a flight gate) was, or could have
+been, reported by it. Two practices close that gap:
+
+1. **A normative sentence lives in one place.** Other documents link to it instead of restating
+   it. The pose boundary is coherence spec §10.2; the camera model is §10.5. Restatements are what
+   drifted.
+2. **A number shared between artifacts gets a consumer test.** `tests/survey/test_camera_model.py`
+   is the pattern: it reads the calibration artifact and the pose package's pitch and fails when
+   the survey package disagrees with either.
+
+A spec added under `docs/superpowers/specs/` needs either no frontmatter at all or a valid block
+with `id`, `title` and `status`. A frontmatter value that starts with a backtick, or contains
+`: `, must be quoted or written as a folded scalar (`>-`).
