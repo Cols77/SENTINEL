@@ -344,6 +344,7 @@ W08 implementation status rather than reporting the requirement satisfied.
 | B@1.2s | forward 100 | stop, land at 1.5 s | `error Auto land`, 0.29 s after `land` | 1.4 s | 2.6 s | **33 cm** |
 | A@1.2s | forward 100 | land | `error Auto land`, 0.16 s after `land` | 1.0 s | 2.3 s | **35 cm** (total 70 cm; operator tape 70 cm) |
 | A@0.5s | forward 100 | land | `error Auto land`, 0.20 s after `land` | - | 2.7 s | ~15 cm: `land` arrived before the drone was moving (motion starts ~0.6 s after the move); weak video (17 fps, mostly single-tag fixes) |
+| **A@3.0s, speed 20** | forward 100 | land | `error Auto land`, 0.18 s after `land` | - | 3.7 s | **12 cm** (36 cm flown before `land`; battery 22 -> 14 %) |
 
 - **The Tello honours `land` during a move.** The move ends with `error Auto land` within 0.3 s, the drone brakes and descends; no emergency cut needed; telemetry answered afterwards.
 - **`stop` does not exist on this firmware** (`unknown command: stop`). Variant B is variant A with a 0.3 s delay; drop it.
