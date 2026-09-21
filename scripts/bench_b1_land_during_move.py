@@ -23,7 +23,8 @@ import time
 from pathlib import Path
 
 TELLO = ("192.168.10.1", 8889)
-MIN_BATTERY = 30          # a run costs ~5-10 %; the Tello itself degrades below ~20 %
+MIN_BATTERY = 5           # operator decision 2026-09-21; runs below LOW_BATTERY are flagged
+LOW_BATTERY = 20          # below this a Tello may land by itself, which looks like obeying `land`
 HOVER_S = 3.0
 FAILSAFE_LAND_S = 12.0      # after the move is sent, land regardless
 GIVE_UP_S = 30.0
@@ -194,6 +195,9 @@ def main() -> int:
         if battery is None or not battery.isdigit() or int(battery) < MIN_BATTERY:
             print(f"Battery {battery}% is below {MIN_BATTERY}%. Not taking off.")
             return 1
+        if int(battery) < LOW_BATTERY:
+            bench.log("note", f"LOW BATTERY {battery}%: a self-landing would look like obeying land; "
+                              "treat this run as provisional")
         bench.ask(f"speed {args.speed}")
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
