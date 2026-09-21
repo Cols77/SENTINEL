@@ -521,3 +521,31 @@ def test_load_mission_accepts_a_file_without_a_start(tmp_path):
                                 "waypoints": [{"name": "A", "x_cm": 270, "y_cm": 300, "z_cm": 100}]}))
     mission = load_mission(path)
     assert mission.start_x_cm is None and mission.start_y_cm is None
+
+
+def test_a_firmware_without_stop_still_completes_the_mission(tmp_path):
+    """2026-09-21, trial 5: the Tello answered `unknown command: stop` and a
+    fully flown mission was reported FAIL. A Tello already hovers after a move."""
+
+    class NoStopClient(DryRunClient):
+        def stop(self):
+            raise RuntimeError("Command 'stop' was unsuccessful for 4 tries. "
+                               "Latest response:\t'unknown command: stop'")
+
+    client = NoStopClient()
+    runner = CubeMissionRunner(client, "dry-run", mission=MISSION, site=SITE, pose_mode="off",
+                               mission_log=tmp_path / "mission.jsonl", sleep_fn=lambda seconds: None)
+    report = runner.run(confirm=True)
+    assert report.status == "PASS"
+    assert client.commands[-1] == "land"
+
+
+def test_any_other_stop_failure_still_fails_the_run(tmp_path):
+    class BrokenStopClient(DryRunClient):
+        def stop(self):
+            return "error"
+
+    client = BrokenStopClient()
+    runner = CubeMissionRunner(client, "dry-run", mission=MISSION, site=SITE, pose_mode="off",
+                               mission_log=tmp_path / "mission.jsonl", sleep_fn=lambda seconds: None)
+    assert runner.run(confirm=True).status == "FAIL"
