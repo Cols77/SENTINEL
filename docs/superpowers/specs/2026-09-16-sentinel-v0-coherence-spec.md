@@ -167,6 +167,12 @@ V0 excludes real GIS/terrain, GPS/global localisation, multi-drone coordination,
 > ingested as `EMERGENCY_LATCHED`. No other autonomous motion, correction or
 > dispatch is introduced.
 
+> **Amendment (2026-09-21, Colin Aubé, PM authority):** the reflex above is a **controlled
+> landing** through the existing abort policy, not the motor cut, and the envelope is the
+> operating cube derived from the site file (W08-a and W08-c, §10.3). The run is reported as
+> failed with the containment reason; `EMERGENCY_LATCHED` and the motor cut remain the
+> operator's emergency control. The word "continuously" is still under review (W08-b).
+
 V0 includes host-side AprilTag-based room-local pose estimation emitted as `DRONE_POSE_REPORTED`. Pose never originates or modifies a motion command; the uses it is permitted are enumerated in §10.2, which is the single statement of that boundary.
 
 ## 10. WP5 drone pose amendment (contract-amendment)
@@ -206,23 +212,35 @@ the existing abort path to end a flight, and may do nothing else to it.
 `runner.py` consumes no pose data (SR-063 AC-1). A detector fault can therefore produce wrong
 advisory data or an unnecessary abort, never a wrong motion.
 
-### 10.3 SR-SENTINEL-V0-W08 is not yet satisfied (open operator decisions)
+### 10.3 SR-SENTINEL-V0-W08: two decisions taken, one open
 
-W08 and SR-063 agree in kind: both let pose stop a flight and neither lets it steer one. They
-differ from the implementation in three places. These are recorded here, not resolved, and until
-they are decided **no artifact may claim W08 satisfied**:
+W08 and SR-063 agree in kind: both let pose end a flight and neither lets it steer one. Three
+differences between W08's 2026-09-17 text and the implementation were found on 2026-09-21:
 
-| # | W08 as written | What is implemented | Decision needed |
+| # | 2026-09-17 text | Implemented | Status |
 |---|---|---|---|
-| W08-a | the reflex is the *terminal emergency hard stop* (motor cut, W05 latch) | a measured position outside the cube raises an abort that ends in a **controlled landing** (`docs/safety.md`, cube mission) | which reflex is normative |
-| W08-b | the worker verifies position *continuously* | a fix exists only with tags in view and is evaluated at localised stops; between stops and in blind zones there is no check | accept stop-time checking, or require more |
-| W08-c | the envelope is *the 1 m demo cube of W03* | the envelope is derived from the site file and is larger than 1 m | re-anchor the wording to "the configured envelope" |
+| W08-a | the reflex is the *terminal emergency hard stop* (motor cut, W05 latch) | a measured position outside the cube raises an abort that ends in a **controlled landing** | **decided 2026-09-21 (Colin): controlled landing.** A single-tag fix has an 11 cm spread at 1.1 m, so a false `OUTSIDE` is realistic, and a motor cut at up to 1.8 m near people is the more harmful failure. W08 amended |
+| W08-c | the envelope is *the 1 m demo cube of W03* | the envelope is derived from the site file | **decided 2026-09-21 (Colin): the configured envelope.** W08 amended |
+| W08-b | the worker verifies position *continuously* | checked only at localised stops | **open**, see below |
 
-Recommendation on W08-a, for the operator to accept or reject: make the controlled landing the
-pose-triggered reflex and keep the motor cut for the operator's emergency control. A measured
-single-tag fix has an 11 cm spread at 1.1 m (`docs/wp5-rehearsal-manifest.md`), so a false
-`OUTSIDE` is a realistic event, and a motor cut at up to 1.8 m near people is the more harmful
-failure of the two.
+**W08-b: what "continuously" can mean.** Navigation is open-loop. A waypoint is reached with at
+most three blocking Tello `move` commands (x, then y, then z), each validated against the envelope
+*before* it is sent, from a position that is dead-reckoned: after an `ok` the runner simply assumes
+the commanded endpoint, and only altitude is read back from a sensor. The drone executes each
+`move` with its own onboard optical-flow loop; the host cannot adjust a leg in flight. Pose enters
+only at a stop, after the drone has settled. Three levels are possible:
+
+| Level | What pose does | Requirement impact | State |
+|---|---|---|---|
+| 1. Stop-time check (`passive`) | measured at each localised stop; outside the cube means a controlled landing | none: SR-063 as written | implemented |
+| 2. In-leg watchdog | the pose stream, which already stays open all flight, is also evaluated *during* legs whenever tags are in view; outside the cube means a controlled landing. It can end the flight and nothing else | none on SR-063; this is what W08's "continuously" asks for. Needs a second thread beside the blocking `move`, and a bench test that the Tello honours `land` while a `move` is executing | not built |
+| 3. Stop-time correction (`reanchor`) | a good fix replaces the dead-reckoned position at a hover and sends at most two bounded trim moves toward the approved waypoint | needs the SR-063 amendment C1 (cube design §5) on the operator's recorded consent | implemented, refused without the consent flag |
+
+Continuous *steering* from pose — a velocity loop on `rc` commands — is excluded from V0 by SR-063
+and W07, and is not a safe proposition on this hardware: pose arrives at video rate with several
+hundred milliseconds of latency, only while tags are in frame, and its accuracy in motion is
+unmeasured. Levels 2 and 3 are independent and can both be adopted. Until W08-b is decided **no
+artifact may claim W08 satisfied**.
 
 ### 10.4 Implementation (informative, owned elsewhere)
 
