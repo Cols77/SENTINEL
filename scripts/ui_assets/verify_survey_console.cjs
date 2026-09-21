@@ -32,6 +32,27 @@ async function main(){
   await page.selectOption('#scenario','provider-timeout');assert.match(await page.locator('#progress').innerText(),/Unknown labels: macbook/);
   await page.selectOption('#scenario','report-rejected');await page.locator('#next-snapshot').click();
   assert.match(await page.locator('#report-status').innerText(),/REJECTED/);assert.equal(await page.locator('#accepted-report').count(),0);
+  await page.selectOption('#scenario','computers-followup');for(let i=0;i<5;i++)await page.locator('#next-snapshot').click();
+  await page.locator('#object-computer-6').click();await page.locator('#evidence img').waitFor();
+  assert.deepEqual(await page.locator('.frame[aria-pressed="true"]').evaluateAll(es=>es.map(e=>e.dataset.frameId)),['f3']);
+  assert.equal(await page.locator('#evidence [data-sighting-id]').count(),1);
+  assert.match(await page.locator('#evidence').innerText(),/not calibrated probability/);
+  const evidenceResults=await page.evaluate(async()=>{
+   const {createEvidenceView}=await import('/examples/survey-console/evidence.mjs');const {makeScenario}=await import('/examples/survey-console/fixtures.mjs');const {createFixtureClient}=await import('/examples/survey-console/fixture-client.mjs');
+   const a=makeScenario('people-lower-bound').snapshots[0],b=makeScenario('provider-timeout').snapshots[0];
+   const host=document.createElement('div');document.body.append(host);let finishA,finishB;
+   const view=createEvidenceView(host,{read_evidence:id=>new Promise(r=>{if(id===a.run_id)finishA=r;else finishB=r;})});
+   const pa=view.select(a,{kind:'frame',id:'f1'}),pb=view.select(b,{kind:'frame',id:'f1'});
+   const bytes=await createFixtureClient(makeScenario('people-lower-bound')).read_evidence(a.run_id,'f1');
+   finishB({...bytes,run_id:b.run_id});await pb;finishA(bytes);await pa;
+   const race=host.textContent.includes(b.run_id)&&!host.textContent.includes(a.run_id);
+   b.frames[0].evidence='REVOKED';await view.select(b,{kind:'frame',id:'f1'});const revoked=host.querySelectorAll('img').length===0&&host.textContent.includes('REVOKED');view.dispose();
+   const failures=[];
+   for(const result of [{...bytes,media_type:'image/svg+xml'},{...bytes,bytes:new Uint8Array(10485761)},{...bytes,width:22},{status:'FORBIDDEN',run_id:a.run_id,frame_id:'f1',reason:'Denied'},{status:'NOT_FOUND',run_id:a.run_id,frame_id:'f1',reason:'Missing'}]){
+    const v=createEvidenceView(host,{read_evidence:async()=>result});await v.select(a,{kind:'frame',id:'f1'});failures.push(host.querySelectorAll('img').length===0);v.dispose();
+   }host.remove();return {race,revoked,failures};
+  });
+  assert.equal(evidenceResults.race,true);assert.equal(evidenceResults.revoked,true);assert.ok(evidenceResults.failures.every(Boolean));
   await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   await page.evaluate(async()=>{const {renderShell}=await import('/examples/survey-console/shell.mjs');const {makeScenario}=await import('/examples/survey-console/fixtures.mjs');const s=makeScenario('computers-followup').snapshots[0];s.request_text='<img src=x onerror=alert(1)>';renderShell(document.getElementById('app'),{survey:s,events:[],needs_refresh:false,log_gaps:[],error:null},{});});
   assert.match(await page.locator('#request').innerText(),/<img src=x onerror=alert\(1\)>/);assert.equal(await page.locator('#request img').count(),0);
