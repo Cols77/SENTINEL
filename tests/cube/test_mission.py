@@ -365,3 +365,74 @@ def test_a_stop_aborted_en_route_has_no_measured_height(tmp_path):
     wp1 = _log(tmp_path)[0]
     assert wp1["status"] == "ABORTED_EN_ROUTE"
     assert wp1["height_cm"] is None
+
+
+# -- start-independent missions: the start is measured, not assumed ------------------------
+
+FREE_START = Mission(None, None, (
+    Waypoint("WP1", 270, 300, 100),
+    Waypoint("WP2", 150, 300, 140),
+))
+
+
+def test_a_mission_without_a_start_measures_it_after_takeoff_and_plans_from_the_fix(tmp_path):
+    bursts = [[_report(230, 280)] * 10,      # START: wherever the operator put it
+              [_report(270, 300)] * 10,      # WP1
+              [_report(150, 300)] * 10]      # WP2
+    runner, client = _runner(tmp_path, "reanchor", bursts, mission=FREE_START)
+    assert runner.run(confirm=True).status == "PASS"
+    assert "right 40" in client.commands and "forward 20" in client.commands
+    start, wp1, wp2 = _log(tmp_path)
+    assert start["waypoint"] == "START" and start["status"] == "LOCALISED"
+    assert start["fix_cm"] == [230.0, 280.0]
+
+
+def test_an_unlocalised_start_lands_rather_than_guessing(tmp_path):
+    runner, client = _runner(tmp_path, "reanchor", [[_report(230, 280)] * 3], mission=FREE_START)
+    report = runner.run(confirm=True)
+    assert report.status == "FAIL" and "start" in report.error.lower()
+    assert "land" in client.commands
+    assert not any(c.split()[0] in {"forward", "back", "left", "right"} for c in client.commands)
+    assert _log(tmp_path)[0]["status"] == "UNLOCALISED"
+
+
+def test_a_start_outside_the_cube_lands(tmp_path):
+    runner, client = _runner(tmp_path, "reanchor", [[_report(230, 470)] * 10], mission=FREE_START)
+    report = runner.run(confirm=True)
+    assert report.status == "FAIL" and "containment" in report.error.lower()
+    assert not any(c.split()[0] in {"forward", "back", "left", "right"} for c in client.commands)
+
+
+def test_a_crooked_start_is_squared_up_in_reanchor_mode(tmp_path):
+    bursts = [[_report(270, 300, heading=75.0)] * 10, [_report(270, 300)] * 10,
+              [_report(150, 300)] * 10]
+    runner, client = _runner(tmp_path, "reanchor", bursts, mission=FREE_START)
+    assert runner.run(confirm=True).status == "PASS"
+    assert "ccw 15" in client.commands
+    assert _log(tmp_path)[0]["yaw_trim_deg"] == 15
+
+
+def test_pose_off_cannot_fly_a_mission_without_a_start(tmp_path):
+    with pytest.raises(PlanError, match="start"):
+        _runner(tmp_path, "off", [], mission=FREE_START)
+
+
+def test_each_stop_records_the_open_loop_error_before_any_trim(tmp_path):
+    bursts = [[_report(230, 280)] * 10,
+              [_report(270, 282)] * 10, [_report(271, 301)] * 10,    # WP1: 18 cm short, then trimmed
+              [_report(150, 300)] * 10]
+    runner, _ = _runner(tmp_path, "reanchor", bursts, mission=FREE_START)
+    assert runner.run(confirm=True).status == "PASS"
+    wp1 = _log(tmp_path)[1]
+    assert wp1["open_loop_fix_cm"] == [270.0, 282.0]
+    assert wp1["open_loop_error_cm"] == pytest.approx(18.0)
+    assert wp1["arrival_error_cm"] == pytest.approx(1.4, abs=0.1)
+    assert wp1["localise_s"] is not None
+
+
+def test_load_mission_accepts_a_file_without_a_start(tmp_path):
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps({"schema_version": "cube-mission-v1",
+                                "waypoints": [{"name": "A", "x_cm": 270, "y_cm": 300, "z_cm": 100}]}))
+    mission = load_mission(path)
+    assert mission.start_x_cm is None and mission.start_y_cm is None

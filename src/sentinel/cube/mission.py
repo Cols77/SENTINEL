@@ -70,6 +70,10 @@ class ToleranceAbort(RuntimeError):
     """Both trims were spent and the drone is still beyond the outer tolerance circle."""
 
 
+class StartUnlocalised(RuntimeError):
+    """A mission without a start pad could not measure where the drone took off."""
+
+
 class PoseImplausible(RuntimeError):
     """Two consecutive fixes disagreed with dead reckoning."""
 
@@ -86,8 +90,9 @@ class Waypoint:
 
 @dataclass(frozen=True)
 class Mission:
-    start_x_cm: int
-    start_y_cm: int
+    """``start_*`` None: the start is measured from the tags after takeoff (pose modes only)."""
+    start_x_cm: int | None
+    start_y_cm: int | None
     waypoints: tuple[Waypoint, ...]
 
 
@@ -101,7 +106,10 @@ def load_mission(path) -> Mission:
         for w in doc["waypoints"])
     if not 1 <= len(waypoints) <= MAX_WAYPOINTS:
         raise ValueError(f"a mission has 1-{MAX_WAYPOINTS} waypoints, got {len(waypoints)}")
-    return Mission(int(doc["start"]["x_cm"]), int(doc["start"]["y_cm"]), waypoints)
+    start = doc.get("start")
+    if start is None:
+        return Mission(None, None, waypoints)
+    return Mission(int(start["x_cm"]), int(start["y_cm"]), waypoints)
 
 
 def tolerance_verdict(arrival_error_cm: float) -> str:
@@ -188,7 +196,11 @@ class CubeMissionRunner(FlightTestRunner):
     def _validate_mission(self) -> None:
         env = self.envelope
         in_xy = lambda x, y: env.min_x_cm <= x <= env.max_x_cm and env.min_y_cm <= y <= env.max_y_cm
-        if not in_xy(self.mission.start_x_cm, self.mission.start_y_cm):
+        if self.mission.start_x_cm is None or self.mission.start_y_cm is None:
+            if self.pose_mode == "off":
+                raise PlanError("a mission without a start pad needs a pose mode: with pose off "
+                                "nothing can tell the runner where it took off")
+        elif not in_xy(self.mission.start_x_cm, self.mission.start_y_cm):
             raise PlanError("the start pad is outside the commanded bounds")
         for wp in self.mission.waypoints:
             if not (in_xy(wp.x_cm, wp.y_cm) and env.min_z_cm <= wp.z_cm <= env.max_z_cm):
@@ -363,6 +375,13 @@ class CubeMissionRunner(FlightTestRunner):
             on_frame=lambda _frame: count["n"] < BURST_TARGET_REPORTS, on_report=on_report)
 
     def _localise(self, wp: Waypoint, entry: dict) -> None:
+        started = time.monotonic()
+        try:
+            self._localise_rounds(wp, entry)
+        finally:
+            entry["localise_s"] = round(time.monotonic() - started, 1)
+
+    def _localise_rounds(self, wp: Waypoint, entry: dict) -> None:
         rounds = 0
         while True:
             self.sleep_fn(SETTLE_S)
@@ -389,6 +408,9 @@ class CubeMissionRunner(FlightTestRunner):
                 "tolerance": tolerance_verdict(math.dist(fix, (wp.x_cm, wp.y_cm))),
                 "proposed_trims": [list(t) for t in trims], "trim_rounds_sent": rounds,
             })
+            if rounds == 0 and entry.get("open_loop_fix_cm") is None:
+                entry["open_loop_fix_cm"] = entry["fix_cm"]
+                entry["open_loop_error_cm"] = entry["arrival_error_cm"]
             if containment is Containment.OUTSIDE:
                 entry["status"] = "LOCALISED"
                 raise ContainmentAbort(f"containment: measured position {entry['fix_cm']} cm "
@@ -416,6 +438,42 @@ class CubeMissionRunner(FlightTestRunner):
             if not any(sent):
                 return self._accept_arrival(wp, entry)
             rounds += 1
+
+    def _localise_start(self, height_cm: int) -> None:
+        """No start pad: measure where the drone is after takeoff and plan every leg from it.
+        No reliable fix, or a fix outside the cube, ends the flight before any translation."""
+        entry = {"waypoint": "START", "pose_mode": self.pose_mode, "status": "UNLOCALISED",
+                 "fix_cm": None, "heading_deg": None, "heading_error_deg": None, "n": 0,
+                 "spread_p95_cm": None, "containment": None, "yaw_trim_deg": None,
+                 "height_cm": height_cm}
+        try:
+            self.sleep_fn(SETTLE_S)
+            result = localise(self.burst_fn())
+            if not isinstance(result, LocalisationFix):
+                entry["n"] = result.n
+                raise StartUnlocalised(f"start: no reliable tag fix after takeoff ({result.reason}); "
+                                       "the runner will not guess where it is")
+            fix = (result.x_units * CM_PER_UNIT, result.y_units * CM_PER_UNIT)
+            heading_error = heading_delta_deg(result.heading_deg, FACING_DEG)
+            containment = check_containment(fix[0], fix[1], self.footprint)
+            entry.update({"fix_cm": [round(fix[0], 1), round(fix[1], 1)],
+                          "heading_deg": round(result.heading_deg, 1),
+                          "heading_error_deg": round(heading_error, 1), "n": result.n,
+                          "spread_p95_cm": round(result.spread_p95_cm, 2),
+                          "containment": containment.value, "status": "LOCALISED"})
+            if containment is Containment.OUTSIDE:
+                raise ContainmentAbort(f"containment: start position {entry['fix_cm']} cm "
+                                       "is outside the cube")
+            self.envelope.position = Position(round(fix[0]), round(fix[1]), height_cm)
+            if abs(heading_error) > YAW_TRIM_THRESHOLD_DEG:
+                if self.pose_mode == "reanchor":
+                    self._rotate("cw" if heading_error > 0 else "ccw", round(abs(heading_error)))
+                    entry["yaw_trim_deg"] = round(abs(heading_error))
+                else:
+                    self._emit("alert", f"start: heading is {heading_error:+.0f} degrees off +y; "
+                                        "passive mode will not correct it")
+        finally:
+            self._append_log(entry)
 
     def _accept_arrival(self, wp: Waypoint, entry: dict) -> None:
         """No trim is left to send: land if the drone is still beyond the outer circle."""
@@ -452,7 +510,10 @@ class CubeMissionRunner(FlightTestRunner):
     def _fly_sequence(self) -> None:
         self._enter_altitude_band()
         height = self.envelope.position.z_cm
-        self.envelope.position = Position(self.mission.start_x_cm, self.mission.start_y_cm, height)
+        if self.mission.start_x_cm is None:
+            self._localise_start(height)
+        else:
+            self.envelope.position = Position(self.mission.start_x_cm, self.mission.start_y_cm, height)
         for wp in self.mission.waypoints:
             # F1: the entry is created BEFORE _go_to and always appended
             # (try/finally). An abort raised while still travelling to this
@@ -467,7 +528,8 @@ class CubeMissionRunner(FlightTestRunner):
                      "spread_p95_cm": None, "arrival_error_cm": None, "containment": None,
                      "tolerance": None, "proposed_trims": None,
                      "trim_rounds_sent": 0, "looks_deg": list(wp.looks_deg),
-                     "watchdog_land_error": None, "height_cm": None}
+                     "watchdog_land_error": None, "height_cm": None,
+                     "open_loop_fix_cm": None, "open_loop_error_cm": None, "localise_s": None}
             try:
                 self._go_to(wp)
                 entry["status"] = "OPEN_LOOP"
