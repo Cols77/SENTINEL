@@ -105,6 +105,16 @@ def _escalate_result() -> dict:
     }
 
 
+def _partial_propose_result(plan_id: str) -> dict:
+    return {
+        "status": "TOOL_CALLS",
+        "tool_calls": [{
+            "tool_name": "inspection.propose_plan",
+            "arguments": {"catalogue_plan_id": plan_id},
+        }],
+    }
+
+
 def _finish_result(summary: str, *, agent_run_id: str = AGENT_RUN_ID) -> dict:
     request = {**_request(), "agent_run_id": agent_run_id}
     return one_call(request, "finish", {"status": "NEEDS_REVIEW", "summary": summary})
@@ -223,6 +233,20 @@ def test_e_at_select_plan_forwards_canonical_proposer_escalation_without_fallbac
 @pytest.mark.parametrize("make_proposer, expected_reason", [
     (lambda: _ScriptedProposer(exc=RuntimeError("boom")), "exception:RuntimeError"),
     (lambda: _ScriptedProposer(result=_escalate_result()), "proposer_escalated"),
+    (lambda: _ScriptedProposer(result=_partial_propose_result(
+        load_catalogue_plans()[0].plan_id
+    )), "malformed_result"),
+    (lambda: _ScriptedProposer(result={
+        **_propose_result(load_catalogue_plans()[0].plan_id),
+        "agent_run_id": "33333333-3333-4333-8333-333333333333",
+    }), "agent_run_id_mismatch"),
+    (lambda: _ScriptedProposer(result=AgentModelResult.from_dict(
+        _propose_result(load_catalogue_plans()[0].plan_id)
+    )), "malformed_result"),
+    (lambda: _ScriptedProposer(result={
+        **_propose_result(load_catalogue_plans()[0].plan_id),
+        "intent": None,
+    }), "malformed_result"),
     (lambda: _ScriptedProposer(result=AgentModelResult.from_dict(
         _finish_result("plan proposal needs operator review")
     )), "malformed_result"),

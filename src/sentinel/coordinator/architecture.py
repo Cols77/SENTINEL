@@ -21,6 +21,8 @@ from __future__ import annotations
 import os
 from typing import Mapping, Sequence
 
+from sentinel.contracts import AgentModelResult
+
 from .legal_tools import ESCALATE_LABEL, SELECT_PLAN
 from .policies import RulePolicy
 from .policy import ContextualPolicy, PolicyContext
@@ -79,7 +81,9 @@ class ArchitectureRouter:
             )
             return result
 
-        reason = self._reject_reason(result, context)
+        reason = self._reject_reason(
+            result, context, agent_run_id=request["agent_run_id"],
+        )
         if reason is not None:
             return self._fallback(request, context, reason)
 
@@ -99,12 +103,15 @@ class ArchitectureRouter:
         })
 
     @staticmethod
-    def _reject_reason(result: object, context: PolicyContext) -> str | None:
+    def _reject_reason(
+        result: object, context: PolicyContext, *, agent_run_id: str,
+    ) -> str | None:
         """``None`` iff ``result`` is accepted: exactly one ``TOOL_CALLS``
-        tool call, named ``inspection.propose_plan``, whose
+        result in the controller's exact normalized envelope, bound to this
+        agent run, containing ``inspection.propose_plan`` whose
         ``catalogue_plan_id`` is the label of a candidate in
         ``context.legal.candidates`` with that same tool name."""
-        if not isinstance(result, dict):
+        if type(result) is not dict:
             return "malformed_result"
         if result.get("status") != "TOOL_CALLS":
             return "proposer_escalated"
@@ -117,6 +124,14 @@ class ArchitectureRouter:
         tool_name = call.get("tool_name")
         if tool_name != "inspection.propose_plan":
             return f"illegal_tool:{tool_name}"
+        try:
+            normalized = AgentModelResult.from_dict(result).to_dict()
+        except Exception:  # noqa: BLE001 -- untrusted proposer result is fail-closed
+            return "malformed_result"
+        if normalized.get("agent_run_id") != agent_run_id:
+            return "agent_run_id_mismatch"
+        if result != normalized:
+            return "malformed_result"
         arguments = call.get("arguments")
         if not isinstance(arguments, dict) or "catalogue_plan_id" not in arguments:
             return "malformed_result"
