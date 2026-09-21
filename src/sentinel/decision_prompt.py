@@ -1,6 +1,6 @@
 """Code-owned instructions shared by decision-point advisors."""
 
-DECISION_PROMPT_REVISION = "select_plan.complete_constraints.v3"
+DECISION_PROMPT_REVISION = "select_plan.complete_constraints.v4"
 
 SELECT_PLAN_PLAN_CRITERION_PREFIX = (
     "Choose this catalogue plan when the operator request is fully matched by "

@@ -70,8 +70,15 @@ def test_load_catalogue_plans_describes_both_fixture_plans():
     plans = load_catalogue_plans()
     by_id = {p.plan_id: p for p in plans}
     assert set(by_id) == {"PLAN_MARKER_VERIFIED_6", "PLAN_ROUTE_ONLY_2_ZONE"}
-    for plan in by_id.values():
-        assert plan.description
+    marker = by_id["PLAN_MARKER_VERIFIED_6"].description
+    route = by_id["PLAN_ROUTE_ONLY_2_ZONE"].description
+
+    assert "will visit exactly 6 stations" in marker
+    assert "schedules a marker-verification step at every listed station" in marker
+    assert "marker verification=required" not in marker
+    assert "will visit exactly 2 stations" in route
+    assert "schedules no marker-verification step" in route
+    assert "marker verification=not required" not in route
 
 
 def test_legal_set_walks_one_station_flow_with_gateway_valid_candidates(tmp_path):

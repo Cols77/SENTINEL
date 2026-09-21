@@ -67,7 +67,7 @@ def test_dry_run_rejects_semantic_revision_drift_before_provider_or_output(
 
     assert status == 2
     error = capsys.readouterr().err
-    assert "select_plan.complete_constraints.v3" in error
+    assert "select_plan.complete_constraints.v4" in error
     assert "drifted-revision" in error
     assert not out.exists()
 
@@ -114,6 +114,10 @@ def test_live_dry_run_binds_reviewed_identity_cost_and_fixed_call_budget(capsys)
     assert manifest["maximum_fresh_provider_calls"] == 36
     assert manifest["cost_per_call_usd_assumption"] == 0.025
     assert manifest["estimated_cost_usd"] == pytest.approx(0.9)
+    assert manifest["quality_claim"] == (
+        "fresh provider calls on synthetic-declared cases; "
+        "harness and prompt-sensitivity evidence only"
+    )
     assert manifest["token_accounting"] == {
         "prompt_tokens": None, "completion_tokens": None, "total_tokens": None,
     }
@@ -136,7 +140,7 @@ def test_llm_dry_run_requires_exact_reviewed_prompt_and_tool_revisions(monkeypat
     config = json.loads(capsys.readouterr().out)["manifest"]["configurations"]["llm"]
     assert config["prompt_revision"] == "prompt-v4-complete-constraints"
     assert config["tool_policy_revision"] == "legal-tools-v2"
-    assert config["decision_prompt_revision"] == "select_plan.complete_constraints.v3"
+    assert config["decision_prompt_revision"] == "select_plan.complete_constraints.v4"
 
     monkeypatch.setenv("SENTINEL_LLM_PROMPT_REVISION", "old")
     assert main(args) == 2

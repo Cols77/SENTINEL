@@ -72,10 +72,11 @@ from this baseline.
 ## Reviewed live gate
 
 Both model arms bind the shared SELECT_PLAN semantic revision
-`select_plan.complete_constraints.v3`. It treats catalogue entries as future
+`select_plan.complete_constraints.v4`. It treats catalogue entries as future
 work, so empty pre-execution plan, task, detection, and result fields are not
 reasons to escalate. Jev's candidate criteria describe plan capabilities as
-future actions and make escalation conditional on no complete match,
+scheduled future actions, including marker-verification steps derived from the
+catalogue, and make escalation conditional on no complete match,
 contradictory constraints, or insufficient request detail. Confidence and
 margin gates still apply uniformly to plan and escalation choices. The LLM arm additionally requires
 `SENTINEL_LLM_PROMPT_REVISION=prompt-v4-complete-constraints` and

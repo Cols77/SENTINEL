@@ -107,12 +107,27 @@ def load_catalogue_plans(path: Path | None = None) -> tuple[CataloguePlan, ...]:
     doc = json.loads(path.read_text(encoding="utf-8"))
     plans = []
     for entry in doc["entries"]:
-        stations = [step["zone_id"] for step in entry.get("station_steps", [])]
+        station_steps = entry.get("station_steps", [])
+        stations = [step["zone_id"] for step in station_steps]
         mode = entry.get("mode")
+        marker_stations = [
+            step["zone_id"] for step in station_steps if step.get("marker_id")
+        ]
+        if marker_stations and len(marker_stations) == len(stations):
+            marker_work = (
+                "it schedules a marker-verification step at every listed station"
+            )
+        elif marker_stations:
+            marker_work = (
+                "it schedules marker-verification steps at "
+                + ", ".join(map(str, marker_stations))
+            )
+        else:
+            marker_work = "it schedules no marker-verification step"
         plans.append(CataloguePlan(
             entry["id"],
-            f"mode={mode}; stations={len(stations)} ({', '.join(map(str, stations))}); "
-            f"marker verification={'required' if 'MARKER' in str(mode) else 'not required'}",
+            f"This plan will visit exactly {len(stations)} stations "
+            f"({', '.join(map(str, stations))}); {marker_work}; mode={mode}",
             station_ids=tuple(stations),
         ))
     return tuple(plans)

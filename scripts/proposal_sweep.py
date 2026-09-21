@@ -33,7 +33,7 @@ CATALOGUE = ROOT / "docs/superpowers/specs/contracts/fixtures/survey-catalogue-v
 PINNED_CASES = ROOT / "fixtures/proposal_eval/generated-requests-v1.json"
 PINNED_FIXTURE_PATH = "fixtures/proposal_eval/generated-requests-v1.json"
 PINNED_FIXTURE_SHA256 = "1b1089694fd74a82924c020bacfefc2e7a8b905077f05b8bbe01135777822f70"
-REQUIRED_DECISION_PROMPT_REVISION = "select_plan.complete_constraints.v3"
+REQUIRED_DECISION_PROMPT_REVISION = "select_plan.complete_constraints.v4"
 LLM_PROMPT_REVISION = "prompt-v4-complete-constraints"
 LLM_TOOL_POLICY_REVISION = "legal-tools-v2"
 MODEL_ID_MAX_LENGTH = 256
@@ -391,7 +391,8 @@ def main(argv=None):
         manifest = build_manifest(root=ROOT, fixture=args.fixtures, catalogue=CATALOGUE, arms=arms,
                                   mode=args.mode, repeats=args.repeats, max_calls=budget_limit,
                                   configurations=configurations, cost_per_call_usd=args.cost_per_call_usd,
-                                  recording=args.recording)
+                                  recording=args.recording,
+                                  label_statuses=(c.label_status for c in cases))
         manifest["maximum_possible_calls"] = maximum
         manifest["fixture_path"] = _fixture_path(args.fixtures)
         manifest["pinned_fixture_sha256"] = PINNED_FIXTURE_SHA256
