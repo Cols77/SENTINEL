@@ -114,6 +114,31 @@ def _select_plan_tools(context: PolicyContext) -> list[str]:
     return tools
 
 
+def _bound_jev_state(
+    request: Mapping[str, Any], context: PolicyContext,
+) -> dict[str, Any] | None:
+    run_id = request.get("run_id")
+    agent_run_id = request.get("agent_run_id")
+    state_version = request.get("state_version")
+    if (
+        not isinstance(run_id, str)
+        or not run_id.strip()
+        or not isinstance(agent_run_id, str)
+        or not agent_run_id.strip()
+        or isinstance(state_version, bool)
+        or not isinstance(state_version, int)
+        or run_id != context.state.run_id
+        or state_version != context.state.state_version
+    ):
+        return None
+    return {
+        **context.state.to_packet(),
+        "run_id": run_id,
+        "agent_run_id": agent_run_id,
+        "state_version": state_version,
+    }
+
+
 @dataclass(frozen=True)
 class JevProposalGates:
     """Acceptance thresholds for a Jev plan recommendation."""
@@ -139,6 +164,14 @@ class JevProposer:
         if context.legal.decision_point != SELECT_PLAN:
             return self._escalate(request)
 
+        provider_state = _bound_jev_state(request, context)
+        if provider_state is None:
+            _write_attempt(
+                self.sink, context, advisor="jev", started=time.perf_counter(),
+                gate_outcome="invalid_answer", policy_label=ESCALATE_LABEL,
+            )
+            return self._escalate(request)
+
         candidates = {
             candidate.label: candidate
             for candidate in context.legal.candidates
@@ -157,7 +190,7 @@ class JevProposer:
         started = time.perf_counter()
         try:
             answer = self.judge.choice(
-                state=context.state.to_packet(),
+                state=provider_state,
                 instruction=f"At {SELECT_PLAN}, {SELECT_PLAN_INSTRUCTION}",
                 criteria=criteria,
                 name="select_plan",

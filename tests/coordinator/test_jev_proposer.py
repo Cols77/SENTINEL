@@ -26,7 +26,11 @@ FULL = "PLAN_MARKER_VERIFIED_6"
 
 
 def _request() -> dict:
-    return {"agent_run_id": AGENT_RUN_ID}
+    return {
+        "agent_run_id": AGENT_RUN_ID,
+        "run_id": RUN_ID,
+        "state_version": 4,
+    }
 
 
 def _state() -> DecisionState:
@@ -80,7 +84,12 @@ def test_calls_jev_with_packet_and_every_described_legal_candidate() -> None:
     proposer.decide(_request(), _context())
 
     state, instruction, criteria, name = judge.calls[0]
-    assert state == _state().to_packet()
+    assert state == {
+        **_state().to_packet(),
+        "run_id": RUN_ID,
+        "agent_run_id": AGENT_RUN_ID,
+        "state_version": 4,
+    }
     assert name == "select_plan"
     assert criteria == {
         ROUTE: "route-only plan",
@@ -90,6 +99,25 @@ def test_calls_jev_with_packet_and_every_described_legal_candidate() -> None:
     assert "SELECT_PLAN" in instruction
     assert "fully satisfy every explicit operator constraint" in instruction
     assert "closest" in instruction
+
+
+@pytest.mark.parametrize("field, mismatched", [
+    ("run_id", "33333333-3333-4333-8333-333333333333"),
+    ("state_version", 5),
+])
+def test_request_and_context_binding_mismatch_fails_closed(field, mismatched) -> None:
+    request = _request()
+    request[field] = mismatched
+    judge = Judge()
+    sink = MemoryAuditSink()
+
+    result = JevProposer(judge, sink).decide(request, _context())
+
+    _assert_escalation(result)
+    assert judge.calls == []
+    attempt, = sink.records
+    assert attempt["gate_outcome"] == "invalid_answer"
+    assert attempt["policy_label"] == ESCALATE_LABEL
 
 
 def test_accepts_top_ranked_answer_and_preserves_arguments_with_derived_reason_and_audit() -> None:
