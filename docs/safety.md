@@ -39,3 +39,18 @@ The USB adapter must already be connected to the Tello network. SENTINEL selects
 ## Force-run after a failed preflight
 
 A failed preflight does not force a re-dispatch of the prior operation. The operator may force a **new** run via `FORCE_RUN_CREATE` only, naming the failed report, an operator reason, and a new run/plan ID, always with fresh preflight and `--real --confirm`. A force-run is never permitted while an active emergency latch is armed.
+
+## Cube mission variant (`cube-run`)
+
+- The operating cube and the commanded bounds come from the site file; print them with
+  `cube-site-map`. The room must be substantially larger than the cube, and the space around the
+  tag stands must be clear.
+- Place the drone on the marked takeoff pad at the mission file's `start` point, **facing the
+  tag line**. The whole mission is validated against the commanded bounds before takeoff.
+- Commands are `move` and `rotate` only. The drone translates only while facing the tag line;
+  look rotations happen at a stop and are undone before the next move.
+- `--pose off`: open-loop only. `--pose passive`: pose is measured and logged at each stop and
+  can trigger a controlled landing if the measured position leaves the cube; it sends nothing.
+  `--pose reanchor`: pose may replace the position estimate at a hover and send at most two
+  bounded trims; SR-063 was amended for this on 2026-09-21; the `--sr063-amended` flag is still required, as the operator's acknowledgement on each run.
+- Always run `cube-run --dry-run` on the exact site and mission files first.

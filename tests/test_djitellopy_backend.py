@@ -289,3 +289,87 @@ def test_emergency_transmits_while_normal_command_lock_is_held():
         client._command_lock.release()
 
     assert result == ["sent 9 bytes"]
+
+
+def test_land_now_transmits_while_a_move_holds_the_command_lock():
+    """land() waits for the lock an in-flight move holds, so it cannot
+    interrupt one. land_now() must get through regardless (bench test B1)."""
+    client = make_client([])
+    client.connect()
+    client._command_lock.acquire()
+    result = []
+    try:
+        thread = Thread(target=lambda: result.append(client.land_now()))
+        thread.start()
+        thread.join(timeout=0.5)
+        assert not thread.is_alive()
+    finally:
+        client._command_lock.release()
+
+    assert result == ["sent"]
+    assert client._tello.commands[-1] == "land"
+
+
+class RealisticTello(FakeTello):
+    """Has DJITelloPy's single-send primitive, and replies like a drone."""
+
+    def __init__(self, *, replies, **kwargs):
+        super().__init__(**kwargs)
+        self.replies = list(replies)
+        self.sends = []
+
+    def send_command_with_return(self, command, timeout=7):
+        self.sends.append((command, timeout))
+        return self.replies.pop(0)
+
+
+def make_realistic_client(replies):
+    def socket_factory(*_args, **_kwargs):
+        return FakeSocket([])
+
+    client = DjitellopyClient(
+        local_ip="192.168.10.2",
+        tello_factory=lambda **kwargs: RealisticTello(replies=replies, **kwargs),
+        socket_factory=socket_factory, video_factory=FakeVideo)
+    client.connect()
+    return client
+
+
+def test_a_move_that_fails_is_sent_once_never_retried():
+    """DJITelloPy re-sends a command up to retry_count times when no "ok"
+    comes back. For a translation that means flying it again, or sending it
+    again while the first is still being flown ("error Not joystick")."""
+    client = make_realistic_client(["error Not joystick", "ok", "ok"])
+    with pytest.raises(DjitellopyBackendError, match="Not joystick"):
+        client.move("back", 39)
+    assert [command for command, _ in client._tello.sends] == ["back 39"]
+
+
+def test_an_interrupted_move_surfaces_the_auto_land_reply():
+    client = make_realistic_client(["error Auto land"])
+    with pytest.raises(DjitellopyBackendError, match="Auto land"):
+        client.move("forward", 100)
+
+
+def test_a_moves_reply_timeout_covers_the_time_the_leg_takes():
+    """At the missions' 20 cm/s a 3 m leg takes well over DJITelloPy's fixed
+    7 s, after which it would have re-sent the move mid-flight."""
+    client = make_realistic_client(["ok", "ok", "ok"])
+    client.set_speed(20)
+    client.move("forward", 300)
+    client.move("forward", 20)
+    client.rotate("cw", 90)
+    (_, long_leg), (_, short_leg), (_, turn) = client._tello.sends
+    assert long_leg >= 300 / 20 + 6
+    assert short_leg >= client.timeout
+    assert turn >= client.timeout
+
+
+def test_a_moves_reply_timeout_is_a_whole_number_of_seconds():
+    """DJITelloPy's enforce_types rejects a float timeout before anything is
+    sent: on 2026-09-21 the first real leg after takeoff failed that way."""
+    client = make_realistic_client(["ok", "ok"])
+    client.set_speed(20)
+    client.move("up", 20)
+    client.rotate("cw", 45)
+    assert all(type(timeout) is int for _, timeout in client._tello.sends)

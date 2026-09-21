@@ -175,3 +175,26 @@ amendment cannot put the two definitions out of step again, and another replays 
 call through the real loop: three calls, no rejection, `WAITING_FOR_APPROVAL`.
 
 **Still open, not fixed here:** the rejection message. A model should be told *which field* was refused.
+
+---
+
+# Addendum 3 -- fourth run: pass
+
+**Batch:** `2026-09-20-operator-grant-4` (consent C-19). **Master:** `02428dc`. **Model:** `z-ai/glm-5.3`.
+**Spend:** 3 model calls. **Raw record:** `artifacts/wp1/live-runs/2026-09-20-operator-grant-4-qualifying_evidence_to_task.{json,sqlite3}`.
+
+| Turn | Model call | Gateway |
+|---|---|---|
+| 1 | `task.create` -- three ids and a `reason` | accepted |
+| 2 | `patroller.rank_for_task` -- typed `task_id` from turn 1, and a `reason` | accepted |
+| 3 | `assignment.propose` | accepted; run parks in `WAITING_FOR_APPROVAL`, task `ASSIGNMENT_PROPOSED` |
+
+Three deliverables in three turns, no read, no rejection. **The live LLM gate on the real loop now passes
+3 of 3 scenarios** (`approval_wait` and `initial_plan_one_station` passed in grant-1 and were not re-run).
+
+The model sent a `reason` on every call, exactly as it did in the run that failed: the only thing that
+changed between grant-3 and grant-4 is `command_for`. That is as close to a controlled comparison as this
+line has produced. It is one run of one scenario on one model -- it shows the defect is gone, not that the
+LLM loop is reliable. Stability across repeats has not been measured.
+
+Total live spend across grant-2, -3 and -4: 13 model calls.

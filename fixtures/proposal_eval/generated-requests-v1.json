@@ -1,0 +1,18 @@
+{
+  "version": "proposal-outcomes.v1",
+  "provenance": "Twelve agent-authored synthetic request cases; not operator-held-out labels or empirical model-quality evidence.",
+  "cases": [
+    {"case_id": "generated_middle_only", "request": "Just inspect the middle of the left alley and the middle of the right alley. Skip marker verification.", "acceptable_plans": ["PLAN_ROUTE_ONLY_2_ZONE"]},
+    {"case_id": "generated_short_route", "request": "Use the short two-zone route through the two alley middles, with no marker checks.", "acceptable_plans": ["PLAN_ROUTE_ONLY_2_ZONE"]},
+    {"case_id": "generated_no_ends", "request": "Survey both middle stations without checking tags. Do not include either alley's front or back station.", "acceptable_plans": ["PLAN_ROUTE_ONLY_2_ZONE"]},
+    {"case_id": "generated_all_tags", "request": "Visit front, middle and back in both alleys, verifying the marker at each of the six stations.", "acceptable_plans": ["PLAN_MARKER_VERIFIED_6"]},
+    {"case_id": "generated_complete_verified", "request": "I need the complete six-station inspection, with marker verification throughout.", "acceptable_plans": ["PLAN_MARKER_VERIFIED_6"]},
+    {"case_id": "generated_not_short", "request": "The short middle-only route is insufficient. Inspect all six stations in both alleys and verify every station marker.", "acceptable_plans": ["PLAN_MARKER_VERIFIED_6"]},
+    {"case_id": "generated_left_only", "request": "Inspect only the left alley's three stations, with marker verification. Do not enter the right alley.", "expected_escalation": true, "expected_terminal": "RUNNING", "expected_effects": []},
+    {"case_id": "generated_front_pair", "request": "Inspect only the two front stations without checking markers. Skip all middle and back stations.", "expected_escalation": true, "expected_terminal": "RUNNING", "expected_effects": []},
+    {"case_id": "generated_verified_middle", "request": "Verify markers at only the left and right middle stations. No other stations may be visited.", "expected_escalation": true, "expected_terminal": "RUNNING", "expected_effects": []},
+    {"case_id": "generated_unspecified", "request": "Can you inspect that bit we were discussing?", "expected_escalation": true, "expected_terminal": "RUNNING", "expected_effects": []},
+    {"case_id": "generated_conflicting_coverage", "request": "Visit all six stations, but visit only the left and right middle stations and no others.", "expected_escalation": true, "expected_terminal": "RUNNING", "expected_effects": []},
+    {"case_id": "generated_visible_computers", "request": "Count the visible computers in the approved survey area and return the unique count.", "expected_escalation": true, "expected_terminal": "RUNNING", "expected_effects": []}
+  ]
+}

@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "provenance": "synthetic",
+  "bounds_cm": {
+    "min_x": -1000,
+    "max_x": 1000,
+    "min_y": 0,
+    "max_y": 1000
+  },
+  "camera": {
+    "width_px": 960,
+    "height_px": 720,
+    "fx_px": 683,
+    "fy_px": 683,
+    "cx_px": 480,
+    "cy_px": 360,
+    "minimum_object_width_px": 20
+  },
+  "scene_id": "synthetic-off-axis-occlusion-closer-followup",
+  "objects": [
+    {
+      "object_id": "phone",
+      "class": "phone",
+      "x_cm": 150,
+      "y_cm": 600,
+      "surface_z_cm": 0,
+      "width_cm": 15
+    },
+    {
+      "object_id": "hidden",
+      "class": "computer",
+      "x_cm": 0,
+      "y_cm": 600,
+      "surface_z_cm": 0,
+      "width_cm": 35
+    }
+  ],
+  "options": {
+    "far": [
+      "f0"
+    ],
+    "near": [
+      "n0"
+    ]
+  },
+  "frames": [
+    {
+      "frame_id": "f0",
+      "option_id": "far",
+      "stop_index": 0,
+      "status": "OK",
+      "pose": {
+        "x_cm": 0,
+        "y_cm": 0,
+        "z_cm": 55,
+        "heading_deg": 0
+      },
+      "occluded_object_ids": [
+        "hidden"
+      ],
+      "detections": [
+        {
+          "class": "phone",
+          "band": "UNCERTAIN",
+          "synthetic_detection_id": "phone-far-uncertain",
+          "bbox": null
+        }
+      ]
+    },
+    {
+      "frame_id": "n0",
+      "option_id": "near",
+      "stop_index": 0,
+      "status": "OK",
+      "pose": {
+        "x_cm": 0,
+        "y_cm": 300,
+        "z_cm": 55,
+        "heading_deg": 0
+      },
+      "occluded_object_ids": [
+        "hidden"
+      ],
+      "detections": [
+        {
+          "class": "phone",
+          "synthetic_detection_id": "phone-near",
+          "bbox": {
+            "x": 804.425,
+            "y": 475.2166666667,
+            "width": 34.15,
+            "height": 20
+          }
+        }
+      ]
+    }
+  ]
+}

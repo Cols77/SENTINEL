@@ -42,6 +42,10 @@ class SocketBinding:
 
 
 _DJITELLOPY_FACTORY_LOCK = threading.Lock()
+#: Added to a motion's expected duration before its reply counts as lost.
+MOTION_REPLY_SLACK_S = 6.0
+#: A deliberately slow figure for sizing a rotation's reply timeout.
+ROTATION_DEG_PER_S = 30.0
 
 
 class _BoundSocket:
@@ -174,6 +178,8 @@ class DjitellopyClient:
         self.tello_ip = tello_ip
         self.video_port = video_port
         self.retry_count = retry_count
+        #: What `speed` was last set to; the Tello's power-on default until then.
+        self._commanded_speed_cm_s = 30.0
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         self.timeout = timeout
@@ -472,7 +478,36 @@ class DjitellopyClient:
             return self.send(command)
 
     def set_speed(self, cm_per_second: int) -> str:
-        return self._command_method(("set_speed",), f"speed {cm_per_second}", cm_per_second)
+        response = self._command_method(("set_speed",), f"speed {cm_per_second}", cm_per_second)
+        self._commanded_speed_cm_s = float(cm_per_second)
+        return response
+
+    def _motion_command(self, methods: tuple[str, ...], command: str, travel_s: float,
+                        *args: Any) -> str:
+        """Send a command that moves the drone exactly once.
+
+        DJITelloPy's ``send_control_command`` re-sends any command up to
+        ``retry_count`` times when no ``ok`` arrives, and its reply timeout
+        is a 7 s default bound at definition time -- ``tello.RESPONSE_TIMEOUT``
+        set on the instance never reaches ``move``. At the missions' 20 cm/s a
+        leg over about a metre outlasts it, so the same move was sent again
+        while the drone was still flying it (answered ``error Not joystick``),
+        and a move whose reply was merely lost would have been flown twice.
+        A translation or rotation is therefore sent once, with a timeout
+        sized to the motion, and any reply but ``ok`` is an error for the
+        caller to act on -- which includes ``error Auto land``.
+        """
+        with self._command_lock:
+            self._ensure_available()
+            sender = getattr(self._tello, "send_command_with_return", None)
+            if sender is None:
+                return self._command_method(methods, command, *args)
+            # DJITelloPy enforces an int timeout (enforce_types); a float raises before sending
+            response = sender(command, timeout=math.ceil(max(self.timeout, travel_s + MOTION_REPLY_SLACK_S)))
+            normalized = self._record(command, response)
+            if "ok" not in normalized.lower():
+                raise DjitellopyBackendError(f"{command} failed: {normalized}")
+            return "ok"
 
     def set_video_record_path(self, path: str | Path) -> None:
         with self._command_lock:
@@ -488,8 +523,29 @@ class DjitellopyClient:
     def land(self) -> str:
         return self._command_method(("land",), "land")
 
+    def land_now(self) -> str:
+        """Send `land` while another command is still waiting for its reply.
+
+        ``land()`` takes the command lock, which an in-flight ``move`` holds
+        until the drone answers, so it cannot interrupt one. This sends the
+        datagram without the lock and without waiting: bench test B1 showed
+        the Tello honours it and the interrupted move then answers
+        ``error Auto land``. It goes out through DJITelloPy's own socket: B1
+        found the Tello answers only the source port that sent its first
+        ``command``, and the same-socket path is the one B1 actually flew.
+        """
+        self._ensure_available()
+        sender = getattr(self._tello, "send_command_without_return", None)
+        if sender is None:
+            raise DjitellopyBackendError("this DJITelloPy build cannot send without waiting")
+        sender("land")
+        return self._record("land (no wait)", "sent")
+
     def move(self, direction: str, distance_cm: int) -> str:
-        return self._command_method(("move",), f"{direction} {distance_cm}", direction, distance_cm)
+        # B1: real cruise is about 0.8 of the commanded speed; allow for half.
+        travel_s = distance_cm / max(0.5 * self._commanded_speed_cm_s, 5.0)
+        return self._motion_command(("move",), f"{direction} {distance_cm}", travel_s,
+                                    direction, distance_cm)
 
     def rotate(self, direction: str, degrees: int) -> str:
         if not isinstance(direction, str) or direction not in {"cw", "ccw"}:
@@ -501,7 +557,8 @@ class DjitellopyClient:
             "ccw": ("rotate_counter_clockwise",),
         }
         candidates = methods[direction]
-        return self._command_method(candidates, f"{direction} {degrees}", degrees)
+        return self._motion_command(candidates, f"{direction} {degrees}",
+                                    degrees / ROTATION_DEG_PER_S, degrees)
 
     def stop(self) -> str:
         return self._command_method(("stop",), "stop")

@@ -37,13 +37,14 @@ operator request -> real LLM intent -> coordinator -> supervised Tello mission
 | D-008 | Judged path has one supervised real Tello | WP4 physical slice is a V0 release prerequisite, not an optional future capability |
 | D-009 | Canonical V0 class is `rock` | Parent `pebble_cluster` source output maps to canonical `rock` under the versioned mapping below |
 | D-010 | WP6 combines technical document and pitch material | It is non-normative and evidence-derived |
+| D-011 | (Colin, 2026-09-20) The rail-sweep survey-and-count replaces the indoor-alley survey as the **demonstrated** scenario: recorded video 2026-09-25, live demo 2026-09-27 | The alley design, code and contracts are retained, not deleted. §4 and D-004/D-009 still define the *judged* V0 path and are not re-baselined by this decision; the survey flow runs under its own `sentinel-survey-v1` contract and claims no judged evidence. Re-baselining §4 is a separate decision that has not been taken |
 
 ## 3. Authority hierarchy and compatibility
 
 1. This document selects the V0 profile.
 2. The approved [indoor-alley survey design](2026-09-16-sentinel-v0-indoor-alley-survey-design.md) is the V0 decision record: it resolves the V0 room-demo decisions (six-zone route, station capture, layout modes, preflight/force-run/emergency semantics) that the coherence profile and WP0–WP4 below must conform to. It ranks just below this document.
 3. [`WP0`](2026-09-16-sentinel-wp0-shared-coherence-contracts.md) and its machine-readable contract artifacts define executable shared semantics.
-4. WP1–WP3 define component behavior only within WP0.
+4. WP1–WP3 define component behavior only within WP0. The [WP5 cube design](2026-09-20-wp5-cube-positioning-design.md) and the [survey-counting design](2026-09-20-survey-counting-design.md) rank here too: component designs that may refine but not widen this document. The survey design declares exactly one exception to a WP3 rule (its §6.1) and nothing else in it overrides WP0.
 5. The parent database specification remains the persistence/safety source unless the table below explicitly defines the V0 profile mapping.
 6. Historical broad component drafts are supporting design history, not current V0 authority.
 
@@ -155,7 +156,7 @@ V0 release requires G0–G4. G0–G3 can be completed without live hardware; G4 
 
 ## 9. Non-goals
 
-V0 excludes real GIS/terrain, GPS/localisation, multi-drone coordination, autonomous patroller dispatch, external notification, hidden chain-of-thought display, automatic provider failover and a broker.
+V0 excludes real GIS/terrain, GPS/global localisation, multi-drone coordination, autonomous patroller dispatch, external notification, hidden chain-of-thought display, automatic provider failover and a broker.
 
 > **Amendment (2026-09-17, Colin Aubé, PM authority):** one safety carve-out is
 > added to these non-goals: autonomous **geofence hard stop** (SR-SENTINEL-V0-W08).
@@ -165,3 +166,154 @@ V0 excludes real GIS/terrain, GPS/localisation, multi-drone coordination, autono
 > a fail-safe reflex, not autonomy: it can only stop the drone and is always
 > ingested as `EMERGENCY_LATCHED`. No other autonomous motion, correction or
 > dispatch is introduced.
+
+> **Amendment (2026-09-21, Colin Aubé, PM authority):** the reflex above is a **controlled
+> landing** through the existing abort policy, not the motor cut, and the envelope is the
+> operating cube derived from the site file (W08-a and W08-c, §10.3). The run is reported as
+> failed with the containment reason; `EMERGENCY_LATCHED` and the motor cut remain the
+> operator's emergency control. "Continuously" means at every localised stop and during moves
+> whenever tags are in view (W08-b).
+
+V0 includes host-side AprilTag-based room-local pose estimation emitted as `DRONE_POSE_REPORTED`. Pose never originates a target and never acts while the drone is moving; the uses it is permitted are enumerated in §10.2, which is the single statement of that boundary.
+
+## 10. WP5 drone pose amendment (contract-amendment)
+
+> **Revised 2026-09-21 (coherence alignment).** The original single paragraph is replaced by the
+> subsections below. It mixed contract, implementation and safety statements, and several of them
+> had become false; §10.7 lists each change and the evidence for it. The heading is unchanged so
+> that the `source:` anchors of SR-060…SR-063 still resolve.
+
+### 10.1 Contract surface (normative)
+
+The WP0 contract is amended by this specification. WP5 adds:
+
+- a closed `DronePoseReport` wire object in the `sentinel-v0-wire.schema.json` `oneOf` registry
+  (unknown fields rejected; `method: APRILTAG_36H11_PNP`);
+- `DRONE_POSE_REPORTED` in the WP0 §3.5 event enum;
+- a `drone_pose` snapshot read model subject to the WP0 §3.4 staleness rule;
+- the `tag-map-v1` schema, with `room_scale_m_per_unit` fixed at 0.1 for V0 determinism.
+
+Pose estimates are room-local, carry `source_kind` provenance (`LIVE`/`SIMULATED`/`REPLAYED`) and
+are never a GPS claim. The ingestion slice appends run-scoped `DRONE_POSE_REPORTED` events to the
+SQLite store and projects them into `drone_pose`; the full coordinator remains the WP1 boundary.
+
+### 10.2 Safety boundary (normative)
+
+**Pose never originates a target and never acts while the drone is moving.** It may end a flight
+through the existing abort path, and at a stationary hover it may correct where the runner
+believes the drone is. It does nothing else.
+
+| Use of pose | Status | Authority |
+|---|---|---|
+| Evidence, display, `drone_pose` read model | permitted | SR-060, SR-061, SR-062 |
+| Verifying the zone of a capture | permitted | SR-SENTINEL-V0-W07 |
+| Advisory containment: alert the operator; trip the **existing** abort policy | permitted | SR-063 (as revised at consent 2026-09-18); SR-SENTINEL-V0-W08; §9 amendment |
+| At a stationary hover, after the quality and plausibility gates: replacing the open-loop position estimate and sending at most two rounds of trim moves and one trim rotation toward the already-approved waypoint, each validated by the envelope (`reanchor`) | permitted since 2026-09-21 | SR-063 as amended at consent 2026-09-21 (C1); cube design §5 C1 |
+| Steering, route correction, originating a target, any control while the drone is moving | excluded from V0 | SR-063; W07 |
+
+`runner.py` consumes no pose data (SR-063 AC-1); re-anchoring lives in the cube mission runner. A
+detector fault can produce wrong advisory data, an unnecessary abort, or at worst a misplaced
+start of one leg — and that only after the quality gate, the plausibility gate (within 60 cm of
+dead reckoning), the envelope and containment have all passed.
+
+### 10.3 SR-SENTINEL-V0-W08: three decisions taken, one half still to build
+
+W08 and SR-063 agree in kind: both let pose end a flight and neither lets it steer one. Three
+differences between W08's 2026-09-17 text and the implementation were found on 2026-09-21:
+
+| # | 2026-09-17 text | Implemented | Status |
+|---|---|---|---|
+| W08-a | the reflex is the *terminal emergency hard stop* (motor cut, W05 latch) | a measured position outside the cube raises an abort that ends in a **controlled landing** | **decided 2026-09-21 (Colin): controlled landing.** A single-tag fix is realistically noisy wherever only one tag is in view (measured 10.4-12.5 cm spread off-axis), so a false `OUTSIDE` is realistic there; with two tags in view the joint solve measured 0.45 cm at the same range, so a false `OUTSIDE` is implausible at a stop where both are seen. A motor cut at up to 1.8 m near people is the more harmful failure regardless. W08 amended |
+| W08-c | the envelope is *the 1 m demo cube of W03* | the envelope is derived from the site file | **decided 2026-09-21 (Colin): the configured envelope.** W08 amended |
+| W08-b | the worker verifies position *continuously* | checked only at localised stops | **decided 2026-09-21 (Colin): at every localised stop, and during moves whenever tags are in view.** W08 amended; the in-move half (level 2 below) is built, not yet bench-tested |
+
+**W08-b: what "continuously" can mean.** Navigation is open-loop. A waypoint is reached with at
+most three blocking Tello `move` commands (x, then y, then z), each validated against the envelope
+*before* it is sent, from a position that is dead-reckoned: after an `ok` the runner simply assumes
+the commanded endpoint, and only altitude is read back from a sensor. The drone executes each
+`move` with its own onboard optical-flow loop; the host cannot adjust a leg in flight. Pose enters
+only at a stop, after the drone has settled. Three levels are possible:
+
+| Level | What pose does | Requirement impact | State |
+|---|---|---|---|
+| 1. Stop-time check (`passive`) | measured at each localised stop; outside the cube means a controlled landing | none: SR-063 as written | implemented |
+| 2. In-leg watchdog | the pose stream, which already stays open all flight, is also evaluated *during* legs whenever tags are in view; outside the cube means a controlled landing. It can end the flight and nothing else | none on SR-063; **required by W08 since 2026-09-21**. Needs a second thread beside the blocking `move`, and a bench test that the Tello honours `land` while a `move` is executing | built (`sentinel.pose.watchdog` + `CubeMissionRunner.move_checked`): 2 consecutive joint fixes, a speed-based trip margin (about 26 cm at `speed 20`), a lock-free `land`. Bench test B1 has shown the Tello honours `land` mid-move (12 cm further travel at `speed 20`); 2 of its 9 runs are flown, so sending `land` mid-move stays behind a flag defaulting off |
+| 3. Stop-time correction (`reanchor`) | a good fix replaces the dead-reckoned position at a hover and sends at most two bounded trim moves toward the approved waypoint | SR-063 amendment C1, **consented 2026-09-21 (Colin)** | implemented; run with `cube-run --pose reanchor --sr063-amended`; not yet flown (cube design Stage 3) |
+
+Continuous *steering* from pose — a velocity loop on `rc` commands — is excluded from V0 by SR-063
+and W07, and is not a safe proposition on this hardware: pose arrives at video rate with several
+hundred milliseconds of latency, only while tags are in frame, and its accuracy in motion is
+unmeasured. Levels 2 and 3 are independent and both are now adopted: level 3 by the SR-063
+amendment, level 2 by W08. Level 2 is owed by WP5; until it is built and bench-tested **no
+artifact may claim W08 satisfied**.
+
+### 10.4 Implementation (informative, owned elsewhere)
+
+This specification no longer pins the detector. Its original text named `SOLVEPNP_IPPE_SQUARE`;
+that is now only the single-tag path, and two or more tags are solved jointly. The detector, localisation burst,
+containment check and mission runner are specified by the
+[WP5 cube design](2026-09-20-wp5-cube-positioning-design.md), which is a component design within
+this profile and may not widen §10.2.
+
+### 10.5 Camera model (normative, single source)
+
+One camera model applies to every consumer of Tello 960x720 stream pixels: pose, cube observation
+planning and survey geometry alike. Its source is the chessboard calibration in
+[`calibration/tag-map-calibrated.json`](../../../calibration/tag-map-calibrated.json)
+(`calibration_source: chessboard`), validated by the pose accuracy measured with it (1.0 cm at
+40 cm, 2.1 cm at 80 cm):
+
+| Quantity | Value |
+|---|---|
+| Focal length | fx 892.6 px, fy 893.7 px |
+| Principal point | cx 467.8, cy 353.8 |
+| Field of view of the stream | 56.5° horizontal, 43.9° vertical |
+| Optical-axis pitch | about 8.6° **down**; the horizon sits near image row 219, not row 360 |
+| View relative to the horizon | about 13° above to 31° below |
+
+The datasheet figure of 82.6° does **not** describe the 960x720 stream, under either reading:
+taken as a horizontal angle it gives f = 547 px, taken as a diagonal it gives f = 683 px, and the
+measured value is 893 px. The nominal intrinsics (`calibration_source: nominal`, fx 547) remain
+valid for **synthetic rendered frames only**, where the renderer and the solver share them;
+`pose-stream` and `pose-score` already refuse a nominal map on live data.
+
+The calibration belongs to one airframe. A different Tello is re-calibrated with
+`scripts/calibrate_camera.py` before its pixels are trusted, and the pitch is re-measured from the
+horizon row.
+
+Known non-conforming artifacts as of this revision, each to be corrected by its owner:
+
+| Artifact | Uses | Consequence |
+|---|---|---|
+| Dzivha's `fixtures/perception` package, `sentinel_perception.config.CameraConfig` | field of view 70.2° x 55.6° (`hfov_deg`, `vfov_deg` defaults) | the same wrong FOV as the two rows below carried until 2026-09-21; her bearing arithmetic is skewed by it until her package adopts the measured model. Out of scope for this repository's owner to fix directly — `fixtures/perception` is her package, read-only from here (survey design §D handoff, `docs/handoffs/2026-09-21-HANDOFF-to-dzivha-camera-and-survey.md`) |
+
+> **Rev (2026-09-21, live-integration workstream A2).** `sentinel.cube.observe` is no longer in this
+> table: `WIDTH_PER_RANGE` and `BELOW_HORIZON_DEG` now derive from `sentinel.camera.TELLO_MEASURED`
+> (≈1.076 of width per unit range and ≈30.9° below the horizon, matching the measured figures this
+> table used to contrast them against), pinned by `tests/cube/test_observe.py`'s
+> `test_observe_constants_agree_with_the_calibrated_camera`. The survey-counting design carried the
+> same error, f = 683 px with a level optical axis, until its rev 5 of the same date; see that
+> document's §5.1.
+
+### 10.6 Acceptance and gates
+
+All development and CI use synthetic rendered tag frames only; no implementation task connects to
+a live drone. Acceptance is a user-approved supervised physical test run (detector works, database
+position updates, real-time x/y/z terminal logging).
+
+- Every real flight is behind the **G4** operator consent (owner: Colin), fresh per run.
+- Motors-off stages (`pose-stream`, the static stand test) need no flight gate.
+- **G3 does not gate pose.** G3 is the perception-provider approval of §8 and is currently
+  BLOCKED; it applies only when a run feeds the judged perception path. The earlier phrase "G3
+  owner approval" attached to pose flights was a category error and, read literally, made every
+  WP5 flight wait on a rock-detection provider profile.
+
+### 10.7 What this revision changed, and why
+
+| Original statement | Problem | Now |
+|---|---|---|
+| "pose never mutates flight state" / "never a flight-control input" | contradicted the §9 W08 carve-out in the same document, SR-063 as revised at consent, FEAT-021 and the implemented `passive` mode, all of which let pose trip the abort path | §10.2 |
+| "`SOLVEPNP_IPPE_SQUARE`" | implementation detail in the top-authority document; stale since the joint multi-tag solve | §10.4 |
+| "nominal intrinsics … fx 547" stated without scope | read as the camera model; three focal lengths were in use across the repository | §10.5 |
+| "safety: G3 owner approval" | G3 is the perception gate, not a flight gate | §10.6 |
+| §9 "GPS/localisation" | SR-061 AC-3 requires "GPS/global localisation"; the wording was lost when the integration branch merged §9 | §9 |

@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "provenance": "synthetic",
+  "bounds_cm": {
+    "min_x": -1000,
+    "max_x": 1000,
+    "min_y": 0,
+    "max_y": 1000
+  },
+  "camera": {
+    "width_px": 960,
+    "height_px": 720,
+    "fx_px": 683,
+    "fy_px": 683,
+    "cx_px": 480,
+    "cy_px": 360,
+    "minimum_object_width_px": 20
+  },
+  "scene_id": "synthetic-missing-unanalysed",
+  "objects": [
+    {
+      "object_id": "computer",
+      "class": "computer",
+      "x_cm": 0,
+      "y_cm": 300,
+      "surface_z_cm": 0,
+      "width_cm": 35
+    }
+  ],
+  "options": {
+    "missing": [
+      "absent"
+    ],
+    "unanalysed": [
+      "u0"
+    ]
+  },
+  "frames": [
+    {
+      "frame_id": "u0",
+      "option_id": "unanalysed",
+      "stop_index": 0,
+      "status": "UNANALYSED",
+      "pose": {
+        "x_cm": 0,
+        "y_cm": 0,
+        "z_cm": 55,
+        "heading_deg": 0
+      },
+      "occluded_object_ids": [],
+      "detections": []
+    }
+  ]
+}

@@ -29,3 +29,14 @@ assert Path(sentinel_package.__file__).resolve().is_relative_to(SOURCE_ROOT)
 _REPO_ROOT = str(Path(__file__).resolve().parents[1])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
+
+# INTEGRATION NOTE (integration/survey-demo). WP5 added tests/__init__.py, which makes pytest put
+# the repo root on sys.path instead of tests/. tests/test_cli_proposal_review.py imports its helper
+# as ``from coordinator.p3_helpers import P3Run`` -- the only file in the suite using that bare
+# form; thirteen others use ``from tests.coordinator...``. It resolved only while pytest happened to
+# add tests/ itself. Keeping tests/ importable here lets both branches' tests run unmodified.
+# Follow-up for that file's owner: switch it to the ``from tests.coordinator...`` convention, after
+# which this block can go.
+_TESTS_ROOT = str(Path(__file__).resolve().parent)
+if _TESTS_ROOT not in sys.path:
+    sys.path.append(_TESTS_ROOT)

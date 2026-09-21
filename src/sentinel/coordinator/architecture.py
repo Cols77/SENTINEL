@@ -118,6 +118,13 @@ class ArchitectureRouter:
             return "unknown_plan"
         return None
 
+    def forget(self, agent_run_id: str) -> None:
+        """Clear per-run model memory across both architecture routes."""
+        for policy in (self.proposer, self.ladder):
+            forget = getattr(policy, "forget", None)
+            if callable(forget):
+                forget(agent_run_id)
+
     def close(self) -> None:
         closer = getattr(self.ladder, "close", None)
         if closer is not None:

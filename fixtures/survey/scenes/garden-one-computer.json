@@ -1,0 +1,6 @@
+{
+  "scene_id": "garden-one-computer",
+  "objects": [{"class": "computer", "x_cm": 0.0, "y_cm": 300.0}],
+  "frames_dir": "fixtures/survey/frames/garden-one-computer",
+  "responses_dir": "fixtures/survey/responses/garden-one-computer"
+}

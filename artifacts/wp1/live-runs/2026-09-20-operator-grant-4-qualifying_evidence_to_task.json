@@ -1,0 +1,258 @@
+{
+ "calls": [
+  "task.create",
+  "patroller.rank_for_task",
+  "assignment.propose"
+ ],
+ "model_results": [
+  {
+   "agent_run_id": "22222222-2222-4222-8222-222222222222",
+   "contract_version": "sentinel.v0",
+   "status": "TOOL_CALLS",
+   "tool_calls": [
+    {
+     "arguments": {
+      "evidence_artifact_id": "33333333-3333-4333-8333-333333333333",
+      "perception_result_id": "55555555-5555-4555-8555-555555555555",
+      "reason": "Qualifying rock detection with accepted evidence (class=rock, score_band=very_high) at section LEFT_ALLEY_MIDDLE; creating the remediation task per user request, after which ranking and patroller proposal will follow.",
+      "section_id": "LEFT_ALLEY_MIDDLE"
+     },
+     "contract_version": "sentinel.v0",
+     "tool_name": "task.create",
+     "wire_type": "agent_tool_call"
+    }
+   ],
+   "wire_type": "agent_result"
+  },
+  {
+   "agent_run_id": "22222222-2222-4222-8222-222222222222",
+   "contract_version": "sentinel.v0",
+   "status": "TOOL_CALLS",
+   "tool_calls": [
+    {
+     "arguments": {
+      "reason": "Remediation task created for qualifying rock detection at section LEFT_ALLEY_MIDDLE (very_high score band); requesting coordinator ranking as the next step before proposing a patroller.",
+      "task_id": "2fbde59a-ef3d-5620-989d-f44c8768fd0e"
+     },
+     "contract_version": "sentinel.v0",
+     "tool_name": "patroller.rank_for_task",
+     "wire_type": "agent_tool_call"
+    }
+   ],
+   "wire_type": "agent_result"
+  },
+  {
+   "agent_run_id": "22222222-2222-4222-8222-222222222222",
+   "contract_version": "sentinel.v0",
+   "status": "TOOL_CALLS",
+   "tool_calls": [
+    {
+     "arguments": {
+      "patroller_id": "PATROLLER_1",
+      "reason": "Top-ranked patroller from coordinator ranking for the remediation task of the very_high rock detection at LEFT_ALLEY_MIDDLE.",
+      "task_id": "2fbde59a-ef3d-5620-989d-f44c8768fd0e"
+     },
+     "contract_version": "sentinel.v0",
+     "tool_name": "assignment.propose",
+     "wire_type": "agent_tool_call"
+    }
+   ],
+   "wire_type": "agent_result"
+  }
+ ],
+ "requests": [
+  {
+   "agent_run_id": "22222222-2222-4222-8222-222222222222",
+   "allowed_intent_schema_id": "https://sentinel.local/contracts/sentinel-v0-wire.schema.json#AgentModelResult",
+   "contract_version": "sentinel.v0",
+   "deadline": "2999-01-01T00:00:00Z",
+   "event_context": [
+    {
+     "event_type": "RUN_CREATED",
+     "sequence_no": 1,
+     "summary": "RUN_CREATED: {\"run_status\":\"RUNNING\"}"
+    },
+    {
+     "event_type": "USER_MESSAGE_RECEIVED",
+     "sequence_no": 2,
+     "summary": "USER_MESSAGE_RECEIVED: {\"request_text\":\"A qualifying rock detection with accepted evidence is available. Create the remediation task for it, then rank and propose a patroller.\"}"
+    },
+    {
+     "event_type": "PLAN_PROPOSED",
+     "sequence_no": 3,
+     "summary": "PLAN_PROPOSED: {\"catalogue_plan_id\":\"PLAN_ROUTE_ONLY_2_ZONE\",\"plan_id\":\"180711e2-522b-535c-9cc6-3762b1efedf8\"}"
+    },
+    {
+     "event_type": "PLAN_CREATED",
+     "sequence_no": 4,
+     "summary": "PLAN_CREATED: {\"catalogue_plan_id\":\"PLAN_ROUTE_ONLY_2_ZONE\",\"plan_id\":\"180711e2-522b-535c-9cc6-3762b1efedf8\"}"
+    },
+    {
+     "event_type": "AGENT_INTENT_PROPOSED",
+     "sequence_no": 5,
+     "summary": "AGENT_INTENT_PROPOSED: {\"catalogue_plan_id\":\"PLAN_ROUTE_ONLY_2_ZONE\",\"intent\":\"REQUEST_OPERATOR_APPROVAL\"}"
+    },
+    {
+     "event_type": "PLAN_APPROVED",
+     "sequence_no": 6,
+     "summary": "PLAN_APPROVED: {\"target\":{\"plan_reference\":{\"station_ids\":[\"LEFT_ALLEY_MIDDLE\",\"RIGHT_ALLEY_MIDDLE\"],\"catalogue_id\":\"SURVEY_CATALOGUE_V1\",\"plan_id\":\"180711e2-522b-535c-9cc6-3762b1efedf8\",\"catalogue_revision\":\"REV_1\",\"plan_sha256\":\"ad43c349722175dd4d25eaabad9ce0f019ed32a95c7e8feaa498e11a9d210f08\"},\"kind\":\"PLAN\"},\"decision\":\"CONFIRM\"}"
+    },
+    {
+     "event_type": "PREFLIGHT_REPORTED",
+     "sequence_no": 7,
+     "summary": "PREFLIGHT_REPORTED: {\"preflight_report\":{\"checks\":[{\"checked_at\":\"2026-09-17T13:00:00Z\",\"name\":\"WIFI_INTERFACE\",\"passed\":true},{\"checked_at\":\"2026-09-17T13:00:00Z\",\"name\":\"DRONE_LINK\",\"passed\":true},{\"checked_at\":\"2026-09-17T13:00:00Z\",\"name\":\"BATTERY_TELEMETRY\",\"passed\":true},{\"checked_at\":\"2026-09-17T13:00:00Z\",\"name\":\"LIVE_VIDEO\",\"passed\":true},{\"checked_at\":\"2026-09-17T13:00:00Z\",\"name\":\"LAYOUT_MARKERS\",\"passed\":true},{\"checked_at\":\"2026-09-17T13:00:00Z\",\"name\":\"BOUNDED_AREA\",\"passed\":true},{\"checked_at"
+    },
+    {
+     "event_type": "DRONE_DISPATCH_REQUESTED",
+     "sequence_no": 8,
+     "summary": "DRONE_DISPATCH_REQUESTED: {\"mission_id\":\"180711e2-522b-535c-9cc6-3762b1efedf8\",\"section_id\":\"LEFT_ALLEY_MIDDLE\",\"worker_id\":\"SIMULATED_WORKER\"}"
+    },
+    {
+     "event_type": "DETECTION_RECORDED",
+     "sequence_no": 9,
+     "summary": "DETECTION_RECORDED: {\"perception_result\":{\"station_capture\":{\"marker_id\":\"TAG_LEFT_MIDDLE\",\"station_id\":\"LEFT_ALLEY_MIDDLE\",\"zone_id\":\"LEFT_ALLEY_MIDDLE\",\"artifact_id\":\"33333333-3333-4333-8333-333333333333\",\"plan_id\":\"180711e2-522b-535c-9cc6-3762b1efedf8\",\"artifact_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"capture_index\":1,\"captured_at\":\"2026-09-17T13:00:00Z\",\"height_m\":1.2,\"plan_sha256\":\"ad43c349722175dd4d25eaabad9ce0f019ed32a95c7e8feaa498e11a9d210f08\",\"plan_step\":1}}}"
+    }
+   ],
+   "evidence_context": [
+    {
+     "artifact_id": "33333333-3333-4333-8333-333333333333",
+     "source_kind": "SIMULATED",
+     "status": "DETECTED",
+     "summary": "section_id=LEFT_ALLEY_MIDDLE class=rock score_band=very_high perception_result_id=55555555-5555-4555-8555-555555555555 evidence_artifact_id=33333333-3333-4333-8333-333333333333"
+    }
+   ],
+   "legal_tools": [
+    "finish",
+    "state.get_recent_events",
+    "state.get_summary",
+    "task.create"
+   ],
+   "phase": "RECEIVE_REQUEST",
+   "previous_result": null,
+   "run_id": "11111111-1111-4111-8111-111111111111",
+   "state_version": 9,
+   "user_request": "A qualifying rock detection with accepted evidence is available. Create the remediation task for it, then rank and propose a patroller.",
+   "wire_type": "agent_request"
+  },
+  {
+   "agent_run_id": "22222222-2222-4222-8222-222222222222",
+   "allowed_intent_schema_id": "https://sentinel.local/contracts/sentinel-v0-wire.schema.json#AgentModelResult",
+   "contract_version": "sentinel.v0",
+   "deadline": "2999-01-01T00:00:00Z",
+   "event_context": [
+    {
+     "event_type": "TASK_CREATED",
+     "sequence_no": 10,
+     "summary": "TASK_CREATED: {\"evidence_artifact_id\":\"33333333-3333-4333-8333-333333333333\",\"perception_result_id\":\"55555555-5555-4555-8555-555555555555\",\"section_id\":\"LEFT_ALLEY_MIDDLE\"}"
+    }
+   ],
+   "evidence_context": [
+    {
+     "artifact_id": "33333333-3333-4333-8333-333333333333",
+     "source_kind": "SIMULATED",
+     "status": "DETECTED",
+     "summary": "section_id=LEFT_ALLEY_MIDDLE class=rock score_band=very_high perception_result_id=55555555-5555-4555-8555-555555555555 evidence_artifact_id=33333333-3333-4333-8333-333333333333"
+    }
+   ],
+   "legal_tools": [
+    "patroller.rank_for_task",
+    "state.get_recent_events",
+    "state.get_summary"
+   ],
+   "phase": "RECEIVE_REQUEST",
+   "previous_result": {
+    "contract_version": "sentinel.v0",
+    "error_code": null,
+    "event_cursor": 10,
+    "legal_tools": [
+     "state.get_summary",
+     "state.get_recent_events",
+     "inspection.propose_plan",
+     "task.create",
+     "patroller.rank_for_task",
+     "assignment.propose",
+     "wait_for_event",
+     "finish"
+    ],
+    "result": {
+     "kind": "task",
+     "task_id": "2fbde59a-ef3d-5620-989d-f44c8768fd0e"
+    },
+    "safe_summary": "TASK_CREATE COMPLETED; ids: {'run_id': '11111111-1111-4111-8111-111111111111', 'plan_id': '180711e2-522b-535c-9cc6-3762b1efedf8', 'task_id': '2fbde59a-ef3d-5620-989d-f44c8768fd0e', 'perception_result_id': None, 'artifact_id': None, 'station_id': None}",
+    "state_version": 10,
+    "status": "ACCEPTED",
+    "tool_name": "task.create",
+    "wire_type": "agent_tool_result"
+   },
+   "run_id": "11111111-1111-4111-8111-111111111111",
+   "state_version": 10,
+   "user_request": "A qualifying rock detection with accepted evidence is available. Create the remediation task for it, then rank and propose a patroller.",
+   "wire_type": "agent_request"
+  },
+  {
+   "agent_run_id": "22222222-2222-4222-8222-222222222222",
+   "allowed_intent_schema_id": "https://sentinel.local/contracts/sentinel-v0-wire.schema.json#AgentModelResult",
+   "contract_version": "sentinel.v0",
+   "deadline": "2999-01-01T00:00:00Z",
+   "event_context": [],
+   "evidence_context": [
+    {
+     "artifact_id": "33333333-3333-4333-8333-333333333333",
+     "source_kind": "SIMULATED",
+     "status": "DETECTED",
+     "summary": "section_id=LEFT_ALLEY_MIDDLE class=rock score_band=very_high perception_result_id=55555555-5555-4555-8555-555555555555 evidence_artifact_id=33333333-3333-4333-8333-333333333333"
+    }
+   ],
+   "legal_tools": [
+    "assignment.propose",
+    "state.get_recent_events",
+    "state.get_summary"
+   ],
+   "phase": "RECEIVE_REQUEST",
+   "previous_result": {
+    "contract_version": "sentinel.v0",
+    "error_code": null,
+    "event_cursor": 10,
+    "legal_tools": [
+     "state.get_summary",
+     "state.get_recent_events",
+     "inspection.propose_plan",
+     "task.create",
+     "patroller.rank_for_task",
+     "assignment.propose",
+     "wait_for_event",
+     "finish"
+    ],
+    "result": {
+     "kind": "ranking",
+     "patroller_ids": [
+      "PATROLLER_1"
+     ]
+    },
+    "safe_summary": "TASK_RANK COMPLETED; ids: {'run_id': '11111111-1111-4111-8111-111111111111', 'plan_id': '180711e2-522b-535c-9cc6-3762b1efedf8', 'task_id': '2fbde59a-ef3d-5620-989d-f44c8768fd0e', 'perception_result_id': None, 'artifact_id': None, 'station_id': None}",
+    "state_version": 10,
+    "status": "ACCEPTED",
+    "tool_name": "patroller.rank_for_task",
+    "wire_type": "agent_tool_result"
+   },
+   "run_id": "11111111-1111-4111-8111-111111111111",
+   "state_version": 10,
+   "user_request": "A qualifying rock detection with accepted evidence is available. Create the remediation task for it, then rank and propose a patroller.",
+   "wire_type": "agent_request"
+  }
+ ],
+ "result": {
+  "contract_version": "sentinel.v0",
+  "error_code": "WAITING_FOR_APPROVAL",
+  "event_cursor": 11,
+  "legal_tools": [],
+  "result": {
+   "kind": "wait"
+  },
+  "safe_summary": "operator approval is required",
+  "state_version": 11,
+  "status": "ACCEPTED",
+  "tool_name": "wait_for_event",
+  "wire_type": "agent_tool_result"
+ }
+}

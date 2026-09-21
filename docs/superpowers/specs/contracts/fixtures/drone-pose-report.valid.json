@@ -1,0 +1,21 @@
+{
+  "report_id": "3f6b0a1e-7c2d-4e8a-9b1f-0a2c3d4e5f60",
+  "run_id": "4f6b0a1e-7c2d-4e8a-9b1f-0a2c3d4e5f61",
+  "observed_at": "2026-09-18T10:00:00Z",
+  "source_kind": "LIVE",
+  "pose": {
+    "point": { "x": 12.5, "y": 40.0 },
+    "heading_deg": 91.0,
+    "altitude_m": 1.2
+  },
+  "method": "APRILTAG_36H11_PNP",
+  "tag_observations": [
+    {
+      "tag_id": 0,
+      "zone_id": "LEFT_ALLEY_FRONT",
+      "distance_m": 2.0,
+      "reprojection_error_px": 0.8
+    }
+  ],
+  "reprojection_error_px": 0.8
+}

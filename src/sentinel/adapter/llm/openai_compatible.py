@@ -163,6 +163,8 @@ class OpenAICompatibleAgentModel:
             request,
             prompt_revision=self.config.prompt_revision,
             tool_policy_revision=self.config.tool_policy_revision,
+            # Legacy `read_tools` carries the in-process PolicyContext for contextual policies.
+            context=read_tools,
             history=self._history.get(agent_run_id, ()),
         )
         self.last_request = payload

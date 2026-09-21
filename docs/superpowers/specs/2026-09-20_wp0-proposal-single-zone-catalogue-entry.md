@@ -1,14 +1,20 @@
 ---
+id: sentinel-wp0-proposal-single-zone-catalogue-entry
+title: "WP0 proposal - single-zone catalogue entry"
 status: proposed (Coherence consent required — no gate opened yet; this document grants none)
-proposed_by: P2 Task C — Shadow Advisors follow-up
+proposed_by: >-
+  P2 Task C — Shadow Advisors follow-up
   (`docs/superpowers/plans/2026-09-19-p2-shadow-advisors-F.md`, gate G-labels decision 3)
 proposed_at: 2026-09-20
-scope: `docs/superpowers/specs/contracts/fixtures/survey-catalogue-v1.fixture.json` (catalogue content) and
+scope: >-
+  `docs/superpowers/specs/contracts/fixtures/survey-catalogue-v1.fixture.json` (catalogue content) and
   `docs/superpowers/specs/contracts/survey-catalogue-v1.schema.json` (catalogue shape)
-implements_in: not scheduled. **This document does not modify the catalogue fixture or the catalogue schema.**
+implements_in: >-
+  not scheduled. **This document does not modify the catalogue fixture or the catalogue schema.**
   It is a diff proposal only, matching the "Proposal only, you consent" pattern already used for this catalogue
   (see `fixtures/decisions/README.md` §4).
-consent_required: yes — operator Coherence consent, never self-granted. This document is the proposal artifact;
+consent_required: >-
+  yes — operator Coherence consent, never self-granted. This document is the proposal artifact;
   it does not open or satisfy that consent gate.
 ---
 

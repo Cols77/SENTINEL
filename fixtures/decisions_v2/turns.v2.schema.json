@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://sentinel.local/fixtures/decisions_v2/turns.v2.schema.json",
   "title": "SENTINEL decision-turn fixture record (turns.v2)",
-  "description": "One line of fixtures/decisions_v2/turns.v2.jsonl: a decision point captured from the real coordinator gateway, with a draft label pending operator approval at gate G-labels-v2 (P3a Task 10). Adds packet.v2 (queue/detection/assignment facts) and rule_choice on top of turns.v1.",
+  "description": "One line of fixtures/decisions_v2/turns.v2.jsonl: a decision point captured from the real coordinator gateway with explicit hand, rule, generated, or pending label provenance. SELECT_PLAN uses the draft catalogue; generated expectations do not approve it for production. Adds packet.v2 (queue/detection/assignment facts) and rule_choice on top of turns.v1.",
   "type": "object",
   "additionalProperties": false,
   "required": ["turn_id", "decision_point", "packet", "candidates", "label", "label_source", "rationale", "generator_revision", "rule_choice"],
@@ -109,7 +109,7 @@
     },
     "label_source": {
       "type": "string",
-      "enum": ["hand", "rule", "operator_pending"]
+      "enum": ["hand", "rule", "operator_pending", "generated"]
     },
     "rationale": {
       "type": ["string", "null"]

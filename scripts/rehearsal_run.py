@@ -32,9 +32,10 @@ G-rehearsal, Task 6 Step 4). Nothing in this script sets that variable.
 
 ``--architecture {F,E}`` (default: the ``SENTINEL_ARCHITECTURE`` env var,
 then ``F``) selects the architecture; ``--proposer scripted:<PLAN_ID>``
-supplies E's proposer with a tiny non-LLM stand-in -- there is no live-LLM
-proposer option here (that is P4 Task 6, deferred until Codex's P3b1
-``LlmProposer`` lands). ``--architecture E`` with no ``--proposer`` exits 2
+supplies E's proposer with a tiny non-LLM stand-in. ``--proposer jev`` uses
+the approval-gated Jev proposer and refuses before artifact creation unless
+``SENTINEL_JEV_PROPOSER_CONSENT=<batch-id>`` records fresh explicit consent
+for G-live-jev-proposer. ``--architecture E`` with no ``--proposer`` exits 2
 before anything is opened or created.
 
 Every mutation here still goes through ``CommandGateway.submit`` (directly,
@@ -46,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -64,6 +66,10 @@ from sentinel.coordinator.legal_tools import EVIDENCE_GATE, SELECT_PLAN, load_ca
 from sentinel.coordinator.operator_choice import submit_choice  # noqa: E402
 from sentinel.coordinator.policies import JevPolicy  # noqa: E402
 from sentinel.coordinator.policy import ContextualPolicy, PolicyContext, one_call  # noqa: E402
+from sentinel.coordinator.proposer_factory import (  # noqa: E402
+    ScriptedProposer, build_proposer, require_jev_proposer_consent,
+    require_proposer_consent, JEV_PROPOSER_CONSENT_ENV, JEV_PROPOSER_MODEL,
+)
 from sentinel.coordinator.repository import CoordinatorRepository  # noqa: E402
 from sentinel.coordinator.shadow import JsonlAuditSink  # noqa: E402
 
@@ -172,33 +178,6 @@ def _confirm_task(repo: CoordinatorRepository, gateway: CommandGateway, run_id: 
     }, sequence=30, run_id=run_id, actor_type="OPERATOR", expected=_state_version(repo, run_id)))
 
 
-# --- architecture E's proposer (CLI-testing stand-in only) ---------------
-
-class ScriptedProposer:
-    """``--proposer scripted:<PLAN_ID>``: always proposes the same catalogue
-    plan id, regardless of context -- no model, no network call. This is a
-    seam for exercising ``ArchitectureRouter`` end to end; the real proposer
-    is P3b1's ``LlmProposer`` (Task 6, deferred, not part of this task)."""
-
-    def __init__(self, plan_id: str) -> None:
-        self.plan_id = plan_id
-
-    def decide(self, request: dict, context: PolicyContext) -> dict:
-        return one_call(request, "inspection.propose_plan", {"catalogue_plan_id": self.plan_id})
-
-
-def build_proposer(spec: str | None) -> ContextualPolicy | None:
-    """``None`` -> no proposer (architecture F, or E with none supplied --
-    ``architecture.build_policy`` is what raises ``ArchitectureUnavailable``
-    for that case). ``"scripted:<PLAN_ID>"`` -> ``ScriptedProposer``."""
-    if spec is None:
-        return None
-    prefix = "scripted:"
-    if spec.startswith(prefix) and len(spec) > len(prefix):
-        return ScriptedProposer(spec[len(prefix):])
-    raise ValueError(f"unknown --proposer spec: {spec!r} (expected 'scripted:<PLAN_ID>')")
-
-
 # --- the rehearsal itself -------------------------------------------------
 
 def run_rehearsal(*, advisors_mode: str, choices: dict[str, str], db_path: Path, audit_path: Path,
@@ -206,7 +185,8 @@ def run_rehearsal(*, advisors_mode: str, choices: dict[str, str], db_path: Path,
                    request_text: str = "inspect one station",
                    prompt: Callable[[str], str] = input,
                    architecture: str | None = None,
-                   proposer: ContextualPolicy | None = None) -> dict[str, Any]:
+                   proposer: ContextualPolicy | None = None,
+                   audit_sink: Any | None = None) -> dict[str, Any]:
     """Drives one simulated demo run end to end and returns a small summary
     dict. Every mutation goes through ``CommandGateway.submit`` -- directly
     here, or through ``operator_choice.submit_choice`` -- there is no other
@@ -222,7 +202,7 @@ def run_rehearsal(*, advisors_mode: str, choices: dict[str, str], db_path: Path,
     agent_run_id = agent_run_id or str(uuid.uuid4())
     advisors = build_advisors(advisors_mode)  # before any side effect: live mode refuses without consent
     resolved_architecture = resolve_architecture(architecture)
-    sink = JsonlAuditSink(audit_path)
+    sink = audit_sink or JsonlAuditSink(audit_path)
     policy = build_policy(resolved_architecture, advisors=advisors, sink=sink, proposer=proposer)
 
     repo = CoordinatorRepository.open(db_path)
@@ -267,8 +247,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--architecture", default=None, choices=("F", "E"),
                          help="F (default) or E; unset falls back to the SENTINEL_ARCHITECTURE env var, then F")
     parser.add_argument("--proposer", default=None,
-                         help="scripted:<PLAN_ID> -- a non-LLM stand-in proposer for architecture E; "
-                              "there is no live-LLM proposer option in this task")
+                         help="llm/jev (live, separately consent-gated) or scripted:<PLAN_ID> for architecture E")
     parser.add_argument("--choices", default=None,
                          help="sp=<SELECT_PLAN label>,eg=<EVIDENCE_GATE label>; omitted entries are prompted for")
     parser.add_argument("--run-id", default=None)
@@ -285,9 +264,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"refusing to run rehearsal with '--advisors live': {exc}", file=sys.stderr)
             return 2
 
+    if args.proposer in {"jev", "llm"}:
+        try:
+            require_proposer_consent(args.proposer)
+        except PermissionError as exc:
+            print(f"refusing to run rehearsal with '--proposer {args.proposer}': {exc}", file=sys.stderr)
+            return 2
+
     try:
-        proposer = build_proposer(args.proposer)
-    except ValueError as exc:
+        proposer = build_proposer(args.proposer) if args.proposer not in {"jev", "llm"} else None
+    except (PermissionError, ValueError) as exc:
         print(f"invalid --proposer: {exc}", file=sys.stderr)
         return 2
 
@@ -297,11 +283,19 @@ def main(argv: list[str] | None = None) -> int:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     audit_path.parent.mkdir(parents=True, exist_ok=True)
 
+    sink = JsonlAuditSink(audit_path)
+    if args.proposer in {"jev", "llm"}:
+        try:
+            proposer = build_proposer(args.proposer, sink=sink)
+        except (PermissionError, ValueError) as exc:
+            print(f"invalid --proposer: {exc}", file=sys.stderr)
+            return 2
+
     try:
         summary = run_rehearsal(
             advisors_mode=args.advisors, choices=parse_choices(args.choices),
             db_path=db_path, audit_path=audit_path, run_id=run_id, request_text=args.request,
-            architecture=args.architecture, proposer=proposer,
+            architecture=args.architecture, proposer=proposer, audit_sink=sink,
         )
     except ArchitectureUnavailable as exc:
         print(f"refusing to run rehearsal: {exc}", file=sys.stderr)

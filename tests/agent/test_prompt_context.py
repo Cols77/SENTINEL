@@ -1,12 +1,26 @@
 import json
 from dataclasses import replace
 
+from sentinel.adapter.llm.config import load_config
+from sentinel.adapter.llm.openai_compatible import OpenAICompatibleAgentModel
 from sentinel.adapter.llm.parser import APPROVED_TOOL_NAMES, wire_tool_name
 from sentinel.adapter.llm.prompt import build_chat_request
 from sentinel.contracts import AgentRequest
+from sentinel.coordinator.decision_state import DecisionState
+from sentinel.coordinator.legal_tools import Candidate, LegalSet, SELECT_PLAN
+from sentinel.coordinator.policy import PolicyContext
 
 
 UUID = "11111111-1111-4111-8111-111111111111"
+ENV = {
+    "SENTINEL_LLM_PROVIDER": "openrouter",
+    "SENTINEL_LLM_MODEL": "model-v1",
+    "SENTINEL_LLM_TIMEOUT_MS": "12000",
+    "SENTINEL_LLM_PROMPT_REVISION": "prompt-v1",
+    "SENTINEL_LLM_TOOL_POLICY_REVISION": "tools-v1",
+    "SENTINEL_LLM_API_KEY_ENV": "TEST_API_KEY",
+    "TEST_API_KEY": "secret",
+}
 REQUEST = AgentRequest.from_dict(
     {
         "contract_version": "sentinel.v0",
@@ -148,3 +162,78 @@ def test_prompt_context_text_fields_are_bounded_to_default_limit():
 
     assert context["event_context"][0]["summary"] == oversized[:512]
     assert context["evidence_context"][0]["summary"] == oversized[:512]
+
+
+def test_adapter_forwards_optional_policy_context_to_prompt():
+    state = DecisionState(
+        run_id=UUID,
+        state_version=7,
+        run_status="ACTIVE",
+        agent_phase="PLAN",
+        emergency_latched=False,
+        request_text="Survey the route.",
+        plan_id=None,
+        plan_mode=None,
+        plan_station_ids=(),
+        plan_approved=False,
+        detection=None,
+        open_task_station_ids=(),
+        task_id=None,
+        task_status=None,
+    )
+    legal = LegalSet(
+        SELECT_PLAN,
+        (
+            Candidate(
+                "inspection.propose_plan",
+                {"catalogue_plan_id": "PLAN_ROUTE_ONLY_2_ZONE"},
+                "PLAN_ROUTE_ONLY_2_ZONE",
+                "inspect both route stations",
+            ),
+            Candidate(
+                "finish",
+                {"status": "NEEDS_REVIEW", "summary": "no plan fits"},
+                "escalate",
+                "ask the operator to choose",
+            ),
+        ),
+    )
+    policy_context = PolicyContext(state, legal)
+
+    class Completions:
+        def create(self, **_kwargs):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {"name": "state.get_summary", "arguments": "{}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+
+    class Client:
+        def __init__(self):
+            self.chat = type("Chat", (), {"completions": Completions()})()
+
+    adapter = OpenAICompatibleAgentModel(
+        load_config(ENV), client_factory=lambda **_: Client(), environ=ENV
+    )
+
+    adapter.propose(REQUEST, policy_context)
+    assert adapter.last_request is not None
+    rendered = json.loads(adapter.last_request["messages"][-1]["content"])
+    assert rendered["decision_point"] == SELECT_PLAN
+    assert rendered["decision_packet"] == state.to_packet()
+    assert [item["label"] for item in rendered["options"]] == list(legal.labels)
+
+    adapter.propose(REQUEST)
+    assert adapter.last_request is not None
+    plain = json.loads(adapter.last_request["messages"][-1]["content"])
+    for key in ("decision_point", "decision_packet", "options"):
+        assert key not in plain
