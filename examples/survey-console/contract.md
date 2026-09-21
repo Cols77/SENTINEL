@@ -1,4 +1,27 @@
-# Proposed survey UI projection v1
+# Mission Control projection v2
+
+`src/sentinel/ui/schema.py` owns the closed JSON schema, generated into `mission-schema.mjs`. Python and browser validate the same payload. `mission-contract.mjs` adds reference checks. Unknown nested fields are rejected; private paths, provider credentials, encoded images and internal prompts are excluded. The retained fixture v1 contract is documented below.
+
+| HTTP route | Purpose |
+|---|---|
+| `GET /api/v1/session` | Immutable mode and session/run identity |
+| `GET /api/v1/runs/{run}/snapshot` | Full validated v2 projection |
+| `GET /api/v1/runs/{run}/events?after_sequence=N&limit=200` | Ordered durable events |
+| `GET /api/v1/runs/{run}/evidence/{artifact}` | Run-bound verified PNG/JPEG bytes or explicit denial |
+| `POST /api/v1/runs/{run}/chat` | Durable scoped text command |
+| `POST /api/v1/runs/{run}/decisions` | Immutable approval/rejection attempt |
+| `POST /api/v1/runs/{run}/land` | Controlled Land on the registered runner |
+| `POST /api/v1/safety/emergency` | Session latch plus independent transport |
+
+The service binds only to localhost. Mode is immutable for a session. Browser code cannot query SQLite or construct flight geometry. Rehearsal and Live implement the same methods and shape; source provenance remains explicit.
+
+`run.version` tracks visible snapshots. `run.decision_version` tracks authoritative decision state: pose aging alone does not invalidate approval. A decision binds session/run/proposal ID, SHA-256, decision version, choice, command/correlation/attempt IDs and idempotency key. The journal commits before the waiting worker wakes. Same-payload retries return the stored result, including after a lost browser response; changed-payload key reuse is a conflict. The HTTP adapter preserves typed 409 results. Local storage retains the immutable uncertain decision attempt for reload reconciliation.
+
+A single guarded worker refuses concurrent missions rather than queuing them. Reads, chat and safety remain outside that worker. Live startup refuses incomplete configuration; restart marks interrupted Live runs RECOVERY_REQUIRED. Approval acknowledgement never means flight or landing completion.
+
+Evidence serving resolves only captured run-bound artifacts, verifies hashes, image format and dimensions, and excludes denied/revoked bytes. Pose diagnostics bind the exact encoded image hash, report ID, corners and run. Freshness is computed by the backend clock: FRESH below half the 2000ms threshold, AGING through 2000ms, STALE above it. A stale measured location remains frozen; commanded position is displayed separately. Pose displays use bounded asynchronous sinks and do not control flight.
+
+## Retained fixture projection v1
 
 This is a fixture-only contract, not an adopted coordinator transport. `contract.mjs` documents the complete field types and rejects extra internal fields recursively.
 

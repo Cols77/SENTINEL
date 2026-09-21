@@ -4,6 +4,12 @@ SENTINEL is a supervised physical-AI demonstrator for mountain inspection. An or
 
 The complete product and database contract is defined in the [SENTINEL V0 Coherence Specification](docs/superpowers/specs/2026-09-16-sentinel-v0-coherence-spec.md), whose [indoor-alley survey design](docs/superpowers/specs/2026-09-16-sentinel-v0-indoor-alley-survey-design.md) and [WP0–WP4](docs/superpowers/specs/) specifications define the executable V0 profile. This README is only a quick-start overview.
 
+## Survey Mission Control
+
+The lecture-room survey console now has a local Rehearsal/Live host. Rehearsal runs the production survey loop against synthetic boundary inputs without a drone. Start `uv run python -m sentinel.ui --mode rehearsal --data-dir artifacts/my-rehearsal`, open http://127.0.0.1:8771/console/, and request “count the computers”. Every flight proposal requires an explicit approval.
+
+See [Mission Control setup and Live prerequisites](examples/survey-console/README.md), [the HTTP contract](examples/survey-console/contract.md), and [verification handoff](docs/handoffs/2026-09-21-mission-control.md). Live hardware readiness has not been established by software tests.
+
 ## V0 demonstration loop
 
 ```text

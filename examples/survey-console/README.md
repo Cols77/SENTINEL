@@ -1,46 +1,67 @@
-# Survey console fixture demo
+# SENTINEL Mission Control
 
-A separate follow-up to PR #7. This browser console reuses the asset kit without changing it. It is **not flight-capable**, does not invoke providers, and is not the WP2 NiceGUI smoke surface. Every source badge is shown alongside FIXTURE DEMO. Emergency is visibly disconnected.
+The local Mission Control host connects this vanilla browser UI to the production survey loop. Rehearsal and Live use the same application service, approval broker, snapshot contract and survey/report validation. Rehearsal injects synthetic camera, flight and perception boundaries; its results are computed by the runtime.
 
-## Run
+## Start a rehearsal
 
-From repository root:
+From the repository root, install the project dependencies (`uv sync`), then:
 
 ```sh
-# Terminal 1
-python3 -m http.server 8770 --bind 127.0.0.1
-# Terminal 2
+uv run python -m sentinel.ui --mode rehearsal --data-dir artifacts/my-rehearsal --port 8771
+# Equivalent entry point:
+uv run sentinel mission-control --mode rehearsal --data-dir artifacts/my-rehearsal
+```
+
+Open http://127.0.0.1:8771/console/, ask **count the computers**, inspect the proposal and explicitly approve or reject it. Text cannot authorize flight. Status questions remain available while approval waits. One host owns one session/run; use a fresh data directory for a new rehearsal. Do not run two hosts against the same session database.
+
+The clean scenario yields one confirmed synthetic computer. Pass `--scenario fixtures/mission-control/uncertain-followup.json` for a separately approved follow-up, or `--scenario fixtures/mission-control/missing-analysis.json` for a provider gap. Missing analysis is visibly incomplete, never interpreted as a zero count. Rehearsal localization runs the real AprilTag estimator over scripted image inputs, including no-tag intervals that age and recover the last measured fix.
+
+Land interrupts normal sequencing and requests controlled landing. Hold Emergency for 1.2 seconds to latch the session and all active runners, then use the independent transport. Both are simulated in Rehearsal. Acknowledgement is not proof of physical landing or motor stop.
+
+## Live startup
+
+Live refuses startup on a missing prerequisite; it cannot select a Rehearsal fallback. The following example describes configuration, not evidence of hardware readiness:
+
+```sh
+export GEMINI_API_KEY='...'
+export GEMINI_MODEL='your-approved-model'
+uv run sentinel mission-control --mode live --confirm \
+  --data-dir artifacts/live-session \
+  --survey-db /absolute/path/to/consented-survey.sqlite \
+  --site /absolute/path/to/site.json \
+  --tag-map /absolute/path/to/tag-map.json \
+  --pose-db /absolute/path/to/pose.sqlite --pose passive \
+  --detector gemini --provider-profile /absolute/path/to/approved-profile.json \
+  --location lecture-room --consent-date YYYY-MM-DD \
+  --local-ip 192.168.10.2 --surface-z-cm 50
+```
+
+Supply actual measured configuration. `--pose off` also requires `--start-x-cm` and `--start-y-cm`; both coordinates must lie inside the selected envelope. Reanchor retains the existing `--sr063-amended` gate. The provider profile must conform to `provider-profile.v1`, be approved, and match the selected provider/model. Moondream uses `MOONDREAM_API_KEY` and `MOONDREAM_MODEL`. Consent must already be recorded for that exact location/date in the survey database; the host does not record it on the operator's behalf.
+
+Startup checks the selected independent UDP interface and existing no-takeoff preflight. Actual flight still needs an explicit proposal approval. The Live adapter uses `CubeFlight`, the measured Tello camera model, real provider perception, and the existing F rules proposer. The bounded chat currently supports computer-count requests and status; it clarifies unsupported intent. Pose evidence comes from the runner's real localization bursts, so it can honestly age between bursts. Restarted Live sessions require recovery and cannot dispatch again automatically. Start a new session only after the operator has reconciled the aircraft and previous run.
+
+All hardware operation, measured calibration and actual landing/emergency outcomes remain subject to physical verification. Automated acceptance uses injected clients only.
+
+## Verify
+
+```sh
+uv run pytest -q --ignore=fixtures
 node --test tests/survey_console/*.test.mjs
+uv run python scripts/ui_assets/check_assets.py
+node scripts/ui_assets/verify_mission_control.cjs
+```
+
+The browser verifier starts and stops its own real local backend and temporary data directory. It requires Playwright/Chromium in the tooling environment; no frontend build is needed. Acceptance covers approval reload/reconciliation, production survey/report/evidence, stale-to-fresh localization, independent safety controls, three viewports, reduced motion, and local-only traffic. Artifacts go under ignored `artifacts/mission-control/`.
+
+## Retained fixture regression surface
+
+The original eight-scenario fixture demo remains isolated at `/examples/survey-console/` on a static repository server:
+
+```sh
+python3 -m http.server 8770 --bind 127.0.0.1
 node scripts/ui_assets/verify_survey_console.cjs http://127.0.0.1:8770
 ```
 
-Open [the survey console](http://127.0.0.1:8770/examples/survey-console/) or [the legacy alley study](http://127.0.0.1:8770/assets/sentinel-ui/console.html). Browser ES modules require HTTP; direct `file://` loading is not supported. Node 22 was used for verification. The browser verifier needs Playwright and its Chromium binary available to Node, as does the existing asset-kit verifier. With the Codex bundled runtime, set `NODE_PATH` to the node_modules directory returned by the workspace-dependencies tool. Outside Codex, install Playwright in your tooling environment and install Chromium with that environment's Playwright CLI; no runtime dependency is required by the demo.
+That surface is labelled FIXTURE DEMO and cannot dispatch a flight. Its reviewer controls exercise snapshots, uncertain/lower-bound counts, evidence races, and approval state transitions. It does not prove runtime integration. The legacy asset-kit study remains `/assets/sentinel-ui/console.html`.
 
-## Reviewer controls
-
-- **Fixture scenario** replaces the entire run/client and clears selection and pending presentation.
-- **Next fixture snapshot** exposes the next complete supplied projection. It never advances automatically.
-- **Fixture submission result / Resolve fixture submission** settles a pending simulated approval or rejection. It cannot dispatch a flight or advance the snapshot. It is separate from the operator decision panel.
-- Select a class, object, frame, or stop to inspect supporting evidence. Evidence images are synthetic 1×1 PNGs with illustrative boxes; no lecture-room frames are included. Capture-strip thumbnails are explicitly placeholders. An absent measured pose stays unavailable.
-- The operator's initial request is immutable. There is no chat route.
-
-## Scenarios
-
-| Scenario | What to inspect |
-|---|---|
-| Computers · close follow-up | Six stages; five confirmed plus one uncertain; complete closer proposal targets computer-6 |
-| People · lower bound | One capture, timestamped lower bound of three, no merged person identity |
-| Phone · closer sweep | Six projected pixels and NOT_OBSERVABLE, then 18 pixels and one uncertain phone after flight 2 |
-| Consent required | No retained capture, FORBIDDEN evidence, approval disabled |
-| Partial sweep aborted | Flight count unchanged at 0/2; frame excluded from merge |
-| Provider timeout | One of three analysed; failed and pending frames; unknown/dropped labels |
-| Report rejected | Invented count rejected; authoritative computer range unchanged |
-| Source & stale state | LIVE then REPLAY then STALE, unchanged operational facts |
-
-The flight budget comes from the projection. Person counts remain SINGLE_VIEW_LOWER_BOUND. Pen arithmetic uses explicitly illustrative optics. Raw detector scores retain their supplied semantics. The console does not merge sightings or manufacture counts.
-
-## Verification and handoff
-
-Unit tests cover validation, scenario semantics, scoped client reads, event/snapshot races, count copy, image geometry and decision identity. Browser acceptance covers all eight scenarios, source/freshness distinctions, evidence denials and races, approval outcomes, keyboard controls, reduced motion, inert public text, local-only requests, and 1440×900 / 390×844 layout. It writes screenshots and `validation.json` under ignored `artifacts/survey-console/`; these are fixture-review evidence, not proof of flight behavior or WP2 conformance.
-
-Read [the proposed contract](contract.md), [the approved specification](../../docs/superpowers/specs/2026-09-21-survey-console-follow-up.md), and [the implementation plan](../../docs/superpowers/plans/2026-09-21-survey-console-follow-up.md). Real backend projection, evidence transport, emergency support, NiceGUI integration, consent/provider approval and flight/proposer readiness require a separate integration project.
+See [the contract](contract.md), [approved design](../../docs/superpowers/specs/2026-09-21-sentinel-mission-control-design.md), and [execution handoff](../../docs/handoffs/2026-09-21-mission-control.md).
