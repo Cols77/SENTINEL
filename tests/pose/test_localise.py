@@ -39,3 +39,10 @@ def test_too_few_samples_is_unreliable():
 def test_scattered_burst_is_unreliable():
     result = localise([_report(15.0 + i, 12.0, 90.0) for i in range(10)])  # 10 cm steps
     assert isinstance(result, LocalisationUnreliable) and "spread" in result.reason
+
+
+def test_hover_wobble_up_to_ten_cm_still_localises():
+    """2026-09-21 trials: a hovering Tello's bursts spread 5-10 cm around a good median;
+    the old 5 cm gate (set from motors-off data) threw 3 of 12 stops away."""
+    wobble = [_report(15.0 + 0.7 * ((i % 3) - 1), 12.0, 90.0) for i in range(12)]   # +-7 cm
+    assert isinstance(localise(wobble), LocalisationFix)
