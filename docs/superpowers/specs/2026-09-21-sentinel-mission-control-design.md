@@ -1,13 +1,15 @@
 ---
 id: sentinel-mission-control-design
 title: "SENTINEL mission control center"
-status: approved
+status: revised-awaiting-review
 date: 2026-09-21
 ---
 
 # SENTINEL mission control center — design
 
-> Approved by the operator on 2026-09-21. Implementation ownership is handed to LightCode.
+> Revised on 2026-09-21 after Alan approved the shared-runtime, dry-run-first approach.
+> This written revision awaits review before the implementation plan is revised.
+> It supersedes the earlier delivery sequence; implementation ownership remains with LightCode.
 
 ## 1. Purpose and release boundary
 
@@ -15,6 +17,13 @@ Mission Control is the operator-facing center for the SENTINEL rail-sweep demo. 
 uses it to submit a natural-language request, inspect and approve a legal sweep, supervise
 flight and localization, inspect captured evidence, authorize an optional follow-up, and present
 an evidence-backed answer.
+
+The immediate goal is to iterate on the integrated system without a connected drone. Dry-run
+and Live use the same application interfaces and production orchestration; deterministic adapters
+replace external hardware and provider boundaries in dry-run. The existing frontend is preserved.
+The first milestone is one existing scenario executed end to end through the UI, including an
+explicit approval, evidence, authoritative counts, and a validated report. Live adapter wiring
+follows that baseline; the complete release retains the capabilities described below.
 
 The first release optimizes for a laptop or projector at 1440x900 or 1920x1080. It retains a
 usable narrow-screen fallback but does not optimize the live demo for a phone.
@@ -63,7 +72,8 @@ parts are retained and promoted behind an adopted backend contract:
 - evidence image lifecycle and normalized box geometry;
 - immutable proposal identity, idempotent decision attempts, and `IN_DOUBT` reconciliation;
 - confirmed/uncertain count presentation and explicit observability states;
-- fixture scenarios as Rehearsal and browser-acceptance inputs.
+- fixture scenarios as isolated browser-acceptance inputs; integrated Rehearsal uses runtime
+  scenario inputs rather than precomputed browser snapshots.
 
 The local Python host uses [NiceGUI](https://github.com/zauberzeug/nicegui). Its supported
 FastAPI coexistence, static/media serving, test facilities, and image-update patterns remove the
@@ -79,8 +89,10 @@ that branch must incorporate the latest `integration/survey-demo` ancestry conta
 survey, proposer, flight, and pose work. The implementer must not wire against sibling worktree
 files or bypass missing runtime contracts by reading their databases directly from browser code.
 
-The approved design was prepared against local integration commit `9b6b5f1`; implementation
-must re-check the integration tip because that branch is active.
+The original design was prepared against local integration commit `9b6b5f1`. This revision
+checked the published `integration/survey-demo` at `6d7f24b641feb94188d15507a10da5ec65ae1aaa`.
+Implementation must fetch and record the current published tip, incorporate its ancestry, and
+verify the runtime interfaces before product changes. No sibling-worktree dependency is allowed.
 
 ## 4. Architecture
 
@@ -92,6 +104,11 @@ session configuration. It has five bounded units.
 NiceGUI serves the existing static frontend and a small set of typed local API routes. V1 uses
 cursor polling rather than adding another streaming transport. The host remains responsive while
 the synchronous survey and flight code runs on a dedicated mission worker.
+
+The canonical frontend URL is `/console/`: `/` redirects there and static serving supplies its
+index. Existing relative module and stylesheet URLs must resolve under that mount; shared assets
+remain under `/assets/sentinel-ui`. Host acceptance loads the page and its imports, styles and
+API through the actual application server, rather than checking only the root HTML status.
 
 ### 4.2 Projection service
 
@@ -108,6 +125,11 @@ completion, approval legality, pose freshness, containment, or report validity.
 One background worker serializes mission mutations and runs the existing synchronous survey and
 flight loop. At an approval point, an approval broker blocks only that worker. The UI host,
 read-only chat questions, snapshot reads, Land, and Emergency remain responsive.
+
+Mission admission is atomic: a second distinct mutating mission is refused while one is active,
+including during approval waits. A single-thread executor alone is insufficient because it queues
+work. Retries with the same command identity reconcile the existing mission instead of enqueueing
+another. Admission is released only after terminal cleanup; safety latches still prohibit restart.
 
 An approval wait survives browser refresh because its proposal and attempt are persisted. V1
 does not claim process-crash continuation. If the backend process disappears during a Live run,
@@ -137,14 +159,42 @@ the approval broker, and the normal mission queue, and delegates to the existing
 emergency transport. UI acknowledgement confirms command acceptance only; it does not claim
 physical safety or completed landing.
 
+Emergency first latches the active runner and prevents subsequent normal command dispatch, then
+attempts the independent emergency transport. The latch remains set even if sending fails. The
+adapter must not call only `EmergencySender.send()`, which does not latch the runner, or rely on a
+normal command transport that can be blocked by mission activity. Adopt or add a public runner
+seam that coordinates the latch with the independent sender. With no active runner, a valid
+session-level emergency still reaches the independent transport. Safety work never waits for
+mission admission or an approval waiter. Repeated delivery reconciles the same command; stale
+proposal or snapshot versions must not suppress an otherwise valid session emergency.
+
 ## 5. Runtime modes
 
 ### 5.1 Rehearsal
 
-Rehearsal runs the real projection, command, approval, merge, report, and UI code over deterministic
-recorded or scripted adapters. It is the fallback presentation mode and the source of browser
-acceptance scenarios. Every snapshot, frame, and message is labelled `REHEARSAL` with its
-underlying `SIMULATED` or `REPLAYED` source kind.
+Rehearsal is the dry-run mode. It runs the real mission worker, survey loop, bounded decision
+flow, candidate selection, command service, approval broker, merge, report validation, persistence,
+projection and UI over deterministic recorded or scripted boundary adapters. It requires no drone,
+external network or provider credentials. Scripted policy/provider responses pass through the
+same legality and validation rules as Live; they cannot supply authoritative counts or reports
+that bypass the runtime. Flight, camera, detector, pose and safety boundary adapters are selected
+at startup and cannot open a hardware connection in Rehearsal.
+
+Use the existing clean-run scenario in `tests/survey/test_loop.py`
+(`test_a_clean_run_flies_once_counts_and_reports`) as the first integration baseline. Promote its
+scenario inputs into reusable runtime fixtures without importing test-private helpers in product
+code. Supply actual synthetic image artifacts with matching hashes and dimensions for browser
+evidence: test-only placeholder paths and zero hashes are not valid image capabilities. The
+scenario must pass through the UI approval broker, not an unconditional approval callback.
+
+Existing frontend snapshots remain useful for isolated presentation regressions. Advancing those
+snapshots is not an integrated Rehearsal run and cannot satisfy the first milestone. Runtime events
+and persisted facts alone advance the integrated evidence spine. Additional existing scenarios
+cover uncertainty, missing analysis and follow-up after the initial clean run works.
+
+Rehearsal is explicitly selected at startup as a demonstration mode. Every snapshot, frame and
+message is labelled `REHEARSAL` with its underlying `SIMULATED` or `REPLAYED` source kind.
+There is no automatic switch from a failed Live session.
 
 ### 5.2 Live
 
@@ -227,6 +277,10 @@ events        latest exposed sequence and snapshot watermark
 legal_actions exact current operator actions and disabled reasons
 ```
 
+The contract carries an explicit `schema_version` separate from `run.version`. The implementation
+plan must define the exact versioned payload, identity fields and response envelopes together
+with a consumer migration; it cannot change validation while leaving consumers on the old shape.
+
 Unknown fields and unresolved references are rejected. Every frame, sighting, object, stop,
 proposal, message, and report belongs to the same run. Source kind, freshness, and operational
 status remain separate axes.
@@ -243,6 +297,14 @@ GET  /api/v1/runs/{run_id}/evidence/{artifact_id}
 POST /api/v1/runs/{run_id}/land
 POST /api/v1/safety/emergency
 ```
+
+The browser decision port retains `submit_decision(attempt)`, deriving the route run ID from the
+immutable attempt. The backend verifies that route and body identities agree. Response envelopes
+preserve `attempt_id`, typed status and a safe public message. HTTP 409 decision conflicts are
+validated and returned as `CONFLICT`, not converted into transport exceptions and `IN_DOUBT`.
+An uncertain outcome uses `IN_DOUBT` and retains the same attempt identity on reconciliation.
+The client also implements the bounded evidence read contract, including denial and revocation.
+Contract tests exercise the HTTP adapter with the existing decision controller.
 
 Event polling defaults to 500 ms while the page is visible and backs off when hidden. Polls do
 not overlap. A newer complete snapshot may restore operational state after an event gap, but the
@@ -365,8 +427,9 @@ physical/terminal fallback.
 - Chat/provider failure preserves operator text and returns a stable public error code.
 - Unsupported or contradictory requests clarify, refuse, or escalate instead of selecting the
   nearest legal mission.
-- Browser disconnect leaves the mission worker paused at approval. Reconnect loads a complete
-  snapshot and resumes after the last known event sequence.
+- Browser disconnect does not approve pending work. A worker already waiting for approval remains
+  paused; an executing mission continues under backend safety policy. Reconnect loads a complete
+  snapshot and resumes event reads after the last known sequence without implicitly authorizing work.
 - Event gaps never produce synthetic transitions.
 - Camera and evidence failures remain explicitly unavailable, degraded, forbidden, revoked, or
   stale. Old imagery is not relabelled current.
@@ -417,7 +480,23 @@ physical/terminal fallback.
 8. **Performance:** polls do not overlap, frame display is bounded, intermediate display frames
    may drop safely, and UI commands stay responsive during mission activity.
 
-### 13.2 Primary acceptance scenario
+### 13.2 First milestone acceptance
+
+Run the actual application host with Rehearsal adapters and drive the browser from text request
+through proposal, explicit approval, simulated flight/capture, merge and validated report. Assert
+one confirmed computer against the existing clean-run baseline, inspect authorized image bytes,
+and verify that events and results originate from the real runtime and store. No fixture snapshot
+sequence may stand in for execution.
+
+Additional focused checks cover rejection with no flight dispatch, duplicate approval delivery,
+stale-proposal conflict, uncertain-result reconciliation, browser reload at approval, concurrent
+mission refusal and responsive status reads during a blocked worker. Runner/adapter tests prove
+emergency latching precedes independent send, survives send failure and prevents later normal
+commands; all transports are fakes. Host/browser checks fail on missing imports, styles or API
+routes. The full localization demonstration below is a later acceptance gate, not evidence that
+the first milestone already implements Live operation.
+
+### 13.3 Full release acceptance scenario
 
 The browser test and Rehearsal demonstration show, in one run:
 
@@ -431,7 +510,7 @@ The browser test and Rehearsal demonstration show, in one run:
 8. validated evidence-backed report;
 9. Land and Emergency availability throughout.
 
-### 13.3 Hardware gate
+### 13.4 Hardware gate
 
 Automated tests send no real motor command. A Live label requires separately authorized checks of
 camera transport, localization/tag overlay binding, pose freshness transitions, controlled Land,
@@ -440,12 +519,31 @@ success without separate observed evidence.
 
 ## 14. Delivery and ownership
 
-LightCode owns the UI implementation after reviewing this specification and its implementation
-plan. The implementing branch first incorporates the latest `integration/survey-demo` work, then
-adapts the fixture console in small test-driven slices. The fixture adapter remains available for
-Rehearsal and browser acceptance until every Live adapter passes its contract tests.
+LightCode owns the UI integration. Preserve the tested frontend and Colin's product direction;
+revise the existing implementation plan after this written spec is approved. The existing plan's
+fixture-advancement milestone, two-argument decision client, root static route, unguarded mission
+executor and sender-only emergency adapter are superseded by this specification.
 
-No implementation begins from this design session. The handoff consists of this specification,
-a task-level implementation plan, and a PR comment summarizing the differences from LightCode's
-fixture console: persistent chat, real runtime projection, mission and localization visualization,
-tag overlays, actual approval/control transport, Rehearsal/Live separation, and safety controls.
+Delivery proceeds in three ordered milestones:
+
+1. **Shared-runtime dry-run:** incorporate published integration ancestry, establish the baseline,
+   adopt typed runtime and browser interfaces, and complete the clean scenario through the real
+   host, mission worker and approval broker. Include valid evidence, persisted results, admission
+   control and simulated safety behavior. This milestone proves iteration without a drone.
+2. **Broader dry-run coverage and presentation:** add existing uncertainty/follow-up scenarios,
+   mission/evidence layout and localization diagnostics. Preserve source labels and all existing
+   accessibility, evidence lifecycle and decision identity regressions.
+3. **Live adapters:** compose the same application with live boundary adapters, immutable startup
+   gates and independent safety transport. Pass adapter contract tests and startup refusal tests
+   before separately authorized hardware verification. No hardware operation is authorized by
+   approval of this design or by automated tests.
+
+Both modes share orchestration, persistence semantics, projections and command interfaces.
+Presentation fixtures remain available for component tests but are not a parallel application
+runtime. Contract or ownership gaps are reported against the published integration source and
+resolved through explicit backend interfaces.
+
+After implementation and verification, update PR #8 with integration ancestry, completed scope,
+commands/results, remaining Live gates and reviewer-facing explanations of contract corrections;
+request review again. Keep PR #7 linked as the existing asset foundation without duplicating its
+implementation. No implementation or plan approval is implied by this written-spec revision.
