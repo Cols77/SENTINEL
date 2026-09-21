@@ -337,16 +337,16 @@ W08 implementation status rather than reporting the requirement satisfied.
 
 ### B1 results so far — 2026-09-21 (outdoors, same Tello as the stand test)
 
-| run | move | abort | reply to the move | abort to horizontal stop | abort to landed | travel after the abort (integrated vgx) |
+| run | move | abort | reply to the move | abort to horizontal stop | abort to landed | travel after `land` (video, tags) |
 |---|---|---|---|---|---|---|
 | N | forward 200 | none (failsafe land at 12 s) | `ok` after 10.5 s | - | - | - |
 | B@5s | forward 200 | stop + land | `error Motor stop` | void | void | **void: flew into the tag door** (started ~195 cm from it; no clearance check) |
-| B@1.2s | forward 100 | stop, land at 1.5 s | `error Auto land`, 0.29 s after `land` | 1.4 s | 2.6 s | ~40 cm after `land` |
-| A@1.2s | forward 100 | land | `error Auto land`, 0.16 s after `land` | 1.0 s | 2.3 s | ~32 cm |
+| B@1.2s | forward 100 | stop, land at 1.5 s | `error Auto land`, 0.29 s after `land` | 1.4 s | 2.6 s | **45 cm** |
+| A@1.2s | forward 100 | land | `error Auto land`, 0.16 s after `land` | 1.0 s | 2.3 s | **50 cm** (total 70 cm; operator tape 70 cm) |
 
 - **The Tello honours `land` during a move.** The move ends with `error Auto land` within 0.3 s, the drone brakes and descends; no emergency cut needed; telemetry answered afterwards.
 - **`stop` does not exist on this firmware** (`unknown command: stop`). Variant B is variant A with a 0.3 s delay; drop it.
-- **Post-abort travel is ~30-40 cm at the ~45 cm/s cruise speed** (velocity integrated from the state stream, 10 cm/s resolution). That is at or above the 30 cm `Site.commanded` inset. Operator tape figures pending.
+- **Post-abort travel is 45-50 cm** at the ~45 cm/s cruise speed, measured from the tags in the recorded video (`scripts/b1_offline_pose.py`, 2-tag fixes, windowed medians). The A run's total, 69.8 cm, matches the operator's tape (70 cm). Integrating the state stream's `vgx` under-reads by ~25 % (55 cm) and must not be used for this. This travel lands *outside* the cube, so it sizes the free space beyond the cube edge / the watchdog trip margin, not the `Site.commanded` inset (which absorbs open-loop drift).
 - `speed 50` does not shorten a 200 cm move (10.5 s).
 - The state stream's `h` field is not the height (reads 0-10 at 90 cm hover); use `tof`.
 - The Tello only answers the UDP source port that sent its first `command` after boot; the harness now uses a fixed port 8889.
