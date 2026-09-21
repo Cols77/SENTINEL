@@ -4,7 +4,7 @@ title: "SENTINEL survey and counting - design"
 status: review-pending
 ---
 
-# SENTINEL survey and counting — design (rev 5)
+# SENTINEL survey and counting — design (rev 6)
 
 > **Status:** approved in brainstorm 2026-09-20; spec pending operator review
 > **Owner:** Colin (operator), implemented by the P4/orchestrating Claude session
@@ -358,6 +358,16 @@ This spec does not weaken them. Instead:
 This is a **stated exception, not an oversight**, and Dzivha must see it before the provider profile
 is approved (E7).
 
+> **Rev 6 correction (2026-09-21).** §6.1 as written above describes an intent; the code now makes
+> it true. `sentinel.survey.detector.normalise` gained a `DETECTOR_RAW` branch (plan workstream D):
+> a bridged detector item carrying a numeric `score` and `"score_kind": "DETECTOR_RAW"` is banded by
+> two module constants named and marked **PROVISIONAL** —
+> `DETECTOR_RAW_HIGH_PROVISIONAL = 0.35`, `DETECTOR_RAW_MEDIUM_PROVISIONAL = 0.25` — a starting point
+> for the bridge's output, not a measured cutoff; the provider spike (workstream E, not yet run) is
+> what pins them for real. A `VLM_CONFIDENCE_BAND` sighting is never compared against these
+> thresholds, and no `DETECTOR_RAW` sighting enters the rock path — both rules from §6.1 hold
+> unchanged in code. See §6.4 for what else workstreams C and D actually built.
+
 ### 6.2 Provider
 
 **Primary: Moondream 3** (`detect`). Purpose-built for detect/point/count, normalized `(x, y, w, h)`,
@@ -379,6 +389,58 @@ log image bytes or credentials.
 
 Every raw provider response is stored beside its frame, so replay and re-scoring never call the API
 again. (Same lesson as the live-gate work: persist raw rows before scoring.)
+
+### 6.4 Three detector sources, and what the flight adapter stamps onto a frame (rev 6, 2026-09-21)
+
+Rev 5 (§5.1) fixed the camera model workstream A actually built. This section records what
+workstreams B, C and D built on top of it — nothing here changes an architectural decision made
+earlier in this document; it records what now exists in code.
+
+**Three sources implement `DetectorPort`, combined only as primary + fallback — no box fusion, as
+already decided in the plan's context.** `FallbackDetector(primary, fallback)`
+(`sentinel.survey.detector`) tries `primary` first and calls `fallback` only when `primary` raised a
+`ProviderError` or returned a `"PROVIDER_ERROR"` batch (a `CLASS_MAP_MISS` batch is a substantive
+answer, not a trigger). The returned batch's `raw` always records `provider`: which detector
+actually answered, and, when the fallback ran, `primary_error`: the primary's exception class name.
+That raw dict is what `loop.py` persists beside every sighting (§6.3), so a replayed run can show
+which provider spoke without re-deciding it.
+
+| Source | Module | `score_kind` | Notes |
+|---|---|---|---|
+| Moondream 3 (primary) | `survey.providers.moondream` | `VLM_CONFIDENCE_BAND` | one request per class (`object` is singular in the real API — the defect C1 found); base64 image body |
+| Gemini Flash (fallback) | `survey.providers.gemini` | `VLM_CONFIDENCE_BAND` | `[ymin,xmin,ymax,xmax]` scaled 0–1000, converted to top-left pixels |
+| Dzivha's Grounding DINO, via the offline bridge | `scripts/survey_detect_gdino.py` → `ReplayDetector` | `DETECTOR_RAW` | not a live `DetectorPort` implementation: it runs once, offline, and writes response files `ReplayDetector` then serves; §6.1's stated WP3-boundary exception |
+
+Both VLM adapters send the image as base64 and are covered by a fake-session test asserting the
+request payload decodes back to the frame's exact bytes — the defect C1's read of the real API docs
+found (image bytes were never sent at all in the pre-C1 code).
+
+**Per-frame `delta_z_cm` replaces the single `DELTA_Z_CM` constant for a real flight.**
+`FlightFrame` (`sentinel.survey.flight`) gained an optional `delta_z_cm` field; when a frame does not
+carry one (every replay fixture, and Codex's `scripts/survey_sweep.py` harness), `loop.py` falls back
+to the old constant, so nothing existing changed shape. A `CubeFlight`-produced frame always carries
+its own value: the runner's measured height reading at that stop minus the tape-measured surface
+height passed in at the CLI (`--surface-z-cm`).
+
+**The flight adapter stamps `MEASURED` or `COMMANDED` per frame, per amendment V13.**
+`CubeFlight._frame_from` reads the mission log entry for the stop that produced each frame: when the
+stop's pose fix was reliable and plausible (`status == "LOCALISED"`), the frame's `x_cm`/`y_cm`/
+`heading_deg` are the measured fix and `position_kind="MEASURED"`; otherwise they are the
+dead-reckoned commanded position and the rail's fixed heading (`FACING_DEG`, the drone only ever
+translates facing +y), and `position_kind="COMMANDED"`.
+
+**Every frame also carries the stop's tolerance verdict.** `cube/mission.py`'s two tolerance circles
+(`TOLERANCE_CM = 15`, `OUTER_TOLERANCE_CM = 30`) already classify each stop as `INSIDE`, `OUTER` or
+`OUTSIDE` (`None` when unlocalised) and log it on the mission-log entry; `CubeFlight` copies that
+verdict onto every `FlightFrame` captured at that stop as `FlightFrame.tolerance`. This is carried
+for the record only — an `OUTER`-circle photo is visibly one the drone did not quite hover where
+commanded — and does not change how `merge.py` weighs a sighting; widening tolerance for a degraded
+stop remains §5.4's `geometry_degraded` mechanism, unchanged by this addition.
+
+A stop aborted en route (the in-move watchdog of §10.3 of the coherence spec, a containment or
+tolerance abort) never reaches the mission runner's `_look` step, so it contributes no frames;
+`CubeFlight.fly` returns whatever frames were captured before the abort instead of raising, since the
+drone has already been landed by the existing controlled-landing path either way.
 
 ## 7. Jev
 

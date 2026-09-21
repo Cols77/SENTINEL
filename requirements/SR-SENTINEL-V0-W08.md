@@ -47,8 +47,14 @@ simulation, real-drone proof is human/live).
 - **W08-b, decided:** "continuously" becomes "at every localised stop and during moves whenever
   tags are in view", which is what a camera-based fix can honestly deliver.
 
-**Implementation status (2026-09-21): half built.** The stop-time check exists (`passive` and
-`reanchor` modes). The in-move watchdog does not: it needs a thread evaluating the pose stream
-beside the blocking `move`, and a motors-on bench test that the Tello honours `land` while a
-`move` is executing. It is owed by WP5. Until it is built and tested this requirement is **not
-satisfied** and must not be reported as satisfied.
+**Implementation status (2026-09-21, updated later the same day): the in-move watchdog now exists
+in software; the requirement is still not satisfied.** The stop-time check exists (`passive` and
+`reanchor` modes). The in-move watchdog is now built: `sentinel.pose.watchdog.PoseWatchdog` runs on
+a background thread beside the blocking `move` (`CubeMissionRunner.move_checked`), evaluating the
+already-open pose stream and debouncing on 3 consecutive `OUTSIDE` fixes before it sets an abort
+event; the runner acts on that event once the move returns, ending in the existing controlled
+landing. What is still missing is the motors-on bench test that the Tello honours `land` sent while
+a `move` is still executing (**bench test B1**, `docs/wp5-rehearsal-manifest.md`, owned by another
+session): sending `land` mid-move stays behind a constructor flag defaulting off until that test
+passes. Until bench test B1 is run and passes, this requirement is **not satisfied** and must not be
+reported as satisfied.

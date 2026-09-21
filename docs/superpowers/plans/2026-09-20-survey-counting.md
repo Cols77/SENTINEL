@@ -3082,3 +3082,108 @@ the sweep in `reanchor` mode whenever tags are up, once the mode has passed its 
 flight (cube design Stage 3, G4 on the day). A stop with no reliable fix degrades to open-loop
 for that leg; the sweep does not depend on pose to complete.
 
+---
+
+## Rev 6 amendment (2026-09-21) — what workstreams A–E of the live-integration plan actually built
+
+This plan's Task 11 and 12 bodies above describe intent; the
+`docs/superpowers/plans/2026-09-21-survey-live-integration.md` plan (workstreams A–F) is what was
+actually executed, on this branch, after rev 5. This amendment records what that execution
+committed. Precedence: Rev 6 > Rev 5 > Rev 4 > Rev 3 > task bodies.
+
+**V14. Workstream A (shared camera model, WP5 fixes) — built.**
+
+- `src/sentinel/camera.py` (A1): `CameraModel`, `SYNTHETIC_LEVEL`, `TELLO_MEASURED`, `CAMERAS` moved
+  here out of `survey.observability`, which re-exports them; no caller changed. Reason: `sentinel.cube`
+  must not import `sentinel.survey`.
+- `cube/observe.py` (A2): `WIDTH_PER_RANGE` and `BELOW_HORIZON_DEG` now derive from
+  `camera.TELLO_MEASURED` (≈1.076 and ≈30.9°, were 1.406 and 36.4° off the wrong datasheet FOV —
+  coherence spec §10.5's listed non-conforming artifact, now fixed). `tests/cube/test_observe.py`'s
+  numbers, pinned to the old FOV, were recomputed with the premise; see "existing tests changed"
+  below for that phase's own record of it.
+- `cube/mission.py` (A3): `_look` records `path`/`sha256`/`look_deg`/`captured_at` per captured frame
+  into the waypoint's log entry; `_localise` records the measured `heading_deg` alongside the
+  existing `heading_error_deg`. Additive; no existing log consumer changed.
+- `pose/watchdog.py` + `CubeMissionRunner.move_checked` (A4): the in-move containment watchdog —
+  `OUTSIDE_STREAK_TO_TRIP = 3` debounce, since in-motion pose accuracy is unmeasured — sets an abort
+  event the runner acts on once its blocking `move` returns, ending in the existing controlled
+  landing. Sending `land` itself while a move is still executing stays behind the constructor flag
+  `land_during_move`, default **off**, pending bench test B1
+  (`docs/wp5-rehearsal-manifest.md`, owned by another session).
+
+**V15. Workstream B (survey flight adapter, Task 11) — built.**
+
+- `src/sentinel/survey/cube_bridge.py`: `envelope_from_site`, `mission_from_option`, `CubeFlight` —
+  the only `sentinel.cube` importer in the package, exactly as this plan's Task 11 specified.
+  `CubeFlight` refuses any camera other than `TELLO_MEASURED` outright (`SyntheticCameraRefused`),
+  so there is no code path onto which a frame the drone filmed reaches the merge under the synthetic
+  model (V12).
+- `FlightFrame` (`sentinel.survey.flight`) gains two new optional fields, both backward compatible
+  with every existing construction and every replay fixture: `delta_z_cm` (falls back to
+  `loop.DELTA_Z_CM` when absent) and `tolerance` (the stop's `INSIDE`/`OUTER`/`OUTSIDE` verdict,
+  `None` when unlocalised).
+- `CubeFlight._frame_from` stamps `position_kind="MEASURED"` with the fix's `x_cm`/`y_cm`/
+  `heading_deg` when the stop's mission-log status is `LOCALISED`, and `position_kind="COMMANDED"`
+  with the dead-reckoned commanded position and `FACING_DEG` otherwise, exactly as V13 requires.
+  `z_cm` is the runner's own measured height reading, not the commanded target.
+- `scripts/survey_run.py` gained `--site`, `--pose {off,passive,reanchor}`, `--surface-z-cm` and
+  `--real --confirm` (mirrors the cube CLI's safety flags; default stays replay); the summary reports
+  `MEASURED` vs `COMMANDED` frame counts.
+- A stop aborted en route contributes no frames; `CubeFlight.fly` returns whatever was captured
+  before the abort rather than raising.
+
+**V16. Workstream C (provider adapters, C1–C4) — built and offline-tested; no live provider call
+made.**
+
+- C1: the real Moondream and Gemini APIs were verified read-only against their official docs (dated
+  in each adapter module's docstring). Moondream's `detect` takes one object per call (`object` is
+  singular) and returns fractional corner coordinates, not `label`/`confidence` fields; Gemini
+  returns `[ymin,xmin,ymax,xmax]` scaled 0–1000.
+- C2: both adapters now send the image as base64 (the defect this workstream fixed: neither sent the
+  image at all before). Covered by a fake-session test that asserts the request payload decodes back
+  to the frame's exact bytes.
+- C3: `FallbackDetector(primary, fallback)` added to `detector.py` — fallback runs only on a
+  `ProviderError` or a `"PROVIDER_ERROR"` batch; the returned batch's `raw` records `provider` (who
+  answered) and, when the fallback ran, `primary_error`.
+- C4: `scripts/survey_run.py` gained `--detector {replay,moondream,gemini}` and
+  `--fallback {none,moondream,gemini}`; a provider detector refuses to start without recorded filming
+  consent (`survey/consent.py`, already enforced).
+
+**V17. Workstream D (Dzivha's detector, offline bridge) — built; her model weights were not
+downloaded and no bridge run against them.**
+
+- `scripts/survey_detect_gdino.py` imports `sentinel_perception.detection` and `models` read-only and
+  writes one `ReplayDetector`-shaped response file per frame, each item carrying a numeric `score`
+  and `"score_kind": "DETECTOR_RAW"`.
+- `detector.py`'s `normalise` gained the `DETECTOR_RAW` banding branch described in design spec §6.1's
+  rev 6 correction: two PROVISIONAL constants, `DETECTOR_RAW_HIGH_PROVISIONAL = 0.35` and
+  `DETECTOR_RAW_MEDIUM_PROVISIONAL = 0.25`, pinned for real only once workstream E's spike runs.
+  `CLASS_MAP` gained `"computer monitor" -> computer`, kept deliberately distinct from the bare
+  `"monitor"` rev 3's R6 had already removed.
+- `docs/handoffs/2026-09-21-HANDOFF-to-dzivha-camera-and-survey.md` was written, covering the camera-
+  model contradiction (coherence spec §10.5), the bridge's dependency surface, and the WP3-boundary
+  tension this workstream's code opens ahead of this very document revision.
+
+**V18. Workstream E (provider comparison spike) — prepared, not run.**
+
+- `scripts/survey_provider_spike.py` refuses any real provider call and prints the exact paid-call
+  count, both pinned model versions and an estimated cost unless `--i-authorise-paid-calls` is
+  passed; that flag was never passed in this phase, and it additionally requires recorded filming
+  consent before it will use garden stills. Only its refusal path and call-count arithmetic are
+  tested.
+
+**What remains gated, unchanged by this phase — none of it self-granted:**
+
+- Any real flight, including the watchdog's own first flight and the first `reanchor` flight (**G4**,
+  operator, on the day).
+- **Bench test B1** (`docs/wp5-rehearsal-manifest.md`, owned by another session) — does a Tello
+  honour `land` sent while a `move` is still executing. Until it passes, `land_during_move` stays off
+  and W08 is not satisfied (`requirements/SR-SENTINEL-V0-W08.md`).
+- The provider spike's paid calls (**G-provider-spike**) and the API keys that would make them.
+- Downloading Dzivha's model weights (`scripts/probe_models.py`), a multi-GB network download this
+  workflow does not run.
+- Recording filming consent for any garden or lecture-room capture (**G-filming-consent**), which
+  only the operator records, per location and date.
+- The joint Colin+Dzivha provider-profile approval (WP3 §3; coherence spec D-007/G3), which remains
+  **BLOCKED**.
+

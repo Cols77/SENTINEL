@@ -86,7 +86,7 @@ uv run --project C:/coding/pi-agent-factory-wt/contract-capability-main python -
 
 | Command | What it checks | State on `integration/survey-demo`, 2026-09-21 |
 |---|---|---|
-| `trace check --project-root .` | every plan, spec, feature and requirement is reachable in the trace graph | runs; health 23 %. Before 2026-09-21 it **crashed**: two proposal documents carried frontmatter that was not valid YAML and had no `id`/`title`, which the tool treats as fatal for the whole graph |
+| `trace check --project-root .` | every plan, spec, feature and requirement is reachable in the trace graph | runs; health 23 %. Before 2026-09-21 it **crashed**: two proposal documents carried frontmatter that was not valid YAML and had no `id`/`title`, which the tool treats as fatal for the whole graph. Re-run on `feat/survey-counting` the same day, after workstreams A–D of the live-integration plan landed: still runs (prints a health line, not a traceback), health 22 % — the small drop is the trace graph gaining new plan/spec content, not a regression; `SR-SENTINEL-V0-W08` is flagged `sr_unsatisfied` (no task declares `satisfies` for it), consistent with W08 still not being satisfied |
 | `register check --project-root .` | each requirement is accounted for by a measurement, a task or a deferral | fails by design: all 37 requirements are `proposed` and undecided |
 | `mirrors check --project-root .` | derived blocks in feature dossiers match the graph | passes (FEAT-021 regenerated 2026-09-21) |
 | `navigate freshness --repo-root .` | declared contract artifacts exist and have provenance and validation evidence | warnings only: no consumer has recorded validation evidence yet |

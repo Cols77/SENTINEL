@@ -285,10 +285,15 @@ Known non-conforming artifacts as of this revision, each to be corrected by its 
 
 | Artifact | Uses | Consequence |
 |---|---|---|
-| WP5 cube design E4 and `sentinel.cube.observe` | field of view 70.2° x 55.6° | view width per unit of range is taken as 1.41 where the measured figure is 1.08, so a "back-and-wide" stop stands about 30 % too close to span the alley mouth it promises to; and the bottom of the view is taken as 36.4° below the horizon where the measured figure is about 31° |
+| Dzivha's `fixtures/perception` package, `sentinel_perception.config.CameraConfig` | field of view 70.2° x 55.6° (`hfov_deg`, `vfov_deg` defaults) | the same wrong FOV as the two rows below carried until 2026-09-21; her bearing arithmetic is skewed by it until her package adopts the measured model. Out of scope for this repository's owner to fix directly — `fixtures/perception` is her package, read-only from here (survey design §D handoff, `docs/handoffs/2026-09-21-HANDOFF-to-dzivha-camera-and-survey.md`) |
 
-(The survey-counting design carried the same error, f = 683 px with a level optical axis, until
-its rev 5 of the same date; see that document's §5.1.)
+> **Rev (2026-09-21, live-integration workstream A2).** `sentinel.cube.observe` is no longer in this
+> table: `WIDTH_PER_RANGE` and `BELOW_HORIZON_DEG` now derive from `sentinel.camera.TELLO_MEASURED`
+> (≈1.076 of width per unit range and ≈30.9° below the horizon, matching the measured figures this
+> table used to contrast them against), pinned by `tests/cube/test_observe.py`'s
+> `test_observe_constants_agree_with_the_calibrated_camera`. The survey-counting design carried the
+> same error, f = 683 px with a level optical axis, until its rev 5 of the same date; see that
+> document's §5.1.
 
 ### 10.6 Acceptance and gates
 
