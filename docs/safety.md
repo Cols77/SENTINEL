@@ -52,5 +52,5 @@ A failed preflight does not force a re-dispatch of the prior operation. The oper
 - `--pose off`: open-loop only. `--pose passive`: pose is measured and logged at each stop and
   can trigger a controlled landing if the measured position leaves the cube; it sends nothing.
   `--pose reanchor`: pose may replace the position estimate at a hover and send at most two
-  bounded trims; permitted only after SR-063 has been amended (`--sr063-amended`).
+  bounded trims; SR-063 was amended for this on 2026-09-21; the `--sr063-amended` flag is still required, as the operator's acknowledgement on each run.
 - Always run `cube-run --dry-run` on the exact site and mission files first.

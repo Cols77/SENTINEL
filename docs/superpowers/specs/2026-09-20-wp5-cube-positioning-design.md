@@ -21,7 +21,7 @@ down the two table alleys). One mission runner, **three pose modes**, chosen per
 |---|---|---|---|
 | `off` | none | nothing; pure open-loop navigation | untouched |
 | `passive` | yes | measured at each stop, logged, can trigger a controlled landing if the drone leaves the cube; computes the correction it *would* make | compliant as written |
-| `reanchor` | yes | additionally replaces the open-loop position estimate at a hover and sends ≤ 2 bounded trim moves | needs the amendment in §5 C1 |
+| `reanchor` | yes | additionally replaces the open-loop position estimate at a hover and sends ≤ 2 bounded trim moves | compliant since the §5 C1 amendment (consented 2026-09-21) |
 
 Which mode the final demo uses is decided later, from flight data. The mission never *depends*
 on pose: a failed fix degrades a stop to open-loop, it does not end the run.
@@ -159,7 +159,7 @@ Each candidate carries its metrics; the agent chooses. Deterministic, envelope-v
 
 ## 5. Decisions
 
-**C1 — SR-063 amendment for `reanchor` mode.** Proposed replacement statement:
+**C1 — SR-063 amendment for `reanchor` mode. CONSENTED 2026-09-21 (Colin) and applied to `requirements/SR-063.md`.** Stage 3 (§7) is still the first flight of this mode and keeps its G4 consent per flight. Replacement statement:
 
 > Pose data shall never command drone motion while the drone is translating or rotating, and
 > shall never originate a target. At a stationary hover, a pose fix that passes the quality gate

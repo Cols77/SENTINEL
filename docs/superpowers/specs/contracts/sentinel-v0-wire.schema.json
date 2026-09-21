@@ -4541,7 +4541,7 @@
     },
     "DronePoseReport": {
       "$anchor": "DronePoseReport",
-      "description": "Host-side AprilTag room-local pose report (WP5 amendment). Pose is evidence, read-model data and an advisory containment input; it never originates or modifies a motion command (coherence spec 10.2; SR-061, SR-063). The point is the drone position in room units (0..100) against the versioned tag-map fixture; heading_deg is optional and altitude_m optional, each null when unsolved.",
+      "description": "Host-side AprilTag room-local pose report (WP5 amendment). Pose is evidence, read-model data and an advisory containment input; it never originates a target and never acts while the drone is moving (coherence spec 10.2; SR-061, SR-063). The point is the drone position in room units (0..100) against the versioned tag-map fixture; heading_deg is optional and altitude_m optional, each null when unsolved.",
       "type": "object",
       "additionalProperties": false,
       "required": [

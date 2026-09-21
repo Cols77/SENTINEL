@@ -173,7 +173,7 @@ V0 excludes real GIS/terrain, GPS/global localisation, multi-drone coordination,
 > failed with the containment reason; `EMERGENCY_LATCHED` and the motor cut remain the
 > operator's emergency control. The word "continuously" is still under review (W08-b).
 
-V0 includes host-side AprilTag-based room-local pose estimation emitted as `DRONE_POSE_REPORTED`. Pose never originates or modifies a motion command; the uses it is permitted are enumerated in §10.2, which is the single statement of that boundary.
+V0 includes host-side AprilTag-based room-local pose estimation emitted as `DRONE_POSE_REPORTED`. Pose never originates a target and never acts while the drone is moving; the uses it is permitted are enumerated in §10.2, which is the single statement of that boundary.
 
 ## 10. WP5 drone pose amendment (contract-amendment)
 
@@ -198,19 +198,22 @@ SQLite store and projects them into `drone_pose`; the full coordinator remains t
 
 ### 10.2 Safety boundary (normative)
 
-**Pose never originates or modifies a motion command.** Stopping is not steering: pose may cause
-the existing abort path to end a flight, and may do nothing else to it.
+**Pose never originates a target and never acts while the drone is moving.** It may end a flight
+through the existing abort path, and at a stationary hover it may correct where the runner
+believes the drone is. It does nothing else.
 
 | Use of pose | Status | Authority |
 |---|---|---|
 | Evidence, display, `drone_pose` read model | permitted | SR-060, SR-061, SR-062 |
 | Verifying the zone of a capture | permitted | SR-SENTINEL-V0-W07 |
 | Advisory containment: alert the operator; trip the **existing** abort policy | permitted | SR-063 (as revised at consent 2026-09-18); SR-SENTINEL-V0-W08; §9 amendment |
-| Replacing the open-loop position estimate at a stationary hover and sending bounded trim moves (`reanchor`) | **not permitted** until the SR-063 amendment proposed in the cube design §5 C1 has the operator's recorded consent; the runner refuses the mode without it | cube design §5 C1 |
+| At a stationary hover, after the quality and plausibility gates: replacing the open-loop position estimate and sending at most two rounds of trim moves and one trim rotation toward the already-approved waypoint, each validated by the envelope (`reanchor`) | permitted since 2026-09-21 | SR-063 as amended at consent 2026-09-21 (C1); cube design §5 C1 |
 | Steering, route correction, originating a target, any control while the drone is moving | excluded from V0 | SR-063; W07 |
 
-`runner.py` consumes no pose data (SR-063 AC-1). A detector fault can therefore produce wrong
-advisory data or an unnecessary abort, never a wrong motion.
+`runner.py` consumes no pose data (SR-063 AC-1); re-anchoring lives in the cube mission runner. A
+detector fault can produce wrong advisory data, an unnecessary abort, or at worst a misplaced
+start of one leg — and that only after the quality gate, the plausibility gate (within 60 cm of
+dead reckoning), the envelope and containment have all passed.
 
 ### 10.3 SR-SENTINEL-V0-W08: two decisions taken, one open
 
@@ -234,7 +237,7 @@ only at a stop, after the drone has settled. Three levels are possible:
 |---|---|---|---|
 | 1. Stop-time check (`passive`) | measured at each localised stop; outside the cube means a controlled landing | none: SR-063 as written | implemented |
 | 2. In-leg watchdog | the pose stream, which already stays open all flight, is also evaluated *during* legs whenever tags are in view; outside the cube means a controlled landing. It can end the flight and nothing else | none on SR-063; this is what W08's "continuously" asks for. Needs a second thread beside the blocking `move`, and a bench test that the Tello honours `land` while a `move` is executing | not built |
-| 3. Stop-time correction (`reanchor`) | a good fix replaces the dead-reckoned position at a hover and sends at most two bounded trim moves toward the approved waypoint | needs the SR-063 amendment C1 (cube design §5) on the operator's recorded consent | implemented, refused without the consent flag |
+| 3. Stop-time correction (`reanchor`) | a good fix replaces the dead-reckoned position at a hover and sends at most two bounded trim moves toward the approved waypoint | SR-063 amendment C1, **consented 2026-09-21 (Colin)** | implemented; run with `cube-run --pose reanchor --sr063-amended`; not yet flown (cube design Stage 3) |
 
 Continuous *steering* from pose — a velocity loop on `rc` commands — is excluded from V0 by SR-063
 and W07, and is not a safe proposition on this hardware: pose arrives at video rate with several

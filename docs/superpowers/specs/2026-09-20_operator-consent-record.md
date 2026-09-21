@@ -125,3 +125,17 @@ patrol task a human acts on. The survey flow records `VLM_CONFIDENCE_BAND` hones
 `DETECTOR_RAW`, and no survey detection may enter the rock path. This is a stated exception, not an
 oversight, and **Dzivha must see it before the provider profile is approved** — provider selection
 is a joint Colin-and-Dzivha gate under WP3 §3, which C-20 does not replace.
+
+## C-21, C-22 — safety-requirement decisions taken in the coherence-alignment session (2026-09-21)
+
+Neither falls under C-20; each was given explicitly, in the operator's own words.
+
+| # | Decision | Operator's words | Applied in |
+|---|---|---|---|
+| C-21 | W08-a: the pose-triggered geofence reflex is a controlled landing, not the motor cut. W08-c: the envelope is the site-derived operating cube | "W08-c should be updated. W08-a go with your recommendation." | `requirements/SR-SENTINEL-V0-W08.md`; coherence spec §9, §10.3 |
+| C-22 | SR-063 amendment C1: stationary re-anchoring with at most two trim rounds and one trim rotation (`reanchor` mode) | "Yes I consent to C1, I consent for reanchor mode" | `requirements/SR-063.md`; coherence spec §10.2; cube design §5 C1 |
+
+C-22 changes what the requirement permits. It is **not** a flight consent: every real flight,
+including the first `reanchor` flight (cube design Stage 3), still needs G4 on the day. W08-b
+("continuously") remains open.
+

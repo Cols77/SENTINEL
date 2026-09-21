@@ -3076,8 +3076,9 @@ is `COMMANDED`; that is acceptable for a sparse scene and not for a row of lapto
 
 *Navigation* (reaching the next stop, and above all the follow-up close look) uses the runner's
 tracked position, which in `passive` mode is dead-reckoned and **never refreshed**, so error
-accumulates leg after leg. Only `--pose reanchor` refreshes it, and that needs the SR-063
-amendment C1 on the operator's recorded consent. Until then the sweep tolerates drift by keeping
-the rail short (at most 8 stops) and re-deriving nothing from the tracked position except the
-envelope check.
+accumulates leg after leg. Only `--pose reanchor` refreshes it. The SR-063 amendment C1 that
+permits it was consented on 2026-09-21 (consent record C-22), so Task 11's `CubeFlight` runs
+the sweep in `reanchor` mode whenever tags are up, once the mode has passed its own first
+flight (cube design Stage 3, G4 on the day). A stop with no reliable fix degrades to open-loop
+for that leg; the sweep does not depend on pose to complete.
 
