@@ -720,7 +720,16 @@ def main(argv=None):
                 semantic_boundary_gate,
             ), encoding="utf-8")
         raw.write({"record": "run_complete", **summary})
-        return 1 if budget.exhausted or live_gate["live_gate_applicable"] and not live_gate["passed"] else 0
+        live_gate_failed = (
+            live_gate["live_gate_applicable"] and not live_gate["passed"]
+        )
+        semantic_gate_failed = (
+            semantic_boundary_gate["applicable"]
+            and not semantic_boundary_gate["passed"]
+        )
+        return 1 if (
+            budget.exhausted or live_gate_failed or semantic_gate_failed
+        ) else 0
     except (ValueError, PermissionError, FileExistsError) as exc:
         print(f"evaluation refused: {exc}", file=sys.stderr)
         return 2

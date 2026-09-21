@@ -524,6 +524,118 @@ def test_completed_applicable_live_gate_failure_exits_nonzero_without_network(
     assert summary["live_gate"]["safe_escalation"] == 0
 
 
+def test_applicable_semantic_gate_failure_exits_nonzero_when_live_gate_passes(
+        tmp_path, monkeypatch, capsys):
+    from dataclasses import asdict
+    from types import SimpleNamespace
+    from scripts import proposal_sweep
+
+    expected_model = "typesafe/jev-1.13-20260917"
+
+    class FakeJudge:
+        def __init__(self, stream, observations):
+            self.stream = stream
+            self.observations = observations
+
+        def choice(self, **kwargs):
+            self.stream.write({
+                "record": "provider_wire_request",
+                "request": {"model": expected_model},
+            })
+            self.observations.append({
+                "model": expected_model,
+                "usage": {
+                    "prompt_tokens": 2, "completion_tokens": 1,
+                    "total_tokens": 3,
+                },
+            })
+            return {"value": "PLAN_ROUTE_ONLY_2_ZONE"}
+
+    def fake_run_case(case, arm, output_dir, proposer_factory=None, **kwargs):
+        directory = output_dir / case.case_id / arm
+        directory.mkdir(parents=True)
+        measured = proposer_factory(
+            arm, SimpleNamespace(write=lambda row: None), case,
+        )
+        measured.choice(
+            state={}, instruction="select", criteria={}, name="select_plan",
+        )
+        wrong_unsupported_raw_plan = (
+            case.expected_escalation and case.case_id == CASE_IDS[6]
+        )
+        raw_correct = not wrong_unsupported_raw_plan
+        return {
+            "case": asdict(case),
+            "artifact_dir": str(directory),
+            "audit": [{
+                "record": "proposal_attempt",
+                "gate_outcome": (
+                    "low_confidence" if wrong_unsupported_raw_plan else "accepted"
+                ),
+            }],
+            "metrics": {
+                "outcome_success": True,
+                "failure_reasons": [],
+                "correct_supported_trial": not case.expected_escalation,
+                "safe_escalation_trial": case.expected_escalation,
+                "raw_semantic_correct_choices": int(raw_correct),
+                "raw_semantic_choice_denominator": 1,
+                "raw_escalation_choices": int(
+                    case.expected_escalation and raw_correct
+                ),
+                "raw_plan_choices": int(
+                    not case.expected_escalation or wrong_unsupported_raw_plan
+                ),
+                "confidence_filtered_correct_choices": 0,
+                "confidence_filtered_correct_choice_denominator": int(raw_correct),
+                "architecture_f_fallbacks": 0,
+                "unsupported_false_proposals": 0,
+                "provider_failures": 0,
+                "deterministic_refusals": 0,
+            },
+        }
+
+    monkeypatch.setattr(
+        proposal_sweep, "require_authorization", lambda manifest: None,
+    )
+    monkeypatch.setattr(
+        proposal_sweep, "require_proposer_consent", lambda arm: None,
+    )
+    monkeypatch.setattr(
+        proposal_sweep, "_live_transport",
+        lambda arm, config, stream, observations: FakeJudge(
+            stream, observations,
+        ),
+    )
+    monkeypatch.setattr(
+        proposal_sweep, "build_proposer",
+        lambda *args, judge_factory=None, **kwargs: judge_factory(),
+    )
+    monkeypatch.setattr(proposal_sweep, "run_case", fake_run_case)
+    monkeypatch.setattr(
+        proposal_sweep, "aggregate",
+        lambda records: {
+            "case_denominator": len(records),
+            "plan_attempt_denominator": len(records),
+        },
+    )
+    out = tmp_path / "semantic-failure"
+
+    status = proposal_sweep.main([
+        "--mode", "live", "--arms", "jev", "--execute",
+        "--output", str(out), *_identity_args("jev", expected_model),
+    ])
+    capsys.readouterr()
+
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["live_gate"]["live_gate_applicable"] is True
+    assert summary["live_gate"]["passed"] is True
+    assert summary["semantic_boundary_gate"]["applicable"] is True
+    assert summary["semantic_boundary_gate"]["passed"] is False
+    assert summary["semantic_boundary_gate"]["unsupported_raw_plan_choices"] == 3
+    assert status == 1
+
+
 def test_live_refuses_manifest_authorization_before_initializing_provider_or_artifacts(
         tmp_path, monkeypatch, capsys):
     from scripts import proposal_sweep
