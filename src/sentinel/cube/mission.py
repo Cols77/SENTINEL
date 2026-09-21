@@ -244,6 +244,7 @@ class CubeMissionRunner(FlightTestRunner):
             raise RuntimeError("translation requires the drone to face +y")
         target = {"x_cm": wp.x_cm, "y_cm": wp.y_cm, "z_cm": wp.z_cm}
         self._watchdog_last_fix_cm = None
+        self._watchdog_land_error = None
         env = self.envelope
         origin = env.position.as_dict()
         # F2: reanchoring can leave the tracked x/y a few cm outside the
@@ -255,15 +256,40 @@ class CubeMissionRunner(FlightTestRunner):
         # perfectly good move then fails on a reason of its own making.
         # Recover any such axis first, non-optionally (never skipped as an
         # overshoot), before the rest of the plan is validated against it.
+        #
+        # A fix near a cube corner can leave x AND y outside the bounds at
+        # once. Recovering one axis still validates the WHOLE candidate
+        # position, so the first recovery move would itself be rejected on
+        # the other, still-uncorrected axis. While that other axis is still
+        # bad, widen its bound just enough to admit its own current (already
+        # out-of-bounds) value -- so only the axis actually moving here is
+        # really checked -- and restore the real bound immediately after,
+        # before anything else in this method is validated.
+        bad_axes = [axis for axis, _, _ in _AXES if axis in ("x_cm", "y_cm")
+                    and not (getattr(env, f"min_{axis}") <= origin[axis] <= getattr(env, f"max_{axis}"))]
         for axis, negative, positive in _AXES:
-            if axis not in ("x_cm", "y_cm"):
+            if axis not in bad_axes:
                 continue
-            low, high = getattr(env, f"min_{axis}"), getattr(env, f"max_{axis}")
-            if low <= origin[axis] <= high:
-                continue
-            delta = target[axis] - origin[axis]
-            distance = max(MIN_MOVE_CM, round(abs(delta)))
-            self._step(positive if delta > 0 else negative, distance, optional=False)
+            widened = []
+            for other in bad_axes:
+                if other == axis:
+                    continue
+                current = getattr(env.position, other)
+                lo_attr, hi_attr = f"min_{other}", f"max_{other}"
+                lo, hi = getattr(env, lo_attr), getattr(env, hi_attr)
+                if lo <= current <= hi:
+                    continue
+                widened.append((lo_attr, lo, hi_attr, hi))
+                setattr(env, lo_attr, min(lo, current))
+                setattr(env, hi_attr, max(hi, current))
+            try:
+                delta = target[axis] - origin[axis]
+                distance = max(MIN_MOVE_CM, round(abs(delta)))
+                self._step(positive if delta > 0 else negative, distance, optional=False)
+            finally:
+                for lo_attr, lo, hi_attr, hi in widened:
+                    setattr(env, lo_attr, lo)
+                    setattr(env, hi_attr, hi)
         for direction, distance in self._moves_toward(target, self.envelope.position.as_dict()):
             # a minimum-move overshoot (delta under 20 cm) is optional; a real leg is not
             overshoot = distance == MIN_MOVE_CM
@@ -440,7 +466,8 @@ class CubeMissionRunner(FlightTestRunner):
                      "heading_deg": None, "heading_error_deg": None, "n": 0,
                      "spread_p95_cm": None, "arrival_error_cm": None, "containment": None,
                      "tolerance": None, "proposed_trims": None,
-                     "trim_rounds_sent": 0, "looks_deg": list(wp.looks_deg)}
+                     "trim_rounds_sent": 0, "looks_deg": list(wp.looks_deg),
+                     "watchdog_land_error": None}
             try:
                 self._go_to(wp)
                 entry["status"] = "OPEN_LOOP"
@@ -452,4 +479,10 @@ class CubeMissionRunner(FlightTestRunner):
                     entry["status"] = "ABORTED_EN_ROUTE"
                     if self._watchdog_last_fix_cm is not None:
                         entry["fix_cm"] = self._watchdog_last_fix_cm
+                    # land_during_move (still default off, pending bench test
+                    # B1): surface a failed cross-thread `land` rather than
+                    # leaving it write-only -- the watchdog already ends the
+                    # flight through ContainmentAbort either way.
+                    if self._watchdog_land_error is not None:
+                        entry["watchdog_land_error"] = str(self._watchdog_land_error)
                 self._append_log(entry)

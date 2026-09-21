@@ -225,7 +225,7 @@ differences between W08's 2026-09-17 text and the implementation were found on 2
 |---|---|---|---|
 | W08-a | the reflex is the *terminal emergency hard stop* (motor cut, W05 latch) | a measured position outside the cube raises an abort that ends in a **controlled landing** | **decided 2026-09-21 (Colin): controlled landing.** A single-tag fix is realistically noisy wherever only one tag is in view (measured 10.4-12.5 cm spread off-axis), so a false `OUTSIDE` is realistic there; with two tags in view the joint solve measured 0.45 cm at the same range, so a false `OUTSIDE` is implausible at a stop where both are seen. A motor cut at up to 1.8 m near people is the more harmful failure regardless. W08 amended |
 | W08-c | the envelope is *the 1 m demo cube of W03* | the envelope is derived from the site file | **decided 2026-09-21 (Colin): the configured envelope.** W08 amended |
-| W08-b | the worker verifies position *continuously* | checked only at localised stops | **decided 2026-09-21 (Colin): at every localised stop, and during moves whenever tags are in view.** W08 amended; the in-move half (level 2 below) is not built yet |
+| W08-b | the worker verifies position *continuously* | checked only at localised stops | **decided 2026-09-21 (Colin): at every localised stop, and during moves whenever tags are in view.** W08 amended; the in-move half (level 2 below) is built, not yet bench-tested |
 
 **W08-b: what "continuously" can mean.** Navigation is open-loop. A waypoint is reached with at
 most three blocking Tello `move` commands (x, then y, then z), each validated against the envelope
@@ -237,7 +237,7 @@ only at a stop, after the drone has settled. Three levels are possible:
 | Level | What pose does | Requirement impact | State |
 |---|---|---|---|
 | 1. Stop-time check (`passive`) | measured at each localised stop; outside the cube means a controlled landing | none: SR-063 as written | implemented |
-| 2. In-leg watchdog | the pose stream, which already stays open all flight, is also evaluated *during* legs whenever tags are in view; outside the cube means a controlled landing. It can end the flight and nothing else | none on SR-063; **required by W08 since 2026-09-21**. Needs a second thread beside the blocking `move`, and a bench test that the Tello honours `land` while a `move` is executing | not built |
+| 2. In-leg watchdog | the pose stream, which already stays open all flight, is also evaluated *during* legs whenever tags are in view; outside the cube means a controlled landing. It can end the flight and nothing else | none on SR-063; **required by W08 since 2026-09-21**. Needs a second thread beside the blocking `move`, and a bench test that the Tello honours `land` while a `move` is executing | built (`sentinel.pose.watchdog` + `CubeMissionRunner.move_checked`); sending `land` mid-move is behind a flag defaulting off, pending bench test B1 |
 | 3. Stop-time correction (`reanchor`) | a good fix replaces the dead-reckoned position at a hover and sends at most two bounded trim moves toward the approved waypoint | SR-063 amendment C1, **consented 2026-09-21 (Colin)** | implemented; run with `cube-run --pose reanchor --sr063-amended`; not yet flown (cube design Stage 3) |
 
 Continuous *steering* from pose — a velocity loop on `rc` commands — is excluded from V0 by SR-063

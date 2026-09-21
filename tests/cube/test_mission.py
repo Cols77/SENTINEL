@@ -248,6 +248,30 @@ def test_a_watchdog_trip_during_a_move_ends_in_the_landing_path(tmp_path):
     assert wp1["fix_cm"] == [1000.0, 1000.0]      # the watchdog's last fix
 
 
+def test_a_failed_land_during_move_is_surfaced_in_the_mission_log(tmp_path):
+    """_watchdog_land_error was previously write-only: set when the
+    cross-thread `land` (land_during_move=True) fails, but never read
+    anywhere. It must reach the mission log for the waypoint the drone
+    aborted en route to."""
+    client = _SlowMoveClient()
+
+    def failing_land():
+        raise RuntimeError("simulated link drop")
+
+    client.land = failing_land
+    runner = CubeMissionRunner(
+        client, "dry-run", mission=MISSION, site=SITE, pose_mode="passive",
+        mission_log=tmp_path / "mission.jsonl", burst_fn=lambda: [_report(270, 300)] * 10,
+        sleep_fn=lambda seconds: None, watchdog_fix_fn=lambda: (1000.0, 1000.0),
+        watchdog_poll_interval_s=0.005, land_during_move=True)
+    report = runner.run(confirm=True)
+    assert report.status == "FAIL"
+    wp1 = _log(tmp_path)[0]
+    assert wp1["status"] == "ABORTED_EN_ROUTE"
+    assert wp1["watchdog_land_error"] is not None
+    assert "simulated link drop" in wp1["watchdog_land_error"]
+
+
 # -- F1: a waypoint aborted en route still gets a log line --------------------
 
 def test_an_abort_during_the_move_still_logs_a_line_for_that_waypoint(tmp_path):
@@ -288,6 +312,24 @@ def test_reanchor_recovers_an_axis_left_outside_the_bounds_before_the_other_axis
         Waypoint("WP1", 270, 235, 100), Waypoint("WP2", 220, 235, 100)))
     bursts = [[_report(270, 226)] * 10,     # WP1 fix: y is 4 cm beyond the 230 cm bound
               [_report(220, 235)] * 10]     # WP2
+    runner, client = _runner(tmp_path, "reanchor", bursts, mission=mission)
+    report = runner.run(confirm=True)
+    assert report.status == "PASS", report.error
+    assert [e["status"] for e in _log(tmp_path)] == ["LOCALISED", "LOCALISED"]
+
+
+def test_reanchor_recovers_both_axes_left_outside_the_bounds_at_once(tmp_path):
+    """A reanchor fix near a cube corner can leave BOTH x and y outside the
+    commanded bounds at the same time. Recovering one axis at a time still
+    validates the WHOLE candidate position, so the first recovery move (say,
+    x) is itself rejected on the other, still-uncorrected axis (y) -- the
+    exact nuisance abort F2 exists to eliminate. While a not-yet-corrected
+    axis is being recovered around, its bound must admit its own stale
+    out-of-bounds value so only the axis actually moving is checked."""
+    mission = Mission(65, 235, (
+        Waypoint("WP1", 65, 235, 100), Waypoint("WP2", 200, 300, 100)))
+    bursts = [[_report(56, 226)] * 10,      # WP1 fix: x and y both beyond their bound
+              [_report(200, 300)] * 10]     # WP2
     runner, client = _runner(tmp_path, "reanchor", bursts, mission=mission)
     report = runner.run(confirm=True)
     assert report.status == "PASS", report.error
