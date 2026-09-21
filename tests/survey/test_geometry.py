@@ -79,10 +79,12 @@ def test_position_of_combines_depth_and_bearing_from_the_cameras_own_stop():
     target_x, target_y = -50.0, 250.0
     cam_x = 75.0
     dx, dy = target_x - cam_x, target_y
-    range_cm = math.hypot(dx, dy)
     bearing = math.atan2(dx, dy)
     u = PRINCIPAL_X + FOCAL_PX * math.tan(bearing)
-    v_px = 55.0 * FOCAL_PX / range_cm
+    # rev 5: a pinhole's image row depends on the *forward* distance dy, not
+    # on the slant range. This test previously projected with the range,
+    # which no camera does, and so agreed with the same error in position_of.
+    v_px = 55.0 * FOCAL_PX / dy
     bbox = {"x": u - 20, "y": PRINCIPAL_Y + v_px - 20, "width": 40, "height": 40}
     sighting = {"bbox": bbox, "x_cm": cam_x, "y_cm": 0.0, "heading_deg": 0.0, "look_deg": 0.0}
     x_cm, y_cm = position_of(sighting, 55.0)

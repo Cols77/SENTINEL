@@ -1,20 +1,71 @@
 # src/sentinel/survey/observability.py
-"""Whether a class can be resolved at all at a given range.
+"""The camera model, and whether a class can be resolved at a given range.
 
-Derived in the design spec section 5.1 from the Tello's 82.6 degree
-*diagonal* field of view over a 960x720 frame: half-diagonal 41.3 degrees
-against a 600 px image half-diagonal gives f = 600 / tan(41.3) = 683 px.
-An object of real width S at range D spans S * f / D pixels.
+rev 5: there are two camera models and they must not be mixed.
+
+``SYNTHETIC_LEVEL`` is the model synthetic scenes are *rendered* with: a
+level optical axis, a centred principal point and f = 683 px. It came from
+reading the Tello's 82.6 degree datasheet figure as a diagonal field of
+view (half-diagonal 41.3 degrees against a 600 px half-diagonal). That
+figure does not describe the 960x720 stream, so this model is wrong for
+real pixels -- but a scene rendered with it must be inverted with it, which
+is why it stays, and stays the default for replayed synthetic scenes.
+
+``TELLO_MEASURED`` is the camera the drone actually has: the chessboard
+calibration in ``calibration/tag-map-calibrated.json`` plus the 8.6 degree
+downward pitch measured from the horizon row (``docs/wp5-rehearsal-
+manifest.md``). Coherence spec section 10.5 makes it the single camera
+model for real frames; ``tests/survey/test_camera_model.py`` fails if the
+two drift apart. Any path that handles real Tello pixels passes it
+explicitly.
+
+An object of real width S at forward distance D spans S * f / D pixels.
 """
 from __future__ import annotations
 
-FOCAL_PX = 683.0
-IMAGE_WIDTH = 960
-IMAGE_HEIGHT = 720
-PRINCIPAL_X = IMAGE_WIDTH / 2.0
+import math
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class CameraModel:
+    name: str
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+    #: Optical-axis pitch below the horizontal, degrees. Positive looks down.
+    pitch_down_deg: float
+    width: int = 960
+    height: int = 720
+
+    @property
+    def horizontal_half_angles(self) -> tuple[float, float]:
+        """(left, right) half-angles in radians; unequal when cx is off-centre."""
+        return (math.atan(self.cx / self.fx), math.atan((self.width - self.cx) / self.fx))
+
+    @property
+    def horizon_row(self) -> float:
+        """The image row the horizon falls on. Boxes centred at or above it
+        are not on any plane below the camera."""
+        return self.cy - self.fy * math.tan(math.radians(self.pitch_down_deg))
+
+
+SYNTHETIC_LEVEL = CameraModel("synthetic-level", 683.0, 683.0, 480.0, 360.0, 0.0)
+TELLO_MEASURED = CameraModel("tello-measured", 892.58, 893.74, 467.75, 353.83, 8.6)
+
+CAMERAS = {camera.name: camera for camera in (SYNTHETIC_LEVEL, TELLO_MEASURED)}
+
+#: The synthetic model's constants under their original names. Kept because
+#: the evaluation harness compares a scene's camera against them; they are
+#: NOT the real camera (see the module docstring).
+FOCAL_PX = SYNTHETIC_LEVEL.fx
+IMAGE_WIDTH = SYNTHETIC_LEVEL.width
+IMAGE_HEIGHT = SYNTHETIC_LEVEL.height
+PRINCIPAL_X = SYNTHETIC_LEVEL.cx
 #: rev 3 R1: ground-plane depth reads the box centre's pixel row against
 #: this line, not against PRINCIPAL_X.
-PRINCIPAL_Y = IMAGE_HEIGHT / 2.0
+PRINCIPAL_Y = SYNTHETIC_LEVEL.cy
 
 #: Nominal real width in centimetres, per class.
 NOMINAL_WIDTH_CM = {"person": 50.0, "computer": 35.0, "phone": 15.0, "pen": 1.0}
@@ -28,15 +79,22 @@ NOMINAL_WIDTH_CM = {"person": 50.0, "computer": 35.0, "phone": 15.0, "pen": 1.0}
 #: (resolvable), pen 2.3 px at 3 m (not). This constant also drives
 #: class_counts's NOT_OBSERVABLE decision, so it is load-bearing -- do not
 #: change it without re-verifying every threshold above.
+#: rev 5: those figures are the synthetic model's. On the measured camera
+#: everything is 31% larger (phone 44.6 px at 3 m, 22.3 px at 6 m, pen
+#: 3.0 px at 3 m), so a phone stays resolvable out to 6.7 m. The threshold
+#: itself is a statement about detectors and is unchanged; it is still
+#: unmeasured and the provider spike is what will pin it.
 MIN_DETECTABLE_PX = 20.0
 
 
-def pixels_at(class_name: str, range_cm: float) -> float:
+def pixels_at(class_name: str, range_cm: float,
+              camera: CameraModel = SYNTHETIC_LEVEL) -> float:
     if range_cm <= 0:
         raise ValueError("range must be positive")
-    return NOMINAL_WIDTH_CM[class_name] * FOCAL_PX / range_cm
+    return NOMINAL_WIDTH_CM[class_name] * camera.fx / range_cm
 
 
-def resolvable_classes(range_cm: float) -> tuple[str, ...]:
+def resolvable_classes(range_cm: float,
+                       camera: CameraModel = SYNTHETIC_LEVEL) -> tuple[str, ...]:
     return tuple(name for name in NOMINAL_WIDTH_CM
-                 if pixels_at(name, range_cm) >= MIN_DETECTABLE_PX)
+                 if pixels_at(name, range_cm, camera) >= MIN_DETECTABLE_PX)

@@ -31,11 +31,17 @@ import math
 from statistics import median
 
 from .geometry import ground_depth, position_of
+from .observability import SYNTHETIC_LEVEL, CameraModel
 
 MERGE_MIN_RANGE_CM = 50.0
 MERGE_MAX_RANGE_CM = 1200.0
 CONFIRM_MIN_STOPS = 3
 
+#: rev 5: the spread is the widest gap between the positions the member
+#: sightings recover, as a fraction of the median viewing depth. Rev 3-4
+#: compared the viewing depths themselves, which differ legitimately as soon
+#: as one object is seen from two distances -- so a closer follow-up look
+#: marked every object it re-saw as degraded, the opposite of its purpose.
 #: A per-object depth spread above this fraction of the median depth means
 #: the geometry disagrees with itself for that object (design spec 5.4):
 #: it stays UNCERTAIN and counts toward the sweep's geometry_degraded tally.
@@ -58,7 +64,8 @@ def _tolerance_cm(range_cm: float) -> float:
     return max(30.0, 0.25 * range_cm)
 
 
-def _locate(sighting: dict, default_delta_z_cm: float):
+def _locate(sighting: dict, default_delta_z_cm: float,
+            camera: CameraModel = SYNTHETIC_LEVEL):
     """Return (x_cm, y_cm, depth_cm) for a sighting that can be placed on
     the ground plane, or None when it cannot: no box, or the box is not on
     the measured plane (``ground_depth`` raises for those)."""
@@ -67,8 +74,8 @@ def _locate(sighting: dict, default_delta_z_cm: float):
         return None
     delta_z_cm = sighting.get("delta_z_cm", default_delta_z_cm)
     try:
-        depth_cm = ground_depth(bbox, delta_z_cm)
-        x_cm, y_cm = position_of(sighting, delta_z_cm)
+        depth_cm = ground_depth(bbox, delta_z_cm, camera)
+        x_cm, y_cm = position_of(sighting, delta_z_cm, camera)
     except (KeyError, ValueError, ZeroDivisionError, TypeError):
         return None
     return (x_cm, y_cm, depth_cm)
@@ -85,8 +92,10 @@ def _unmerged(sighting: dict, x_cm=None, y_cm=None) -> dict:
 def _object_from_group(group: dict, sighting_by_id: dict) -> dict:
     depths = group["depths"]
     stops = group["stops"]
-    spread_pct = ((max(depths) - min(depths)) / median(depths) * 100.0
-                  if len(depths) > 1 else None)
+    points = group["points"]
+    widest = max((math.hypot(a[0] - b[0], a[1] - b[1])
+                  for i, a in enumerate(points) for b in points[i + 1:]), default=0.0)
+    spread_pct = widest / median(depths) * 100.0 if len(points) > 1 else None
     degraded = spread_pct is not None and spread_pct > DEGRADED_SPREAD_PCT
     confident = all(band != "low" for band in group["bands"])
     confirmed = (len(stops) >= CONFIRM_MIN_STOPS and confident
@@ -105,7 +114,8 @@ def _object_from_group(group: dict, sighting_by_id: dict) -> dict:
     }
 
 
-def associate(sightings: list[dict], delta_z_cm: float = 55.0) -> list[dict]:
+def associate(sightings: list[dict], delta_z_cm: float = 55.0,
+              camera: CameraModel = SYNTHETIC_LEVEL) -> list[dict]:
     """Merge one class's sightings into distinct objects via
     mutual-nearest-neighbour single-linkage: each sighting is claimed by
     exactly one object. Sightings that cannot be placed on the ground plane
@@ -118,19 +128,20 @@ def associate(sightings: list[dict], delta_z_cm: float = 55.0) -> list[dict]:
     groups: dict[str, dict] = {}
     unpositioned: list[dict] = []
     for sighting in sightings:
-        located = _locate(sighting, delta_z_cm)
+        located = _locate(sighting, delta_z_cm, camera)
         if located is None:
             unpositioned.append(sighting)
             continue
         x_cm, y_cm, depth_cm = located
         sid = sighting["sighting_id"]
-        groups[sid] = {"ids": [sid], "x_cm": x_cm, "y_cm": y_cm,
+        groups[sid] = {"ids": [sid], "x_cm": x_cm, "y_cm": y_cm, "points": [(x_cm, y_cm)],
                        "depths": [depth_cm], "stops": {sighting.get("stop_index")},
                        "bands": [sighting.get("band")], "ambiguous": False}
 
     while len(groups) > 1:
         ids = list(groups)
         candidates = []
+        compatible = set()
         for i, id_a in enumerate(ids):
             for id_b in ids[i + 1:]:
                 a, b = groups[id_a], groups[id_b]
@@ -141,6 +152,7 @@ def associate(sightings: list[dict], delta_z_cm: float = 55.0) -> list[dict]:
                 if MERGE_MIN_RANGE_CM <= mean_depth <= MERGE_MAX_RANGE_CM \
                         and distance <= tolerance:
                     candidates.append((distance, id_a, id_b))
+                    compatible.add(frozenset((id_a, id_b)))
         if not candidates:
             break
         candidates.sort(key=lambda c: c[0])
@@ -148,7 +160,18 @@ def associate(sightings: list[dict], delta_z_cm: float = 55.0) -> list[dict]:
 
         runner_up = next((c for c in candidates[1:]
                           if id_a in (c[1], c[2]) or id_b in (c[1], c[2])), None)
-        ambiguous = bool(runner_up) and runner_up[0] <= best_distance * AMBIGUITY_FACTOR
+        ambiguous = False
+        if runner_up and runner_up[0] <= best_distance * AMBIGUITY_FACTOR:
+            # rev 5: a near-tie is only ambiguous when it is a real choice.
+            # If the runner-up's third group is also compatible with the
+            # other half of the best pair, all three are one object and the
+            # tie is what agreement looks like. Accurate geometry makes such
+            # ties the normal case (every distance near zero); rev 3-4 only
+            # escaped it because their position error spread the points out.
+            shared = id_a if id_a in runner_up[1:] else id_b
+            other = id_b if shared == id_a else id_a
+            third = runner_up[2] if runner_up[1] == shared else runner_up[1]
+            ambiguous = frozenset((other, third)) not in compatible
 
         a, b = groups.pop(id_a), groups.pop(id_b)
         n_a, n_b = len(a["ids"]), len(b["ids"])
@@ -157,6 +180,7 @@ def associate(sightings: list[dict], delta_z_cm: float = 55.0) -> list[dict]:
             "ids": a["ids"] + b["ids"],
             "x_cm": (a["x_cm"] * n_a + b["x_cm"] * n_b) / total,
             "y_cm": (a["y_cm"] * n_a + b["y_cm"] * n_b) / total,
+            "points": a["points"] + b["points"],
             "depths": a["depths"] + b["depths"],
             "stops": a["stops"] | b["stops"],
             "bands": a["bands"] + b["bands"],
@@ -168,7 +192,8 @@ def associate(sightings: list[dict], delta_z_cm: float = 55.0) -> list[dict]:
     return objects
 
 
-def merge_sightings(sightings: list[dict], delta_z_cm: float = 55.0) -> list[dict]:
+def merge_sightings(sightings: list[dict], delta_z_cm: float = 55.0,
+                    camera: CameraModel = SYNTHETIC_LEVEL) -> list[dict]:
     """Group by class, route mobile classes straight to single-sighting
     objects (design spec 4.3: people are never position-merged, since they
     move between stops), and run ``associate`` per remaining class."""
@@ -178,7 +203,7 @@ def merge_sightings(sightings: list[dict], delta_z_cm: float = 55.0) -> list[dic
         if class_name in MOBILE_CLASSES:
             objects.extend(_unmerged(s) for s in rows)
             continue
-        objects.extend(associate(rows, delta_z_cm))
+        objects.extend(associate(rows, delta_z_cm, camera))
     return objects
 
 

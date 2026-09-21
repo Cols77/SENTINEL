@@ -66,6 +66,7 @@ from .candidates import (ESCALATE_LABEL, MAX_FLIGHTS, REPORT_LABEL, propose_cand
 from .consent import ConsentMissing, consent_policy
 from .context import SurveyContext
 from .merge import merge_sightings
+from .observability import SYNTHETIC_LEVEL, CameraModel
 from .proposer import chosen_label
 from .report import ReportMismatch, check_report, class_counts
 
@@ -117,7 +118,8 @@ def get_results(store, run_id: str, options) -> dict[str, Any]:
     }
 
 
-def _fly_and_ingest(store, run_id, option, flight, detector) -> tuple[str, ...]:
+def _fly_and_ingest(store, run_id, option, flight, detector,
+                    camera: CameraModel = SYNTHETIC_LEVEL) -> tuple[str, ...]:
     """Returns every raw label this sweep's frames could not map to a known
     class (rev 3 R6's ``dropped``), in the order seen, duplicates included --
     the caller (``run_survey``) accumulates these across the whole run for
@@ -146,7 +148,7 @@ def _fly_and_ingest(store, run_id, option, flight, detector) -> tuple[str, ...]:
     rows = store.sightings(run_id)
     for row in rows:
         row["bbox"] = json.loads(row["bbox_json"]) if row["bbox_json"] else None
-    store.set_objects(run_id, merge_sightings(rows, delta_z_cm=DELTA_Z_CM))
+    store.set_objects(run_id, merge_sightings(rows, delta_z_cm=DELTA_Z_CM, camera=camera))
     return tuple(dropped)
 
 
@@ -210,14 +212,21 @@ def _write_report(writer, results) -> tuple[str | None, ReportMismatch | None]:
 def run_survey(*, store, run_id: str, request_text: str, options, policy,
                flight, detector, on_approval, writer,
                location: str | None = None, consent_date: str | None = None,
-               max_flights: int = MAX_FLIGHTS) -> dict[str, Any]:
+               max_flights: int = MAX_FLIGHTS,
+               camera: CameraModel = SYNTHETIC_LEVEL) -> dict[str, Any]:
     """rev 3 R5 (Task 8): when ``location`` is given, filming consent is
     gated *before anything else happens* -- before ``store.create_run``,
     before any sweep, before the detector is ever touched. Absent consent,
     the run ends ``CONSENT_REQUIRED`` and nothing downstream runs at all.
     ``location`` defaults to ``None`` so hermetic/replay runs over
     already-consented frames (design spec 13.4) are unaffected by the gate,
-    matching every test written before this parameter existed."""
+    matching every test written before this parameter existed.
+
+    rev 5: ``camera`` is the model the frames were *produced* with. It
+    defaults to the synthetic level camera because every scene in this
+    repository is rendered with it; anything handling real Tello pixels
+    passes ``observability.TELLO_MEASURED`` (coherence spec 10.5). The
+    ``options`` passed in must have been generated with the same model."""
     if location is not None:
         try:
             consent_policy(store, location, consent_date)
@@ -255,7 +264,8 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
                     "dropped_labels": tuple(dict.fromkeys(dropped_labels))}
 
         option = next(o for o in options if o.option_id == call["arguments"]["option_id"])
-        dropped_labels.extend(_fly_and_ingest(store, run_id, option, flight, detector))
+        dropped_labels.extend(_fly_and_ingest(store, run_id, option, flight, detector,
+                                              camera))
 
         results = get_results(store, run_id, options)
         if results["flights_used"] >= max_flights:

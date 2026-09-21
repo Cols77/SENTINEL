@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import re
 
-from .observability import resolvable_classes
 
 
 class ReportMismatch(ValueError):
@@ -74,10 +73,10 @@ def class_counts(store, run_id: str, options) -> list[dict]:
     flown_option_ids = {row["option_id"] for row in store.connection.execute(
         "SELECT DISTINCT option_id FROM sweeps WHERE run_id = ? AND status != 'ABORTED'",
         (run_id,))}
-    flown_ranges = [option.range_cm for option in options if option.option_id in flown_option_ids]
-    range_cm = min(flown_ranges) if flown_ranges else min(option.range_cm for option in options)
-
-    resolvable = set(resolvable_classes(range_cm))
+    flown = [option for option in options if option.option_id in flown_option_ids] or list(options)
+    # rev 5: read from the closest flown option itself, which was generated
+    # with the run's camera model, rather than recomputed under a default one.
+    resolvable = set(min(flown, key=lambda option: option.range_cm).resolvable_classes)
     stored = store.counts(run_id)
     out = []
     for name in ("computer", "person", "phone", "pen"):

@@ -53,6 +53,7 @@ from sentinel.survey.envelope import SweepEnvelope  # noqa: E402
 from sentinel.survey.eval import load_scene, score_episode  # noqa: E402
 from sentinel.survey.flight import ReplayFlight  # noqa: E402
 from sentinel.survey.loop import run_survey  # noqa: E402
+from sentinel.survey.observability import CAMERAS, SYNTHETIC_LEVEL  # noqa: E402
 from sentinel.survey.options import generate_options  # noqa: E402
 from sentinel.survey.proposer import JevProposer, LlmProposer, RuleProposer  # noqa: E402
 from sentinel.survey.store import SurveyStore  # noqa: E402
@@ -148,6 +149,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--retain-person-frames", action="store_true",
                         help="requires --location and --date, and refuses to start "
                              "(ConsentMissing) unless filming consent is already recorded")
+    parser.add_argument("--camera", choices=sorted(CAMERAS), default=SYNTHETIC_LEVEL.name,
+                        help="the model the frames were produced with: synthetic-level for "
+                             "rendered scenes, tello-measured for anything the drone filmed "
+                             "(coherence spec 10.5). The wrong one misplaces every object.")
     parser.add_argument("--auto-approve", action="store_true",
                         help="tests and replay only -- a real flight always prompts")
     args = parser.parse_args(argv)
@@ -162,7 +167,8 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--retain-person-frames requires --location and --date")
         consent_policy(store, args.location, args.date)
 
-    options = generate_options(DEFAULT_ENVELOPE)
+    camera = CAMERAS[args.camera]
+    options = generate_options(DEFAULT_ENVELOPE, camera)
     sink = JsonlAuditSink(args.db.with_suffix(".jsonl"))
     policy = build_policy(args.mode, sink=sink)
     flight = ReplayFlight(args.frames)
@@ -173,9 +179,10 @@ def main(argv: list[str] | None = None) -> int:
                          options=options, policy=policy, flight=flight, detector=detector,
                          on_approval=_make_on_approval(args.auto_approve),
                          writer=_default_writer,
-                         location=args.location, consent_date=args.date)
+                         location=args.location, consent_date=args.date, camera=camera)
 
-    summary: dict[str, Any] = {"run_id": run_id, "mode": args.mode, "outcome": outcome}
+    summary: dict[str, Any] = {"run_id": run_id, "mode": args.mode, "camera": camera.name,
+                               "outcome": outcome}
     if args.scene is not None:
         scene = load_scene(args.scene)
         summary["score"] = score_episode(scene, outcome, store, run_id)

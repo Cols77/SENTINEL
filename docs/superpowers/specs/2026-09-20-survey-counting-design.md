@@ -1,4 +1,10 @@
-# SENTINEL survey and counting — design (rev 1)
+---
+id: sentinel-survey-counting-design
+title: "SENTINEL survey and counting - design"
+status: review-pending
+---
+
+# SENTINEL survey and counting — design (rev 5)
 
 > **Status:** approved in brainstorm 2026-09-20; spec pending operator review
 > **Owner:** Colin (operator), implemented by the P4/orchestrating Claude session
@@ -157,6 +163,34 @@ of HH:MM:SS"*. It is a lower bound because occluded people are missed, and the r
 
 ### 5.1 Camera model
 
+> **Rev 5 correction (2026-09-21).** The model below the line was derived from the datasheet and
+> is wrong for real frames. The repository already held the measurement that refutes it: the
+> chessboard calibration in `calibration/tag-map-calibrated.json`, validated by WP5's pose accuracy
+> (1.0 cm at 40 cm). The coherence spec §10.5 now makes that calibration the single camera model.
+>
+> | | Datasheet-derived (rev 1–4) | Measured |
+> |---|---|---|
+> | focal length | 683 px | 892.6 / 893.7 px |
+> | principal point | (480, 360) | (467.8, 353.8) |
+> | field of view | 70.2° × 55.6° | **56.5° × 43.9°** |
+> | optical axis | level | pitched **8.6° down**; horizon near row 219 |
+>
+> Three consequences. **Objects are 31 % larger in pixels** than the table below says (laptop ≈ 104 px
+> at 3 m, phone ≈ 45 × 21, pen ≈ 3 px wide), so a phone stays above the 20 px floor out to 6.7 m —
+> pens remain not observable. **Each frame covers a narrower strip**: 3.2 m wide at 3 m, not 4.2 m;
+> the option generator recomputes this per camera. **Depth cannot use the level shortcut** — see §5.2.
+>
+> The code carries both models (`survey.observability`): `SYNTHETIC_LEVEL`, the datasheet model,
+> which the synthetic evaluation scenes are rendered with and must therefore be inverted with; and
+> `TELLO_MEASURED`, which every path touching real Tello pixels passes explicitly
+> (`scripts/survey_run.py --camera tello-measured`). Mixing them misplaces every object.
+> `tests/survey/test_camera_model.py` fails if `TELLO_MEASURED` drifts from the calibration file or
+> from the pose package's pitch. The calibration is one airframe's; a different drone is
+> re-calibrated first. Lens distortion is ignored: it is about 1 % at the frame's side edges and
+> grows to about 10 % only in the far corners.
+
+*Original derivation, kept because the synthetic scenes use it:*
+
 Tello: 960 × 720, 82.6° **diagonal** FOV. Half-diagonal 41.3°, image half-diagonal 600 px, so
 
 ```
@@ -186,7 +220,38 @@ second flight would be theatre.
 > now comes from the **vertical** bearing against a known surface height. The baseline survives only
 > as a cross-check.
 
-**Primary measurement.** Objects rest on a surface whose height is known (a garden table, a lecture
+> **Rev 5 correction (2026-09-21).** The measurement is the intersection of the pixel's ray with the
+> horizontal plane `Δz` below the lens. With the box centre at normalised image coordinates
+> `x_n = (u − cx)/fx`, `y_n = (v − cy)/fy` and the optical axis pitched down by `p`:
+>
+> ```
+> scale   = Δz / (sin p + y_n · cos p)          # defined only below the horizon
+> forward = scale · (cos p − y_n · sin p)
+> lateral = scale · x_n
+> ```
+>
+> `D = Δz · f / v` is the special case `p = 0`. On the real camera (`p` = 8.6°), an object 3 m
+> ahead on a plane 55 cm below the lens sits **28 px** below the principal row, not 125 px, and one
+> pixel is worth **1.9 cm** of depth there. Fed real pixels, the level formula would have put that
+> object beyond 17 m, and refused outright anything past about 3.5 m, whose box rises above the
+> image centre while still being well below the horizon.
+>
+> Rev 5 fixes two further errors the first one had been hiding. `D` is a **forward** distance, and
+> rev 3–4 used it as a slant range along the bearing, shortening every off-axis position by
+> `cos(bearing)` — up to 18 % at the frame edge. And with positions now exact, two rules in §5.4
+> misfired: the near-tie ambiguity rule fired on every well-measured object (all its sightings are
+> near-equidistant *because* they agree), and `depth_spread_pct` compared viewing depths, which
+> differ legitimately when one object is seen from two distances — so a closer follow-up marked
+> everything it re-saw as degraded. A near-tie is now ambiguous only when the third sighting could
+> *not* also join the pair, and the spread is the widest gap between the positions the sightings
+> recover, as a fraction of the median depth.
+>
+> **New sensitivity: pitch.** One degree of unmodelled pitch moves a 3 m estimate by about 27 cm
+> (9 %). The 8.6° was measured with the drone on the floor; in a hover the airframe tilts to hold
+> position, more so in a garden breeze. §5.4's spread check is what detects this, and the first
+> flight's tape-measured truth is what calibrates it.
+
+**Primary measurement (rev 3 text, now the level special case).** Objects rest on a surface whose height is known (a garden table, a lecture
 desk). With the camera `Δz` above that surface and the object's box centre `v` pixels below the
 image centre:
 

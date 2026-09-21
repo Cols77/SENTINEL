@@ -3022,3 +3022,30 @@ git commit -m "docs(survey): implementation handoff and verification record"
 **Gaps found and closed during review.** Two defects were found here and **have already been fixed in the spec** (rev 2, commit `f2ca73c`): the bearing formula's principal point is 480, not 320; and the spec no longer claims P3b1's `LlmProposer` plugs into the survey flow unchanged. **Do not "fix" either again** — the spec is correct as it stands, and a second-round reviewer flagged the previous wording here as an instruction that would re-break a correct document.
 
 **Type consistency.** `SweepOption.option_id` is the `Candidate.label` at propose and `f"follow_up:{option_id}"` at review; `chosen_label` reads `arguments["option_id"]` in both cases, so it is stable across decision points. `DetectionBatch.status` is `"OK"`/`"PROVIDER_ERROR"` in Task 3 and consumed with exactly those values in Task 7. `position_kind` is `"COMMANDED"`/`"MEASURED"` in Tasks 1, 7 and 11. `band` on a sighting is `"high"`/`"medium"`/`"low"`; `band` on an object is `"CONFIRMED"`/`"UNCERTAIN"` — different vocabularies on purpose, and the merge is the only place both appear.
+
+---
+
+## Rev 5 amendment (2026-09-21) — camera model. Precedence: Rev 5 > Rev 4 > Rev 3 > task bodies
+
+**V12. One camera model for real pixels (design spec §5.1–§5.2 rev 5; coherence spec §10.5).**
+Implemented on `docs/coherence-alignment`:
+
+- `survey.observability` carries `CameraModel`, `SYNTHETIC_LEVEL` (f 683, level — the model the
+  synthetic scenes are rendered with) and `TELLO_MEASURED` (chessboard calibration, 8.6° pitch).
+- `survey.geometry.ground_point` intersects the pixel ray with the surface plane; `ground_depth`
+  and `position_of` take a `camera`. `merge`, `options` and `run_survey` thread it; every default
+  is `SYNTHETIC_LEVEL`, so existing scenes and the evaluation harness are unaffected.
+- `scripts/survey_run.py --camera {synthetic-level,tello-measured}`; the summary records which.
+- `merge`: spread is positional scatter; a near-tie is ambiguous only when it is a real choice.
+
+**Binding on the tasks not yet built:**
+
+- **Task 11 (cube bridge, real flight adapter)** passes `TELLO_MEASURED` to both
+  `generate_options` and `run_survey`. There is no code path in which a frame the drone filmed
+  may reach the merge under `SYNTHETIC_LEVEL`; the adapter, not the caller, fixes the model.
+- **Task 12 spike and any replay of real footage** run with `--camera tello-measured`.
+- `DELTA_Z_CM` is still one constant. With the pitched camera the depth error from a wrong `Δz`
+  is proportional (5 cm on 55 cm is 9 %), so Task 11 also replaces it with the frame's measured
+  altitude minus the tape-measured surface height.
+- First flight: tape-measure two object positions and compare; a consistent long or short bias is
+  hover pitch, and is corrected in `TELLO_MEASURED.pitch_down_deg`, nowhere else.

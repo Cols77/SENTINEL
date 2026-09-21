@@ -6,25 +6,33 @@ from __future__ import annotations
 import math
 
 from .envelope import SweepEnvelope, SweepOption
-from .observability import FOCAL_PX, IMAGE_WIDTH, resolvable_classes
+from .observability import SYNTHETIC_LEVEL, CameraModel, resolvable_classes
 
 MAX_WAYPOINTS = 8          # the WP5 mission runner's own cap
 SECONDS_PER_STOP = 22      # move, settle, capture -- measured on 09-21, revise then
 
 
+def _view_width_cm(range_cm: float, camera: CameraModel) -> float:
+    """Width of the ground strip one frame covers at ``range_cm`` ahead."""
+    left, right = camera.horizontal_half_angles
+    return range_cm * (math.tan(left) + math.tan(right))
+
+
 def _rail(envelope: SweepEnvelope, option_id: str, description: str,
-          count: int, z_cm: int, y_cm: int, range_cm: int) -> SweepOption:
+          count: int, z_cm: int, y_cm: int, range_cm: int,
+          camera: CameraModel) -> SweepOption:
     span = envelope.max_x_cm - envelope.min_x_cm
     step = span / (count - 1) if count > 1 else 0
     stops = tuple((int(round(envelope.min_x_cm + step * index)), y_cm)
                   for index in range(count))
-    half_angle = math.atan(IMAGE_WIDTH / 2.0 / FOCAL_PX)
-    viewed = int(span + 2 * range_cm * math.tan(half_angle))
+    viewed = int(span + _view_width_cm(range_cm, camera))
     return SweepOption(option_id, description, stops, z_cm, (0,), viewed,
-                       count * SECONDS_PER_STOP, resolvable_classes(range_cm), range_cm)
+                       count * SECONDS_PER_STOP, resolvable_classes(range_cm, camera),
+                       range_cm)
 
 
-def generate_options(envelope: SweepEnvelope) -> tuple[SweepOption, ...]:
+def generate_options(envelope: SweepEnvelope,
+                     camera: CameraModel = SYNTHETIC_LEVEL) -> tuple[SweepOption, ...]:
     mid_z = (envelope.min_z_cm + envelope.max_z_cm) // 2
     near_y = envelope.min_y_cm
     far_y = envelope.max_y_cm
@@ -35,15 +43,16 @@ def generate_options(envelope: SweepEnvelope) -> tuple[SweepOption, ...]:
 
     options = [
         _rail(envelope, "RAIL_MID_HEIGHT", "four stops across the middle of the cube",
-              4, mid_z, near_y, near_range),
+              4, mid_z, near_y, near_range, camera),
         _rail(envelope, "RAIL_HIGH_WIDE", "six stops at the top of the cube, widest view",
-              6, envelope.max_z_cm, far_y, far_range),
+              6, envelope.max_z_cm, far_y, far_range, camera),
         _rail(envelope, "RAIL_LOW_NEAR", "four stops low and close",
-              4, envelope.min_z_cm, near_y, near_range),
+              4, envelope.min_z_cm, near_y, near_range, camera),
         SweepOption("CLOSE_LOOK_CENTRE", "two close stops in the middle, for a second look",
                     ((centre_x - 40, far_y), (centre_x + 40, far_y)), mid_z, (0,),
-                    int(2 * close_range * math.tan(math.atan(IMAGE_WIDTH / 2.0 / FOCAL_PX))),
-                    2 * SECONDS_PER_STOP, resolvable_classes(close_range), close_range),
+                    int(_view_width_cm(close_range, camera)),
+                    2 * SECONDS_PER_STOP, resolvable_classes(close_range, camera),
+                    close_range),
     ]
     for option in options:
         assert len(option.stops) <= MAX_WAYPOINTS, option.option_id

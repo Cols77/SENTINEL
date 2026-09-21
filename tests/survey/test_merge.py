@@ -22,10 +22,11 @@ def _looking_at(stop_index, cam_x, target_x, target_y, sighting_id=None, **kwarg
     plane at (target_x, target_y). Round-trips exactly through
     geometry.position_of because it is built from the same formula."""
     dx, dy = target_x - cam_x, target_y - 0.0
-    range_cm = math.hypot(dx, dy)
     bearing = math.atan2(dx, dy)
     u = PRINCIPAL_X + FOCAL_PX * math.tan(bearing)
-    v_px = DELTA_Z_CM * FOCAL_PX / range_cm
+    # rev 5: a pinhole's image row depends on the forward distance dy, not
+    # on the slant range this helper used before (see test_geometry).
+    v_px = DELTA_Z_CM * FOCAL_PX / dy
     bbox = {"x": u - 20, "y": PRINCIPAL_Y + v_px - 20, "width": 40, "height": 40}
     return _sighting(sighting_id or f"s{stop_index}", stop_index, cam_x, bbox=bbox, **kwargs)
 
@@ -101,10 +102,14 @@ def test_each_sighting_belongs_to_exactly_one_object_even_when_two_are_plausible
 
 
 def test_depth_spread_over_30_percent_marks_the_object_uncertain_and_degraded():
-    """A target close to the rail: the true range varies hugely stop to
-    stop even though every stop recovers the identical (x, y) -- exactly
-    the geometry-disagreement signal design spec 5.4 describes."""
-    sightings = [_looking_at(i, i * 75.0, 0.0, 150.0, sighting_id=f"n{i}") for i in range(3)]
+    """Three stops that each put the object somewhere else: 60 cm apart in
+    depth, close enough to chain into one cluster, smeared over 120 cm at
+    a median depth of 360 cm. That is the geometry disagreeing with itself
+    (design spec 5.4). rev 5: this test used to build its disagreement
+    from a slant-range projection no camera produces; the sightings it
+    flagged agreed perfectly."""
+    sightings = [_looking_at(i, i * 75.0, 0.0, 300.0 + 60.0 * i, sighting_id=f"n{i}")
+                 for i in range(3)]
     objects = merge_sightings(sightings)
     assert len(objects) == 1
     obj = objects[0]
