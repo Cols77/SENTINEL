@@ -51,13 +51,15 @@ def summarise(values):
 
 def report(runs: list[dict]) -> str:
     lines = ["# Waypoint trials", ""]
-    lines += ["| run | mode | outcome | start fix (cm) | start heading err | stops reached |",
-              "|---|---|---|---|---|---|"]
+    lines += ["| run | mode | outcome | start fix (cm) | start heading err | battery start -> last | stops reached |",
+              "|---|---|---|---|---|---|---|"]
     for run in runs:
         start = run["start"] or {}
         outcome = run["status"] + (f" ({run['error'][:60]})" if run["error"] else "")
+        readings = [e.get("battery_pct") for e in [start] + run["stops"] if e.get("battery_pct") is not None]
+        battery = f"{readings[0]} -> {readings[-1]} %" if readings else "-"
         lines.append(f"| {run['name']} | {run['mode']} | {outcome} | {start.get('fix_cm', '-')} | "
-                     f"{fmt(start.get('heading_error_deg'), ' deg')} | "
+                     f"{fmt(start.get('heading_error_deg'), ' deg')} | {battery} | "
                      f"{sum(s.get('status') == 'LOCALISED' for s in run['stops'])}/{len(run['stops'])} |")
     lines += ["", "## Every stop", "",
               "| run | waypoint | status | open-loop err | final err | trims | verdict | localise s |",

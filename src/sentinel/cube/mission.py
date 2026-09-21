@@ -439,13 +439,20 @@ class CubeMissionRunner(FlightTestRunner):
                 return self._accept_arrival(wp, entry)
             rounds += 1
 
+    def _battery_pct(self) -> int | None:
+        """Best-effort battery reading for the log: a low battery explains a Tello that lands itself."""
+        try:
+            return int(self._call(self.client.battery))
+        except Exception:  # noqa: BLE001 - telemetry must never end a flight
+            return None
+
     def _localise_start(self, height_cm: int) -> None:
         """No start pad: measure where the drone is after takeoff and plan every leg from it.
         No reliable fix, or a fix outside the cube, ends the flight before any translation."""
         entry = {"waypoint": "START", "pose_mode": self.pose_mode, "status": "UNLOCALISED",
                  "fix_cm": None, "heading_deg": None, "heading_error_deg": None, "n": 0,
                  "spread_p95_cm": None, "containment": None, "yaw_trim_deg": None,
-                 "height_cm": height_cm}
+                 "height_cm": height_cm, "battery_pct": self._battery_pct()}
         try:
             self.sleep_fn(SETTLE_S)
             result = localise(self.burst_fn())
@@ -529,7 +536,8 @@ class CubeMissionRunner(FlightTestRunner):
                      "tolerance": None, "proposed_trims": None,
                      "trim_rounds_sent": 0, "looks_deg": list(wp.looks_deg),
                      "watchdog_land_error": None, "height_cm": None,
-                     "open_loop_fix_cm": None, "open_loop_error_cm": None, "localise_s": None}
+                     "open_loop_fix_cm": None, "open_loop_error_cm": None, "localise_s": None,
+                     "battery_pct": None}
             try:
                 self._go_to(wp)
                 entry["status"] = "OPEN_LOOP"
@@ -538,6 +546,7 @@ class CubeMissionRunner(FlightTestRunner):
                 # not the commanded target -- they agree within DEAD_BAND_CM
                 # by construction but are not the same number.
                 entry["height_cm"] = self.envelope.position.z_cm
+                entry["battery_pct"] = self._battery_pct()
                 if self.pose_mode != "off" and wp.localise:
                     self._localise(wp, entry)
                 self._look(wp, entry)
