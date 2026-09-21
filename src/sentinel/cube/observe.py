@@ -7,10 +7,16 @@ along +y beyond its mouth; look offsets are relative to facing +y, + = left.
 import math
 from dataclasses import dataclass
 
+from sentinel.camera import TELLO_MEASURED
 from sentinel.envelope import FlightEnvelope
 
-WIDTH_PER_RANGE = 2.0 * math.tan(math.radians(70.2 / 2.0))   # 1.406 of width per unit range
-BELOW_HORIZON_DEG = 55.6 / 2.0 + 8.6                          # 36.4: bottom edge of the pitched view
+# Coherence spec 10.5: one camera model for every consumer of real Tello
+# pixels, this one included -- the 70.2 x 55.6 degree datasheet figure these
+# constants used to be built from does not describe the 960x720 stream.
+_left, _right = TELLO_MEASURED.horizontal_half_angles
+WIDTH_PER_RANGE = math.tan(_left) + math.tan(_right)   # ~1.076 of width per unit range (was 1.406)
+BELOW_HORIZON_DEG = TELLO_MEASURED.pitch_down_deg + math.degrees(
+    math.atan((TELLO_MEASURED.height - TELLO_MEASURED.cy) / TELLO_MEASURED.fy))  # ~30.9 (was 36.4)
 
 
 @dataclass(frozen=True)
