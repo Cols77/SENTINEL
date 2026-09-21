@@ -97,6 +97,46 @@ def test_jev_judge_transport_observation_rejects_invalid_numeric_usage(monkeypat
     }]
 
 
+def test_jev_observation_rejects_overlength_model_identity(monkeypatch):
+    from sentinel.judgment import JevJudge
+
+    monkeypatch.setenv("SENTINEL_TEST_KEY", "fake-not-a-real-key")
+    observations = []
+    judge = JevJudge(
+        api_key_env="SENTINEL_TEST_KEY",
+        transport=lambda payload: {
+            "model": "m" * 256 + "-different-release",
+            "answers": {"q": {"type": "noul", "noul": 0.2}},
+        },
+        observation_callback=observations.append,
+    )
+
+    judge.boolean({}, "q?", name="q")
+    assert observations[0]["model"] is None
+
+
+def test_jev_enormous_usage_integer_does_not_discard_model_identity(monkeypatch):
+    from sentinel.judgment import JevJudge
+
+    monkeypatch.setenv("SENTINEL_TEST_KEY", "fake-not-a-real-key")
+    observations = []
+    judge = JevJudge(
+        api_key_env="SENTINEL_TEST_KEY",
+        transport=lambda payload: {
+            "model": "typesafe/jev-1.13-20260917",
+            "usage": {"prompt_tokens": 10 ** 10_000, "completion_tokens": 2, "total_tokens": 3},
+            "answers": {"q": {"type": "noul", "noul": 0.2}},
+        },
+        observation_callback=observations.append,
+    )
+
+    judge.boolean({}, "q?", name="q")
+    assert observations == [{
+        "model": "typesafe/jev-1.13-20260917",
+        "usage": {"prompt_tokens": None, "completion_tokens": 2, "total_tokens": 3},
+    }]
+
+
 def test_jev_judge_posts_to_decisions_endpoint(monkeypatch):
     from sentinel.judgment import JevJudge
 

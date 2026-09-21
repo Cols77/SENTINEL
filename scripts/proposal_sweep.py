@@ -30,9 +30,11 @@ from sentinel.proposal_eval import load_case_bundle, run_case, score_outcome, ag
 CATALOGUE = ROOT / "docs/superpowers/specs/contracts/fixtures/survey-catalogue-v1.fixture.json"
 PINNED_CASES = ROOT / "fixtures/proposal_eval/generated-requests-v1.json"
 PINNED_FIXTURE_PATH = "fixtures/proposal_eval/generated-requests-v1.json"
+PINNED_FIXTURE_SHA256 = "1b1089694fd74a82924c020bacfefc2e7a8b905077f05b8bbe01135777822f70"
 REQUIRED_DECISION_PROMPT_REVISION = "select_plan.complete_constraints.v2"
 LLM_PROMPT_REVISION = "prompt-v4-complete-constraints"
 LLM_TOOL_POLICY_REVISION = "legal-tools-v2"
+MODEL_ID_MAX_LENGTH = 256
 TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
 PINNED_CASE_IDS = (
     "generated_middle_only", "generated_short_route", "generated_no_ends",
@@ -42,7 +44,7 @@ PINNED_CASE_IDS = (
 )
 
 
-def _arm_mappings(values, selected_arms, option):
+def _arm_mappings(values, selected_arms, option, *, max_length=None):
     mappings = {}
     selected = {arm.lower() for arm in selected_arms}
     for item in values:
@@ -55,6 +57,8 @@ def _arm_mappings(values, selected_arms, option):
             raise ValueError(f"{option} arm {arm!r} is not a selected model arm")
         if not value:
             raise ValueError(f"{option} requires a non-empty value for {arm}")
+        if max_length is not None and len(value) > max_length:
+            raise ValueError(f"{option} value for {arm} exceeds {max_length} characters")
         if arm in mappings:
             raise ValueError(f"{option} repeats arm {arm}")
         mappings[arm] = value
@@ -70,7 +74,8 @@ def _fixture_path(path):
 
 
 def _classify_identity(observed, expected, expected_observations):
-    values = [value for value in observed if isinstance(value, str) and value]
+    values = [value for value in observed
+              if isinstance(value, str) and value and len(value) <= MODEL_ID_MAX_LENGTH]
     if any(value != expected for value in values):
         return "mismatched"
     if not values:
@@ -102,7 +107,8 @@ def _sum_trial_usage(records):
 def _evaluate_live_gate(manifest, trials, *, identity_status):
     fixture_matches = (
         manifest.get("fixture_path") == PINNED_FIXTURE_PATH
-        and manifest.get("fixture_sha256") == manifest.get("pinned_fixture_sha256")
+        and manifest.get("fixture_sha256") == PINNED_FIXTURE_SHA256
+        and manifest.get("pinned_fixture_sha256") == PINNED_FIXTURE_SHA256
     )
     trial_keys = [(row.get("case_id"), row.get("repeat")) for row in trials]
     complete_trials = (
@@ -182,8 +188,8 @@ def _http_evidence(response, stream, *, error_category=None):
 def _live_transport(arm, config, stream, observations):
     """One HTTP request per measured call; SDK retries are explicitly disabled."""
     def observe(row):
-        observations.append(row)
         stream.write({"record": "provider_observation", **row})
+        observations.append(row)
 
     if arm == "jev":
         import os
@@ -310,6 +316,11 @@ def main(argv=None):
             raise ValueError(
                 "decision prompt revision must be "
                 f"{REQUIRED_DECISION_PROMPT_REVISION}, got {DECISION_PROMPT_REVISION}")
+        pinned_runtime_digest = file_digest(PINNED_CASES)
+        if pinned_runtime_digest != PINNED_FIXTURE_SHA256:
+            raise ValueError(
+                "canonical fixture SHA-256 must be "
+                f"{PINNED_FIXTURE_SHA256}, got {pinned_runtime_digest}")
         cases, excluded = load_case_bundle(args.fixtures)
         if not cases:
             raise ValueError("no evaluable cases")
@@ -321,7 +332,8 @@ def main(argv=None):
             raise ValueError("initial live baseline requires three repeats")
         arms = list(dict.fromkeys(args.arms))
         expected_models = _arm_mappings(
-            args.expected_resolved_model, arms, "--expected-resolved-model")
+            args.expected_resolved_model, arms, "--expected-resolved-model",
+            max_length=MODEL_ID_MAX_LENGTH)
         identity_notes = _arm_mappings(
             args.identity_decision_note, arms, "--identity-decision-note")
         model_arms = {arm.lower() for arm in arms if arm.lower() != "f"}
@@ -355,6 +367,11 @@ def main(argv=None):
             for arm in arms}
         for arm, config in configurations.items():
             key = arm.lower()
+            requested_model = config.get("requested_model")
+            if (isinstance(requested_model, str)
+                    and len(requested_model) > MODEL_ID_MAX_LENGTH):
+                raise ValueError(
+                    f"requested model identity for {key} exceeds {MODEL_ID_MAX_LENGTH} characters")
             config.update(
                 decision_prompt_revision=DECISION_PROMPT_REVISION if key in {"jev", "llm"} else None,
                 expected_resolved_model=expected_models.get(key),
@@ -374,7 +391,12 @@ def main(argv=None):
                                   recording=args.recording)
         manifest["maximum_possible_calls"] = maximum
         manifest["fixture_path"] = _fixture_path(args.fixtures)
-        manifest["pinned_fixture_sha256"] = file_digest(PINNED_CASES)
+        manifest["pinned_fixture_sha256"] = PINNED_FIXTURE_SHA256
+        if (manifest["fixture_path"] == PINNED_FIXTURE_PATH
+                and manifest["fixture_sha256"] != PINNED_FIXTURE_SHA256):
+            raise ValueError(
+                "selected canonical fixture SHA-256 must be "
+                f"{PINNED_FIXTURE_SHA256}, got {manifest['fixture_sha256']}")
         manifest["case_ids"] = [c.case_id for c in cases]
         manifest["case_definitions"] = [asdict(c) for c in cases]
         manifest["excluded_cases"] = excluded

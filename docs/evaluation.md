@@ -56,10 +56,13 @@ Invalid or unavailable answers cannot establish model-quality escalation success
 Rationale completeness is separate from factual support, which is unassessed.
 
 The default is the fixed 12-case
-`fixtures/proposal_eval/generated-requests-v1.json` pack. Its path and current
-computed SHA-256 (`1b1089694fd74a82924c020bacfefc2e7a8b905077f05b8bbe01135777822f70`)
-are recorded independently; a matching filename is never treated as hash
-evidence. The cases are explicitly synthetic. The optional existing hand-label
+`fixtures/proposal_eval/generated-requests-v1.json` pack. Its reviewed literal
+SHA-256 pin is
+`1b1089694fd74a82924c020bacfefc2e7a8b905077f05b8bbe01135777822f70`.
+The runner computes the file digest at runtime and requires both the exact
+canonical path and that literal digest; a matching filename or a self-consistent
+manifest value is never treated as pin evidence. The cases are explicitly
+synthetic. The optional existing hand-label
 importer preserves labels and describes its request-only adaptation; it excludes
 incompatible context, draft candidates, pending labels and other decision points
 with reasons. It does not manufacture independently labelled observations.

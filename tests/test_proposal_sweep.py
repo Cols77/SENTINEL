@@ -6,6 +6,7 @@ import pytest
 
 
 FIXTURE_RELATIVE = "fixtures/proposal_eval/generated-requests-v1.json"
+FIXTURE_SHA256 = "1b1089694fd74a82924c020bacfefc2e7a8b905077f05b8bbe01135777822f70"
 CASE_IDS = [
     "generated_middle_only", "generated_short_route", "generated_no_ends",
     "generated_all_tags", "generated_complete_verified", "generated_not_short",
@@ -30,6 +31,7 @@ def test_dry_run_validates_and_prints_budget_without_artifacts(tmp_path, capsys)
     assert manifest["maximum_possible_calls"] == 12
     assert manifest["fixture_path"] == FIXTURE_RELATIVE
     assert manifest["fixture_sha256"] == hashlib.sha256(fixture.read_bytes()).hexdigest()
+    assert manifest["pinned_fixture_sha256"] == FIXTURE_SHA256
     assert manifest["fixture_sha256"] != fixture.name
     assert manifest["case_ids"] == CASE_IDS
     config = manifest["configurations"]["jev"]
@@ -66,6 +68,37 @@ def test_dry_run_rejects_semantic_revision_drift_before_provider_or_output(
     error = capsys.readouterr().err
     assert "select_plan.complete_constraints.v2" in error
     assert "drifted-revision" in error
+    assert not out.exists()
+
+
+def test_dry_run_rejects_changed_canonical_fixture_digest_before_provider_or_output(
+        tmp_path, monkeypatch, capsys):
+    from scripts import proposal_sweep
+
+    out = tmp_path / "must-not-exist"
+    actual_file_digest = proposal_sweep.file_digest
+
+    def changed_digest(path):
+        if path.resolve() == proposal_sweep.PINNED_CASES.resolve():
+            return "b" * 64
+        return actual_file_digest(path)
+
+    monkeypatch.setattr(proposal_sweep, "file_digest", changed_digest)
+    monkeypatch.setattr(
+        proposal_sweep, "_live_transport",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("provider initialized before fixture validation")),
+    )
+
+    status = proposal_sweep.main([
+        "--mode", "live", "--arms", "jev", "--dry-run", "--output", str(out),
+        *_identity_args("jev", "typesafe/jev-1.13-20260917"),
+    ])
+
+    assert status == 2
+    error = capsys.readouterr().err
+    assert FIXTURE_SHA256 in error
+    assert "b" * 64 in error
     assert not out.exists()
 
 
@@ -121,6 +154,19 @@ def test_identity_mapping_arguments_validate_selected_arms_and_nonempty_values(o
     assert "evaluation refused" in capsys.readouterr().err
 
 
+def test_expected_model_identity_is_bounded_before_manifest_or_output(tmp_path, capsys):
+    from scripts.proposal_sweep import main
+
+    out = tmp_path / "must-not-exist"
+    status = main([
+        "--mode", "live", "--arms", "jev", "--dry-run", "--output", str(out),
+        *_identity_args("jev", "m" * 257),
+    ])
+    assert status == 2
+    assert "256" in capsys.readouterr().err
+    assert not out.exists()
+
+
 def test_live_identity_mappings_are_required_for_each_model_arm(capsys):
     from scripts.proposal_sweep import main
     assert main(["--mode", "live", "--arms", "jev", "--dry-run"]) == 2
@@ -146,7 +192,8 @@ def test_live_gate_has_exact_applicability_and_denominators():
 
     manifest = {
         "mode": "live", "arms": ["jev"], "fixture_path": FIXTURE_RELATIVE,
-        "fixture_sha256": "a" * 64, "pinned_fixture_sha256": "a" * 64, "repeats": 3,
+        "fixture_sha256": FIXTURE_SHA256, "pinned_fixture_sha256": FIXTURE_SHA256,
+        "repeats": 3,
         "max_calls": 36,
     }
     trials = []
@@ -176,12 +223,26 @@ def test_live_gate_has_exact_applicability_and_denominators():
     ):
         candidate = {**manifest, **changed}
         assert _evaluate_live_gate(candidate, trials, identity_status="verified")["live_gate_applicable"] is False
+    forged = {**manifest, "fixture_sha256": "b" * 64, "pinned_fixture_sha256": "b" * 64}
+    assert _evaluate_live_gate(forged, trials, identity_status="verified")["live_gate_applicable"] is False
+
+
+def test_overlength_provider_identity_cannot_verify_matching_256_character_prefix():
+    from scripts.proposal_sweep import _classify_identity
+    from sentinel.adapter.llm.openai_compatible import _observation_from_mapping
+
+    expected = "m" * 256
+    observation = _observation_from_mapping({"model": expected + "-different-release"})
+    observed = [observation["model"]] if observation["model"] else []
+
+    assert observation["model"] is None
+    assert _classify_identity(observed, expected, 1) == "unverified"
 
 
 def test_identity_mismatch_fails_applicable_gate_and_bad_shape_is_nonapplicable():
     from scripts.proposal_sweep import _evaluate_live_gate
     manifest = {"mode": "live", "arms": ["jev"], "fixture_path": FIXTURE_RELATIVE,
-                "fixture_sha256": "a" * 64, "pinned_fixture_sha256": "a" * 64,
+                "fixture_sha256": FIXTURE_SHA256, "pinned_fixture_sha256": FIXTURE_SHA256,
                 "repeats": 3, "max_calls": 36}
     trials = [{"case_id": CASE_IDS[i % 12], "repeat": i // 12 + 1, "supported": i % 12 < 6,
                "supported_correct": i % 12 < 6, "safe_escalation": i % 12 >= 6,
@@ -349,6 +410,52 @@ def test_live_jev_preserves_http_failure_evidence(monkeypatch):
     assert responses and responses[0]["http_status"] == 429
     assert "rate limited" in json.dumps(responses[0])
     assert "private HTTP details" not in json.dumps(records)
+
+
+def test_provider_observation_is_ineligible_when_append_only_write_fails(monkeypatch):
+    import httpx
+    from scripts.proposal_sweep import _live_transport
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    observations = []
+
+    class ThrowingStream:
+        def __init__(self):
+            self.records = []
+            self.observation_writes = 0
+
+        def write(self, row):
+            if row.get("record") == "provider_observation":
+                self.observation_writes += 1
+                raise OSError("synthetic append-only failure")
+            self.records.append(row)
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "model": "typesafe/jev-1.13-20260917",
+                "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+                "answers": {"select_plan": {
+                    "type": "choice", "choice": "plan", "probabilities": {"plan": 1.0},
+                }},
+            }
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: Response())
+    stream = ThrowingStream()
+    judge = _live_transport("jev", None, stream, observations)
+
+    answer = judge.choice(
+        state={}, instruction="choose", criteria={"plan": "plan"}, name="select_plan")
+
+    assert answer["value"] == "plan"
+    assert stream.observation_writes == 1
+    assert observations == []
 
 
 def test_live_jev_preserves_malformed_http_body(monkeypatch):

@@ -144,7 +144,28 @@ def test_transport_observation_preserves_missing_or_invalid_usage_as_null():
 
     adapter.propose(REQUEST)
 
-    assert len(observations[0]["model"]) <= 256
+    assert observations[0]["model"] is None
     assert observations[0]["usage"] == {
         "prompt_tokens": None, "completion_tokens": None, "total_tokens": None,
     }
+
+
+def test_enormous_usage_integer_is_rejected_without_discarding_model_identity():
+    observations = []
+    response = {
+        "model": "z-ai/glm-5.3",
+        "usage": {"prompt_tokens": 10 ** 10_000, "completion_tokens": 2, "total_tokens": 3},
+        **valid_response(),
+    }
+    adapter = OpenAICompatibleAgentModel(
+        load_config(ENV),
+        client_factory=lambda **_: Client(Completions(response)),
+        environ=ENV,
+        observation_callback=observations.append,
+    )
+
+    assert adapter.propose(REQUEST).status == "TOOL_CALLS"
+    assert observations == [{
+        "model": "z-ai/glm-5.3",
+        "usage": {"prompt_tokens": None, "completion_tokens": 2, "total_tokens": 3},
+    }]

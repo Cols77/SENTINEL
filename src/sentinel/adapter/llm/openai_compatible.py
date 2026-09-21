@@ -38,10 +38,9 @@ _TOKEN_COUNT_LIMIT = 1_000_000_000_000
 def _observation_from_mapping(response: Mapping[str, Any] | None) -> dict[str, Any]:
     """Project provider metadata without retaining content or request data."""
     model = response.get("model") if response is not None else None
-    if not isinstance(model, str) or not model.strip():
+    if (not isinstance(model, str) or not model.strip()
+            or len(model) > _MODEL_ID_CHAR_BUDGET):
         model = None
-    else:
-        model = model[:_MODEL_ID_CHAR_BUDGET]
     usage: Any = response.get("usage") if response is not None else None
     if not isinstance(usage, Mapping):
         for method_name in ("model_dump", "to_dict"):
@@ -57,7 +56,11 @@ def _observation_from_mapping(response: Mapping[str, Any] | None) -> dict[str, A
     def count(name: str) -> int | float | None:
         value = usage.get(name)
         if (isinstance(value, bool) or not isinstance(value, (int, float))
-                or not math.isfinite(value) or value < 0 or value > _TOKEN_COUNT_LIMIT):
+                or value < 0 or value > _TOKEN_COUNT_LIMIT):
+            return None
+        if isinstance(value, int):
+            return value
+        if not math.isfinite(value):
             return None
         return value
 

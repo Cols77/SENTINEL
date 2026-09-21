@@ -21,10 +21,9 @@ def _provider_observation(raw: Any) -> dict[str, Any]:
     """Return only bounded identity and usage metadata from an HTTP result."""
     document = raw if isinstance(raw, Mapping) else {}
     model = document.get("model")
-    if not isinstance(model, str) or not model.strip():
+    if (not isinstance(model, str) or not model.strip()
+            or len(model) > _MODEL_ID_CHAR_BUDGET):
         model = None
-    else:
-        model = model[:_MODEL_ID_CHAR_BUDGET]
     usage = document.get("usage")
     if not isinstance(usage, Mapping):
         usage = {}
@@ -32,7 +31,11 @@ def _provider_observation(raw: Any) -> dict[str, Any]:
     def count(name: str) -> int | float | None:
         value = usage.get(name)
         if (isinstance(value, bool) or not isinstance(value, (int, float))
-                or not math.isfinite(value) or value < 0 or value > _TOKEN_COUNT_LIMIT):
+                or value < 0 or value > _TOKEN_COUNT_LIMIT):
+            return None
+        if isinstance(value, int):
+            return value
+        if not math.isfinite(value):
             return None
         return value
 
