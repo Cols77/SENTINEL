@@ -45,3 +45,10 @@ def test_reanchoring_returns_home_closer_than_open_loop():
     assert closed["completed"] == 40
     assert closed["waypoints"]["HOME"]["median_cm"] < open_loop["waypoints"]["HOME"]["median_cm"]
     assert closed["waypoints"]["HOME"]["within_tolerance"] >= 0.9
+
+
+def test_a_start_free_mission_flies_from_random_takeoff_points():
+    free = Mission(None, None, LOOP.waypoints)
+    closed = monte_carlo(free, SITE, "reanchor", DriftModel(), runs=30, tolerance_cm=15)
+    assert closed["completed"] == 30
+    assert closed["waypoints"]["HOME"]["within_tolerance"] >= 0.9
