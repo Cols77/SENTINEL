@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 TELLO = ("192.168.10.1", 8889)
-MIN_BATTERY = 50
+MIN_BATTERY = 30          # a run costs ~5-10 %; the Tello itself degrades below ~20 %
 HOVER_S = 3.0
 FAILSAFE_LAND_S = 12.0      # after the move is sent, land regardless
 GIVE_UP_S = 30.0

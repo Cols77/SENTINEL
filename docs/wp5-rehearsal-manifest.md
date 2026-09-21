@@ -294,7 +294,7 @@ watchdog's send-during-move flag stays **off** and an abort takes effect when th
 **Gate.** Motors on, so **G4 live-rehearsal consent** and the operator present at the controller
 with the emergency cut to hand. Not a pose test: no tags needed.
 
-**Preconditions.** Battery >= 50% (it drops fast and a dying Tello ignores commands — see the
+**Preconditions.** Battery >= 30% (lowered from 50% on 2026-09-21: a run costs 5-10%) (it drops fast and a dying Tello ignores commands — see the
 2026-09-21 stand test). At least 3 m of clear run in the move direction plus 1 m either side.
 Soft floor or a mat. Nobody within the run. Propellers guarded if available.
 
