@@ -123,5 +123,8 @@ class MissionControlService:
                             correlation_id=identity,idempotency_key=identity),self.config.run_id)
             self.approval.cancel(self.config.run_id)
             self.worker.close()
+            flight_close = getattr(self.adapters.flight, 'close', None)
+            if flight_close is not None:
+                flight_close()
             self.safety.close()
             if self.pose_feed:self.pose_feed.close()

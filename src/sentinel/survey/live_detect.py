@@ -17,6 +17,9 @@ recorded for the location and date (``RETAIN``) and the operator's
 from __future__ import annotations
 
 import json
+import atexit
+import math
+import os
 import subprocess
 import sys
 import time
@@ -32,6 +35,77 @@ from .store import SurveyStore
 
 #: The survey's classes, the same set the survey resolves (observability).
 LIVE_CLASSES = tuple(sorted(NOMINAL_WIDTH_CM))
+_DETECTION_FIELDS = frozenset({
+    "class", "matched_prompt", "raw_score", "score_kind", "bbox",
+    "bbox_coordinate_space", "description", "provider_item_id",
+})
+_DETECTION_CLASSES = frozenset({"computer", "person", "phone", "pen"})
+_SCORE_KINDS = frozenset({"DETECTOR_RAW", "VLM_CONFIDENCE_BAND", "NONE"})
+_BANDS = frozenset({"high", "medium", "low"})
+
+
+def _number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _clean_detection(document: object) -> tuple[dict, str, object] | None:
+    """Validate a follower document and remove its display-only metadata."""
+    if not isinstance(document, dict):
+        return None
+    band = document.get("band", "low")
+    tile = document.get("tile")
+    clean = {key: value for key, value in document.items() if key not in {"band", "tile"}}
+    if set(clean) != _DETECTION_FIELDS or band not in _BANDS:
+        return None
+    if clean["class"] not in _DETECTION_CLASSES:
+        return None
+    if clean["matched_prompt"] is not None and not isinstance(clean["matched_prompt"], str):
+        return None
+    if clean["raw_score"] is not None and not _number(clean["raw_score"]):
+        return None
+    if clean["score_kind"] not in _SCORE_KINDS or clean["bbox_coordinate_space"] != "PIXELS_TOP_LEFT":
+        return None
+    if clean["description"] is not None and not isinstance(clean["description"], str):
+        return None
+    if clean["provider_item_id"] is not None and not isinstance(clean["provider_item_id"], str):
+        return None
+    bbox = clean["bbox"]
+    if bbox is not None:
+        if not isinstance(bbox, dict) or set(bbox) != {"x", "y", "width", "height"}:
+            return None
+        if not all(_number(bbox[key]) for key in ("x", "y", "width", "height")):
+            return None
+    if tile is not None and not isinstance(tile, str):
+        return None
+    return clean, band, tile
+
+
+def _terminate_process_tree(process, timeout_s: float) -> bool:
+    """Terminate a Popen process and descendants, with finite psutil waits."""
+    try:
+        import psutil
+        root = psutil.Process(process.pid)
+        members = root.children(recursive=True) + [root]
+        for member in members:
+            try:
+                member.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        _gone, alive = psutil.wait_procs(members, timeout=timeout_s)
+        for member in alive:
+            try:
+                member.kill()
+            except psutil.NoSuchProcess:
+                pass
+        _gone, alive = psutil.wait_procs(alive, timeout=timeout_s)
+        return not alive and process.poll() is not None
+    except (AttributeError, OSError, ImportError):
+        try:
+            process.kill()
+            process.wait(timeout=timeout_s)
+            return process.poll() is not None
+        except Exception:
+            return False
 
 
 class LiveDetectRefused(RuntimeError):
@@ -97,14 +171,34 @@ class DetectionCache:
                 if not ids_match:
                     foreign = True
                     continue
-                raw = dict(row.get("raw") or {})
+                raw_document = row.get("raw")
+                if raw_document is not None and not isinstance(raw_document, dict):
+                    return self._gap("ANALYSIS_GAP_INVALID_RESULT", "raw must be an object", classes)
+                raw = dict(raw_document or {})
                 raw.setdefault("detect_s", row.get("detect_s"))
                 if row.get("error"):
                     raw.setdefault("error", row["error"])
-                detections = tuple(row.get("detections") or ())
-                bands = tuple(d.get("band", "low") for d in detections)
-                return DetectionBatch(detections, str(row.get("status") or "DETECTOR_ERROR"),
-                                      bands=bands, dropped=tuple(row.get("dropped") or ()),
+                documents = row.get("detections")
+                if not isinstance(documents, list):
+                    return self._gap("ANALYSIS_GAP_INVALID_RESULT",
+                                     "detections must be a JSON list", classes)
+                cleaned = []
+                bands = []
+                for index, document in enumerate(documents):
+                    result = _clean_detection(document)
+                    if result is None:
+                        return self._gap("ANALYSIS_GAP_INVALID_RESULT",
+                                         f"invalid detection at index {index}", classes)
+                    detection, band, tile = result
+                    cleaned.append(detection)
+                    bands.append(band)
+                    if tile is not None:
+                        raw.setdefault("tile_only", []).append({"index": index, "tile": tile})
+                dropped = row.get("dropped", [])
+                if not isinstance(dropped, list) or not all(isinstance(label, str) for label in dropped):
+                    return self._gap("ANALYSIS_GAP_INVALID_RESULT", "dropped must be string list", classes)
+                return DetectionBatch(tuple(cleaned), str(row.get("status") or "DETECTOR_ERROR"),
+                                      bands=tuple(bands), dropped=tuple(dropped),
                                       raw=raw)
         if foreign:
             return self._gap("ANALYSIS_GAP_STALE", "cached result belongs to another run", classes)
@@ -133,12 +227,13 @@ class LiveDetectionSupervisor:
                  consent_db: str | Path | None = None, location: str | None = None,
                  date: str | None = None, tiles: str = "none", authorised: bool = True,
                  launcher: Callable | None = None, script: str | Path | None = None,
-                 drain_timeout_s: float = 90.0) -> None:
+                 drain_timeout_s: float = 90.0, tree_terminator: Callable | None = None) -> None:
         self.run_id = run_id
         self.detector_name = detector_name
         self.consent_db, self.location, self.date = consent_db, location, date
         self.tiles, self.authorised = tiles, authorised
         self.launcher = launcher or subprocess.Popen
+        self.tree_terminator = tree_terminator or _terminate_process_tree
         self.script = Path(script) if script else Path(__file__).resolve().parents[3] / "scripts" / "live_detect.py"
         self.drain_timeout_s = drain_timeout_s
         self.sweep_id = f"{run_id}-{uuid.uuid4().hex}"
@@ -151,7 +246,9 @@ class LiveDetectionSupervisor:
         self.process = None
         self.process_status = "NOT_STARTED"
         self.process_error: str | None = None
+        self._cleanup_pending = False
         self._cache: DetectionCache | None = None
+        atexit.register(self.close)
 
     def command(self) -> list[str]:
         command = [sys.executable, str(self.script), "--detector", self.detector_name,
@@ -172,7 +269,15 @@ class LiveDetectionSupervisor:
         self.frames_dir.mkdir(parents=True, exist_ok=True)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         try:
-            self.process = self.launcher(self.command())
+            launch_options = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                              if os.name == "nt" and hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP")
+                              else {"start_new_session": True})
+            try:
+                self.process = self.launcher(self.command(), **launch_options)
+            except TypeError:
+                # Injected test launchers and older wrappers may only accept
+                # argv; the real Popen path always receives process isolation.
+                self.process = self.launcher(self.command())
             self.process_status = "RUNNING"
         except Exception as exc:  # child failure must not affect flight
             self.process_status = "START_FAILED"
@@ -193,9 +298,10 @@ class LiveDetectionSupervisor:
             except (subprocess.TimeoutExpired, TimeoutError) as exc:
                 self.process_status, self.process_error = "TIMEOUT", str(exc)
                 try:
-                    self.process.kill()
-                except Exception as kill_error:
-                    self.process_error = f"{self.process_error}; kill: {kill_error}"
+                    terminated = self.tree_terminator(self.process, self.drain_timeout_s)
+                except Exception as tree_error:
+                    terminated = False
+                    self.process_error = f"{self.process_error}; tree cleanup: {tree_error}"
                 try:
                     self.process.wait(timeout=self.drain_timeout_s)
                 except (subprocess.TimeoutExpired, TimeoutError):
@@ -203,17 +309,26 @@ class LiveDetectionSupervisor:
                     self.process_error = "follower did not reap after kill"
                 except Exception:
                     pass
+                if not terminated or self.process.poll() is None:
+                    self.process_status = "FATAL_CLEANUP_UNCONFIRMED"
+                    self.process_error = "follower process tree remains alive"
+                    self._cleanup_pending = True
             except Exception as exc:
                 self.process_status = "CRASHED"
                 self.process_error = f"{type(exc).__name__}: {exc}"
                 try:
-                    self.process.kill()
+                    terminated = self.tree_terminator(self.process, self.drain_timeout_s)
                     self.process.wait(timeout=self.drain_timeout_s)
                 except (subprocess.TimeoutExpired, TimeoutError):
                     self.process_status = "TIMEOUT_UNREAPED"
                     self.process_error = "follower did not reap after kill"
+                    terminated = False
                 except Exception:
-                    pass
+                    terminated = False
+                if not terminated or self.process.poll() is None:
+                    self.process_status = "FATAL_CLEANUP_UNCONFIRMED"
+                    self.process_error = "follower process tree remains alive"
+                    self._cleanup_pending = True
         elif self.process is None and self.process_status == "NOT_STARTED":
             self.process_status = "START_FAILED"
         rows: list[dict] = []
@@ -229,6 +344,18 @@ class LiveDetectionSupervisor:
         self._cache = DetectionCache(self.run_id, rows, self.process_status,
                                      self.process_error, sweep_id=self.sweep_id, strict=True)
         return self._cache
+
+    def close(self) -> None:
+        """Retry ownership of an unconfirmed cleanup without blocking forever."""
+        if not self._cleanup_pending or self.process is None:
+            return
+        try:
+            terminated = self.tree_terminator(self.process, self.drain_timeout_s)
+            self.process.wait(timeout=self.drain_timeout_s)
+            if terminated and self.process.poll() is not None:
+                self._cleanup_pending = False
+        except Exception:
+            return
 
     def detection_for(self, frame, classes: tuple[str, ...] = LIVE_CLASSES):
         return self.finish().for_frame(frame, classes)

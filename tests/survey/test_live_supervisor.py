@@ -40,6 +40,32 @@ class _TimedOutProcess(_Process):
         return -9
 
 
+class _ReapedAfterTreeKill(_Process):
+    def __init__(self):
+        super().__init__()
+        self.pid = 12345
+        self.terminal = False
+
+    def wait(self, timeout=None):
+        self.wait_calls.append(timeout)
+        if timeout is not None and not self.terminal:
+            import subprocess
+            raise subprocess.TimeoutExpired("follower", timeout)
+        return 0
+
+    def poll(self):
+        return 0 if self.terminal else None
+
+
+def _detection(**extra):
+    result = {"class": "computer", "matched_prompt": "laptop", "raw_score": None,
+              "score_kind": "VLM_CONFIDENCE_BAND", "bbox": None,
+              "bbox_coordinate_space": "PIXELS_TOP_LEFT", "description": "laptop",
+              "provider_item_id": "item-1"}
+    result.update(extra)
+    return result
+
+
 def test_supervisor_starts_before_flight_and_consumes_exact_cached_batch(tmp_path):
     started = []
     frame_path = tmp_path / "frames" / "f.png"
@@ -54,7 +80,7 @@ def test_supervisor_starts_before_flight_and_consumes_exact_cached_batch(tmp_pat
         out.write_text(json.dumps({
             "run_id": "r", "sweep_id": command[command.index("--sweep-id") + 1],
             "path": str(frame_path), "sha256": frame.sha256,
-            "status": "OK", "detections": [{"class": "computer", "band": "high"}],
+            "status": "OK", "detections": [{**_detection(), "band": "high"}],
             "dropped": [], "raw": {"provider": "fake"}, "detect_s": 0.012,
         }) + "\n")
         return process
@@ -96,9 +122,26 @@ def test_supervisor_timeout_kills_and_reaps_without_failing_the_flight(tmp_path)
     supervisor.start()
     cache = supervisor.finish()
     assert process.killed
-    assert process.wait_calls == [0.01, 0.01]
-    assert cache.process_status == "TIMEOUT_UNREAPED"
-    assert cache.for_frame(_frame(tmp_path / "f.png")).status == "ANALYSIS_GAP_PROCESS_TIMEOUT_UNREAPED"
+    assert process.wait_calls == [0.01, 0.01, 0.01]
+    assert cache.process_status == "FATAL_CLEANUP_UNCONFIRMED"
+    assert cache.for_frame(_frame(tmp_path / "f.png")).status == "ANALYSIS_GAP_PROCESS_FATAL_CLEANUP_UNCONFIRMED"
+
+
+def test_supervisor_uses_injected_tree_terminator_and_confirms_terminal_pid(tmp_path):
+    process = _ReapedAfterTreeKill()
+    terminated = []
+    def terminate_tree(proc, timeout):
+        terminated.append((proc.pid, timeout))
+        proc.terminal = True
+        return True
+    supervisor = LiveDetectionSupervisor(
+        root=tmp_path, run_id="r", detector_name="gemini", launcher=lambda command: process,
+        tree_terminator=terminate_tree, script=tmp_path / "live_detect.py", drain_timeout_s=0.01,
+    )
+    supervisor.start()
+    cache = supervisor.finish()
+    assert terminated == [(12345, 0.01)]
+    assert process.poll() == 0 and cache.process_status == "TIMEOUT"
 
 
 def test_cache_rejects_an_exact_row_from_another_run(tmp_path):
@@ -120,6 +163,14 @@ def test_strict_cache_requires_both_run_and_sweep_ids(tmp_path):
     assert cache.for_frame(frame).status == "ANALYSIS_GAP_STALE"
 
 
+def test_cache_rejects_missing_or_extra_detection_fields_without_sightings(tmp_path):
+    frame = _frame(tmp_path / "f.png")
+    base = {"run_id": "r", "sweep_id": "s", "path": frame.image_path,
+            "sha256": frame.sha256, "status": "OK", "dropped": [], "raw": {}}
+    for detection in ({**_detection(), "unexpected": 1}, {"class": "computer"}):
+        cache = DetectionCache("r", [{**base, "detections": [detection]}],
+                               sweep_id="s", strict=True)
+        assert cache.for_frame(frame).status == "ANALYSIS_GAP_INVALID_RESULT"
 def test_live_cache_is_the_only_ingestion_source_and_publishes_latency_states(tmp_path):
     class Flight:
         def __init__(self):
@@ -127,8 +178,7 @@ def test_live_cache_is_the_only_ingestion_source_and_publishes_latency_states(tm
             self.cache = DetectionCache("r", [{
                 "run_id": "r", "sweep_id": "s", "path": frame.image_path,
                 "sha256": frame.sha256, "status": "OK",
-                "detections": [{"class": "computer", "band": "high",
-                                "bbox": None, "score_kind": "NONE"}],
+                "detections": [{**_detection(), "band": "high", "tile": "r1c1"}],
                 "bands": ["high"], "raw": {"detect_s": 0.025},
             }], sweep_id="s", strict=True)
 
@@ -163,3 +213,31 @@ def test_live_cache_is_the_only_ingestion_source_and_publishes_latency_states(tm
     assert [event.status for event in detector_events] == ["DETECTING", "OK"]
     assert detector_events[-1].latency_ms == 25.0
     assert "band" not in seen[0]
+
+
+def test_invalid_cached_result_is_an_analysis_gap_with_zero_sightings(tmp_path):
+    frame = _frame(tmp_path / "f.png")
+    cache = DetectionCache("r", [{
+        "run_id": "r", "sweep_id": "s", "path": frame.image_path,
+        "sha256": frame.sha256, "status": "OK", "detections": [{"class": "computer"}],
+        "dropped": [], "raw": {},
+    }], sweep_id="s", strict=True)
+
+    class Flight:
+        def fly(self, option):
+            return [frame]
+        def detection_for(self, frame, classes):
+            return cache.for_frame(frame, classes)
+
+    class MustNotCall:
+        def detect(self, *_args):
+            raise AssertionError("invalid cache must not fall back to provider")
+
+    store = SurveyStore.open(tmp_path / "survey.sqlite")
+    outcome = run_survey(
+        store=store, run_id="r", request_text="count computers", options=OPTIONS,
+        policy=RuleProposer(), flight=Flight(), detector=MustNotCall(),
+        on_approval=lambda _call: True, writer=_writer([]))
+    assert outcome["status"] == "REPORTED"
+    assert store.unanalysed_count("r") == 1
+    assert store.sightings("r") == []

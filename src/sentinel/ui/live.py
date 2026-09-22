@@ -129,6 +129,7 @@ class LiveFlight:
         self.observer=None
         self.artifacts={};self.start=(config.start_x_cm,config.start_y_cm)
         self._detection_cache = None
+        self._supervisor = None
 
     def _new_supervisor(self, option):
         if self.supervisor_factory is not None:
@@ -153,6 +154,7 @@ class LiveFlight:
     def fly(self,option):
         config=self.config
         supervisor = self._new_supervisor(option)
+        self._supervisor = supervisor
         # This is deliberately before client creation and before CubeFlight's
         # runner.  The first saved frame can therefore be consumed while the
         # drone is in flight, without coupling follower health to navigation.
@@ -204,6 +206,10 @@ class LiveFlight:
                 except Exception as exc:
                     self._detection_cache = DetectionCache(
                         self.run_id, (), 'SUPERVISOR_ERROR', f'{type(exc).__name__}: {exc}')
+
+    def close(self):
+        if self._supervisor is not None:
+            self._supervisor.close()
 
 
 def report_writer(results):
