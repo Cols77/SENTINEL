@@ -128,7 +128,12 @@ def _fly_and_ingest(store, run_id, option, flight, detector,
     R8's ``dropped_labels`` attribution signal."""
     sweep_id = store.add_sweep(run_id, option.option_id, len(option.stops))
     dropped: list[str] = []
-    for frame in flight.fly(option):
+    frames = flight.fly(option)
+    # Legacy replay lists represent complete recorded sweeps. Live adapters
+    # carry an explicit terminal result; partial evidence never upgrades it.
+    status = "FLOWN" if getattr(frames, "status", "COMPLETED") == "COMPLETED" else "ABORTED"
+    store.set_sweep_status(sweep_id, status)
+    for frame in frames:
         # Task 11/V12: a real flight port stamps its own per-frame delta_z
         # (height above the tape-measured surface); a replay frame with no
         # such field (every fixture written before Task 11) falls back to
@@ -151,7 +156,6 @@ def _fly_and_ingest(store, run_id, option, flight, detector,
         for detection, band in zip(batch.detections, bands):
             store.add_sighting(frame_id, detection, band, raw_response=batch.raw)
         dropped.extend(batch.dropped)
-    store.set_sweep_status(sweep_id, "FLOWN")
 
     rows = store.sightings(run_id)
     for row in rows:
@@ -281,6 +285,12 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
                                               camera))
 
         results = get_results(store, run_id, options)
+        if store.connection.execute(
+                "SELECT 1 FROM sweeps WHERE run_id = ? AND status = 'ABORTED'", (run_id,)).fetchone():
+            return {"status": "ABORTED", "flights": results["flights_used"],
+                    "counts": results["counts"], "report": None, "escalations": escalations,
+                    "decision_quality": min(decision_qualities) if decision_qualities else None,
+                    "dropped_labels": tuple(dict.fromkeys(dropped_labels))}
         if results["flights_used"] >= max_flights:
             break
         review = review_candidates(results, options)

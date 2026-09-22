@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
+import time
 from typing import Literal, TYPE_CHECKING
 
 from .goals import EntityRef, GoalLedger, GoalObjective
@@ -118,12 +119,13 @@ class ReadQueries:
     """
 
     def __init__(self, store: RoomStore, *, survey_store: SurveyStore | None = None,
-                 survey_run_id: str | None = None):
+                 survey_run_id: str | None = None, clock=time.monotonic, clock_domain_id: str | None = None):
         if (survey_store is None) != (survey_run_id is None):
             raise ValueError("survey_store and survey_run_id must be supplied together")
         self.store = store
         self.survey_store = survey_store
         self.survey_run_id = survey_run_id
+        self.clock, self.clock_domain_id = clock, clock_domain_id
 
     relevant_hash = staticmethod(relevant_hash)
 
@@ -165,8 +167,16 @@ class ReadQueries:
                 event = drones[-1]
                 data = event.payload
                 values = data.get("state", {})
-                allowed = {"battery_percent", "flight_state", "x_cm", "y_cm", "z_cm", "heading_deg"}
+                allowed = {"battery_percent", "flight_state", "x_cm", "y_cm", "z_cm", "heading_deg",
+                           "pose_source", "pose_quality", "pose_age_s", "localization_state", "airborne",
+                           "terminal_state", "action_progress", "completion_known"}
                 values = {key: value for key, value in values.items() if key in allowed}
+                if "clock_domain_id" in data:
+                    now = self.clock()
+                    current = (data["clock_domain_id"] == self.clock_domain_id and data["refresh_succeeded"]
+                        and all(0 <= now - data[key] <= data["sample_max_age_s"]
+                                for key in ("pose_measured_at", "energy_measured_at")))
+                    values["state_freshness"] = "CURRENT" if current else "STALE"
                 if values and all(data.get(key) for key in ("observed_at", "scope", "uncertainty")):
                     facts.append(_fact(CandidateKind.READ_DRONE, values, data["observed_at"], data["scope"],
                                        data["uncertainty"], (event.event_id,)))
@@ -242,6 +252,14 @@ class ReadQueries:
                 ))
         drone_events = [e for e in events if e.event_type == "DRONE_STATE_RECORDED"
                         and isinstance(e.payload.get("state"), dict)]
+        flight_terminal = None
+        if drone_events:
+            measured = drone_events[-1].payload["state"]
+            if measured.get("terminal_state"):
+                flight_terminal = (TerminalState.SAFE_LANDED if measured["terminal_state"] == "LANDED"
+                                   else TerminalState.ABORTED)
+            elif measured.get("action_progress") == "COMMAND_COMPLETION_UNKNOWN":
+                flight_terminal = TerminalState.ABORTED
         snapshot = ReadSnapshot(
             session_id=session_id, state_version=session["state_version"], goal_revision=goal_revision,
             pose_revision=sum(any(k in e.payload.get("state", {}) for k in ("x_cm", "y_cm", "z_cm", "heading_deg")) for e in drone_events),
@@ -249,7 +267,7 @@ class ReadQueries:
             home_revision=0, coverage_revision=0, static_evidence_revision=len(sources),
             target_revision=0, landing_zone_revision=0, tool_outcome_revision=len(outcomes),
             request_text=session["request_text"], ledger=ledger, sources=sources, facts=(),
-            outcomes=tuple(outcomes), terminal_state=next((o.terminal_state for o in reversed(outcomes) if o.terminal_state), None),
+            outcomes=tuple(outcomes), terminal_state=flight_terminal or next((o.terminal_state for o in reversed(outcomes) if o.terminal_state), None),
             compile_rejected=rejected, source_failures=failures,
         )
         facts = {}

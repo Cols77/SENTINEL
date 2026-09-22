@@ -281,6 +281,22 @@ class RoomStore:
             payload=asdict(assurance), correlation_id=assurance.assurance_id, causation_id=None,
             idempotency_key=f"contingency:{assurance.assurance_id}:{assurance.state}")
 
+    def append_checkpoint_completion(self, session_id, *, result, state, pose_measured_at,
+            energy_measured_at, clock_domain_id, sample_max_age_s, fresh, causation_id):
+        """Atomically append completion and its timed, explicitly sourced measurement."""
+        correlation = str(uuid.uuid4())
+        payload = {"state": state, "observed_at": _utc_now(), "scope": f"aircraft:{session_id}",
+                   "uncertainty": "measured checkpoint state; freshness requires matching session clock",
+                   "clock_domain_id": clock_domain_id, "pose_measured_at": pose_measured_at,
+                   "energy_measured_at": energy_measured_at, "sample_max_age_s": sample_max_age_s,
+                   "refresh_succeeded": fresh}
+        with self._lock:
+            return self.append_events(session_id=session_id, expected_version=self.session_version(session_id),
+                events=tuple({"event_type": kind, "payload": data, "correlation_id": correlation,
+                              "causation_id": causation_id, "idempotency_key": f"{correlation}:{kind}"}
+                             for kind, data in (("CHECKPOINT_COMPLETED", asdict(result)),
+                                                ("DRONE_STATE_RECORDED", payload))))
+
     def contingency_assurances(self, session_id: str, *, clock_domain_id: str) -> tuple:
         """Return append-only evidence; reopening a store never renews a deadline."""
         from .site import ContingencyAssurance

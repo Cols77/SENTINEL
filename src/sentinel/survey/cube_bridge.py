@@ -61,6 +61,15 @@ class SyntheticCameraRefused(ValueError):
     would misplace every real object (V12)."""
 
 
+class CubeFlightResult(list[FlightFrame]):
+    """Frame-compatible evidence carrying the runner's terminal verdict."""
+
+    def __init__(self, frames, *, runner_status: str):
+        super().__init__(frames)
+        self.runner_status = runner_status
+        self.status = "COMPLETED" if runner_status == "PASS" else "ABORTED"
+
+
 def envelope_from_site(site: Site, standoff_cm: int) -> SweepEnvelope:
     """The same inset arithmetic as ``Site.envelope()`` (cube/site.py),
     producing the survey's own ``SweepEnvelope`` instead of a
@@ -146,7 +155,7 @@ class CubeFlight:
         self.burst_fn, self.sleep_fn = burst_fn, sleep_fn
         self.minimum_battery, self.confirm = minimum_battery, confirm
 
-    def fly(self, option) -> list[FlightFrame]:
+    def fly(self, option) -> CubeFlightResult:
         mission = mission_from_option(option, self.start_x_cm, self.start_y_cm)
         already = (self.mission_log.read_text(encoding="utf-8").splitlines()
                   if self.mission_log.exists() else [])
@@ -155,17 +164,18 @@ class CubeFlight:
             pose_mode=self.pose_mode, tag_map=self.tag_map, conn=self.conn,
             run_id=self.run_id, mission_log=self.mission_log, capture_dir=self.capture_dir,
             burst_fn=self.burst_fn, sleep_fn=self.sleep_fn)
-        runner.run(confirm=self.confirm)
-        new_lines = self.mission_log.read_text(encoding="utf-8").splitlines()[len(already):]
+        report = runner.run(confirm=self.confirm)
+        new_lines = (self.mission_log.read_text(encoding="utf-8").splitlines()[len(already):]
+                     if self.mission_log.exists() else [])
         # A measured start writes its own START line; it is not a stop.
         names = {waypoint.name for waypoint in mission.waypoints}
         entries = [entry for entry in map(json.loads, new_lines) if entry.get("waypoint") in names]
         self._carry_start_forward(entries)
-        return [
+        return CubeFlightResult([
             self._frame_from(stop_index, entry, frame)
             for stop_index, entry in enumerate(entries)
             for frame in entry.get("frames", ())
-        ]
+        ], runner_status=report.status)
 
     def _carry_start_forward(self, entries: list[dict]) -> None:
         """A follow-up sweep takes off from wherever the last one landed,

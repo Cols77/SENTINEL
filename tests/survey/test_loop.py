@@ -101,6 +101,28 @@ def test_a_clean_run_flies_once_counts_and_reports(tmp_path):
     assert "1 computers" in outcome["report"]
 
 
+def test_aborted_partial_flight_keeps_evidence_but_never_reports_success(tmp_path):
+    class PartialFrames(list):
+        status = "ABORTED"
+
+    class PartialFlight(_StaticFlight):
+        def fly(self, option):
+            return PartialFrames(super().fly(option)[:1])
+
+    store = SurveyStore.open(tmp_path / "partial.sqlite3")
+    calls = []
+    outcome = run_survey(store=store, run_id="PARTIAL", request_text="count the computers",
+                         options=OPTIONS, policy=RuleProposer(), flight=PartialFlight(),
+                         detector=ScriptedDetector(_one_computer_script()),
+                         on_approval=lambda call: True, writer=_writer(calls))
+    assert outcome["status"] == "ABORTED"
+    assert outcome["flights"] == 0
+    assert outcome["report"] is None and calls == []
+    assert store.connection.execute("SELECT status FROM sweeps").fetchone()[0] == "ABORTED"
+    assert store.connection.execute("SELECT count(*) FROM frames").fetchone()[0] == 1
+    assert store.connection.execute("SELECT count(*) FROM sightings").fetchone()[0] == 1
+
+
 def test_a_refused_proposal_ends_the_run_without_flying(tmp_path):
     store = SurveyStore.open(tmp_path / "s.sqlite3")
     flight = _StaticFlight()

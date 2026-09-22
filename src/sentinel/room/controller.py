@@ -10,6 +10,7 @@ import uuid
 
 from sentinel.jev_choice import assess_choice
 from sentinel.judgment import ChoiceJudge
+from sentinel.cube.supervised_wait import SupervisedWait
 
 from .candidates import build_candidates
 from .models import CandidateKind, RoomCandidate, TerminalState
@@ -34,7 +35,8 @@ class RoomController:
                  queries: ReadQueries | None = None, act_at: float = .8, min_margin: float = .15,
                  candidate_builder: Callable[[ReadSnapshot], tuple[RoomCandidate, ...]] = build_candidates,
                  executor: Callable[[RoomCandidate, ReadSnapshot], tuple[ReadFact, ...]] | None = None,
-                 ingest_pending: Callable[[str], object] | None = None):
+                 ingest_pending: Callable[[str], object] | None = None,
+                 supervisor=None, flight_executor=None, provider_wait_s: float = 10.0):
         for value in (act_at, min_margin):
             if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
                 raise ValueError("choice thresholds must be finite probabilities")
@@ -43,6 +45,26 @@ class RoomController:
         self.act_at, self.min_margin = act_at, min_margin
         self.candidate_builder, self.executor = candidate_builder, executor
         self.ingest_pending = ingest_pending
+        if (supervisor is None) != (flight_executor is None):
+            raise ValueError("supervisor and flight executor must be supplied together")
+        if type(provider_wait_s) not in (int, float) or not math.isfinite(provider_wait_s) or provider_wait_s <= 0:
+            raise ValueError("provider wait must be finite and positive")
+        self.supervisor, self.flight_executor, self.provider_wait_s = supervisor, flight_executor, provider_wait_s
+
+    def _preempted(self, session_id, decision):
+        snapshot = self.queries.project(session_id)
+        events = self.store.events(session_id)
+        version = decision.request.snapshot_version if decision else self.supervisor.last_preempted_version
+        return TurnOutcome(decision.transition if decision else "LAND_CONTINGENCY", False,
+                           tuple(e.event_id for e in events if e.state_version > version),
+                           snapshot.terminal_state)
+
+    def wait_for_perception(self, operation, *, session_id):
+        """Bound a data-returning detector operation; its caller owns ingestion."""
+        if self.supervisor is not None:
+            return self.supervisor.run_wait(operation, snapshot_version=self.store.session_version(session_id),
+                                           timeout_s=self.provider_wait_s, executor=self.flight_executor)
+        return SupervisedWait().run(operation, time.monotonic() + self.provider_wait_s, lambda: None)
 
     def _append(self, session_id, version, correlation, entries, causation=None):
         return self.store.append_events(session_id=session_id, expected_version=version, events=tuple(
@@ -91,6 +113,18 @@ class RoomController:
         snapshot = self.queries.project(session_id)
         if snapshot.terminal_state:
             return TurnOutcome("TERMINAL", False, (), snapshot.terminal_state)
+        if self.supervisor is not None:
+            if self.supervisor.session_id != session_id:
+                raise ValueError("supervisor belongs to another session")
+            try:
+                decision = self.supervisor.prepare(snapshot_version=snapshot.state_version,
+                                                   provider_wait_s=self.provider_wait_s)
+            except Exception:
+                self.supervisor.refresh_failure(self.flight_executor)
+                return self._preempted(session_id, None)
+            if decision.transition != "CONTINUE":
+                self.supervisor.dispatch(decision, self.flight_executor)
+                return self._preempted(session_id, decision)
         correlation = str(uuid.uuid4())
         if ingest_failed:
             payload = self._outcome(snapshot, "INGEST_PENDING", "INGEST_PENDING",
@@ -147,12 +181,20 @@ class RoomController:
         state = asdict(snapshot)
         provider_error = None
         started = time.monotonic_ns()
-        try:
-            answer = self.judge.choice(deepcopy(state),
-                                       "Choose one legal action. Reads are historical. Never compose factual values.",
-                                       criteria=dict(criteria), name="room_action")
-        except Exception as exc:
-            provider_error, answer = type(exc).__name__, None
+        def choose(cancel):
+            try:
+                return self.judge.choice(deepcopy(state),
+                    "Choose one legal action. Reads are historical. Never compose factual values.",
+                    criteria=dict(criteria), name="room_action"), None
+            except Exception as exc:
+                return None, type(exc).__name__
+        waited = self.wait_for_perception(choose, session_id=session_id)
+        if waited.status == "PREEMPTED":
+            return self._preempted(session_id, self.supervisor.last_preemption)
+        if waited.status == "COMPLETED":
+            answer, provider_error = waited.value
+        else:
+            answer, provider_error = None, waited.status
         assessment = assess_choice(answer, criteria, escalation_label="ESCALATE",
                                    act_at=self.act_at, min_margin=self.min_margin)
         audited = asdict(assessment)
