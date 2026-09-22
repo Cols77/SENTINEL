@@ -291,6 +291,52 @@ def test_conflicting_same_timestamp_battery_or_motor_payload_fails_closed(
     assert conflicted_estimate.decision is ReserveDecision.LAND_CONTINGENCY
 
 
+def test_direct_assess_ingests_newer_battery_burn_before_pricing() -> None:
+    guard = _guard(now=11, percent_per_second_upper=0.1, telemetry_allowance_pct=0,
+                   landing_floor_pct=20)
+    kwargs = dict(next_plan=None, recovery_plan=None, provider_wait_s=0, termination_plan=_plan("home", 1))
+
+    guard.assess(current=_sample(100, 10), **kwargs)
+    estimate = guard.assess(current=_sample(80, 11), **kwargs)
+
+    assert guard.conservative_percent_per_second == 20.0
+    assert estimate.action_cost_pct == 20
+
+
+def test_direct_assess_rejects_motor_regression_without_an_observe_call() -> None:
+    guard = _guard(now=11)
+    kwargs = dict(next_plan=None, recovery_plan=None, provider_wait_s=0, termination_plan=_plan("home", 1))
+
+    guard.assess(current=_sample(80, 10, motor_time_s=1), **kwargs)
+    estimate = guard.assess(current=_sample(80, 11, motor_time_s=0), **kwargs)
+
+    assert estimate.decision is ReserveDecision.LAND_CONTINGENCY
+
+
+def test_assess_replays_an_observed_current_sample_without_learning_burn_twice() -> None:
+    guard = _guard(now=11, percent_per_second_upper=0.1, telemetry_allowance_pct=0,
+                   landing_floor_pct=20)
+    previous = _sample(100, 10)
+    current = _sample(80, 11)
+
+    guard.observe(previous, current)
+    estimate = guard.assess(current=current, next_plan=None, recovery_plan=None,
+                            provider_wait_s=0, termination_plan=_plan("home", 1))
+
+    assert guard.conservative_percent_per_second == 20.0
+    assert estimate.action_cost_pct == 20
+
+
+def test_direct_assess_rejects_an_older_sample_after_a_newer_ingested_sample() -> None:
+    guard = _guard(now=11)
+    kwargs = dict(next_plan=None, recovery_plan=None, provider_wait_s=0, termination_plan=_plan("home", 1))
+
+    guard.assess(current=_sample(80, 11), **kwargs)
+    estimate = guard.assess(current=_sample(80, 10), **kwargs)
+
+    assert estimate.decision is ReserveDecision.LAND_CONTINGENCY
+
+
 @pytest.mark.parametrize(
     ("factory", "message"),
     [

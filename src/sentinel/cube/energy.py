@@ -219,7 +219,7 @@ class ReserveGuard:
         self._last_sample_s: float | None = None
         self._telemetry_invalid = False
         self._motor_epoch: tuple[Decimal, Decimal, str] | None = None
-        self._sample_payloads: dict[Decimal, tuple[int, Decimal | None, str | None]] = {}
+        self._last_ingested_sample: EnergySample | None = None
         self._minimum_battery_pct: int | None = None
 
     @property
@@ -241,77 +241,84 @@ class ReserveGuard:
         self._last_clock_s = now
         return now
 
-    def _bind_sample(self, sample: EnergySample) -> bool:
-        """Bind each measured instant to one immutable telemetry payload.
+    def _accept_sample(self, sample: EnergySample) -> None:
+        """Record a sample only after its stream transition was validated."""
 
-        Reusing a timestamp with changed battery or motor information is an
-        integrity fault, rather than an opportunity to replace a pessimistic
-        reading.  The session minimum is the only battery value used for
-        future admission until this guard is discarded.
-        """
-
-        measured_at = _exact_decimal(sample.measured_at_s, "measured_at_s")
-        motor_time = (None if sample.motor_time_s is None
-                      else _exact_decimal(sample.motor_time_s, "motor_time_s"))
-        payload = (sample.battery_pct, motor_time, sample.motor_time_source)
-        existing = self._sample_payloads.get(measured_at)
-        if existing is not None and existing != payload:
-            self._telemetry_invalid = True
-            return False
-        self._sample_payloads[measured_at] = payload
         self._minimum_battery_pct = min(self._minimum_battery_pct, sample.battery_pct) \
             if self._minimum_battery_pct is not None else sample.battery_pct
-        return True
+        self._last_ingested_sample = sample
+        if sample.motor_time_s is not None and self._motor_epoch is None:
+            self._motor_epoch = (
+                _exact_decimal(sample.measured_at_s, "measured_at_s"),
+                _exact_decimal(sample.motor_time_s, "motor_time_s"),
+                sample.motor_time_source,
+            )
 
-    def observe(self, previous: EnergySample, current: EnergySample) -> None:
-        """Raise the learned rate only after internally consistent telemetry."""
-
-        if not isinstance(previous, EnergySample) or not isinstance(current, EnergySample):
-            self._telemetry_invalid = True
-            return
-        if not self._bind_sample(previous) or not self._bind_sample(current):
-            return
+    def _valid_transition(self, previous: EnergySample, current: EnergySample) -> bool:
         elapsed = _exact_decimal(current.measured_at_s, "measured_at_s") - _exact_decimal(
             previous.measured_at_s, "measured_at_s",
         )
         if elapsed <= 0:
-            self._telemetry_invalid = True
-            return
-        rate_elapsed = elapsed
+            return False
         if (previous.motor_time_s is None) != (current.motor_time_s is None):
-            self._telemetry_invalid = True
-            return
+            return False
         if previous.motor_time_s is not None:
             if previous.motor_time_source != current.motor_time_source:
-                self._telemetry_invalid = True
-                return
+                return False
             measured_at = _exact_decimal(current.measured_at_s, "measured_at_s")
             motor_time = _exact_decimal(current.motor_time_s, "motor_time_s")
             previous_motor_time = _exact_decimal(previous.motor_time_s, "motor_time_s")
-            if motor_time < previous_motor_time:
-                self._telemetry_invalid = True
-                return
-            if self._motor_epoch is None:
-                self._motor_epoch = (
-                    _exact_decimal(previous.measured_at_s, "measured_at_s"),
-                    previous_motor_time,
-                    previous.motor_time_source,
-                )
+            if motor_time < previous_motor_time or self._motor_epoch is None:
+                return False
             epoch_at, epoch_motor_time, epoch_source = self._motor_epoch
             if epoch_source != current.motor_time_source or motor_time < epoch_motor_time:
-                self._telemetry_invalid = True
-                return
+                return False
             epoch_elapsed = measured_at - epoch_at
             epoch_motor_elapsed = motor_time - epoch_motor_time
             if (epoch_elapsed < 0
                     or abs(epoch_motor_elapsed - epoch_elapsed)
                     > MOTOR_TIME_QUANTIZATION_ENVELOPE_S):
-                self._telemetry_invalid = True
-                return
+                return False
         burn = previous.battery_pct - current.battery_pct
         if burn > 0:
-            self._observed_upper = max(self._observed_upper, Decimal(burn) / rate_elapsed)
-        self._last_sample_s = max(self._last_sample_s or 0.0, current.measured_at_s)
+            self._observed_upper = max(self._observed_upper, Decimal(burn) / elapsed)
+        return True
+
+    def ingest_sample(self, sample: EnergySample) -> bool:
+        """Ingest one chronological sample exactly once, failing closed on drift.
+
+        Exact replays of the latest immutable payload are idempotent.  A
+        changed payload at that timestamp, or any older timestamp, is an
+        integrity fault.  Valid newer samples are checked against the stream
+        predecessor before they can influence reserve pricing.
+        """
+
+        if not isinstance(sample, EnergySample):
+            self._telemetry_invalid = True
+            return False
+        previous = self._last_ingested_sample
+        if previous is None:
+            self._accept_sample(sample)
+            return True
+        measured_at = _exact_decimal(sample.measured_at_s, "measured_at_s")
+        previous_at = _exact_decimal(previous.measured_at_s, "measured_at_s")
+        if measured_at == previous_at:
+            if sample == previous:
+                return True
+            self._telemetry_invalid = True
+            return False
+        if measured_at < previous_at or not self._valid_transition(previous, sample):
+            self._telemetry_invalid = True
+            return False
+        self._accept_sample(sample)
+        return True
+
+    def observe(self, previous: EnergySample, current: EnergySample) -> None:
+        """Raise the learned rate only after internally consistent telemetry."""
+
+        if not self.ingest_sample(previous):
+            return
+        self.ingest_sample(current)
 
     @staticmethod
     def _plan_seconds(plan: object, field: str) -> Decimal:
@@ -366,11 +373,11 @@ class ReserveGuard:
         next_seconds = self._plan_seconds(next_plan, "next_plan.worst_case_s")
         recovery_seconds = self._plan_seconds(recovery_plan, "recovery_plan.worst_case_s")
         termination_seconds = self._plan_seconds(termination_plan, "termination_plan.worst_case_s")
+        bound_sample = self.ingest_sample(current)
+        usable_battery = self._minimum_battery_pct if self._minimum_battery_pct is not None else current.battery_pct
         action_seconds = next_seconds + recovery_seconds + provider_wait + termination_seconds
         action_cost = self._cost(action_seconds)
         termination_cost = self._cost(termination_seconds)
-        bound_sample = self._bind_sample(current)
-        usable_battery = self._minimum_battery_pct if self._minimum_battery_pct is not None else current.battery_pct
         valid_sample = bound_sample and self._sample_is_current(current, self._now())
         can_terminate = usable_battery - termination_cost >= self.profile.landing_floor_pct
         if not valid_sample:
