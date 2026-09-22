@@ -101,6 +101,12 @@ def test_event_rows_are_immutable_and_keys_are_pinned_in_sql(tmp_path):
     {"request_headers": {"trace": "secret"}},
     {"response_headers": [{"name": "X-Trace", "value": "secret"}]},
     {"authorization_digest": "not-a-64-character-digest"},
+    {"primary_api_key_value": "secret"},
+    {"drone_auth_token_value": "secret"},
+    {"provider_headers": {"name": "X-Trace", "value": "secret"}},
+    {"token_count": "bearer-456"},
+    {"token_count": -1},
+    {"token_count": True},
 ])
 def test_payload_boundary_rejects_secrets_and_raw_bytes_without_partial_append(tmp_path, payload):
     store = _store(tmp_path)
@@ -124,6 +130,7 @@ def test_payload_boundary_keeps_safe_descriptive_fields(tmp_path):
         "authorization_digest": "b" * 64,
     })
     assert event.state_version == 1
+    assert event.payload["token_count"] == 2
 
 
 def test_concurrent_first_open_applies_each_migration_once(tmp_path):

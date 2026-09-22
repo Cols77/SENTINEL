@@ -35,11 +35,11 @@ _SENSITIVE_PAYLOAD_KEY_STEMS = frozenset({
     "password",
     "refreshtoken",
     "secretkey",
+    "token",
     "xapikey",
 })
-_HEADER_CONTAINER_KEYS = frozenset({"headers", "requestheaders", "responseheaders"})
-_SAFE_METADATA_KEYS = frozenset({
-    "apikeydescription", "credentialreference", "passwordpolicy", "tokencount",
+_SAFE_STRING_METADATA_KEYS = frozenset({
+    "apikeydescription", "credentialreference", "passwordpolicy",
 })
 _OPEN_RETRY_ATTEMPTS = 5
 _OPEN_RETRY_SECONDS = 0.05
@@ -294,7 +294,7 @@ def _reject_forbidden_payload(value: object) -> None:
             raise ForbiddenPayload("event payloads cannot include credential headers")
         for key, child in value.items():
             normalized = _normalize_payload_key(key)
-            if normalized in _HEADER_CONTAINER_KEYS:
+            if "headers" in normalized:
                 raise ForbiddenPayload("event payloads cannot include headers")
             if _is_safe_metadata_entry(normalized, child):
                 continue
@@ -315,14 +315,16 @@ def _normalize_payload_key(key: object) -> str:
 def _is_forbidden_payload_key(key: object) -> bool:
     normalized = _normalize_payload_key(key)
     return any(
-        normalized == stem or normalized.startswith(stem) or normalized.endswith(stem)
+        stem in normalized
         for stem in _SENSITIVE_PAYLOAD_KEY_STEMS
     )
 
 
 def _is_safe_metadata_entry(normalized_key: str, value: object) -> bool:
-    if normalized_key in _SAFE_METADATA_KEYS:
-        return isinstance(value, (str, int)) and not isinstance(value, bool)
+    if normalized_key in _SAFE_STRING_METADATA_KEYS:
+        return isinstance(value, str)
+    if normalized_key == "tokencount":
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
     return normalized_key == "authorizationdigest" and _is_sha256(value)
 
 
