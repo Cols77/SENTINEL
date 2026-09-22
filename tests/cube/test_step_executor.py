@@ -715,3 +715,44 @@ def test_preempted_provider_deadline_cannot_cancel_the_return_that_replaced_it()
     finally:
         release.set()
         run.close()
+
+
+def test_sdk_deadline_globally_blocks_queued_return_after_generation_changed():
+    entered, release = Event(), Event()
+
+    class Blocking(Client):
+        def move(self, direction, distance_cm):
+            if direction == "forward":
+                entered.set()
+                assert release.wait(2)
+            return super().move(direction, distance_cm)
+
+    run, client, _ = executor(client=Blocking())
+    run.start(HOME)
+    worker, outcomes = threaded(lambda: run.execute(plan(command(bound=0.1))))
+    assert entered.wait(1)
+
+    def request_return():
+        try:
+            return run.return_home(plan(command(direction="back", distance_cm=20)))
+        except Exception as error:
+            return error
+
+    returning, returns = threaded(request_return)
+    try:
+        wait_for_state(run, ExecutorState.RETURNING)
+        worker.join(1)
+        assert not worker.is_alive()
+    finally:
+        release.set()
+        returning.join(1)
+        run.close()
+    assert outcomes[0].status == "COMMAND_COMPLETION_UNKNOWN"
+    assert outcomes[0].command_states[0].status == "COMMAND_COMPLETION_UNKNOWN"
+    assert not outcomes[0].completion_known
+    assert not isinstance(returns[0], Exception)
+    assert returns[0].status == "COMMAND_COMPLETION_UNKNOWN" and not returns[0].completion_known
+    assert "back 20" not in client.commands
+    assert client.commands.count("forward 20") == client.commands.count("land") == 1
+    assert run.state is ExecutorState.CLOSED
+    assert run.land().reason == "COMMAND_COMPLETION_UNKNOWN"

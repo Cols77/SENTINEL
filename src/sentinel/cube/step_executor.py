@@ -105,6 +105,7 @@ class StepExecutor:
         self._land_attempted = self._close_attempted = self._cleanup_started = False
         self._terminal: TerminalOutcome | None = None
         self._terminal_reason = "REQUESTED"
+        self._command_completion_unknown = False
         self._telemetry: Telemetry | None = None
         self._wait = SupervisedWait(clock=clock)
         with runner._emergency_lock:
@@ -217,7 +218,7 @@ class StepExecutor:
             if self._state not in {ExecutorState.AIRBORNE, ExecutorState.RETURNING}:
                 raise RuntimeError("return_home requires AIRBORNE or RETURNING")
             self._transition_locked(ExecutorState.RETURNING, invalidate=True)
-        return self._execute(plan, ExecutorState.RETURNING)
+        return self._execute(plan, ExecutorState.RETURNING, admitted=True)
 
     def execute_legacy(self, plan: CheckpointPlan, sink: Callable[[PlannedCommand], object]) -> None:
         """Preserve historical exception/log semantics through the same iterator."""
@@ -228,14 +229,22 @@ class StepExecutor:
             return CheckpointOutcome(status, tuple(states), tuple(observations), self._telemetry,
                                      self.runner.envelope.position, known)
 
-    def _execute(self, plan, required_state, *, legacy_sink=None):
+    def _preempted_outcome(self, states=(), observations=(), *, known=True):
+        with self._state_lock:
+            if self._command_completion_unknown:
+                return self._outcome("COMMAND_COMPLETION_UNKNOWN", states, observations, known=False)
+            return self._outcome("PREEMPTED", states, observations, known=known)
+
+    def _execute(self, plan, required_state, *, legacy_sink=None, admitted=False):
         # Reject terminal work before waiting behind a pending SDK command's
         # cleanup. Otherwise the supervisor itself could block on that reply.
         if self.state is not required_state:
+            if admitted:
+                return self._preempted_outcome()
             raise RuntimeError(f"execute requires {required_state.value}")
         with self._operation_lock:
             if self.state is not required_state:
-                raise RuntimeError(f"execute requires {required_state.value}")
+                return self._preempted_outcome()
             states, observations = [], []
             try:
                 if self.deadline is not None and self.clock() + plan.worst_case_s > self.deadline:
@@ -248,7 +257,7 @@ class StepExecutor:
                 for command in plan.commands:
                     with self._state_lock:
                         if self._state is not required_state:
-                            return self._outcome("PREEMPTED", states, observations)
+                            return self._preempted_outcome(states, observations)
                         publication = [self._generation, required_state]
                     started = self.clock()
                     if self.deadline is not None and started + command.upper_bound_s > self.deadline:
@@ -270,13 +279,14 @@ class StepExecutor:
                         with context:
                             return self._dispatch_current(command, cancellation, publication)
 
-                    def on_deadline(publication=publication, owned=deadline_owned):
+                    def on_deadline(publication=publication, owned=deadline_owned, command=command):
                         with self._state_lock:
-                            # An obsolete wait cannot terminate the return or
-                            # terminal action that already superseded it.
-                            if self._current_locked(publication):
+                            # Provider results expire with their generation.
+                            # An unresolved SDK call remains a global movement
+                            # hazard even after return/terminal preemption.
+                            if not command.interruptible or self._current_locked(publication):
                                 owned.set()
-                                self._deadline_expired()
+                                self._deadline_expired(completion_unknown=not command.interruptible)
 
                     # A native SETTLE *is* a timed delay: its own timer ends it
                     # successfully. The session deadline still preempts it.
@@ -332,8 +342,8 @@ class StepExecutor:
                 states.append(CommandState(command, "PREEMPTED", started,
                                            result.completed_at if result.completion_known else None,
                                            "LIFECYCLE_PREEMPTED"))
-                return self._outcome("PREEMPTED", states, observations,
-                                     known=result.completion_known), False
+                return self._preempted_outcome(states, observations,
+                                               known=result.completion_known), False
             if settle_timer and result.status == "DEADLINE_EXCEEDED":
                 states.append(CommandState(command, "COMPLETED", started, result.completed_at))
                 return None, False
@@ -395,12 +405,14 @@ class StepExecutor:
         elif command.kind not in {"WATCHDOG", "TRIM_ALLOWANCE"}:
             raise ValueError("command requires an injected execution sink")
 
-    def _deadline_expired(self) -> None:
+    def _deadline_expired(self, *, completion_unknown: bool = False) -> None:
         with self._state_lock:
             if self._state is ExecutorState.CLOSED:
                 return
+            self._command_completion_unknown |= completion_unknown
             self._transition_locked(ExecutorState.TERMINAL, invalidate=True)
-            self._terminal_reason = "DEADLINE_EXCEEDED"
+            self._terminal_reason = ("COMMAND_COMPLETION_UNKNOWN" if self._command_completion_unknown
+                                     else "DEADLINE_EXCEEDED")
             if self._cleanup_started:
                 return
             self._cleanup_started = True
