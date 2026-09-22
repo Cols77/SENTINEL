@@ -273,6 +273,17 @@ class SafetySupervisor:
                 return False
         return True
 
+    def _landing_plan(self, pose):
+        descent = PlannedCommand("LAND", (), self.landing_upper_bound_s, False)
+        return self._plan(pose, (descent,))
+
+    def _landing_forecast(self, pose, now):
+        return self._forecast(pose, self._landing_plan(pose), now)
+
+    def _landing_energy(self, guard, request):
+        return guard.assess(current=request.energy_sample, next_plan=None, recovery_plan=None,
+            provider_wait_s=0, termination_plan=self._landing_plan(request.pose))
+
     def assess(self, request: SupervisorRequest, site: RoomSite) -> SupervisorOutcome:
         """Read-only decision; no telemetry I/O, latch, pose mutation or events."""
         try:
@@ -284,17 +295,27 @@ class SafetySupervisor:
         energy = EnergyEstimate(request.energy_sample.battery_pct, 0, request.energy_sample.battery_pct,
                                 self.reserve.profile.landing_floor_pct, ReserveDecision.LAND_CONTINGENCY, ())
         termination = None
+        prerequisites_valid = False
         hashes = calibration_hashes(self.reserve.profile, self.tracker.profile, self.limits, site, self.landing_upper_bound_s)
 
         def result(transition, reason, trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE):
             contingency = None
+            decision_forecast = forecast
+            decision_energy = energy
             if transition == "LAND_CONTINGENCY" and clock_valid:
-                admitted = self._landing_contingency(site, request.pose, now=now, trigger=trigger,
-                    energy_available=energy.current_pct >= self.reserve.profile.landing_floor_pct
-                        + math.ceil(self.reserve.conservative_percent_per_second * self.landing_upper_bound_s
-                                    + self.reserve.profile.telemetry_allowance_pct))
-                contingency = admitted.contingency_id if admitted is not None else None
-            return SupervisorOutcome(transition, reason, transition != "CONTINUE", energy, forecast,
+                # A current hover footprint cannot authorize ten seconds of
+                # descent: retain its entire calibrated forecast in the audit.
+                decision_forecast = self._landing_forecast(request.pose, now)
+                if prerequisites_valid:
+                    descent_energy = self._landing_energy(guard, request)
+                    decision_energy = replace(energy, components=energy.components + (
+                        ("contingency_landing_s", self.landing_upper_bound_s),
+                        ("contingency_landing_cost_pct", descent_energy.action_cost_pct),
+                        ("contingency_available_pct", descent_energy.current_pct)))
+                    admitted = self._landing_contingency(site, decision_forecast.projected, now=now, trigger=trigger,
+                        energy_available=descent_energy.decision != ReserveDecision.LAND_CONTINGENCY)
+                    contingency = admitted.contingency_id if admitted is not None else None
+            return SupervisorOutcome(transition, reason, transition != "CONTINUE", decision_energy, decision_forecast,
                 request, request.energy_sample, hashes, _sha(room_site_document(site)),
                 now if clock_valid else None, termination, contingency)
 
@@ -310,6 +331,7 @@ class SafetySupervisor:
         guard.clock = lambda: now
         if not guard.ingest_sample(request.energy_sample) or not guard._sample_is_current(request.energy_sample, now):
             return result("LAND_CONTINGENCY", "TELEMETRY_INVALID", ContingencyTrigger.RETURN_ENERGY_UNAVAILABLE)
+        prerequisites_valid = True
         commands = request.checkpoint.commands if request.checkpoint else ()
         if request.provider_wait_s:
             commands += (PlannedCommand("SETTLE", (), request.provider_wait_s, True),)
@@ -695,14 +717,12 @@ class SafetySupervisor:
                     current = self.prepare(snapshot_version=self.store.session_version(self.session_id), fallback=current)
                     eligible = None
                     if current.reason not in {"SITE_OR_CAPABILITY_INVALID", "TELEMETRY_INVALID", "TELEMETRY_UNAVAILABLE", "LOCALIZATION_LOST"}:
-                        landing = self._forecast(current.request.pose,
-                            self._plan(current.request.pose, (cmd,)), self.clock()).projected
-                        eligible = self._landing_contingency(self.site, landing, now=self.clock(),
+                        landing = self._landing_forecast(current.request.pose, self.clock())
+                        current = replace(current, pose_forecast=landing)
+                        descent_energy = self._landing_energy(copy(self.reserve), current.request)
+                        eligible = self._landing_contingency(self.site, landing.projected, now=self.clock(),
                             trigger=ContingencyTrigger.RETURN_ENERGY_UNAVAILABLE,
-                            energy_available=current.energy_sample.battery_pct >=
-                                self.reserve.profile.landing_floor_pct + math.ceil(
-                                    self.reserve.conservative_percent_per_second * self.landing_upper_bound_s
-                                    + self.reserve.profile.telemetry_allowance_pct),
+                            energy_available=descent_energy.decision != ReserveDecision.LAND_CONTINGENCY,
                             home=plan.checkpoint_id == self.site.home.route_id, require_descent=True)
                     current = replace(current, transition="LAND_CONTINGENCY", invalidates_snapshot=True,
                                       reason="LANDING_APPROACH", contingency_id=eligible.contingency_id if eligible else None)

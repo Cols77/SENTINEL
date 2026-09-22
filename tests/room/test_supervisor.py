@@ -423,6 +423,102 @@ def test_termination_failure_selects_only_the_matching_contingency(safety, trigg
     assert outcome.contingency_id == trigger.value
 
 
+@pytest.mark.parametrize("trigger", list(ContingencyTrigger))
+def test_contingency_requires_clearance_for_full_calibrated_descent(safety, trigger):
+    supervisor, store, clock, samples, _, emergencies = safety
+    # The measured radius is 15 + 1 = 16 cm. Ten seconds of calibrated
+    # descent grows it to 17 cm, outside the 116.5 cm polygon boundary.
+    narrow = ((0, 0), (116.5, 0), (116.5, 200), (0, 200))
+    supervisor.site = replace(supervisor.site, terminal_contingencies=tuple(
+        replace(entry, landing_polygon_xy_cm=narrow) for entry in supervisor.site.terminal_contingencies))
+    supervisor.reserve = ReserveGuard(replace(supervisor.reserve.profile,
+        percent_per_second_upper=.1), clock)
+    supervisor.validate_bindings = lambda site: None
+    samples["energy"] = EnergySample(22 if trigger == ContingencyTrigger.RETURN_ENERGY_UNAVAILABLE else 80, clock())
+    outcome = supervisor.assess(request(safety), supervisor.site)
+    assert outcome.transition == "LAND_CONTINGENCY"
+    assert outcome.reason == ("RETURN_ENERGY_UNAVAILABLE"
+        if trigger == ContingencyTrigger.RETURN_ENERGY_UNAVAILABLE else "TERMINATION_LANDING_INVALID")
+    assert outcome.contingency_id is None
+    assert outcome.pose_forecast.projected.propagated_at == clock() + supervisor.landing_upper_bound_s
+    assert outcome.pose_forecast.projected.xy_uncertainty_cm == pytest.approx(2)
+    assert dict(outcome.energy.components)["contingency_landing_s"] == 10
+    assert dict(outcome.energy.components)["contingency_landing_cost_pct"] == 2
+    executor = Executor(store, clock)
+    assert supervisor.dispatch(outcome, executor).state == "EMERGENCY_ABORTED"
+    assert executor.calls == [] and emergencies == [True]
+
+
+def test_dispatch_rechecks_contingency_descent_after_measured_uncertainty_increases(safety):
+    supervisor, store, clock, samples, _, emergencies = safety
+    narrow = ((0, 0), (118.5, 0), (118.5, 200), (0, 200))
+    supervisor.site = replace(supervisor.site, terminal_contingencies=tuple(
+        replace(entry, landing_polygon_xy_cm=narrow) for entry in supervisor.site.terminal_contingencies))
+    supervisor.reserve = ReserveGuard(replace(supervisor.reserve.profile,
+        percent_per_second_upper=.1), clock)
+    supervisor.validate_bindings = lambda site: None
+    samples["energy"] = EnergySample(22, clock())
+    outcome = supervisor.assess(request(safety), supervisor.site)
+    assert outcome.contingency_id == ContingencyTrigger.RETURN_ENERGY_UNAVAILABLE.value
+    # Current radius 18 still fits, but the refreshed descent radius 19 does not.
+    samples["pose"] = replace(samples["pose"], xy_uncertainty_cm=3)
+    executor = Executor(store, clock)
+    assert supervisor.dispatch(outcome, executor).state == "EMERGENCY_ABORTED"
+    assert executor.calls == [] and emergencies == [True]
+    preemption = [e for e in store.events("session") if e.event_type == "SAFETY_ASSESSED"][-1]
+    assert preemption.payload["contingency_id"] is None
+
+
+def test_contingency_cannot_outlast_calibrated_localization_health(safety):
+    supervisor, store, clock, samples, _, emergencies = safety
+    supervisor.tracker.profile = replace(supervisor.tracker.profile, max_camera_age_s=5)
+    supervisor.reserve = ReserveGuard(replace(supervisor.reserve.profile,
+        percent_per_second_upper=.1), clock)
+    supervisor.validate_bindings = lambda site: None
+    samples["energy"] = EnergySample(22, clock())
+    outcome = supervisor.assess(request(safety), supervisor.site)
+    assert outcome.transition == "LAND_CONTINGENCY" and outcome.contingency_id is None
+    assert "camera_age" in outcome.pose_forecast.reasons
+    executor = Executor(store, clock)
+    assert supervisor.dispatch(outcome, executor).state == "EMERGENCY_ABORTED"
+    assert executor.calls == [] and emergencies == [True]
+
+
+@pytest.mark.parametrize("invalid", ["telemetry", "capability"])
+def test_failed_prerequisite_cannot_authorize_normal_contingency_descent(safety, invalid):
+    supervisor, store, clock, samples, _, emergencies = safety
+    if invalid == "telemetry":
+        samples["energy"] = EnergySample(80, 1)
+    else:
+        supervisor.aircraft_id = "unbound-aircraft"
+    outcome = supervisor.assess(request(safety), supervisor.site)
+    assert outcome.transition == "LAND_CONTINGENCY" and outcome.contingency_id is None
+    executor = Executor(store, clock)
+    assert supervisor.dispatch(outcome, executor).state == "EMERGENCY_ABORTED"
+    assert executor.calls == [] and emergencies == [True]
+
+
+@pytest.mark.parametrize("history", ["learned_burn", "prior_minimum"])
+def test_contingency_prices_descent_with_validated_telemetry_history(safety, history):
+    supervisor, _, clock, samples, *_ = safety
+    if history == "learned_burn":
+        supervisor.reserve.ingest_sample(EnergySample(80, clock() - 1))
+        samples["energy"] = EnergySample(22, clock())
+    else:
+        supervisor.reserve.ingest_sample(EnergySample(21, clock() - 1))
+        samples["pose"] = replace(samples["pose"], position=Position(160, 100, 100))
+        supervisor.site = replace(supervisor.site, corridors=(Volume3D("corridor",
+            ((0, 0), (135, 0), (135, 200), (0, 200)), (0, 200)),))
+        supervisor.validate_bindings = lambda site: None
+    outcome = supervisor.assess(request(safety), supervisor.site)
+    assert outcome.transition == "LAND_CONTINGENCY" and outcome.contingency_id is None
+    descent = dict(outcome.energy.components)
+    if history == "learned_burn":
+        assert descent["contingency_landing_cost_pct"] == 581
+    else:
+        assert descent["contingency_available_pct"] == 21
+
+
 def test_return_forecast_cannot_cross_localization_bound(safety):
     supervisor, _, _, samples, *_ = safety
     supervisor.tracker.profile = replace(supervisor.tracker.profile, max_camera_age_s=2)
