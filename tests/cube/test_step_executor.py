@@ -5,7 +5,7 @@ import time
 import pytest
 
 from sentinel.cube.checkpoint import CheckpointPlan, CommandOutcome, HomeDefinition, PlannedCommand
-from sentinel.cube.step_executor import ExecutorState, HomeState, StepExecutor
+from sentinel.cube.step_executor import ExecutorState, HomeMeasurementError, HomeState, StepExecutor
 from sentinel.cube.supervised_wait import SupervisedWait
 from sentinel.dry_run import DryRunClient
 from sentinel.envelope import FlightEnvelope
@@ -92,6 +92,149 @@ def test_measured_home_route_and_time_are_validated():
         run.start(HOME)
     assert run.home.route_id == "other"
     assert client.close_count == 1
+
+
+@pytest.mark.parametrize("terminal_action", ["land", "close"])
+def test_terminal_action_cancels_blocked_home_measurement_without_waiting_for_callback(terminal_action):
+    entered, release, finished = Event(), Event(), Event()
+    run, client, measured = executor()
+    original_pose = run.runner.envelope.position
+
+    def measure(definition):
+        assert definition is HOME
+        entered.set()
+        assert release.wait(3)
+        finished.set()
+        return measured
+
+    def start():
+        try:
+            return run.start(HOME)
+        except RuntimeError as error:
+            return error
+
+    run.measure_home = measure
+    worker, results = threaded(start)
+    assert entered.wait(1)
+    terminal, _ = threaded(getattr(run, terminal_action))
+    try:
+        terminal.join(0.3)
+        worker.join(0.3)
+        assert not terminal.is_alive(), "landing must not wait for a noncooperative measurement"
+        assert not worker.is_alive()
+        assert isinstance(results[0], HomeMeasurementError)
+        assert results[0].status == "PREEMPTED" and not results[0].completion_known
+        assert run.home is None and run.runner.envelope.position == original_pose
+        assert client.commands.count("land") == client.commands.count("takeoff") == 1
+        assert client.close_count == 1
+        with pytest.raises(RuntimeError, match="AIRBORNE"):
+            run.execute(plan(command()))
+    finally:
+        release.set()
+        worker.join(1)
+        terminal.join(1)
+    assert finished.wait(1)
+    assert run.home is None and run.runner.envelope.position == original_pose
+    assert run.state is ExecutorState.CLOSED
+
+
+def test_home_measurement_timeout_lands_and_discards_late_home():
+    entered, release, finished = Event(), Event(), Event()
+    run, client, measured = executor(home_measurement_timeout_s=0.05)
+    original_pose = run.runner.envelope.position
+
+    def measure(definition):
+        entered.set()
+        assert release.wait(3)
+        finished.set()
+        return measured
+
+    run.measure_home = measure
+    try:
+        with pytest.raises(RuntimeError) as failure:
+            run.start(HOME)
+        assert isinstance(failure.value, HomeMeasurementError)
+        assert entered.is_set()
+        assert failure.value.status == "DEADLINE_EXCEEDED"
+        assert not failure.value.completion_known
+        assert run.state is ExecutorState.CLOSED
+        assert run.home is None and run.runner.envelope.position == original_pose
+        assert client.commands.count("takeoff") == client.commands.count("land") == 1
+        assert client.close_count == 1
+        assert run.land().reason == "DEADLINE_EXCEEDED"
+        with pytest.raises(RuntimeError, match="AIRBORNE"):
+            run.execute(plan(command()))
+    finally:
+        release.set()
+    assert finished.wait(1)
+    assert run.home is None and run.runner.envelope.position == original_pose
+
+
+def test_home_measurement_uses_admitted_deadline_and_cancellation_registration():
+    run, client, measured = executor(home_measurement_timeout_s=3.0, deadline=12.0, clock=lambda: 10.0)
+    wait = run._wait.run
+    calls = []
+
+    def supervise(operation, deadline, on_deadline, *, cancellation):
+        calls.append(deadline)
+        assert cancellation is run._active_cancellation
+        assert not cancellation.is_set()
+        return wait(operation, deadline, on_deadline, cancellation=cancellation)
+
+    run._wait.run = supervise
+    assert run.start(HOME) is measured
+    assert calls == [12.0]  # The overall deadline also bounds an interruptible measurement.
+    assert run._active_cancellation is None
+    assert run.home is measured and run.runner.envelope.position == measured.pose
+    assert run.state is ExecutorState.AIRBORNE
+    assert run.start(HOME) is measured and calls == [12.0]
+    run.close()
+
+
+def test_completed_home_measurement_is_discarded_when_land_wins_publication_race():
+    run, client, _ = executor()
+    original_pose = run.runner.envelope.position
+    wait = run._wait.run
+
+    def preempt_after_worker_completed(*args, **kwargs):
+        result = wait(*args, **kwargs)
+        assert result.status == "COMPLETED"
+        run.land()
+        return result
+
+    run._wait.run = preempt_after_worker_completed
+    with pytest.raises(RuntimeError) as failure:
+        run.start(HOME)
+    assert isinstance(failure.value, HomeMeasurementError)
+    assert failure.value.status == "PREEMPTED" and failure.value.completion_known
+    assert run.home is None and run.runner.envelope.position == original_pose
+    assert run.state is ExecutorState.CLOSED
+    assert client.commands.count("land") == 1 and client.close_count == 1
+
+
+def test_home_measurement_failure_is_sanitized_and_lands_once():
+    run, client, _ = executor()
+
+    def measure(definition):
+        raise OSError("password=very-secret")
+
+    run.measure_home = measure
+    with pytest.raises(RuntimeError) as failure:
+        run.start(HOME)
+    assert isinstance(failure.value, HomeMeasurementError)
+    assert failure.value.status == "FAILED" and failure.value.completion_known
+    assert failure.value.error_category == "OPERATION_FAILED"
+    assert "secret" not in repr(failure.value)
+    assert run.home is None and run.state is ExecutorState.CLOSED
+    assert client.commands.count("land") == 1 and client.close_count == 1
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf"), True])
+def test_invalid_home_measurement_timeout_is_rejected_before_takeoff(timeout):
+    client = Client()
+    with pytest.raises(ValueError, match="home_measurement_timeout_s"):
+        executor(client=client, home_measurement_timeout_s=timeout)
+    assert "takeoff" not in client.commands
 
 
 def test_return_latch_blocks_all_later_optional_work():

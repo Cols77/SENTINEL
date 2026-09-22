@@ -40,6 +40,17 @@ class HomeState:
     measured_at: float
 
 
+class HomeMeasurementError(RuntimeError):
+    """Sanitized start failure; a preempted callback cannot publish its result."""
+
+    def __init__(self, status: str, *, completion_known: bool,
+                 error_category: str | None = None) -> None:
+        super().__init__(f"home measurement: {status}")
+        self.status = status
+        self.completion_known = completion_known
+        self.error_category = error_category
+
+
 @dataclass(frozen=True, slots=True)
 class CommandState:
     command: PlannedCommand
@@ -78,7 +89,11 @@ class StepExecutor:
     """Compose with a FlightTestRunner (or its CubeMissionRunner subclass).
 
     ``measure_home`` returns actual takeoff measurement and provenance, never a
-    nominal pad estimate. ``deadline`` uses the injected monotonic clock. A
+    nominal pad estimate. It must return data without publishing state or
+    issuing SDK commands. Its interruptible wait is bounded by
+    ``home_measurement_timeout_s`` and the session deadline; start raises
+    HomeMeasurementError on timeout, failure or lifecycle preemption. A late
+    callback result is discarded. ``deadline`` uses the monotonic clock. A
     command sink receives (immutable command, cancellation Event), must return
     observations rather than publish them, and must use the runner's client
     call boundary for effects. Native SDK operations hold the command lock
@@ -97,6 +112,7 @@ class StepExecutor:
                  command_sink: Callable[[PlannedCommand, Event], object] | None = None,
                  clock: Callable[[], float] = time.monotonic,
                  deadline: float | None = None,
+                 home_measurement_timeout_s: float = 10.0,
                  home_tolerance_cm: float = 20.0,
                  home_heading_tolerance_deg: float = 15.0) -> None:
         self.runner, self.client = runner, runner.client
@@ -104,6 +120,12 @@ class StepExecutor:
         self.clock, self.deadline = clock, deadline
         if deadline is not None and not math.isfinite(deadline):
             raise ValueError("deadline must be finite")
+        if (isinstance(home_measurement_timeout_s, bool)
+                or not isinstance(home_measurement_timeout_s, (int, float))
+                or not math.isfinite(home_measurement_timeout_s)
+                or home_measurement_timeout_s <= 0):
+            raise ValueError("home_measurement_timeout_s must be finite and positive")
+        self.home_measurement_timeout_s = home_measurement_timeout_s
         if any(not math.isfinite(v) or v < 0 for v in
                (home_tolerance_cm, home_heading_tolerance_deg)):
             raise ValueError("home tolerances must be finite and nonnegative")
@@ -206,17 +228,67 @@ class StepExecutor:
                 if self._emergency():
                     raise EmergencyAborted("emergency stop triggered during takeoff")
                 if definition is not None:
-                    self.home = self.measure_home(definition)
-                    self._validate_home(definition)
-                    self.runner.envelope.position = self.home.pose
-                self._home_definition = definition
-                with self._state_lock:
-                    if self._state is not ExecutorState.NEW:
-                        raise RuntimeError("executor became terminal during start")
-                    self._transition_locked(ExecutorState.AIRBORNE)
+                    self._measure_and_publish_home(definition)
+                else:
+                    with self._state_lock:
+                        if self._state is not ExecutorState.NEW:
+                            raise RuntimeError("executor became terminal during start")
+                        self._transition_locked(ExecutorState.AIRBORNE)
             except BaseException:
                 self._cleanup()
                 raise
+
+    def _measure_and_publish_home(self, definition: HomeDefinition) -> None:
+        cancellation = Event()
+        with self._state_lock:
+            if self._state is not ExecutorState.NEW:
+                raise HomeMeasurementError("PREEMPTED", completion_known=True)
+            generation = self._generation
+            self._active_cancellation = cancellation
+        expired_here = False
+
+        def expire() -> None:
+            nonlocal expired_here
+            with self._state_lock:
+                # An obsolete provider deadline must not replace a terminal
+                # action that already owns the lifecycle.
+                if self._generation == generation and self._state is ExecutorState.NEW:
+                    expired_here = True
+                    self._deadline_expired()
+
+        try:
+            try:
+                deadline = self.clock() + self.home_measurement_timeout_s
+                if not math.isfinite(deadline):
+                    raise ValueError("invalid monotonic deadline")
+                if self.deadline is not None:
+                    deadline = min(deadline, self.deadline)
+            except BaseException:
+                expire()
+                raise HomeMeasurementError("WATCHDOG_FAILED", completion_known=True,
+                                           error_category="WATCHDOG_FAILED") from None
+            result = self._wait.run(lambda cancel: self.measure_home(definition), deadline,
+                                    expire, cancellation=cancellation)
+            with self._state_lock:
+                if expired_here:
+                    raise HomeMeasurementError(result.status, completion_known=result.completion_known,
+                                               error_category=result.error_category)
+                if self._generation != generation or self._state is not ExecutorState.NEW:
+                    raise HomeMeasurementError("PREEMPTED", completion_known=result.completion_known)
+                if result.status != "COMPLETED":
+                    raise HomeMeasurementError(result.status, completion_known=result.completion_known,
+                                               error_category=result.error_category)
+                # Validation, provenance and pose publication share the
+                # lifecycle lock, so landing cannot accept a late home.
+                self.home = result.value
+                self._validate_home(definition)
+                self.runner.envelope.position = self.home.pose
+                self._home_definition = definition
+                self._transition_locked(ExecutorState.AIRBORNE)
+        finally:
+            with self._state_lock:
+                if self._active_cancellation is cancellation:
+                    self._active_cancellation = None
 
     def _validate_home(self, definition: HomeDefinition) -> None:
         measured = self.home
