@@ -26,8 +26,8 @@ class ReserveDecision(str, Enum):
 
 # Tello's ``time?`` telemetry is integral seconds.  A read can therefore lead
 # or lag monotonic elapsed time by one reported second at a counter boundary.
-# Comparing against the last validated counter advance makes that phase
-# envelope cumulative across frequent subsecond polls.
+# Comparing against a stream epoch makes that phase envelope cumulative across
+# frequent subsecond polls and counter advances.
 MOTOR_TIME_QUANTIZATION_ENVELOPE_S = Decimal("1")
 
 
@@ -198,7 +198,7 @@ class ReserveGuard:
         self._last_clock_s: float | None = None
         self._last_sample_s: float | None = None
         self._telemetry_invalid = False
-        self._motor_baseline: tuple[Decimal, Decimal, str] | None = None
+        self._motor_epoch: tuple[Decimal, Decimal, str] | None = None
 
     @property
     def conservative_percent_per_second(self) -> float:
@@ -241,25 +241,23 @@ class ReserveGuard:
                 return
             measured_at = _exact_decimal(current.measured_at_s, "measured_at_s")
             motor_time = _exact_decimal(current.motor_time_s, "motor_time_s")
-            if self._motor_baseline is None:
-                self._motor_baseline = (
+            if self._motor_epoch is None:
+                self._motor_epoch = (
                     _exact_decimal(previous.measured_at_s, "measured_at_s"),
                     _exact_decimal(previous.motor_time_s, "motor_time_s"),
                     previous.motor_time_source,
                 )
-            baseline_at, baseline_motor_time, baseline_source = self._motor_baseline
-            if baseline_source != current.motor_time_source or motor_time < baseline_motor_time:
+            epoch_at, epoch_motor_time, epoch_source = self._motor_epoch
+            if epoch_source != current.motor_time_source or motor_time < epoch_motor_time:
                 self._telemetry_invalid = True
                 return
-            baseline_elapsed = measured_at - baseline_at
-            baseline_motor_elapsed = motor_time - baseline_motor_time
-            if (baseline_elapsed < 0
-                    or abs(baseline_motor_elapsed - baseline_elapsed)
+            epoch_elapsed = measured_at - epoch_at
+            epoch_motor_elapsed = motor_time - epoch_motor_time
+            if (epoch_elapsed < 0
+                    or abs(epoch_motor_elapsed - epoch_elapsed)
                     > MOTOR_TIME_QUANTIZATION_ENVELOPE_S):
                 self._telemetry_invalid = True
                 return
-            if baseline_motor_elapsed > 0:
-                self._motor_baseline = (measured_at, motor_time, current.motor_time_source)
         burn = previous.battery_pct - current.battery_pct
         if burn > 0:
             self._observed_upper = max(self._observed_upper, Decimal(burn) / rate_elapsed)

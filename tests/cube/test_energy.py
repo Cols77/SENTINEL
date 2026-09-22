@@ -184,10 +184,10 @@ def test_repeated_subsecond_motor_stalls_accumulate_past_the_quantization_envelo
 
 
 def test_floor_counter_advances_across_fractional_polls_stay_within_the_quantization_envelope() -> None:
-    guard = _guard(now=2)
+    guard = _guard(now=10)
     samples = tuple(
         _sample(80, index / 4, motor_time_s=10 + index // 4)
-        for index in range(9)
+        for index in range(41)
     )
 
     for previous, current in zip(samples, samples[1:]):
@@ -196,6 +196,19 @@ def test_floor_counter_advances_across_fractional_polls_stay_within_the_quantiza
     estimate = guard.assess(current=samples[-1], next_plan=None, recovery_plan=None,
                             provider_wait_s=0, termination_plan=_plan("home", 1))
     assert estimate.decision is ReserveDecision.CONTINUE
+
+
+def test_repeated_fast_motor_ticks_accumulate_past_the_quantization_envelope() -> None:
+    guard = _guard(now=2)
+    previous = _sample(80, 0, motor_time_s=10)
+    for quarter_second in range(1, 9):
+        current = _sample(80, quarter_second / 4, motor_time_s=10 + quarter_second)
+        guard.observe(previous, current)
+        previous = current
+
+    estimate = guard.assess(current=previous, next_plan=None, recovery_plan=None,
+                            provider_wait_s=0, termination_plan=_plan("home", 1))
+    assert estimate.decision is ReserveDecision.LAND_CONTINGENCY
 
 
 def test_nonzero_motor_lag_beyond_one_second_quantization_envelope_fails_closed() -> None:
