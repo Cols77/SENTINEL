@@ -104,10 +104,24 @@ def test_a_failed_crop_is_skipped_and_the_frame_still_answers(frame):
     assert "error" in batch.raw["tiles"]["r0c0"]
 
 
-def test_crops_still_answer_when_the_full_frame_call_failed(frame):
-    inner = Scripted({"full": "FAIL", "r1c1": [(_det("phone", 480, 600, 40, 40), "low")]})
-    batch = TiledDetector(inner).detect(frame, ("phone",))
-    assert batch.status == "OK" and batch.bands == ("low",)
+def test_a_failed_full_frame_fails_the_frame_even_if_crops_answered(frame):
+    """Crops drop cut fragments, so crops alone would count a person spanning two crops as
+    zero and call the frame analysed: a silent undercount. The frame fails instead."""
+    inner = Scripted({"full": RuntimeError("timeout"),
+                      "r0c0": [(_det("person", 700, 300, 260, 420), "high")],
+                      "r1c1": [(_det("phone", 480, 600, 40, 40), "low")]})
+    batch = TiledDetector(inner).detect(frame, ("person", "phone"))
+    assert batch.status == "PROVIDER_ERROR" and batch.detections == ()
+    assert "r1c1" in batch.raw["tiles"]              # the crop answers stay for the audit
+
+
+def test_an_unmapped_label_is_counted_once_not_once_per_call(frame):
+    class Dropping(Scripted):
+        def detect(self, image_path, classes):
+            batch = super().detect(image_path, classes)
+            return DetectionBatch(batch.detections, batch.status, batch.bands, ("macbook",), batch.raw)
+
+    assert TiledDetector(Dropping({})).detect(frame, ("computer",)).dropped == ("macbook",)
 
 
 def test_the_frame_fails_only_when_every_call_failed(frame):

@@ -18,8 +18,10 @@ the full frame missed:
 
 A crop box keeps its own band (a zoomed crop is where a VLM hallucinates; nothing is upgraded).
 Which crop each added box came from is recorded in ``raw["tile_only"]``, since a Detection
-document has a fixed set of fields. A crop whose call fails is skipped; the frame fails only if
-the full-frame call failed too.
+document has a fixed set of fields. A crop whose call fails is skipped. If the full-frame call
+fails the frame fails (PROVIDER_ERROR, crop answers kept in raw): crops only add to a good
+full-frame answer, never replace it, since dropping cut fragments would otherwise turn a person
+spanning two crops into a silent "OK, 0 persons".
 """
 from __future__ import annotations
 
@@ -140,9 +142,9 @@ class TiledDetector:
                "tiles": {}, "tile_only": []}
         full_ok = isinstance(full, DetectionBatch) and full.status != "PROVIDER_ERROR"
         kept = list(zip(full.detections, full.bands)) if full_ok else []
+        # the full frame's unmapped labels only: the same label seen by five calls is one miss
         dropped = list(full.dropped) if full_ok else []
         added: list[tuple[dict, str, str]] = []
-        tiles_ok = 0
         for tile, answer in zip(tiles, answers):
             if not isinstance(answer, DetectionBatch):
                 raw["tiles"][tile.name] = {"error": repr(answer)}
@@ -150,8 +152,6 @@ class TiledDetector:
             raw["tiles"][tile.name] = answer.raw
             if answer.status == "PROVIDER_ERROR":
                 continue
-            tiles_ok += 1
-            dropped.extend(answer.dropped)
             for detection, band in zip(answer.detections, answer.bands):
                 if detection.get("bbox") is None:
                     continue
@@ -170,7 +170,7 @@ class TiledDetector:
                     added.append((moved, band, tile.name))
                 elif _area(box) < _area(added[twin][0]["bbox"]):
                     added[twin] = (moved, band, tile.name)     # the tighter view of one object
-        if not full_ok and tiles_ok == 0:
+        if not full_ok:
             return DetectionBatch((), "PROVIDER_ERROR", raw=raw)
         for detection, band, tile_name in added:
             kept.append((detection, band))
