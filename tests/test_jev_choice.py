@@ -56,22 +56,78 @@ def test_absent_or_none_scalar_confidence_falls_back_to_selected_probability(con
     assert assessment.confidence_source == "SELECTED_PROBABILITY"
 
 
-@pytest.mark.parametrize("answer", [
-    ["not a mapping"],
-    {"value": "alpha", "confidence": True,
-     "probabilities": {"alpha": 0.8, "beta": 0.1, "escalate": 0.1}},
-    {"value": "alpha", "confidence": math.inf,
-     "probabilities": {"alpha": 0.8, "beta": 0.1, "escalate": 0.1}},
-    {"value": "alpha", "confidence": 0.8,
-     "probabilities": {"alpha": math.nan, "beta": 0.1, "escalate": 0.1}},
-    {"value": "alpha", "confidence": 0.8,
-     "probabilities": {"alpha": 1.1, "beta": 0.0, "escalate": 0.0}},
+@pytest.mark.parametrize(("answer", "expected"), [
+    pytest.param(["not a mapping"], "MALFORMED_ANSWER", id="non-mapping"),
+    pytest.param(
+        {"value": "unknown", "confidence": 0.8,
+         "probabilities": {"alpha": 0.8, "beta": 0.1, "escalate": 0.1}},
+        "ILLEGAL_OR_MALFORMED", id="illegal-label",
+    ),
+    ({"value": "alpha", "confidence": True,
+      "probabilities": {"alpha": 0.8, "beta": 0.1, "escalate": 0.1}},
+     "ILLEGAL_OR_MALFORMED"),
+    ({"value": "alpha", "confidence": math.inf,
+      "probabilities": {"alpha": 0.8, "beta": 0.1, "escalate": 0.1}},
+     "ILLEGAL_OR_MALFORMED"),
+    ({"value": "alpha", "confidence": 0.8,
+      "probabilities": {"alpha": math.nan, "beta": 0.1, "escalate": 0.1}},
+     "ILLEGAL_OR_MALFORMED"),
+    ({"value": "alpha", "confidence": 0.8,
+      "probabilities": {"alpha": 1.1, "beta": 0.0, "escalate": 0.0}},
+     "ILLEGAL_OR_MALFORMED"),
 ])
-def test_malformed_or_non_finite_provider_values_fail_closed(answer: object) -> None:
+def test_malformed_or_non_finite_provider_values_fail_closed(answer: object, expected: str) -> None:
     assessment = assess(answer)
 
     assert assessment.final_label == "escalate"
-    assert assessment.outcome in {"MALFORMED_ANSWER", "ILLEGAL_OR_MALFORMED"}
+    assert assessment.outcome == expected
+
+
+class BadStr(str):
+    __hash__ = None
+
+
+class BadFloat(float):
+    def __float__(self):
+        raise RuntimeError("provider conversion must not escape")
+
+
+@pytest.mark.parametrize("answer", [
+    {
+        "value": BadStr("alpha"),
+        "confidence": 0.8,
+        "probabilities": {"alpha": 0.8, "beta": 0.1, "escalate": 0.1},
+    },
+    {
+        "value": "alpha",
+        "confidence": BadFloat(0.8),
+        "probabilities": {"alpha": 0.8, "beta": 0.1, "escalate": 0.1},
+    },
+])
+def test_provider_subclasses_cannot_raise_during_label_or_probability_validation(answer) -> None:
+    assessment = assess(answer)
+
+    assert assessment.outcome == "ILLEGAL_OR_MALFORMED"
+
+
+def test_selection_failure_precedes_malformed_scalar_confidence() -> None:
+    assessment = assess({
+        "value": "alpha",
+        "confidence": "not a number",
+        "probabilities": {"alpha": 0.3, "beta": 0.6, "escalate": 0.1},
+    })
+
+    assert assessment.outcome == "MISSING_OR_NON_MAX_SELECTION"
+
+
+def test_low_confidence_precedes_thin_margin() -> None:
+    assessment = assess({
+        "value": "alpha",
+        "confidence": 0.50,
+        "probabilities": {"alpha": 0.51, "beta": 0.40, "escalate": 0.09},
+    })
+
+    assert assessment.outcome == "LOW_CONFIDENCE"
 
 
 def test_missing_selected_probability_is_a_deterministic_selection_failure() -> None:

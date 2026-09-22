@@ -100,7 +100,12 @@ def test_jev_records_a_derived_justification_because_it_returns_no_rationale():
 
 def test_an_unknown_label_from_any_advisor_escalates():
     judge = _Judge("RAIL_INVENTED", 0.99, {"RAIL_INVENTED": 0.99})
-    assert chosen_label(JevProposer(judge, _Sink()).decide(REQUEST, CONTEXT)) == ESCALATE_LABEL
+    sink = _Sink()
+    result = JevProposer(judge, sink).decide(REQUEST, CONTEXT)
+
+    assert chosen_label(result) == ESCALATE_LABEL
+    assert sink.records[0]["outcome"] == "unknown_label"
+    assert result["tool_calls"][0]["arguments"]["reason"] == "jev: unknown_label"
 
 
 def test_a_judge_that_raises_fails_closed_to_escalate():
@@ -138,6 +143,17 @@ def test_jev_falls_back_to_the_label_probability_when_confidence_is_none():
 def test_jev_escalates_when_confidence_is_none_and_the_label_has_no_probability_either():
     judge = _Judge("RAIL_HIGH_WIDE", None, {"RAIL_MID_HEIGHT": 0.10})
     assert chosen_label(JevProposer(judge, _Sink()).decide(REQUEST, CONTEXT)) == ESCALATE_LABEL
+
+
+def test_missing_selected_probability_keeps_the_existing_below_act_at_audit_reason():
+    sink = _Sink()
+    result = JevProposer(
+        _Judge("RAIL_HIGH_WIDE", None, {"RAIL_MID_HEIGHT": 0.10}), sink,
+    ).decide(REQUEST, CONTEXT)
+
+    assert sink.records[0]["label"] == ESCALATE_LABEL
+    assert sink.records[0]["outcome"] == "below_act_at"
+    assert result["tool_calls"][0]["arguments"]["reason"] == "jev: below_act_at"
 
 
 def test_jev_proposer_works_against_the_real_jev_judge_class(monkeypatch):

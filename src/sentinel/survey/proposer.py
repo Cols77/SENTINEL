@@ -135,18 +135,22 @@ class JevProposer:
             act_at=self.act_at, min_margin=self.min_margin,
         )
         return self._record(
-            context, assessment.final_label, self._audit_outcome(assessment), answer,
+            context, assessment.final_label, self._audit_outcome(assessment, criteria), answer,
         )
 
     @staticmethod
-    def _audit_outcome(assessment: ChoiceAssessment) -> str:
+    def _audit_outcome(
+        assessment: ChoiceAssessment, criteria: dict[str, str],
+    ) -> str:
         if assessment.outcome == "ACCEPTED":
             return "accepted"
         if assessment.outcome == "LOW_CONFIDENCE":
             return "below_act_at"
         if assessment.outcome == "THIN_MARGIN":
             return "thin_margin"
-        if assessment.selected_label is not None:
+        if assessment.outcome == "MISSING_OR_NON_MAX_SELECTION":
+            return "below_act_at"
+        if assessment.selected_label not in criteria:
             return "unknown_label"
         return "invalid_answer"
 

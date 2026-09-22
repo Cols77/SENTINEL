@@ -39,7 +39,7 @@ def assess_choice(
     except Exception:  # noqa: BLE001 -- provider-controlled mappings fail closed
         return _invalid(escalation_label, "MALFORMED_ANSWER")
 
-    label = raw_label if isinstance(raw_label, str) else None
+    label = raw_label if type(raw_label) is str else None
     probabilities = _canonical_probabilities(raw_probabilities)
     if label not in labels or probabilities is None:
         return _invalid(
@@ -127,7 +127,7 @@ def _invalid(
 
 def _legal_labels(labels: Collection[str]) -> frozenset[str]:
     try:
-        return frozenset(label for label in labels if isinstance(label, str))
+        return frozenset(label for label in labels if type(label) is str)
     except Exception:  # noqa: BLE001 -- caller configuration cannot leak here
         return frozenset()
 
@@ -141,7 +141,7 @@ def _canonical_probabilities(
         values = []
         for label, raw_probability in raw.items():
             probability = _finite_probability(raw_probability)
-            if not isinstance(label, str) or probability is None:
+            if type(label) is not str or probability is None:
                 return None
             values.append((label, probability))
         return tuple(sorted(values))
@@ -170,7 +170,7 @@ def _scalar_or_selected_probability(
 
 
 def _finite_probability(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if type(value) not in {int, float}:
         return None
     try:
         resolved = float(value)
