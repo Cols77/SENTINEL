@@ -15,6 +15,7 @@ test('map model preserves operational route facts and freezes stale measured mar
  const model=missionMapModel(s);
  assert.equal(model.route[0].coverage,'OK');
  assert.equal(model.route[1].return_leg,true);
+ assert.equal(model.route.some(x=>x.stop_id==='return'&&x.return_leg),true);
  assert.equal(model.route[0].trim_progress,1);
  assert.deepEqual(model.measured,{x:19,y:31});
  assert.equal(model.measuredFreshness,'STALE');

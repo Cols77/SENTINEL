@@ -12,10 +12,9 @@ def stop_view(option, index, status='PLANNED', operational=None, return_leg=Fals
     never turn elapsed animation time into a completion claim.
     """
     row = operational or {}
-    stop_status={'ARRIVED':'ACTIVE','OPEN_LOOP':'ACTIVE','LOCALISED':'ACTIVE',
-                 'DONE':'COMPLETED','FLOWN':'COMPLETED','ABORTED_EN_ROUTE':'ABORTED'}
+    stop_status={'ARRIVED':'ACTIVE','OPEN_LOOP':'ACTIVE','LOCALISED':'ACTIVE','DONE':'COMPLETED','FLOWN':'COMPLETED','ABORTED_EN_ROUTE':'ABORTED','UNLOCALISED':'FAILED','IMPLAUSIBLE':'FAILED','FAILED':'FAILED','ABORTED':'ABORTED','ACTIVE':'ACTIVE','COMPLETED':'COMPLETED','PLANNED':'PLANNED','UNKNOWN':'UNKNOWN'}
     return dict(
-        id=f'{option.option_id}:{index}', status=stop_status.get(row.get('status', status), row.get('status', status)),
+        id=f'{option.option_id}:{index}', status=stop_status.get(row.get('status', status), 'UNKNOWN'),
         range_m=option.range_cm/100, altitude_m=option.z_cm/100,
         extent_m=option.viewed_width_cm/100,
         duration_s=option.estimated_seconds/len(option.stops),
@@ -83,9 +82,24 @@ class ProjectionService:
             s['mission'].update(route=route,envelope=dict(min_x=min(xs),max_x=max(xs),min_y=min(ys),max_y=max(ys)),flights=dict(used=facts['results']['flights_used'],max=2),return_to_start=any(row.get('return_leg') for row in operational.values()),return_error_cm=return_error)
             if last:
                 s['mission']['sweep']=dict(id=last['sweep_id'],option_id=last['option_id'],status='COMPLETE' if last['status']=='FLOWN' else 'ACTIVE',merged=last['status']=='FLOWN',flights_used_before=max(0,len(facts['sweeps'])-1),stops=[stop_view(option,i,'COMPLETED' if last['status']=='FLOWN' else 'UNKNOWN',operational=operational.get(f"{option.option_id}:{i}")) for i in range(len(option.stops))])
+                if last['status']=='FLOWN':
+                    for stop in s['mission']['sweep']['stops']:
+                        if stop['status'] not in {'FAILED','ABORTED'}:
+                            stop['status']='COMPLETED'
+                    for stop in route:
+                        if stop['status'] not in {'FAILED','ABORTED'}:
+                            stop['status']='COMPLETED'
             s['localization']['vertical_consistency']=vertical_consistency_view(state.get('vertical'))
+            return_row=next((row for row in operational.values() if row.get('return_leg')),None)
+            if return_row:
+                rv=stop_view(option,0,operational=return_row,return_leg=True)
+                if last and last['status']=='FLOWN' and rv['status'] not in {'FAILED','ABORTED'}:
+                    rv['status']='COMPLETED'
+                s['mission']['route'].append(dict(stop_id='RETURN',x=return_row.get('x_cm'),y=return_row.get('y_cm'),**{k:rv[k] for k in ('status','coverage','coverage_reason','predicted_tag_count','predicted_fix_error_cm','leg_speed_cm_s','trim_budget','trim_progress','return_leg','arrival_error_cm','tolerance_cm','tolerance_verdict')}))
+                if s['mission']['sweep']:
+                    s['mission']['sweep']['stops'].append(dict(id='RETURN',status=rv['status'],range_m=option.range_cm/100,altitude_m=option.z_cm/100,extent_m=option.viewed_width_cm/100,duration_s=option.estimated_seconds,resolvable_classes=list(option.resolvable_classes),coverage=rv['coverage'],coverage_reason=rv['coverage_reason'],predicted_tag_count=rv['predicted_tag_count'],predicted_fix_error_cm=rv['predicted_fix_error_cm'],leg_speed_cm_s=rv['leg_speed_cm_s'],trim_budget=rv['trim_budget'],trim_progress=rv['trim_progress'],return_leg=True,arrival_error_cm=rv['arrival_error_cm'],tolerance_cm=rv['tolerance_cm'],tolerance_verdict=rv['tolerance_verdict']))
             if state.get('stop'):
-                stop=state['stop'];s['mission']['active_stop_id']=f"{stop['option_id']}:{stop['stop_index']}"
+                stop=state['stop'];s['mission']['active_stop_id']=stop['option_id'] if stop['stop_index'] is None else f"{stop['option_id']}:{stop['stop_index']}"
                 s['mission']['commanded_position']=dict(x=stop['x_cm'],y=stop['y_cm'])
             frame_meta={}
             sweeps={r['sweep_id']:r for r in facts['sweeps']}
@@ -133,6 +147,8 @@ class ProjectionService:
                     if capability and svc.evidence_status.get(capability['artifact_id']) in {'REVOKED','FORBIDDEN'}:
                         pose['pose_evidence']=None
                     s['localization']=pose
+                    if state.get('vertical'):
+                        s['localization']['vertical_consistency']=vertical_consistency_view(state['vertical'])
             s['legal_actions']=[dict(action=a,enabled=e,reasons=[] if e else ['Unavailable in current state']) for a,e in [('CHAT',True),('APPROVE',bool(offer)),('REJECT',bool(offer)),('LAND',s['safety']['land']['available']),('EMERGENCY',s['safety']['emergency']['available'])]]
             validate_snapshot(s)
             return svc.store.publish_snapshot(run_id,s)

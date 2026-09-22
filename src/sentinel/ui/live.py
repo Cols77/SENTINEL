@@ -260,4 +260,4 @@ def compose(config):
     detector=cls(api_key=os.environ[prefix+'_API_KEY'],model=os.environ[prefix+'_MODEL'],session=HttpSession())
     feed=LivePoseFeed(config.data_dir/'pose-images',site)
     return ScenarioAdapters(generate_options(envelope_from_site(site,300),TELLO_MEASURED),RuleProposer(),
-        LiveFlight(config,site,tag_map,feed,coverage=coverage),detector,report_writer,TELLO_MEASURED,'LIVE',sender,feed,config.location,config.consent_date)
+        LiveFlight(config,site,tag_map,feed,coverage=coverage),detector,report_writer,TELLO_MEASURED,'LIVE',sender,feed,config.location,config.consent_date,'F')

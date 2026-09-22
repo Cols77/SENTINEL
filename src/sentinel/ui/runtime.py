@@ -199,9 +199,9 @@ class SurveyRuntime:
         return outcome
 
     def _decision_defaults(self):
-        mode = getattr(self.adapters, 'provenance_mode', 'F')
+        mode = getattr(self.adapters, 'provenance_mode', None) or getattr(self.adapters.policy, 'provenance_mode', None)
         if mode not in {'F','E','J'}:
-            raise ValueError('invalid configured provenance mode')
+            raise ValueError('configured policy provenance unavailable')
         return {'mode': mode, 'source': {'F':'RULES','E':'AGENT','J':'JUDGE'}[mode], 'escalation_reason': None}
 
     def facts(self, run_id):

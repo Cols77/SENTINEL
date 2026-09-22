@@ -46,6 +46,24 @@ def test_schema_v3_snapshot_exposes_operational_stop_and_detection_facts():
     assert vertical_consistency_view({'tag_height_cm':100,'height_cm':100,'vertical_mismatch_cm':30})['status'] == 'INCONSISTENT'
 
 
+@pytest.mark.parametrize('raw,expected',[('UNLOCALISED','FAILED'),('IMPLAUSIBLE','FAILED'),('ABORTED_EN_ROUTE','ABORTED'),('mystery','UNKNOWN')])
+def test_cube_stop_statuses_are_closed(raw, expected):
+    from sentinel.ui.projection import stop_view
+    class Option:
+        option_id='OPT';range_cm=viewed_width_cm=estimated_seconds=100;z_cm=100;resolvable_classes=();stops=((1,2),)
+    assert stop_view(Option(),0,operational={'status':raw})['status'] == expected
+
+
+def test_proposer_interfaces_expose_explicit_provenance():
+    from sentinel.survey.proposer import RuleProposer, JevProposer, LlmProposer
+    from sentinel.coordinator.proposer import JevProposer as CoordinatorJev, LlmProposer as CoordinatorLlm
+    assert (RuleProposer.provenance_mode, RuleProposer.provenance_source) == ('F','RULES')
+    assert (JevProposer.provenance_mode, JevProposer.provenance_source) == ('J','JUDGE')
+    assert (LlmProposer.provenance_mode, LlmProposer.provenance_source) == ('E','AGENT')
+    assert (CoordinatorJev.provenance_mode, CoordinatorJev.provenance_source) == ('J','JUDGE')
+    assert (CoordinatorLlm.provenance_mode, CoordinatorLlm.provenance_source) == ('E','AGENT')
+
+
 def test_schema_v3_rejects_cross_run_and_unresolved_operational_references():
     snapshot = empty_snapshot('s', 'r', 'REHEARSAL')
     snapshot['evidence']['frames'].append({
