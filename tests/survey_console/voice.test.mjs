@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createVoiceCommandController,
+  cancelOnLostCapture,
   deriveRecognitionLanguage,
   isExactLandPhrase,
 } from '../../examples/survey-console/voice.mjs';
@@ -147,6 +148,35 @@ test('exact land starts a cancellable countdown and executes once only when lega
   assert.equal(landCalls, 1);
   controller.cancelCountdown();
   assert.equal(cancelled, 0);
+});
+
+test('lost capture after normal release cannot cancel the valid Land countdown', () => {
+  let callback;
+  let landCalls = 0;
+  const recognizer = recognizerHarness();
+  const controller = createVoiceCommandController({
+    recognizerFactory: () => recognizer,
+    getSnapshot: () => ({safety: {land: {available: true}}, legal_actions: [{action: 'LAND', enabled: true}]}),
+    onLand: () => { landCalls += 1; },
+    clock: {schedule: fn => { callback = fn; return 1; }, cancel() {}},
+  });
+  controller.begin();
+  recognizer.onresult({results: [{0: {transcript: 'Sentinel land now'}, isFinal: true}]});
+  controller.release();
+  recognizer.onend();
+  // This is the view's lostpointercapture path after pointerup: no held gesture remains.
+  if (controller.isHeld) controller.cancel();
+  callback();
+  assert.equal(landCalls, 1);
+});
+
+test('lost capture cancels only a still-held gesture', () => {
+  let cancels = 0;
+  const held = {isHeld: true, cancel: () => { cancels += 1; }};
+  const released = {isHeld: false, cancel: () => { cancels += 1; }};
+  cancelOnLostCapture(held);
+  cancelOnLostCapture(released);
+  assert.equal(cancels, 1);
 });
 
 test('exact land is refused safely when legality changes before execution', () => {

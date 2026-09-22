@@ -21,6 +21,10 @@ export function isExactLandPhrase(value) {
   return normalizeVoicePhrase(value) === 'sentinel land now';
 }
 
+export function cancelOnLostCapture(controller) {
+  if (controller.isHeld) controller.cancel();
+}
+
 function transcriptFromResult(result) {
   return String(result?.[0]?.transcript ?? result?.transcript ?? '').trim();
 }
@@ -231,7 +235,7 @@ export function createVoiceView(host, input, getSnapshot, chatController, landCo
     cancel.hidden = !controller.isCountingDown;
   };
   const cancelListening = () => {
-    controller.cancel();
+    cancelOnLostCapture(controller);
     if (!controller.isCountingDown) cancel.hidden = true;
   };
   mic.addEventListener('pointerdown', start);
