@@ -15,7 +15,8 @@ import uuid
 from .models import CapabilityProfile
 
 _SCHEMA = Path(__file__).with_name("sql") / "schema.sql"
-_MIGRATIONS = ((1, _SCHEMA),)
+_MIGRATION_002 = Path(__file__).with_name("sql") / "migration_002_event_insert_guard.sql"
+_MIGRATIONS = ((1, _SCHEMA), (2, _MIGRATION_002))
 _FORBIDDEN_PAYLOAD_KEYS = {"authorization", "authorizationheader", "credential", "credentials"}
 
 
@@ -203,8 +204,9 @@ def _run_migrations(connection: sqlite3.Connection) -> None:
 
 
 def _canonical_payload(payload: Mapping[str, object]) -> str:
-    _reject_forbidden_payload(payload)
-    return _canonical_json(_json_value(payload))
+    normalized = _json_value(payload)
+    _reject_forbidden_payload(normalized)
+    return _canonical_json(normalized)
 
 
 def _reject_forbidden_payload(value: object) -> None:

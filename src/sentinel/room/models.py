@@ -98,6 +98,7 @@ class AcceptanceManifest:
     session_id: str
     capability: str
     manifest_sha256: str
+    session_kind: Literal["ACCEPTANCE", "LIVE"] = "ACCEPTANCE"
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,7 @@ class CapabilityGrant:
     evidence_ids: tuple[str, ...]
     expires_at: str | None
     grant_sha256: str
+    acceptance_manifest_sha256: str | None = None
 
     def allows(
         self,
@@ -119,6 +121,7 @@ class CapabilityGrant:
         aircraft_id: str | None,
         profile_sha256s: tuple[str, ...],
         now: datetime,
+        session_id: str | None = None,
         acceptance_manifest: AcceptanceManifest | None = None,
     ) -> bool:
         """Check the complete binding before a live capability is admitted."""
@@ -135,12 +138,16 @@ class CapabilityGrant:
             return False
         if self.state == "PROMOTED":
             return True
-        if self.state != "TRIAL" or acceptance_manifest is None:
+        if self.state != "TRIAL" or acceptance_manifest is None or session_id is None:
             return False
         return (
-            acceptance_manifest.capability == capability
-            and acceptance_manifest.session_id.startswith(f"acceptance:{capability}:")
-            and bool(acceptance_manifest.manifest_sha256)
+            self.acceptance_manifest_sha256 is not None
+            and self.acceptance_manifest_sha256 == acceptance_manifest.manifest_sha256
+            and acceptance_manifest.manifest_sha256
+            == canonical_acceptance_manifest_sha256(acceptance_manifest)
+            and session_id == acceptance_manifest.session_id
+            and acceptance_manifest.session_kind == "ACCEPTANCE"
+            and acceptance_manifest.capability == capability
         )
 
 
@@ -156,6 +163,7 @@ def canonical_grant_sha256(grant: CapabilityGrant) -> str:
     """Hash grant content in a stable representation, excluding its signature field."""
     body = {
         "aircraft_id": grant.aircraft_id,
+        "acceptance_manifest_sha256": grant.acceptance_manifest_sha256,
         "capability": grant.capability,
         "evidence_ids": sorted(grant.evidence_ids),
         "expires_at": grant.expires_at,
@@ -164,6 +172,19 @@ def canonical_grant_sha256(grant: CapabilityGrant) -> str:
         "state": grant.state,
     }
     encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def canonical_acceptance_manifest_sha256(manifest: AcceptanceManifest) -> str:
+    """Hash the manifest's sole session/capability binding, excluding its digest field."""
+    encoded = json.dumps(
+        {
+            "capability": manifest.capability,
+            "session_id": manifest.session_id,
+            "session_kind": manifest.session_kind,
+        },
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    )
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 

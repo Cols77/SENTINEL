@@ -11,6 +11,7 @@ from .models import (
     RoomCandidate,
     RoomSnapshot,
     TerminalState,
+    canonical_acceptance_manifest_sha256,
     canonical_grant_sha256,
 )
 from .store import (
@@ -25,5 +26,5 @@ __all__ = [
     "AcceptanceManifest", "CandidateKind", "CapabilityGrant", "CapabilityProfile",
     "ForbiddenPayload", "GoalKind", "GoalStatus", "IdempotencyConflict", "PhysicalCost",
     "RoomCandidate", "RoomSnapshot", "RoomStore", "StoredEvent", "TerminalState",
-    "VersionConflict", "canonical_grant_sha256",
+    "VersionConflict", "canonical_acceptance_manifest_sha256", "canonical_grant_sha256",
 ]
