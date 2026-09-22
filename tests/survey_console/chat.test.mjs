@@ -14,3 +14,23 @@ test('shared chat submission preserves one attempt identity across uncertain ret
  await controller.submit(input);assert.equal(input,'');
  assert.equal(attempts.length,2);assert.equal(attempts[0][1].command_id,attempts[1][1].command_id);assert.equal(attempts[0][0],'run-1');
 });
+
+test('chat emits pending false after acknowledgement so sequential submissions are allowed',async()=>{
+ const snapshot={session:{id:'session-1'},run:{id:'run-1',status:'ACTIVE',decision_version:4}};
+ const pending=[];const sent=[];let input='first';
+ const controller=createChatSubmissionController({getSnapshot:()=>snapshot,onPending:value=>pending.push(value),setInput:value=>{input=value;},client:{submit_chat:async(id,attempt)=>{sent.push(attempt.text);return {status:'ACKNOWLEDGED',message:'accepted'};}}});
+ await controller.submit(input);input='second';await controller.submit(input);
+ assert.deepEqual(sent,['first','second']);
+ assert.deepEqual(pending,[true,false,true,false]);
+ assert.equal(controller.isPending(),false);
+});
+
+test('chat emits pending false after failure so retry is enabled',async()=>{
+ const snapshot={session:{id:'session-1'},run:{id:'run-1',status:'ACTIVE',decision_version:4}};
+ const pending=[];let calls=0;
+ const controller=createChatSubmissionController({getSnapshot:()=>snapshot,onPending:value=>pending.push(value),client:{submit_chat:async()=>{if(++calls===1)throw Error('lost');return {status:'ACKNOWLEDGED',message:'accepted'};}}});
+ await controller.submit('retry me');
+ assert.equal(controller.isPending(),false);
+ await controller.submit('retry me');
+ assert.deepEqual(pending,[true,false,true,false]);
+});

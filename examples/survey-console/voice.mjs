@@ -1,5 +1,5 @@
 import { el, button } from './dom.mjs';
-import { createControlledLandController, isLandLegal } from './safety.mjs';
+import { isLandLegal } from './safety.mjs';
 
 const speechCtor = globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition;
 
