@@ -59,3 +59,11 @@ def test_record_and_push_refuse_a_dirty_tree(repo):
     (work / "a.txt").write_text("dirty\n")
     assert push_tested.main(["record", str(work)]) == 2
     assert push_tested.main(["push", str(work), "HEAD:refs/heads/main"]) == 2
+
+
+def test_an_untracked_file_does_not_block_a_push(repo):
+    """Another session's draft in a shared worktree is not in HEAD and does not travel."""
+    work, origin = repo
+    (work / "someone-elses-draft.md").write_text("wip\n")
+    assert push_tested.main(["record", str(work)]) == 0
+    assert push_tested.main(["push", str(work), "HEAD:refs/heads/main"]) == 0
