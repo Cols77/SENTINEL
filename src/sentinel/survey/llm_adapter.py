@@ -145,7 +145,7 @@ def to_document(raw: dict) -> dict:
         name = _TOOL_NAMES.get(function.get("name"))
         try:
             arguments = json.loads(function.get("arguments") or "{}")
-        except ValueError:
+        except (ValueError, TypeError):   # not a string: some providers pre-parse it
             arguments = None
         if name is None or not isinstance(arguments, dict):
             return {"status": "MALFORMED", "tool_calls": []}
@@ -204,6 +204,7 @@ class LlmAdapter:
         raw = self._post(payload)
         self.last_raw = raw
         resolved = raw.get("model") if isinstance(raw, dict) else None
-        if resolved is not None and not str(resolved).startswith(self.model):
+        # Exact match: a prefix test let "glm-5.3-mini" pass for "glm-5.3".
+        if resolved is not None and str(resolved) != self.model:
             raise AdapterUnavailable(f"pinned {self.model!r} but the provider resolved {resolved!r}")
         return to_document(raw)
