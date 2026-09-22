@@ -1,0 +1,13 @@
+{
+  "schema_version": "cube-mission-v1",
+  "_comment": "2026-09-22 operator's corner run in the flight3 cube: top-left, top-right, bottom-left, bottom-right corners of the commanded area (top = toward the tags, y 240; bottom = away from them, y 140), then back to the takeoff point. Legs at 50 cm/s (1.3 m across, 1.64 m on the diagonal), up to 3 trims at 20 cm/s. Every corner passes the tag-coverage guard as MARGINAL. Fly with docs/wp5-flight3-site.json and docs/wp5-flight3-map.json.",
+  "max_trim_rounds": 3,
+  "leg_speed_cm_s": 50,
+  "return_to_start": true,
+  "waypoints": [
+    {"name": "TOP_L", "x_cm": 185, "y_cm": 240, "z_cm": 90},
+    {"name": "TOP_R", "x_cm": 315, "y_cm": 240, "z_cm": 90},
+    {"name": "BOT_L", "x_cm": 185, "y_cm": 140, "z_cm": 90},
+    {"name": "BOT_R", "x_cm": 315, "y_cm": 140, "z_cm": 90}
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version": "cube-mission-v1",
+  "_comment": "2026-09-22 demo run in the flight3 cube: long, sharp legs corner to opposite corner, alternating high far corners (z 135) and low near corners (z 70), so every leg is 1.2 m across, 0.9 m deep and 65 cm up or down, flown as straight axis moves at 50 cm/s with a settle pause between them. Up to 3 trims at 20 cm/s, then back to the takeoff point. Fly with docs/wp5-flight3-site.json and docs/wp5-flight3-map.json.",
+  "max_trim_rounds": 3,
+  "leg_speed_cm_s": 50,
+  "return_to_start": true,
+  "waypoints": [
+    {"name": "FAR_L_HI", "x_cm": 190, "y_cm": 145, "z_cm": 135},
+    {"name": "NEAR_R_LO", "x_cm": 310, "y_cm": 235, "z_cm": 70},
+    {"name": "FAR_R_HI", "x_cm": 310, "y_cm": 145, "z_cm": 135},
+    {"name": "NEAR_L_LO", "x_cm": 190, "y_cm": 235, "z_cm": 70},
+    {"name": "FAR_MID_HI", "x_cm": 250, "y_cm": 145, "z_cm": 135}
+  ]
+}

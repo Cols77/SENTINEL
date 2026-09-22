@@ -761,3 +761,57 @@ def test_a_takeoff_height_the_tags_disagree_with_raises_an_alert(tmp_path):
     runner._check_vertical("WP1", [_ranged(250, 240, math.hypot(1.6, 0.75))] * 5, (250.0, 240.0), entry)
     assert entry["tag_height_cm"] == pytest.approx(130.0, abs=0.5)
     assert any(e == "alert" and "altitude bias or tag heights are wrong" in m for e, m in events)
+
+
+def _timeline(runner, client):
+    """Commands with a ('sleep', s) marker wherever the runner paused."""
+    events = []
+    runner.sleep_fn = lambda seconds: events.append(("sleep", seconds, len(client.commands)))
+    return events
+
+
+def _moves_and_pauses(client, events):
+    out, marks = [], {}
+    for _, seconds, index in events:
+        marks.setdefault(index, []).append(seconds)
+    for index, command in enumerate(client.commands):
+        out += [("sleep", s) for s in marks.get(index, [])]
+        if command.split()[0] in {"forward", "back", "left", "right"}:
+            out.append(command)
+    return out
+
+
+def test_a_move_straight_after_another_waits_for_the_drone_to_settle(tmp_path):
+    """09-22: `left 95` sent the instant `back 31` returned "ok" at 50 cm/s was refused with
+    "error Not joystick" and the flight landed. A move that follows a move now waits."""
+    from sentinel.cube.mission import SETTLE_AFTER_FAST_MOVE_S
+    mission = Mission(270, 250, (Waypoint("WP1", 300, 300, 100),), leg_speed_cm_s=50)
+    client = DryRunClient()
+    runner = CubeMissionRunner(client, "dry-run", mission=mission, site=_site(0.4),
+                               pose_mode="off", mission_log=tmp_path / "m.jsonl",
+                               sleep_fn=lambda s: None)
+    events = _timeline(runner, client)
+    assert runner.run(confirm=True).status == "PASS"
+    moves = _moves_and_pauses(client, events)
+    first, second = [i for i, m in enumerate(moves) if isinstance(m, str)][:2]
+    assert ("sleep", SETTLE_AFTER_FAST_MOVE_S) in moves[first + 1:second]
+    assert all(not isinstance(m, tuple) for m in moves[:first])
+
+
+def test_a_hover_fix_counts_as_settling(tmp_path):
+    """After a localisation burst (SETTLE_S hover) the next leg goes without an extra pause."""
+    from sentinel.cube.mission import SETTLE_S
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100), Waypoint("WP2", 150, 300, 100)),
+                      leg_speed_cm_s=40)
+    queue = [[_report(270, 300)] * 10, [_report(150, 300)] * 10]
+    client = DryRunClient()
+    runner = CubeMissionRunner(client, "dry-run", mission=mission, site=SITE,
+                               pose_mode="reanchor", mission_log=tmp_path / "m.jsonl",
+                               burst_fn=lambda: queue.pop(0), sleep_fn=lambda s: None)
+    events = _timeline(runner, client)
+    assert runner.run(confirm=True).status == "PASS"
+    moves = _moves_and_pauses(client, events)
+    assert [m for m in moves if isinstance(m, str)] == ["forward 50", "left 120"]
+    between = moves[moves.index("forward 50") + 1:moves.index("left 120")]
+    # the hover before WP1's fix and the look; no move-settle pause on top
+    assert between.count(("sleep", SETTLE_S)) == 2 and len(between) == 2

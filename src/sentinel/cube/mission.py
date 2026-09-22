@@ -57,6 +57,11 @@ LAND_TRAVEL_MARGIN_CM = 5
 #: Tag-implied height against `height?` + the site's height offset: beyond this, the site's
 #: vertical model (takeoff height, altitude bias or tag heights) is wrong for this room.
 VERTICAL_MISMATCH_CM = 25.0
+#: Pause before a move that directly follows another. The Tello answers "ok" on reaching the
+#: target but still brakes after a fast leg; a move sent at once was refused with "error Not
+#: joystick" at 40 cm/s (09-22 104429) and at 50 cm/s (09-22 152455), and the drone landed.
+SETTLE_AFTER_FAST_MOVE_S = 1.5
+SETTLE_AFTER_SLOW_MOVE_S = 0.7
 #: The extra stop a ``return_to_start`` mission ends with.
 RETURN_NAME = "RETURN"
 YAW_TRIM_THRESHOLD_DEG = 10.0
@@ -242,6 +247,8 @@ class CubeMissionRunner(FlightTestRunner):
         #: cube.coverage.CoverageModel: refuses stops the camera cannot localise from (None: unchecked)
         self.coverage = coverage
         self._start_fix_cm: tuple[float, float] | None = None
+        #: speed of the last translation if nothing has let the drone settle since, else None
+        self._unsettled_speed: int | None = None
         self._look_offset = 0
         self._implausible_streak = 0
         # FlightTestRunner._preflight sets and reads back COMMAND_SPEED_CM_S.
@@ -334,7 +341,11 @@ class CubeMissionRunner(FlightTestRunner):
     def _step(self, direction: str, distance_cm: int, *, optional: bool) -> bool:
         """One checked move. An optional step that would leave the bounds is skipped."""
         try:
+            if self._unsettled_speed is not None:
+                self.sleep_fn(SETTLE_AFTER_FAST_MOVE_S if self._unsettled_speed > COMMAND_SPEED_CM_S
+                              else SETTLE_AFTER_SLOW_MOVE_S)
             self.move_checked(direction, distance_cm)
+            self._unsettled_speed = self._speed_cm_s
         except EnvelopeViolation:
             if not optional:
                 raise
@@ -513,6 +524,7 @@ class CubeMissionRunner(FlightTestRunner):
         rounds = 0
         while True:
             self.sleep_fn(SETTLE_S)
+            self._unsettled_speed = None
             reports = self.burst_fn()
             result = localise(reports)
             if not isinstance(result, LocalisationFix):
