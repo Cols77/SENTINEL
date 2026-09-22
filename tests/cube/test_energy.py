@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from decimal import Decimal
 
 import pytest
 
@@ -102,6 +103,28 @@ def test_observed_burn_can_raise_the_calibrated_bound() -> None:
     assert guard.conservative_percent_per_second == 1.0
 
 
+def test_motor_time_is_only_a_consistency_check_not_the_burn_denominator() -> None:
+    guard = _guard(percent_per_second_upper=0.01, telemetry_allowance_pct=0, landing_floor_pct=20)
+
+    guard.observe(_sample(80, 0, motor_time_s=10), _sample(79, 10, motor_time_s=11))
+    estimate = guard.assess(current=_sample(25, 10, motor_time_s=11), next_plan=None,
+                            recovery_plan=None, provider_wait_s=0, termination_plan=_plan("home", 10))
+
+    assert guard.conservative_percent_per_second == 0.1
+    assert estimate.decision is ReserveDecision.CONTINUE
+
+
+def test_exact_decimal_reserve_math_does_not_overcharge_a_binary_float_boundary() -> None:
+    guard = _guard(percent_per_second_upper=0.07, telemetry_allowance_pct=0, landing_floor_pct=20)
+
+    estimate = guard.assess(current=_sample(27, 10), next_plan=None, recovery_plan=None,
+                            provider_wait_s=0.0, termination_plan=_plan("home", 100.0))
+
+    assert estimate.action_cost_pct == 7
+    assert estimate.projected_landing_pct == 20
+    assert estimate.decision is ReserveDecision.CONTINUE
+
+
 def test_motor_time_is_cross_checked_against_monotonic_measurement_time() -> None:
     guard = _guard()
 
@@ -109,6 +132,16 @@ def test_motor_time_is_cross_checked_against_monotonic_measurement_time() -> Non
     estimate = guard.assess(current=_sample(79, 10, motor_time_s=17), next_plan=None,
                             recovery_plan=None, provider_wait_s=0, termination_plan=_plan("home", 1))
 
+    assert estimate.decision is ReserveDecision.LAND_CONTINGENCY
+
+
+def test_motor_time_stall_is_invalid_when_monotonic_time_advanced() -> None:
+    guard = _guard()
+
+    guard.observe(_sample(80, 0, motor_time_s=10), _sample(80, 5, motor_time_s=10))
+
+    estimate = guard.assess(current=_sample(80, 5, motor_time_s=10), next_plan=None,
+                            recovery_plan=None, provider_wait_s=0, termination_plan=_plan("home", 1))
     assert estimate.decision is ReserveDecision.LAND_CONTINGENCY
 
 
@@ -142,7 +175,9 @@ def test_return_latch_is_irrevocable() -> None:
         (lambda: _sample(True, 0), "battery_pct"),
         (lambda: _sample(101, 0), "battery_pct"),
         (lambda: EnergySample(battery_pct=1, measured_at_s=float("nan")), "measured_at_s"),
+        (lambda: EnergySample(battery_pct=1, measured_at_s=Decimal("NaN")), "measured_at_s"),
         (lambda: _profile(percent_per_second_upper=float("inf")), "percent_per_second_upper"),
+        (lambda: _profile(percent_per_second_upper=Decimal("Infinity")), "percent_per_second_upper"),
         (lambda: _profile(telemetry_allowance_pct=True), "telemetry_allowance_pct"),
     ],
 )

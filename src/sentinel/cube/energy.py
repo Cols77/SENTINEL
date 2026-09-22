@@ -8,6 +8,7 @@ reserve calculation auditable and prevents a second, looser route estimate.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from enum import Enum
 import math
 from typing import Callable, Literal, Mapping, Protocol
@@ -23,13 +24,31 @@ class ReserveDecision(str, Enum):
     LAND_CONTINGENCY = "LAND_CONTINGENCY"
 
 
-def _finite_nonnegative(value: object, field: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+def _exact_decimal(value: object, field: str) -> Decimal:
+    """Accept finite external numbers as their documented decimal spelling.
+
+    A binary float is intentionally parsed through ``str`` so the public
+    decimal contract (for example ``0.07`` percent/s) is not perturbed by its
+    in-memory IEEE-754 representation before the single conservative ceiling.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
         raise TypeError(f"{field} must be a finite nonnegative number")
-    numeric = float(value)
-    if not math.isfinite(numeric) or numeric < 0:
+    try:
+        numeric = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{field} must be a finite nonnegative number") from exc
+    if not numeric.is_finite() or numeric < 0:
         raise ValueError(f"{field} must be a finite nonnegative number")
     return numeric
+
+
+def _finite_nonnegative(value: object, field: str) -> float:
+    numeric = _exact_decimal(value, field)
+    result = float(numeric)
+    if not math.isfinite(result):
+        raise ValueError(f"{field} must be a finite nonnegative number")
+    return result
 
 
 def _percent(value: object, field: str) -> int:
@@ -166,7 +185,7 @@ class ReserveGuard:
             raise TypeError("clock must be callable")
         self.profile = profile
         self.clock = clock
-        self._observed_upper = profile.percent_per_second_upper
+        self._observed_upper = _exact_decimal(profile.percent_per_second_upper, "percent_per_second_upper")
         self._return_latched = False
         self._clock_failed = False
         self._last_clock_s: float | None = None
@@ -175,7 +194,7 @@ class ReserveGuard:
 
     @property
     def conservative_percent_per_second(self) -> float:
-        return self._observed_upper
+        return float(self._observed_upper)
 
     @property
     def return_latched(self) -> bool:
@@ -198,7 +217,9 @@ class ReserveGuard:
         if not isinstance(previous, EnergySample) or not isinstance(current, EnergySample):
             self._telemetry_invalid = True
             return
-        elapsed = current.measured_at_s - previous.measured_at_s
+        elapsed = _exact_decimal(current.measured_at_s, "measured_at_s") - _exact_decimal(
+            previous.measured_at_s, "measured_at_s",
+        )
         if elapsed <= 0:
             self._telemetry_invalid = True
             return
@@ -210,40 +231,41 @@ class ReserveGuard:
             if previous.motor_time_source != current.motor_time_source:
                 self._telemetry_invalid = True
                 return
-            motor_elapsed = current.motor_time_s - previous.motor_time_s  # type: ignore[operator]
-            if motor_elapsed < 0 or motor_elapsed > elapsed:
+            motor_elapsed = _exact_decimal(current.motor_time_s, "motor_time_s") - _exact_decimal(
+                previous.motor_time_s, "motor_time_s",
+            )
+            if motor_elapsed <= 0 or motor_elapsed > elapsed:
                 self._telemetry_invalid = True
                 return
-            if motor_elapsed > 0:
-                rate_elapsed = motor_elapsed
         burn = previous.battery_pct - current.battery_pct
         if burn > 0:
-            self._observed_upper = max(self._observed_upper, burn / rate_elapsed)
+            self._observed_upper = max(self._observed_upper, Decimal(burn) / rate_elapsed)
         self._last_sample_s = max(self._last_sample_s or 0.0, current.measured_at_s)
 
     @staticmethod
-    def _plan_seconds(plan: object, field: str) -> float:
+    def _plan_seconds(plan: object, field: str) -> Decimal:
         if plan is None:
-            return 0.0
+            return Decimal(0)
         try:
-            return _finite_nonnegative(getattr(plan, "worst_case_s"), field)
+            return _exact_decimal(getattr(plan, "worst_case_s"), field)
         except AttributeError as exc:
             raise TypeError(f"{field} must declare worst_case_s") from exc
 
-    def _cost(self, seconds: float) -> int:
-        return math.ceil(self._observed_upper * seconds + self.profile.telemetry_allowance_pct)
+    def _cost(self, seconds: Decimal) -> int:
+        value = self._observed_upper * seconds + Decimal(self.profile.telemetry_allowance_pct)
+        return int(value.to_integral_value(rounding=ROUND_CEILING))
 
     def _estimate(self, *, current: EnergySample, action_cost: int, decision: ReserveDecision,
-                  next_seconds: float, recovery_seconds: float, provider_wait_s: float,
-                  termination_seconds: float) -> EnergyEstimate:
+                  next_seconds: Decimal, recovery_seconds: Decimal, provider_wait_s: Decimal,
+                  termination_seconds: Decimal) -> EnergyEstimate:
         components = {
-            "next_checkpoint_s": next_seconds,
+            "next_checkpoint_s": float(next_seconds),
             "percent_per_second_upper": self._observed_upper,
-            "provider_wait_s": provider_wait_s,
-            "recovery_s": recovery_seconds,
+            "provider_wait_s": float(provider_wait_s),
+            "recovery_s": float(recovery_seconds),
             "telemetry_allowance_pct": float(self.profile.telemetry_allowance_pct),
-            "termination_s": termination_seconds,
-            "total_worst_case_s": next_seconds + recovery_seconds + provider_wait_s + termination_seconds,
+            "termination_s": float(termination_seconds),
+            "total_worst_case_s": float(next_seconds + recovery_seconds + provider_wait_s + termination_seconds),
         }
         return EnergyEstimate(
             current_pct=current.battery_pct, action_cost_pct=action_cost,
@@ -267,7 +289,7 @@ class ReserveGuard:
                provider_wait_s: float, termination_plan: object) -> EnergyEstimate:
         if not isinstance(current, EnergySample):
             raise TypeError("current must be an EnergySample")
-        provider_wait = _finite_nonnegative(provider_wait_s, "provider_wait_s")
+        provider_wait = _exact_decimal(provider_wait_s, "provider_wait_s")
         if termination_plan is None:
             raise ValueError("termination_plan is required")
         next_seconds = self._plan_seconds(next_plan, "next_plan.worst_case_s")
