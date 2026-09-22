@@ -55,6 +55,17 @@ GENERATE_URL_TEMPLATE = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent")
 
 
+#: What a class name means, said to the model. Operator decision 2026-09-22:
+#: a computer is a laptop or a desktop monitor, never a printer -- the second
+#: real-frame spike returned an office printer as "computer, high". The label
+#: asked back is the bare class name, so the bare word "monitor" stays out of
+#: CLASS_MAP (rev 3 R6: it turned projector screens into computers).
+CLASS_HINTS = {
+    "computer": "a laptop or a desktop computer monitor; not a printer, television, "
+                "projector screen or any other appliance",
+}
+
+
 def _to_fractional_box(box_2d) -> dict[str, float] | None:
     """``box_2d`` is ``[ymin, xmin, ymax, xmax]`` on a 0-1000 scale. Returns
     the ``(x, y, width, height)`` fraction ``normalise`` expects, or
@@ -144,10 +155,13 @@ class GeminiDetector:
         # answer spelled out, real objects only, and a confidence word -- without
         # one every Gemini sighting was banded "low" and could never confirm.
         prompt = (
-            "Detect every real, physical instance of: " + ", ".join(classes) + ". "
+            "Detect every real, physical instance of: "
+            + ", ".join(f"{name} ({CLASS_HINTS[name]})" if name in CLASS_HINTS else name
+                        for name in classes) + ". "
             "Ignore pictures, drawings, reflections and screens showing them. "
             'Return only a JSON object {"objects": [...]} whose items each have '
-            '"label", "box_2d" as [ymin, xmin, ymax, xmax] scaled 0 to 1000, '
+            '"label" (exactly one of the names above, without the words in brackets), '
+            '"box_2d" as [ymin, xmin, ymax, xmax] scaled 0 to 1000, '
             '"confidence" as one of "high", "medium" or "low", and "description". '
             'If there are none, return {"objects": []}.')
         url, headers, payload = self._request(prompt, image_path, image_bytes)
