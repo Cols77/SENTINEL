@@ -561,3 +561,69 @@ def test_a_stop_already_inside_the_tolerance_circle_is_not_trimmed(tmp_path):
     wp1 = _log(tmp_path)[0]
     assert wp1["tolerance"] == "INSIDE" and wp1["trim_rounds_sent"] == 0
     assert "left 20" not in client.commands
+
+
+# -- mission tuning: trim rounds per stop, leg speed ---------------------------
+
+def test_a_mission_can_allow_up_to_ten_trim_rounds_and_stops_once_inside(tmp_path):
+    """The convergence test: keep trimming while the drone is outside the 15 cm circle."""
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), max_trim_rounds=10)
+    far = [[_report(270, 280)] * 10] * 5            # 20 cm short, five trims that do nothing
+    runner, client = _runner(tmp_path, "reanchor", far + [[_report(272, 296)] * 10], mission=mission)
+    assert runner.run(confirm=True).status == "PASS"
+    wp1 = _log(tmp_path)[0]
+    assert wp1["trim_rounds_sent"] == 5 and wp1["tolerance"] == "INSIDE"
+    assert wp1["trim_errors_cm"] == [20.0] * 5 + [pytest.approx(4.5, abs=0.1)]
+    assert client.commands.count("forward 20") == 5
+
+
+def test_trim_rounds_are_bounded_by_the_mission(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), max_trim_rounds=4)
+    runner, client = _runner(tmp_path, "reanchor", [[_report(270, 280)] * 10] * 5, mission=mission)
+    assert runner.run(confirm=True).status == "PASS"
+    wp1 = _log(tmp_path)[0]
+    assert wp1["trim_rounds_sent"] == 4 and wp1["tolerance"] == "OUTER"
+    assert len(wp1["trim_errors_cm"]) == 5
+
+
+@pytest.mark.parametrize("rounds", [0, 11])
+def test_trim_rounds_outside_one_to_ten_are_refused(rounds):
+    with pytest.raises(ValueError, match="max_trim_rounds"):
+        Mission(None, None, (Waypoint("WP1", 270, 300, 100),), max_trim_rounds=rounds)
+
+
+@pytest.mark.parametrize("speed", [10, 50])
+def test_leg_speeds_outside_twenty_to_forty_are_refused(speed):
+    with pytest.raises(ValueError, match="leg_speed_cm_s"):
+        Mission(None, None, (Waypoint("WP1", 270, 300, 100),), leg_speed_cm_s=speed)
+
+
+def test_legs_fly_at_the_mission_speed_and_trims_go_back_to_twenty(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100), Waypoint("WP2", 150, 300, 100)),
+                      leg_speed_cm_s=40)
+    bursts = [[_report(270, 282)] * 10, [_report(271, 299)] * 10, [_report(150, 300)] * 10]
+    runner, client = _runner(tmp_path, "reanchor", bursts, mission=mission)
+    assert runner.run(confirm=True).status == "PASS"
+    moves = [c for c in client.commands if c.split()[0] in {"speed", "forward", "left", "back", "right"}]
+    assert moves == ["speed 20",                         # preflight
+                     "speed 40", "forward 50",           # leg to WP1
+                     "speed 20", "forward 20",           # trim
+                     "speed 40", "left 121"]             # leg to WP2 from the trimmed fix
+    assert {e["leg_speed_cm_s"] for e in _log(tmp_path)} == {40}
+
+
+def test_load_mission_reads_the_tuning_fields(tmp_path):
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps({"schema_version": "cube-mission-v1", "max_trim_rounds": 10,
+                                "leg_speed_cm_s": 35,
+                                "waypoints": [{"name": "A", "x_cm": 250, "y_cm": 250, "z_cm": 100}]}))
+    mission = load_mission(path)
+    assert (mission.max_trim_rounds, mission.leg_speed_cm_s, mission.start_x_cm) == (10, 35, None)
+
+
+def test_load_mission_defaults_keep_the_old_behaviour(tmp_path):
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps({"schema_version": "cube-mission-v1",
+                                "waypoints": [{"name": "A", "x_cm": 250, "y_cm": 250, "z_cm": 100}]}))
+    mission = load_mission(path)
+    assert (mission.max_trim_rounds, mission.leg_speed_cm_s) == (2, 20)
