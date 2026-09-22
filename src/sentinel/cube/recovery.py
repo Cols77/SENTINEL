@@ -168,6 +168,17 @@ class RecoveryController:
             return self._terminal(environment, "lost_or_stale_pose")
         # Age and accumulated uncertainty must come from the tracker at admission.
         pose = current
+        superseded = (self._pending is not None and (
+            self._pending.pose_revision != current.pose_revision
+            or self._pending.measured_at != current.measured_at))
+        if superseded:
+            self._pending = None
+            self._pending_at = None
+            self._pose = None
+            self._restore = False
+            # Recheck a stationary attempt at the new measured pose. Retain the
+            # original deadline and attempt count so fresh fixes cannot extend
+            # the bounded recovery budget or revive the cancelled action.
         if self._started_at is None:
             self._started_at = now
         profile = self.tracker.profile
@@ -190,7 +201,7 @@ class RecoveryController:
                                   upper_bound_s=profile.recovery_action_upper_bound_s,
                                   pose_revision=pose.pose_revision, measured_at=pose.measured_at)
 
-        if self._attempts == 0:
+        if self._attempts == 0 or superseded:
             action = make_action("STATIONARY_BURST", pose.heading_deg)
             if not self._can_recover(pose, environment, action):
                 return self._terminal(environment, "stationary_recovery_unavailable")

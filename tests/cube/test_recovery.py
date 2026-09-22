@@ -528,3 +528,81 @@ def test_full_aircraft_descent_footprint_must_fit_free_space_even_with_wide_land
     assert admit_terminal_contingency(narrow_free, records, contingency_id="NAVIGATION_UNAVAILABLE",
         trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, **context,
         now_monotonic_ms=11000, pose=value.health, energy_available=True) is None
+
+
+@pytest.mark.parametrize("pending_kind", ["STATIONARY_BURST", "YAW_BURST"])
+def test_next_action_cancels_superseded_work_and_rechecks_the_new_pose_clearance(pending_kind):
+    recovery, value, clock = controller()
+    env = replace(environment(), rotation_clearance_volumes=(RecoveryVolume(
+        "narrow", ((75, 75), (125, 75), (125, 125), (75, 125)), (0, 200)),))
+    pending = recovery.next_action(value.health, env, ())
+    if pending_kind == "YAW_BURST":
+        recovery.assess_burst(pending, ())
+        pending = recovery.next_action(value.health, env, ())
+    assert pending.kind == pending_kind and pending.pose_revision == 1
+    clock.now = 10.5
+    newest = value.accept_fix(fix(clock, position=Position(110, 100, 100)))
+    assert newest.pose_revision == 2
+    result = recovery.next_action(newest, env, ())
+    assert result.kind == "CONTINGENCY"
+    assert result.action_id != pending.action_id
+    assert not recovery.assess_burst(pending, reports(clock)).accepted
+    assert value.health == newest
+
+
+def test_next_action_rebinds_safe_recovery_after_a_new_fix_without_extending_attempt_budget():
+    recovery, value, clock = controller()
+    pending = recovery.next_action(value.health, environment(), ())
+    clock.now = 10.5
+    newest = value.accept_fix(fix(clock, position=Position(110, 100, 100)))
+    current = recovery.next_action(newest, environment(), ())
+    assert current.kind == "STATIONARY_BURST"
+    assert current.action_id != pending.action_id
+    assert current.pose_revision == newest.pose_revision and current.measured_at == newest.measured_at
+    recovery.max_attempts = 2  # the superseded admission still consumed its bounded attempt
+    recovery.assess_burst(current, ())
+    assert recovery.next_action(value.health, environment(), ()).kind == "CONTINGENCY"
+
+
+def test_adapter_and_terminal_share_normalized_milliseconds_at_fractional_clock_instants():
+    from sentinel.room.site import admit_terminal_contingency, RecoveryEnvironmentAdapter
+    _, value, clock = controller()
+    adapter = RecoveryEnvironmentAdapter(session_id="session", clock=clock)
+    records = (assurance(clock_domain_id=adapter.clock_domain_id),)
+    for now, normalized in ((11.0005, 11000), (12.0, 12000)):
+        clock.now = now
+        adapter.adapt(site(), records, navigation_contingency_id="NAVIGATION_UNAVAILABLE",
+                      mapped_heading_tag_ids=environment().mapped_heading_tag_ids)
+        assert admit_terminal_contingency(site(), records, contingency_id="NAVIGATION_UNAVAILABLE",
+            trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, session_id="session", clock_domain_id=adapter.clock_domain_id,
+            clock_guard=adapter.clock_guard, drift_profile=value.profile,
+            now_monotonic_ms=normalized, pose=value.health, energy_available=True) is not None
+
+
+@pytest.mark.parametrize("before,after", [(11.0005, 11.0004), (11.0011, 11.0009)])
+def test_actual_submillisecond_source_clock_regression_still_poisons_shared_guard(before, after):
+    from sentinel.room.site import admit_terminal_contingency, RecoveryEnvironmentAdapter
+    _, value, clock = controller()
+    adapter = RecoveryEnvironmentAdapter(session_id="session", clock=clock)
+    records = (assurance(clock_domain_id=adapter.clock_domain_id),)
+    clock.now = before
+    adapter.adapt(site(), records, navigation_contingency_id="NAVIGATION_UNAVAILABLE",
+                  mapped_heading_tag_ids=environment().mapped_heading_tag_ids)
+    clock.now = after
+    with pytest.raises(ValueError, match="clock"):
+        adapter.adapt(site(), records, navigation_contingency_id="NAVIGATION_UNAVAILABLE",
+                      mapped_heading_tag_ids=environment().mapped_heading_tag_ids)
+    assert admit_terminal_contingency(site(), records, contingency_id="NAVIGATION_UNAVAILABLE",
+        trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, session_id="session", clock_domain_id=adapter.clock_domain_id,
+        clock_guard=adapter.clock_guard, drift_profile=value.profile,
+        now_monotonic_ms=12000, pose=value.health, energy_available=True) is None
+
+
+def test_clock_guard_normalizes_fractional_and_integer_observations_to_one_tick_precision():
+    from sentinel.room.site import SessionClockGuard
+    guard = SessionClockGuard(session_id="session")
+    bindings = {"session_id": guard.session_id, "clock_domain_id": guard.clock_domain_id}
+    assert guard.observe(11000.5, **bindings)
+    assert guard.observe(11000, **bindings)  # same floor-normalized clock tick
+    assert guard.observe(12000, **bindings)
+    assert not guard.observe(11999.9, **bindings)

@@ -269,19 +269,30 @@ def adapt_recovery_environment(site: RoomSite, assurances: tuple[ContingencyAssu
                                navigation_contingency_id, deadline)
 
 
+def _floor_monotonic_ms(value: int | float) -> int:
+    """Normalize every assurance-clock observation to an integer millisecond tick."""
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0):
+        raise ValueError("invalid monotonic clock observation")
+    return math.floor(value)
+
+
 class SessionClockGuard:
     """One session's monotonic history, shared by every clearance consumer.
 
     The owner creates one guard at session setup. A new guard always mints a new
     clock domain, so restarting cannot import assurances from an old process.
     A regression permanently poisons the existing guard, even after expiry.
+    Observations are floor-normalized to integer milliseconds before comparison;
+    values in the same tick are equal. Adapters separately check their raw clock
+    source for actual sub-millisecond regressions and invalidate this shared guard.
     """
     def __init__(self, *, session_id: str):
         if not session_id:
             raise ValueError("clock guard requires a session identity")
         self._session_id = session_id
         self._clock_domain_id = str(uuid.uuid4())
-        self._last_now_ms: float | None = None
+        self._last_now_ms: int | None = None
         self._failed = False
 
     @property
@@ -292,13 +303,20 @@ class SessionClockGuard:
     def clock_domain_id(self) -> str:
         return self._clock_domain_id
 
+    def invalidate(self) -> None:
+        """Permanently reject this clock domain after a source-level failure."""
+        self._failed = True
+
     def observe(self, now_monotonic_ms: float, *, session_id: str, clock_domain_id: str) -> bool:
         if (session_id, clock_domain_id) != (self.session_id, self.clock_domain_id):
             return False
-        if (isinstance(now_monotonic_ms, bool) or not isinstance(now_monotonic_ms, (int, float))
-                or not math.isfinite(now_monotonic_ms) or now_monotonic_ms < 0
-                or (self._last_now_ms is not None and now_monotonic_ms < self._last_now_ms)):
-            self._failed = True
+        try:
+            now_monotonic_ms = _floor_monotonic_ms(now_monotonic_ms)
+        except ValueError:
+            self.invalidate()
+            return False
+        if self._last_now_ms is not None and now_monotonic_ms < self._last_now_ms:
+            self.invalidate()
         if self._failed:
             return False
         self._last_now_ms = now_monotonic_ms
@@ -320,17 +338,31 @@ class RecoveryEnvironmentAdapter:
         self.session_id = self.clock_guard.session_id
         self.clock_domain_id = self.clock_guard.clock_domain_id
         self.clock = clock
-        if not self.clock_guard.observe(clock() * 1000, session_id=self.session_id, clock_domain_id=self.clock_domain_id):
-            raise ValueError("clock guard is invalid")
+        self._last_clock_seconds: float | None = None
+        self._observe_clock()
+
+    def _observe_clock(self) -> int:
+        now = self.clock()
+        try:
+            if isinstance(now, bool) or not isinstance(now, (int, float)):
+                raise ValueError("invalid clock source")
+            now_ms = _floor_monotonic_ms(now * 1000)
+        except ValueError:
+            self.clock_guard.invalidate()
+            raise ValueError("invalid session clock source") from None
+        if self._last_clock_seconds is not None and now < self._last_clock_seconds:
+            self.clock_guard.invalidate()
+        self._last_clock_seconds = now
+        if not self.clock_guard.observe(now_ms, session_id=self.session_id, clock_domain_id=self.clock_domain_id):
+            raise ValueError("clock reset invalidated this session clock domain")
+        return now_ms
 
     def adapt(self, site: RoomSite, assurances: tuple[ContingencyAssurance, ...], *,
               navigation_contingency_id: str, mapped_heading_tag_ids) -> RecoveryEnvironment:
-        now = self.clock()
-        if not self.clock_guard.observe(now * 1000, session_id=self.session_id, clock_domain_id=self.clock_domain_id):
-            raise ValueError("clock reset invalidated this session clock domain")
+        now_ms = self._observe_clock()
         return adapt_recovery_environment(site, assurances, session_id=self.session_id,
             clock_domain_id=self.clock_domain_id, navigation_contingency_id=navigation_contingency_id,
-            now_monotonic_ms=math.floor(now * 1000), mapped_heading_tag_ids=mapped_heading_tag_ids)
+            now_monotonic_ms=now_ms, mapped_heading_tag_ids=mapped_heading_tag_ids)
 
 
 def admit_terminal_contingency(site: RoomSite, assurances: tuple[ContingencyAssurance, ...], *,
@@ -348,6 +380,7 @@ def admit_terminal_contingency(site: RoomSite, assurances: tuple[ContingencyAssu
     if clock_guard is None or not clock_guard.observe(now_monotonic_ms,
             session_id=session_id, clock_domain_id=clock_domain_id):
         return None
+    now_monotonic_ms = _floor_monotonic_ms(now_monotonic_ms)
     site.validate(real_mode=True)
     entries = [item for item in site.terminal_contingencies if item.contingency_id == contingency_id and item.trigger == trigger]
     if len(entries) != 1 or not energy_available:
