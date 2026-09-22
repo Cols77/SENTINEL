@@ -113,6 +113,54 @@ class NoOpMissionObserver:
         return None
 
 
+def runner_started(observer: MissionObserver | None, run_id: str, runner: Any) -> None:
+    """Required safety admission hook; unlike ``notify``, failures propagate."""
+    hook = getattr(observer, "runner_started", None)
+    if hook is not None:
+        hook(run_id, runner)
+
+
+def runner_finished(observer: MissionObserver | None, run_id: str, runner: Any) -> None:
+    """Required safety release hook; unlike display telemetry, it is not swallowed."""
+    hook = getattr(observer, "runner_finished", None)
+    if hook is not None:
+        hook(run_id, runner)
+
+
+def pose_summary(estimate: Any) -> dict[str, Any]:
+    report = getattr(estimate, "report", estimate)
+    return {
+        "report_id": getattr(report, "report_id", None),
+        "run_id": getattr(report, "run_id", None),
+        "point": list(getattr(report, "point", ())),
+        "heading_deg": getattr(report, "heading_deg", None),
+        "method": getattr(report, "method", None),
+        "reprojection_error_px": getattr(report, "reprojection_error_px", None),
+    }
+
+
+def evidence_summary(evidence: Any) -> dict[str, Any]:
+    if evidence is None:
+        return {"artifact_id": None, "sha256": None, "width_px": None, "height_px": None, "tags": []}
+    tags = []
+    for tag in getattr(evidence, "tags", ()):
+        tags.append({
+            "tag_id": getattr(tag, "tag_id", None),
+            "corners_xy_normalized": [list(point) for point in getattr(tag, "corners_xy_normalized", ())],
+            "status": getattr(tag, "status", None),
+            "reason_code": getattr(tag, "reason_code", None),
+            "zone_id": getattr(tag, "zone_id", None),
+            "reprojection_error_px": getattr(tag, "reprojection_error_px", None),
+        })
+    return {
+        "artifact_id": getattr(evidence, "artifact_id", None),
+        "sha256": getattr(evidence, "sha256", None),
+        "width_px": getattr(evidence, "width_px", None),
+        "height_px": getattr(evidence, "height_px", None),
+        "tags": tags,
+    }
+
+
 def notify(observer: MissionObserver | None, event: MissionEvent) -> None:
     """Best-effort notification; observer/display failures are isolated."""
     if observer is None:

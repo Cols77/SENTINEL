@@ -42,6 +42,26 @@ def test_scenario_interruption_emits_abort_and_failed_lifecycle_not_pass(tmp_pat
             a.flight.fly(a.options[0])
     finally:
         scenarios.FlightTestRunner=old
-    assert any(isinstance(e, AbortEvent) for e in observer.events)
     assert any(isinstance(e, RunnerLifecycleEvent) and e.status in {'FAILED','EMERGENCY_ABORTED'} for e in observer.events)
     assert not any(isinstance(e, RunnerLifecycleEvent) and e.status=='PASS' for e in observer.events)
+
+
+def test_survey_interruption_has_one_authoritative_abort_stage(tmp_path):
+    a=build_rehearsal_adapters('fixtures/mission-control/clean-computer.json',tmp_path/'images')
+    class Observer:
+        def __init__(self): self.events=[]
+        def observe(self,event): self.events.append(event)
+    observer=Observer()
+    def interrupted(_option):
+        raise EmergencyAborted('SESSION_EMERGENCY')
+    a.flight.fly=interrupted
+    store=SurveyStore.open(tmp_path/'survey.sqlite')
+    try:
+        with pytest.raises(EmergencyAborted):
+            run_survey(store=store,run_id='r',request_text='count computers',options=a.options,
+                       policy=a.policy,flight=a.flight,detector=a.detector,writer=a.writer,
+                       on_approval=lambda _candidate: True,observer=observer)
+    finally:
+        store.connection.close()
+    aborts=[e for e in observer.events if isinstance(e, AbortEvent)]
+    assert len(aborts)==1 and aborts[0].stage=='FLIGHT'

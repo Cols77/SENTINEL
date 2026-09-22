@@ -23,7 +23,6 @@ class RuntimeMissionObserver:
         if isinstance(event, RunnerLifecycleEvent):
             # Safety admission is handled by the same lifecycle, atomically with
             # the registry's existing latch/close checks.
-            self.runtime.registry.observe(event)
             if event.status == 'STARTED':
                 self.runtime._publish_structured(self.run_id, 'RUN_STARTED', 'FLIGHT', event)
             elif event.status not in {'STARTED'}:
@@ -54,6 +53,12 @@ class RuntimeMissionObserver:
                 elif isinstance(event, PoseHealthEvent) and event.value is not None:
                     feed.accept_health(event.value)
             return
+
+    def runner_started(self, run_id, runner):
+        self.runtime.registry.runner_started(run_id, runner)
+
+    def runner_finished(self, run_id, runner):
+        self.runtime.registry.runner_finished(run_id, runner)
 
 class SurveyRuntime:
     def __init__(self, survey_db, ui_store, adapters, approval, safety_registry):
@@ -87,7 +92,8 @@ class SurveyRuntime:
         elif isinstance(event, DetectorResultEvent):
             payload.update(status=event.status, latency_ms=event.latency_ms, error=event.error)
         elif isinstance(event, (AbortEvent, PublicEscalationEvent)):
-            payload.update(reason=getattr(event, 'reason', ''), point=getattr(event, 'point', ''))
+            payload.update(reason=getattr(event, 'reason', ''), point=getattr(event, 'point', ''),
+                           stage=getattr(event, 'stage', ''))
         with self.lock:
             state=self.state.setdefault(run_id,{})
             state['phase']=phase; state['updated_at']=now()

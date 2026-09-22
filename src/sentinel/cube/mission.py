@@ -33,9 +33,10 @@ from sentinel.pose.stream import _to_bgr, run_pose_stream
 from sentinel.pose.watchdog import (POLL_INTERVAL_S, PoseWatchdog, post_land_travel_cm,
                                     trip_margin_cm)
 from sentinel.runner import FlightTestRunner
-from sentinel.mission_observer import (AbortEvent, FrameCapturedEvent, MissionObserver,
+from sentinel.mission_observer import (FrameCapturedEvent, MissionObserver,
                                         PoseEstimateEvent, PoseHealthEvent, RunnerLifecycleEvent,
-                                        StopProgressEvent, notify)
+                                        StopProgressEvent, notify, evidence_summary,
+                                        pose_summary, runner_finished, runner_started)
 
 POSE_MODES = ("off", "passive", "reanchor")
 MAX_WAYPOINTS = 8
@@ -290,24 +291,23 @@ class CubeMissionRunner(FlightTestRunner):
 
     def run(self, *, confirm: bool):
         """Run with typed lifecycle telemetry layered over the legacy runner."""
-        notify(self.observer, RunnerLifecycleEvent(
-            run_id=self.run_id, stage="MISSION", status="STARTED", runner=self))
+        runner_started(self.observer, self.run_id, self)
         try:
-            report = super().run(confirm=confirm)
-        except Exception as exc:
-            notify(self.observer, AbortEvent(
-                run_id=self.run_id, stage="MISSION", reason=str(exc)))
             notify(self.observer, RunnerLifecycleEvent(
-                run_id=self.run_id, stage="MISSION", status="FAILED", message=str(exc),
-                runner=self))
-            raise
-        notify(self.observer, RunnerLifecycleEvent(
-            run_id=self.run_id, stage="MISSION", status=report.status,
-            message=getattr(report, "error", None), runner=self))
-        if report.status not in {"PASS", "COMPLETE"}:
-            notify(self.observer, AbortEvent(
-                run_id=self.run_id, stage="MISSION", reason=getattr(report, "error", None) or report.status))
-        return report
+                run_id=self.run_id, stage="MISSION", status="STARTED", runner=self))
+            try:
+                report = super().run(confirm=confirm)
+            except Exception as exc:
+                notify(self.observer, RunnerLifecycleEvent(
+                    run_id=self.run_id, stage="MISSION", status="FAILED", message=str(exc),
+                    runner=self))
+                raise
+            notify(self.observer, RunnerLifecycleEvent(
+                run_id=self.run_id, stage="MISSION", status=report.status,
+                message=getattr(report, "error", None), runner=self))
+            return report
+        finally:
+            runner_finished(self.observer, self.run_id, self)
 
     # -- planning -----------------------------------------------------------
     def _validate_mission(self) -> None:
@@ -555,8 +555,8 @@ class CubeMissionRunner(FlightTestRunner):
                 pass
         notify(self.observer, PoseEstimateEvent(
             run_id=self.run_id,
-            pose=getattr(estimate, "__dict__", None),
-            evidence=getattr(getattr(estimate, "evidence", None), "__dict__", None),
+            pose=pose_summary(estimate),
+            evidence=evidence_summary(getattr(estimate, "evidence", None)),
             estimate=estimate))
 
     def _accept_pose_health(self, health) -> None:

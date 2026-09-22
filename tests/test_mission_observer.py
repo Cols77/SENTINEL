@@ -1,4 +1,6 @@
 from dataclasses import is_dataclass
+import json
+import pytest
 
 from sentinel.mission_observer import (
     AbortEvent,
@@ -13,6 +15,8 @@ from sentinel.mission_observer import (
     RunnerLifecycleEvent,
     StopProgressEvent,
     notify,
+    pose_summary,
+    evidence_summary,
 )
 from sentinel.ui.safety import SafetyRegistry
 from sentinel.ui.runtime import RuntimeMissionObserver
@@ -61,10 +65,58 @@ def test_runner_lifecycle_observer_binds_and_unbinds_safety_registry():
 
     registry = SafetyRegistry()
     runner = Runner()
-    registry.observe(RunnerLifecycleEvent(run_id="r", status="STARTED", runner=runner))
+    registry.runner_started("r", runner)
     assert registry.get("r") is runner
-    registry.observe(RunnerLifecycleEvent(run_id="r", status="PASS", runner=runner))
+    registry.runner_finished("r", runner)
     assert registry.get("r") is None
+
+
+def test_safety_admission_refuses_latched_closing_and_duplicate_runners():
+    class Runner:
+        def latch_emergency(self):
+            self.latched = True
+
+    from sentinel.client import EmergencyAborted
+    for setup in ("emergency", "closing"):
+        registry = SafetyRegistry()
+        if setup == "emergency":
+            registry.emergency.set()
+        else:
+            registry.closing = True
+        with pytest.raises(EmergencyAborted):
+            registry.runner_started("r", Runner())
+    registry = SafetyRegistry()
+    first, second = Runner(), Runner()
+    registry.runner_started("r", first)
+    with pytest.raises(RuntimeError, match="RUNNER_ALREADY_ACTIVE"):
+        registry.runner_started("r", second)
+
+
+def test_pose_event_metadata_is_allowlisted_and_excludes_private_encoded_image():
+    class Evidence:
+        artifact_id = "a"
+        sha256 = "b"
+        width_px = 640
+        height_px = 480
+        tags = (type("Tag", (), {"tag_id": 4, "name": "T4", "distance_m": 1.2,
+                                  "corners_xy_normalized": ((.1, .2),)})(),)
+        private_path = "C:/private/pose.png"
+    class Estimate:
+        report_id = "report"
+        run_id = "run"
+        point = (1.0, 2.0)
+        heading_deg = 90.0
+        method = "PNP"
+        reprojection_error_px = .5
+        evidence = Evidence()
+        encoded_png = b"PRIVATE-BYTES"
+        provider_secret = "do-not-leak"
+    pose = pose_summary(Estimate())
+    evidence = evidence_summary(Estimate.evidence)
+    encoded = json.dumps({"pose": pose, "evidence": evidence})
+    assert set(pose) == {"report_id", "run_id", "point", "heading_deg", "method", "reprojection_error_px"}
+    assert set(evidence) == {"artifact_id", "sha256", "width_px", "height_px", "tags"}
+    assert "PRIVATE" not in encoded and "private" not in encoded and "secret" not in encoded
 
 
 def test_pose_observer_keeps_exact_estimate_object_for_evidence_adapters():

@@ -40,6 +40,12 @@ class SafetyRegistry:
         elif event.status in {'PASS', 'COMPLETE', 'FAILED', 'FAIL', 'EMERGENCY_ABORTED'}:
             self.unbind(event.run_id, event.runner)
 
+    def runner_started(self, run_id, runner):
+        self.bind(run_id, runner)
+
+    def runner_finished(self, run_id, runner):
+        self.unbind(run_id, runner)
+
     def stop_admission(self):
         """Close admission atomically without suppressing controlled landing."""
         with self._lock:

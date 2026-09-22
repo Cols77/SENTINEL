@@ -13,7 +13,8 @@ from sentinel.survey.flight import FlightFrame
 from sentinel.survey.detector import ScriptedDetector
 from sentinel.survey.proposer import RuleProposer
 from sentinel.survey.observability import SYNTHETIC_LEVEL, IMAGE_WIDTH, IMAGE_HEIGHT, PRINCIPAL_X, PRINCIPAL_Y, FOCAL_PX
-from sentinel.mission_observer import (AbortEvent, RunnerLifecycleEvent, StopProgressEvent, notify)
+from sentinel.mission_observer import (RunnerLifecycleEvent, StopProgressEvent, notify,
+                                        runner_finished, runner_started)
 
 @dataclass(frozen=True)
 class ScenarioAdapters:
@@ -40,7 +41,9 @@ class ScenarioFlight:
 
     def fly(self, option):
         runner=FlightTestRunner(DryRunClient(),'dry-run')
-        if self.registry and self.observer is None:
+        if self.observer is not None:
+            runner_started(self.observer, self.run_id, runner)
+        elif self.registry:
             self.registry.bind(self.run_id,runner)
         notify(self.observer, RunnerLifecycleEvent(run_id=self.run_id, stage='MISSION', status='STARTED', runner=runner))
         self.flights+=1
@@ -62,14 +65,15 @@ class ScenarioFlight:
             return result
         except Exception as exc:
             status = 'EMERGENCY_ABORTED' if isinstance(exc, EmergencyAborted) else 'FAILED'
-            notify(self.observer, AbortEvent(run_id=self.run_id, stage='MISSION', reason=str(exc)))
             notify(self.observer, RunnerLifecycleEvent(run_id=self.run_id, stage='MISSION', status=status,
                                                         message=str(exc), runner=runner))
             raise
         finally:
             if succeeded:
                 notify(self.observer, RunnerLifecycleEvent(run_id=self.run_id, stage='MISSION', status='PASS', runner=runner))
-            if self.registry and self.observer is None:
+            if self.observer is not None:
+                runner_finished(self.observer, self.run_id, runner)
+            elif self.registry:
                 self.registry.unbind(self.run_id,runner)
 
 
