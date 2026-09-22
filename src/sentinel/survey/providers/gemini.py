@@ -55,6 +55,17 @@ GENERATE_URL_TEMPLATE = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent")
 
 
+#: What a class name means, said to the model. Operator decision 2026-09-22:
+#: a computer is a laptop or a desktop monitor, never a printer -- the second
+#: real-frame spike returned an office printer as "computer, high". The label
+#: asked back is the bare class name, so the bare word "monitor" stays out of
+#: CLASS_MAP (rev 3 R6: it turned projector screens into computers).
+CLASS_HINTS = {
+    "computer": "a laptop or a desktop computer monitor; not a printer, television, "
+                "projector screen or any other appliance",
+}
+
+
 def _to_fractional_box(box_2d) -> dict[str, float] | None:
     """``box_2d`` is ``[ymin, xmin, ymax, xmax]`` on a 0-1000 scale. Returns
     the ``(x, y, width, height)`` fraction ``normalise`` expects, or
@@ -71,16 +82,34 @@ def _to_fractional_box(box_2d) -> dict[str, float] | None:
     }
 
 
+def _strip_fence(text: str) -> str:
+    """Gemini wraps JSON in a markdown fence (```json ... ```) unless a
+    response schema is set, which this adapter does not set."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+    return text.strip()
+
+
+def _text_from(raw: dict) -> str:
+    """Google's own response (``candidates``) or an OpenAI-compatible one
+    (``choices``, as OpenRouter returns it)."""
+    if "choices" in raw:
+        return raw["choices"][0]["message"]["content"]
+    return raw["candidates"][0]["content"]["parts"][0]["text"]
+
+
 def _items_from(raw: dict) -> list[dict] | None:
     """Gemini answers in free-form text even when the prompt asks for JSON,
     so the detection list is nested inside the first candidate's text
     part. Returns ``None`` -- never raises -- for any shape this adapter
     does not recognise; the caller turns that into ``PROVIDER_ERROR``."""
     try:
-        text = raw["candidates"][0]["content"]["parts"][0]["text"]
-        parsed = json.loads(text)
+        parsed = json.loads(_strip_fence(_text_from(raw)))
         items = parsed["objects"] if isinstance(parsed, dict) else parsed
-    except (KeyError, IndexError, TypeError, ValueError):
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
         return None
     return items if isinstance(items, list) else None
 
@@ -93,37 +122,61 @@ class GeminiDetector:
     never constructed by this class itself.
     """
 
+    provider = "gemini"
+
     def __init__(self, api_key: str, model: str, session=None) -> None:
         self.api_key = api_key
         self.model = model
         self.session = session
 
-    def detect(self, image_path: str, classes: tuple[str, ...]) -> DetectionBatch:
-        image_bytes = read_image_bytes(image_path)
-        prompt = (
-            "Detect every instance of: " + ", ".join(classes) + '. Return a JSON object '
-            '{"objects": [...]} whose items each have "label", "box_2d" as '
-            '[ymin, xmin, ymax, xmax] scaled 0 to 1000, and "description".')
+    def _request(self, prompt: str, image_path: str, image_bytes: bytes):
         payload = {
             "contents": [{"parts": [
                 {"text": prompt},
                 {"inline_data": {"mime_type": guess_mime_type(image_path),
                                 "data": encode_image_base64(image_bytes)}},
             ]}],
+            "generationConfig": {"responseMimeType": "application/json", "temperature": 0},
         }
         url = GENERATE_URL_TEMPLATE.format(model=self.model)
         headers = {"x-goog-api-key": self.api_key, "Content-Type": "application/json"}
+        return url, headers, payload
+
+    @staticmethod
+    def _resolved_model(raw: dict):
+        return raw.get("modelVersion")
+
+    def detect(self, image_path: str, classes: tuple[str, ...]) -> DetectionBatch:
+        image_bytes = read_image_bytes(image_path)
+        # Spike 2026-09-22 (5 garden stills, google/gemini-2.5-flash via OpenRouter):
+        # asked only for "a JSON object", an empty scene came back as a prose
+        # sentence (4 of 5 frames -> PROVIDER_ERROR), and a person in a tile mural
+        # came back as a person. Hence JSON mode on both endpoints, the empty
+        # answer spelled out, real objects only, and a confidence word -- without
+        # one every Gemini sighting was banded "low" and could never confirm.
+        prompt = (
+            "Detect every real, physical instance of: "
+            + ", ".join(f"{name} ({CLASS_HINTS[name]})" if name in CLASS_HINTS else name
+                        for name in classes) + ". "
+            "Ignore pictures, drawings, reflections and screens showing them. "
+            'Return only a JSON object {"objects": [...]} whose items each have '
+            '"label" (exactly one of the names above, without the words in brackets), '
+            '"box_2d" as [ymin, xmin, ymax, xmax] scaled 0 to 1000, '
+            '"confidence" as one of "high", "medium" or "low", and "description". '
+            'If there are none, return {"objects": []}.')
+        url, headers, payload = self._request(prompt, image_path, image_bytes)
 
         try:
             raw = post_json(self.session, url, headers=headers, payload=payload,
-                            provider="gemini")
+                            provider=self.provider)
         except ProviderError:
             return DetectionBatch((), "PROVIDER_ERROR")
 
-        resolved_model = raw.get("modelVersion")
+        resolved_model = self._resolved_model(raw)
         if resolved_model != self.model:
             raise ModelIdentityMismatch(
-                f"gemini: pinned {self.model!r} but the provider resolved {resolved_model!r}")
+                f"{self.provider}: pinned {self.model!r} but the provider resolved "
+                f"{resolved_model!r}")
 
         items = _items_from(raw)
         if items is None:
@@ -133,10 +186,49 @@ class GeminiDetector:
         for item in items:
             if not isinstance(item, dict):
                 continue
-            entry = {"label": item.get("label", ""), "description": item.get("description")}
+            entry = {"label": item.get("label", ""), "description": item.get("description"),
+                     "confidence": item.get("confidence")}
             box = _to_fractional_box(item.get("box_2d"))
             if box is not None:
                 entry.update(box)
             converted.append(entry)
 
         return to_detection_batch(normalise(converted), raw)
+
+
+#: OpenRouter's OpenAI-compatible endpoint. Moondream is not listed there
+#: (checked 2026-09-22 against https://openrouter.ai/api/v1/models); Gemini
+#: Flash models are.
+OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+class OpenRouterGeminiDetector(GeminiDetector):
+    """The same Gemini model and prompt, reached through OpenRouter with the
+    key the repository already holds (``OPENROUTER_API_KEY``). The box format
+    (``box_2d`` 0-1000) is the model's, not the endpoint's, so parsing is
+    shared; only the envelope differs: the image goes as a ``data:`` URL in
+    an ``image_url`` part, the answer comes back in ``choices``, and the
+    resolved model is the response's ``model`` field, pinned exactly
+    (e.g. ``google/gemini-2.5-flash``)."""
+
+    provider = "gemini-openrouter"
+
+    def _request(self, prompt: str, image_path: str, image_bytes: bytes):
+        data_url = (f"data:{guess_mime_type(image_path)};base64,"
+                    f"{encode_image_base64(image_bytes)}")
+        payload = {
+            "model": self.model,
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]}],
+        }
+        headers = {"Authorization": f"Bearer {self.api_key}",
+                   "Content-Type": "application/json"}
+        return OPENROUTER_CHAT_URL, headers, payload
+
+    @staticmethod
+    def _resolved_model(raw: dict):
+        return raw.get("model")

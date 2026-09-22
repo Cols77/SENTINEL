@@ -73,7 +73,7 @@ from sentinel.survey.loop import run_survey  # noqa: E402
 from sentinel.survey.observability import CAMERAS, SYNTHETIC_LEVEL, TELLO_MEASURED  # noqa: E402
 from sentinel.survey.options import generate_options  # noqa: E402
 from sentinel.survey.proposer import JevProposer, LlmProposer, RuleProposer  # noqa: E402
-from sentinel.survey.providers.gemini import GeminiDetector  # noqa: E402
+from sentinel.survey.providers.gemini import GeminiDetector, OpenRouterGeminiDetector  # noqa: E402
 from sentinel.survey.providers.moondream import MoondreamDetector  # noqa: E402
 from sentinel.survey.store import SurveyStore  # noqa: E402
 
@@ -81,6 +81,9 @@ from sentinel.survey.store import SurveyStore  # noqa: E402
 _PROVIDER_ENV = {
     "moondream": ("MOONDREAM_API_KEY", "MOONDREAM_MODEL", MoondreamDetector),
     "gemini": ("GEMINI_API_KEY", "GEMINI_MODEL", GeminiDetector),
+    # the same Gemini model through OpenRouter, on the key the repo already holds
+    "gemini-openrouter": ("OPENROUTER_API_KEY", "GEMINI_OPENROUTER_MODEL",
+                          OpenRouterGeminiDetector),
 }
 
 #: The same fixed envelope used across the survey test suite (tests/survey/
@@ -99,11 +102,13 @@ _PLURAL = {"computer": "computers", "person": "people", "phone": "phones", "pen"
 class _DefaultJudge:
     """Offline, no-network stand-in for ``--mode J`` when no live judge is
     wired in (Task 12's provider gate is separate and still closed).
-    Deterministic -- always the alphabetically-first candidate, at high
-    confidence -- so a replay run is repeatable."""
+    Deterministic -- always the first candidate offered, the same one
+    ``rules`` takes, at high confidence -- so a replay run is repeatable.
+    (It used to take the alphabetically first label, which is the two-stop
+    close look: a first sweep that cannot confirm anything.)"""
 
     def choice(self, state, instruction, *, criteria, name):
-        label = sorted(criteria)[0]
+        label = next(iter(criteria))
         return {"value": label, "confidence": 0.9,
                 "probabilities": {label: 0.9,
                                   **{k: 0.02 for k in criteria if k != label}}}
@@ -129,29 +134,62 @@ class _DefaultAdapter:
                            "reason": "default offline stand-in: first legal sweep"}}]}
 
 
+#: Who picks the sweep. The letters are the project's architecture names (F, E, J in
+#: the coordinator's specs and in every audit record) and stay valid as aliases; the
+#: words say what each one does.
+#:   rules (F) - code picks: the first legal sweep, no model involved.
+#:   judge (J) - a model picks ONE of the offered sweeps; code checks its confidence
+#:               and margin and writes the justification.
+#:   agent (E) - a model writes the tool call itself, with its own reason; code
+#:               validates that the call is legal.
+MODE_NAMES = {"rules": "F", "judge": "J", "agent": "E"}
+MODE_WORDS = {letter: word for word, letter in MODE_NAMES.items()}
+
+
+def _mode_letter(value: str) -> str:
+    return MODE_NAMES.get(value, value)
+
+
 LIVE_JUDGE_BASE_URL = "https://openrouter.ai/api"
 LIVE_JUDGE_KEY_ENV = "OPENROUTER_API_KEY"
+
+
+def _require_paid_go_ahead(args, flag: str) -> None:
+    if not args.i_authorise_paid_calls:
+        raise ValueError(f"{flag} makes paid calls (at most 3 per run); "
+                         "pass --i-authorise-paid-calls to go ahead")
+    from sentinel.env_file import load_env_file
+    load_env_file()
+    if not os.environ.get(LIVE_JUDGE_KEY_ENV):
+        raise ValueError(f"{flag} needs {LIVE_JUDGE_KEY_ENV} in the environment or .env")
+
+
+def _live_agent(args):
+    """None (the offline stand-in) unless the operator asked for the live agent:
+    a model writes the tool call and its reason (survey.llm_adapter). Approved by
+    the operator 2026-09-22; every run's paid calls still need the flag."""
+    if not args.live_agent:
+        return None
+    if args.mode != "E":
+        raise ValueError("--live-agent only applies to --mode agent")
+    _require_paid_go_ahead(args, "--live-agent")
+    from sentinel.survey.llm_adapter import LlmAdapter
+    return LlmAdapter(api_key_env=LIVE_JUDGE_KEY_ENV, base_url=LIVE_JUDGE_BASE_URL,
+                      model=args.llm_model)
 
 
 def _live_judge(args):
     """None (the offline default judge) unless the operator asked for a live one.
 
-    Only mode J has a live path. Its proposer takes a typed choice among the offered
-    sweeps and gates it on confidence and margin; the justification is written by
-    code. Mode E needs a model-written reason from a tool-calling adapter, which the
-    survey does not have, so a live E would mean inventing that reason here."""
+    Mode J's proposer takes a typed choice among the offered sweeps and gates it on
+    confidence and margin; the justification is written by code. Mode E's live path
+    is ``_live_agent``."""
     if args.live_judge == "none":
         return None
     if args.mode != "J":
-        raise ValueError("--live-judge only applies to --mode J")
-    if not args.i_authorise_paid_calls:
-        raise ValueError("--live-judge makes paid calls (at most 3 per run); "
-                         "pass --i-authorise-paid-calls to go ahead")
-    from sentinel.env_file import load_env_file
+        raise ValueError("--live-judge only applies to --mode judge")
+    _require_paid_go_ahead(args, "--live-judge")
     from sentinel.judgment import JevJudge, LlmJudge
-    load_env_file()
-    if not os.environ.get(LIVE_JUDGE_KEY_ENV):
-        raise ValueError(f"--live-judge needs {LIVE_JUDGE_KEY_ENV} in the environment or .env")
     if args.live_judge == "jev":
         return JevJudge(api_key_env=LIVE_JUDGE_KEY_ENV, base_url=LIVE_JUDGE_BASE_URL,
                         timeout_s=20.0)
@@ -185,11 +223,22 @@ def build_policy(mode: str, *, judge=None, adapter=None, sink) -> SurveyPolicy:
 
 
 def _default_writer(results: dict) -> str:
-    parts = [f"{entry['confirmed']} {_PLURAL[entry['class']]}" for entry in results["class_counts"]
-             if entry["method"] != "NOT_OBSERVABLE"]
+    parts = []
+    for entry in results["class_counts"]:
+        noun = _PLURAL[entry["class"]]
+        if entry["method"] == "NOT_OBSERVABLE":
+            continue
+        if entry["method"] == "SINGLE_VIEW_LOWER_BOUND":
+            parts.append(f"at least {entry['uncertain']} {noun}")
+        elif entry["uncertain"]:
+            parts.append(f"{entry['confirmed']} {noun} confirmed and up to "
+                         f"{entry['confirmed'] + entry['uncertain']} {noun} counting the ones "
+                         "I could not confirm")
+        else:
+            parts.append(f"{entry['confirmed']} {noun}")
     if not parts:
         return "No observable classes were confirmed this run."
-    return "I found " + ", ".join(parts) + "."
+    return "I found " + "; ".join(parts) + "."
 
 
 def _real_tello_client(args):
@@ -267,7 +316,10 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
         session=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--mode", choices=("F", "E", "J"), default="F")
+    parser.add_argument("--mode", choices=(*MODE_NAMES, "F", "J", "E"), default="rules",
+                        help="who picks the sweep: rules (code; alias F), judge (a model picks "
+                             "one of the offered sweeps, code gates it; alias J), agent (a "
+                             "model writes the call and its reason; alias E)")
     parser.add_argument("--scene", type=Path, default=None,
                         help="a Scene json (Task 9); when given, the summary also carries "
                              "a score_episode result")
@@ -285,13 +337,20 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
     parser.add_argument("--surface-z-cm", type=float, default=None,
                         help="tape-measured surface height, for the per-frame delta_z_cm "
                              "(V12); required with --site")
+    parser.add_argument("--takeoff-z-cm", type=float, default=None,
+                        help="height of the takeoff surface in the site frame; height? is "
+                             "measured from takeoff (default: the site file's, else 0)")
     parser.add_argument("--live-judge", choices=("none", "jev", "llm"), default="none",
                         help="--mode J only: a live model reads the request and picks the "
                              "sweep. jev = the Jev decision model, llm = a general LLM through "
                              "the same typed-choice interface. PAID: needs OPENROUTER_API_KEY "
                              "and --i-authorise-paid-calls (at most 3 calls per run)")
+    parser.add_argument("--live-agent", action="store_true",
+                        help="--mode agent only: a live model writes the tool call and the "
+                             "reason the operator reads at approval. PAID: needs "
+                             "OPENROUTER_API_KEY and --i-authorise-paid-calls (at most 3 calls)")
     parser.add_argument("--llm-model", default="z-ai/glm-5.3",
-                        help="model id for --live-judge llm")
+                        help="model id for --live-judge llm and --live-agent")
     parser.add_argument("--i-authorise-paid-calls", action="store_true",
                         help="the operator's explicit go-ahead for --live-judge")
     parser.add_argument("--start", default=None, metavar="X,Y",
@@ -314,10 +373,10 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
     parser.add_argument("--responses", type=Path, required=True,
                         help="a ReplayDetector responses dir (one json per frame); ignored "
                              "unless --detector replay")
-    parser.add_argument("--detector", choices=("replay", "moondream", "gemini"), default="replay",
+    parser.add_argument("--detector", choices=("replay", "moondream", "gemini", "gemini-openrouter"), default="replay",
                         help="replay (default) never leaves the machine; moondream/gemini are "
                              "live providers gated on an API key and recorded filming consent")
-    parser.add_argument("--fallback", choices=("none", "moondream", "gemini"), default="none",
+    parser.add_argument("--fallback", choices=("none", "moondream", "gemini", "gemini-openrouter"), default="none",
                         help="tried only when --detector cannot answer (plan section C3); "
                              "gated the same way --detector is")
     parser.add_argument("--db", type=Path, required=True)
@@ -335,6 +394,7 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
     parser.add_argument("--auto-approve", action="store_true",
                         help="tests and replay only -- a real flight always prompts")
     args = parser.parse_args(argv)
+    args.mode = _mode_letter(args.mode)
 
     if bool(args.site) == bool(args.frames):
         parser.error("exactly one of --frames or --site is required")
@@ -383,7 +443,8 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
             pose_mode=args.pose, run_id=run_id, mission_log=mission_log,
             capture_dir=capture_dir,
             start_x_cm=start[0], start_y_cm=start[1],
-            surface_z_cm=args.surface_z_cm, sr063_amended=args.sr063_amended,
+            surface_z_cm=args.surface_z_cm, takeoff_z_cm=args.takeoff_z_cm,
+            sr063_amended=args.sr063_amended,
             tag_map=tag_map, conn=conn,
             # A real flight always requires the explicit --confirm flag
             # (CubeMissionRunner.run() refuses without it regardless of
@@ -396,7 +457,7 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
 
     options = generate_options(envelope, camera)
     sink = JsonlAuditSink(args.db.with_suffix(".jsonl"))
-    policy = build_policy(args.mode, sink=sink, judge=_live_judge(args))
+    policy = build_policy(args.mode, sink=sink, judge=_live_judge(args), adapter=_live_agent(args))
     detector = build_detector(args.detector, args.responses, environ=environ, session=session)
     if args.fallback != "none":
         fallback_detector = build_provider_detector(args.fallback, environ=environ,
@@ -416,7 +477,8 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
         "outer_tolerance": sum(1 for r in frame_rows if r["tolerance"] == "OUTER"),
     }
 
-    summary: dict[str, Any] = {"run_id": run_id, "mode": args.mode, "camera": camera.name,
+    summary: dict[str, Any] = {"run_id": run_id, "mode": args.mode,
+                               "mode_name": MODE_WORDS[args.mode], "camera": camera.name,
                                "frame_counts": frame_counts, "outcome": outcome}
     if args.scene is not None:
         scene = load_scene(args.scene)

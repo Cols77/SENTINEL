@@ -122,7 +122,11 @@ def test_a_localised_stop_produces_measured_frames_with_heading(tmp_path):
     frame = frames[0]
     assert frame.position_kind == "MEASURED"
     assert (frame.x_cm, frame.y_cm) == (155.0, 303.0)         # the fix, not the commanded stop
-    assert frame.heading_deg == pytest.approx(95.0)           # the fix's heading, not FACING_DEG
+    # The fix's heading, not the nominal one -- and in the SURVEY's convention. The cube
+    # says 95 (5 degrees counter-clockwise of facing the tables, which is 90); the survey
+    # says -5 (0 faces the tables, clockwise positive). This assertion used to expect 95,
+    # which placed every object a quarter turn from where it was.
+    assert frame.heading_deg == pytest.approx(-5.0)
 
 
 def test_an_unlocalised_stop_falls_back_to_commanded_dead_reckoning(tmp_path):
@@ -133,7 +137,7 @@ def test_an_unlocalised_stop_falls_back_to_commanded_dead_reckoning(tmp_path):
     frame = frames[0]
     assert frame.position_kind == "COMMANDED"
     assert (frame.x_cm, frame.y_cm) == (150.0, 300.0)          # the commanded target
-    assert frame.heading_deg == FACING_DEG
+    assert frame.heading_deg == pytest.approx(0.0)            # facing the tables, survey convention
 
 
 def test_the_tolerance_verdict_is_carried_onto_the_frame(tmp_path):
@@ -151,6 +155,45 @@ def test_delta_z_cm_is_height_minus_surface(tmp_path):
     assert frame.z_cm == 120
     assert frame.delta_z_cm == pytest.approx(120 - 17.5)
 
+
+def test_takeoff_surface_height_is_added_to_the_takeoff_relative_altimeter(tmp_path):
+    """height? counts from the takeoff point; a pad 40 cm up puts the camera 40 cm higher."""
+    option = SweepOption("ONE_STOP", "one stop", ((150, 300),), 120, (0,), 100, 22, (), 300)
+    flight = CubeFlight(
+        client=DryRunClient(), site=FLY_SITE, mode="dry-run", pose_mode="off",
+        run_id="RUN1", mission_log=tmp_path / "mission.jsonl", start_x_cm=150, start_y_cm=250,
+        surface_z_cm=17.5, takeoff_z_cm=40.0, sleep_fn=lambda seconds: None)
+    frame = flight.fly(option)[0]
+    assert frame.z_cm == 160
+    assert frame.delta_z_cm == pytest.approx(160 - 17.5)
+
+
+def test_takeoff_height_comes_from_the_site_when_not_given(tmp_path):
+    class RaisedSite:
+        takeoff_z_cm = 25.0
+        def __getattr__(self, name):
+            return getattr(FLY_SITE, name)
+    flight = CubeFlight(
+        client=DryRunClient(), site=RaisedSite(), mode="dry-run", pose_mode="off",
+        run_id="RUN1", mission_log=tmp_path / "mission.jsonl", start_x_cm=150, start_y_cm=250,
+        surface_z_cm=0.0, sleep_fn=lambda seconds: None)
+    assert flight.takeoff_z_cm == 25.0
+
+
+def test_the_sites_altitude_bias_adds_to_the_frame_height(tmp_path):
+    """The drone hovers higher than height? says (tag-measured); the survey uses the real height."""
+    class BiasedSite:
+        altitude_bias_cm = 20.0
+        def __getattr__(self, name):
+            return getattr(FLY_SITE, name)
+    option = SweepOption("ONE_STOP", "one stop", ((150, 300),), 120, (0,), 100, 22, (), 300)
+    flight = CubeFlight(
+        client=DryRunClient(), site=BiasedSite(), mode="dry-run", pose_mode="off",
+        run_id="RUN1", mission_log=tmp_path / "mission.jsonl", start_x_cm=150, start_y_cm=250,
+        surface_z_cm=0.0, takeoff_z_cm=0.0, sleep_fn=lambda seconds: None)
+    frame = flight.fly(option)[0]
+    assert frame.z_cm == 140
+    assert frame.delta_z_cm == pytest.approx(140.0)
 
 def test_two_stops_in_one_option_each_produce_their_own_frame(tmp_path):
     fixes = iter([[_report(150, 300)] * 10, [_report(200, 350)] * 10])

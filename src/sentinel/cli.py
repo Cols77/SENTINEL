@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sqlite3
 import uuid
@@ -75,6 +76,9 @@ def build_parser() -> argparse.ArgumentParser:
     cube_run.add_argument("--db", type=Path, default=Path("artifacts/pose.db"))
     cube_run.add_argument("--mission-log", type=Path, default=Path("artifacts/cube-mission.jsonl"))
     cube_run.add_argument("--capture-dir", type=Path)
+    cube_run.add_argument("--takeoff-z-cm", type=float, default=None,
+                          help="height of the takeoff surface above the floor for this flight "
+                               "(overrides the site file's takeoff_z_cm)")
 
     scan = subparsers.add_parser(
         "yaw-scan",
@@ -198,6 +202,17 @@ def build_parser() -> argparse.ArgumentParser:
                         help="altitude in metres; repeatable (default 1.0 1.4 1.8)")
     layout.add_argument("--step", type=float, default=0.5)
     layout.add_argument("--trials", type=int, default=60)
+    layout.add_argument("--coverage", action="store_true",
+                        help="print the tag-coverage guard's OK/MARGINAL/BLIND map over the "
+                             "commanded area instead (altitudes from --alt, in metres)")
+
+    mission_check = subparsers.add_parser(
+        "cube-mission-check",
+        help="check every stop of a mission against the tag-coverage guard, without flying")
+    mission_check.add_argument("--site", type=Path, required=True)
+    mission_check.add_argument("--mission", type=Path, required=True)
+    mission_check.add_argument("--calibration-from", type=Path,
+                               default=Path("calibration/tag-map-calibrated.json"))
 
     emergency = subparsers.add_parser(
         "emergency", help="send an immediate motor-stop command"
@@ -787,6 +802,65 @@ def _run_cube_site_map(args: Any) -> int:
     return 0
 
 
+def _run_cube_coverage_map(args: Any) -> int:
+    from .cube.coverage import CoverageModel
+
+    try:
+        model = CoverageModel.from_files(load_site(args.site), args.calibration_from)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"cube-layout-check failed: {exc}", flush=True)
+        return 1
+    site = model.site
+    step_cm = max(10, round(args.step * 100))
+    print("cube-layout-check --coverage: O = OK (2+ tags whatever the hover error), M = MARGINAL "
+          "(1 tag at worst, or predicted error > 15 cm), B = BLIND (refused); the number is the "
+          f"worst-case tag count. Drone height = commanded + {site.height_offset_cm:.0f} cm "
+          f"(takeoff {site.takeoff_z_cm:.0f}, bias {site.altitude_bias_cm:.0f}).")
+    blind = 0
+    for alt_m in args.alt or [site.min_z_cm / 100.0, site.max_z_cm / 100.0]:
+        rows = model.grid(round(alt_m * 100), step_cm=step_cm)
+        print(f" commanded altitude {alt_m * 100:.0f} cm")
+        print("                 " + "".join(f"x={x:<5}" for x, _ in rows[0][1]))
+        for y, row in reversed(rows):
+            blind += sum(v.level == "BLIND" for _, v in row)
+            print(f"   {site.line_y_m * 100 - y:4.0f} cm from tags " +
+                  "".join(f"{v.level[0]}{v.min_tags:<6}" for _, v in row))
+    print(f" {blind} blind cell(s)")
+    return 0
+
+
+def _run_cube_mission_check(args: Any) -> int:
+    from .cube.coverage import CoverageModel
+    from .cube.mission import required_inset_cm, load_mission
+
+    try:
+        site, mission = load_site(args.site), load_mission(args.mission)
+        model = CoverageModel.from_files(site, args.calibration_from)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"cube-mission-check failed: {exc}", flush=True)
+        return 1
+    env = site.envelope()
+    problems = 0
+    if site.inset_m * 100 < required_inset_cm(mission.leg_speed_cm_s):
+        problems += 1
+        print(f"REFUSED legs at {mission.leg_speed_cm_s} cm/s need a "
+              f"{required_inset_cm(mission.leg_speed_cm_s):.0f} cm inset; the site has "
+              f"{site.inset_m * 100:.0f} cm")
+    for wp in mission.waypoints:
+        inside = (env.min_x_cm <= wp.x_cm <= env.max_x_cm and env.min_y_cm <= wp.y_cm <= env.max_y_cm
+                  and env.min_z_cm <= wp.z_cm <= env.max_z_cm)
+        verdict = model.verdict(wp.x_cm, wp.y_cm, wp.z_cm)
+        refused = not inside or (verdict.level == "BLIND" and wp.localise)
+        problems += refused
+        where = "" if inside else " OUTSIDE the commanded area"
+        print(f"{'REFUSED' if refused else 'ok     '} {wp.name:<10} ({wp.x_cm}, {wp.y_cm}, {wp.z_cm})"
+              f"{where} {verdict.describe()}{'' if wp.localise else ' (flown open loop)'}")
+    if mission.return_to_start:
+        print("ok      RETURN     to the measured takeoff point")
+    print(f"{problems} stop(s) refused" if problems else "mission passes the pre-flight checks")
+    return 1 if problems else 0
+
+
 def _run_cube_layout_check(args: Any) -> int:
     from .pose.layout import predict_grid
     from .pose.tagmap import TagMap
@@ -885,7 +959,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "cube-site-map":
         return _run_cube_site_map(args)
     if args.command == "cube-layout-check":
-        return _run_cube_layout_check(args)
+        return _run_cube_coverage_map(args) if args.coverage else _run_cube_layout_check(args)
+    if args.command == "cube-mission-check":
+        return _run_cube_mission_check(args)
 
     if args.real and not args.confirm:
         print("Real mode requires --confirm after the physical preflight.")
@@ -969,11 +1045,20 @@ def main(argv: list[str] | None = None) -> int:
                 args.db.parent.mkdir(parents=True, exist_ok=True)
                 cube_conn = sqlite3.connect(args.db)
                 ensure_schema(cube_conn)
+            site = load_site(args.site)
+            if args.takeoff_z_cm is not None:
+                site = dataclasses.replace(site, takeoff_z_cm=args.takeoff_z_cm)
+            coverage = None
+            if tag_map is not None:
+                from .cube.coverage import CoverageModel, check_tag_map_matches_site
+
+                check_tag_map_matches_site(tag_map, site)
+                coverage = CoverageModel(site, tag_map.doc["camera_calibration"])
             runner_kwargs.update({
-                "mission": load_mission(args.mission), "site": load_site(args.site),
+                "mission": load_mission(args.mission), "site": site,
                 "pose_mode": args.pose, "tag_map": tag_map, "conn": cube_conn,
                 "run_id": str(uuid.uuid4()), "mission_log": args.mission_log,
-                "capture_dir": args.capture_dir,
+                "capture_dir": args.capture_dir, "coverage": coverage,
             })
         runner = runner_type(
             client,

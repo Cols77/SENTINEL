@@ -6,7 +6,6 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-import time
 
 from sentinel.coordinator.agent_loop import AgentLoop
 from sentinel.coordinator.decision_state import DecisionState
@@ -119,18 +118,30 @@ class _RaisingAdvisor:
         raise RuntimeError("advisor exploded")
 
 
-class _SleepyAdvisor:
-    def __init__(self, sleep_s: float) -> None:
+class _BlockingAdvisor:
+    """Remain in flight until the test releases this advisor.
+
+    A fixed sleep is not a reliable timeout fixture because the shadow
+    deadline deliberately starts after the executor returns.  On a loaded
+    machine the advisor can finish while the executor is running.
+    """
+
+    def __init__(self) -> None:
         self.last: Decision | None = None
         self.calls = 0
-        self.sleep_s = sleep_s
+        self.started = threading.Event()
+        self._release = threading.Event()
 
     def decide(self, request: dict, context: PolicyContext) -> dict:
         self.calls += 1
-        time.sleep(self.sleep_s)
+        self.started.set()
+        self._release.wait()
         self.last = Decision(chooser="JEV", label="create_task", confidence=0.99, band="HIGH",
-                              legal_labels=context.legal.labels, model="sleepy-test", error=None, latency_ms=9999)
+                              legal_labels=context.legal.labels, model="blocking-test", error=None, latency_ms=9999)
         return {"ignored": True}
+
+    def release(self) -> None:
+        self._release.set()
 
 
 class _CountingAdvisor:
@@ -238,7 +249,7 @@ def test_non_interference_opposite_raising_and_timeout_advisors(tmp_path):
     scenarios = {
         "opposite": lambda: _OppositeAdvisor(),
         "raising": lambda: _RaisingAdvisor(),
-        "sleepy": lambda: _SleepyAdvisor(sleep_s=0.3),
+        "timeout": lambda: _BlockingAdvisor(),
     }
     for name, make_advisor in scenarios.items():
         sink = MemoryAuditSink()
@@ -247,12 +258,18 @@ def test_non_interference_opposite_raising_and_timeout_advisors(tmp_path):
         def _wrap(executor, _advisor=advisor, _sink=sink):
             return ShadowLadder(executor, [("bad", _advisor)], _sink, advisor_timeout_s=0.05)
 
-        events, result = _run_select_plan_only(tmp_path / name, _wrap)
-        assert events == baseline_events, name
-        assert result == baseline_result, name
-        # the ladder actually ran the advisor and swallowed whatever it did
-        assert advisor.calls == 1, name
-        assert sink.records[0]["advisors"]["bad"]["error"] is not None or name == "opposite", name
+        try:
+            events, result = _run_select_plan_only(tmp_path / name, _wrap)
+            if isinstance(advisor, _BlockingAdvisor):
+                assert advisor.started.wait(timeout=1.0), "timeout advisor was not invoked"
+            assert events == baseline_events, name
+            assert result == baseline_result, name
+            # the ladder actually ran the advisor and swallowed whatever it did
+            assert advisor.calls == 1, name
+            assert sink.records[0]["advisors"]["bad"]["error"] is not None or name == "opposite", name
+        finally:
+            if isinstance(advisor, _BlockingAdvisor):
+                advisor.release()
 
 
 def test_timed_out_advisor_call_never_races_a_later_call_on_the_same_instance():

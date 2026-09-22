@@ -302,3 +302,115 @@ def test_a_vlm_that_omits_its_confidence_is_still_banded_low():
     assert result.pairs[0][1] == "low"
     with pytest.raises(ValueError):
         normalise([], unscored_band="certain")
+
+
+def _openrouter_answer(text, model="google/gemini-2.5-flash"):
+    return FakeResponse(json_data={"model": model,
+                                   "choices": [{"message": {"role": "assistant", "content": text}}]})
+
+
+def test_gemini_through_openrouter_sends_the_image_as_a_data_url_with_a_bearer_key(frame):
+    from sentinel.survey.providers.gemini import OPENROUTER_CHAT_URL, OpenRouterGeminiDetector
+    session = FakeSession(_openrouter_answer('{"objects": []}'))
+    OpenRouterGeminiDetector(api_key="k", model="google/gemini-2.5-flash",
+                             session=session).detect(str(frame), ("computer",))
+
+    call = session.calls[0]
+    assert call["url"] == OPENROUTER_CHAT_URL
+    assert call["headers"]["Authorization"] == "Bearer k"
+    assert call["json"]["model"] == "google/gemini-2.5-flash"
+    image_part = next(p for p in call["json"]["messages"][0]["content"] if p["type"] == "image_url")
+    header, data = image_part["image_url"]["url"].split(",", 1)
+    assert header == "data:image/jpeg;base64"
+    assert base64.b64decode(data) == frame.read_bytes()
+
+
+def test_gemini_through_openrouter_parses_a_fenced_answer_into_the_same_boxes(frame):
+    """Gemini fences its JSON in markdown unless a response schema is set."""
+    from sentinel.survey.providers.gemini import OpenRouterGeminiDetector
+    body = {"objects": [{"label": "laptop", "box_2d": [500, 250, 700, 350],
+                         "description": "laptop on the table"}]}
+    session = FakeSession(_openrouter_answer("```json\n" + json.dumps(body) + "\n```"))
+    batch = OpenRouterGeminiDetector(api_key="k", model="google/gemini-2.5-flash",
+                                     session=session).detect(str(frame), ("computer",))
+
+    assert batch.status == "OK"
+    assert batch.detections[0]["bbox"] == {"x": 240, "y": 360, "width": 96, "height": 144}
+
+
+def test_gemini_direct_also_accepts_a_fenced_answer(frame):
+    body = {"objects": [{"label": "laptop", "box_2d": [500, 250, 700, 350]}]}
+    response = FakeResponse(json_data={
+        "modelVersion": "gemini-2.0-flash",
+        "candidates": [{"content": {"parts": [
+            {"text": "```json\n" + json.dumps(body) + "\n```"}]}}],
+    })
+    batch = GeminiDetector(api_key="k", model="gemini-2.0-flash",
+                           session=FakeSession(response)).detect(str(frame), ("computer",))
+    assert batch.status == "OK" and len(batch.detections) == 1
+
+
+def test_gemini_through_openrouter_refuses_a_different_resolved_model(frame):
+    from sentinel.survey.providers.gemini import OpenRouterGeminiDetector
+    session = FakeSession(_openrouter_answer('{"objects": []}',
+                                             model="google/gemini-2.5-flash-lite"))
+    with pytest.raises(ModelIdentityMismatch):
+        OpenRouterGeminiDetector(api_key="k", model="google/gemini-2.5-flash",
+                                 session=session).detect(str(frame), ("computer",))
+
+
+def test_gemini_asks_for_json_mode_on_both_endpoints(frame):
+    """Spike 2026-09-22: without JSON mode an empty scene came back as prose."""
+    from sentinel.survey.providers.gemini import OpenRouterGeminiDetector
+    direct = FakeSession(FakeResponse(json_data={
+        "modelVersion": "gemini-2.0-flash",
+        "candidates": [{"content": {"parts": [{"text": '{"objects": []}'}]}}]}))
+    GeminiDetector(api_key="k", model="gemini-2.0-flash", session=direct).detect(
+        str(frame), ("computer",))
+    assert direct.calls[0]["json"]["generationConfig"]["responseMimeType"] == "application/json"
+
+    routed = FakeSession(_openrouter_answer('{"objects": []}'))
+    OpenRouterGeminiDetector(api_key="k", model="google/gemini-2.5-flash",
+                             session=routed).detect(str(frame), ("computer",))
+    assert routed.calls[0]["json"]["response_format"] == {"type": "json_object"}
+
+
+def test_an_empty_gemini_scene_is_ok_not_a_provider_error(frame):
+    from sentinel.survey.providers.gemini import OpenRouterGeminiDetector
+    batch = OpenRouterGeminiDetector(
+        api_key="k", model="google/gemini-2.5-flash",
+        session=FakeSession(_openrouter_answer('{"objects": []}'))).detect(str(frame), ("computer",))
+    assert batch.status == "OK" and batch.detections == ()
+
+
+def test_a_prose_answer_is_still_a_provider_error_never_an_empty_scene(frame):
+    """The spike's failure: prose is not parsed into 'nothing there'."""
+    from sentinel.survey.providers.gemini import OpenRouterGeminiDetector
+    batch = OpenRouterGeminiDetector(
+        api_key="k", model="google/gemini-2.5-flash",
+        session=FakeSession(_openrouter_answer("I did not find any bounding box detections."))
+    ).detect(str(frame), ("computer",))
+    assert batch.status == "PROVIDER_ERROR"
+
+
+def test_gemini_confidence_word_bands_the_sighting_so_it_can_confirm(frame):
+    from sentinel.survey.providers.gemini import OpenRouterGeminiDetector
+    body = {"objects": [{"label": "laptop", "box_2d": [500, 250, 700, 350], "confidence": "high"}]}
+    batch = OpenRouterGeminiDetector(
+        api_key="k", model="google/gemini-2.5-flash",
+        session=FakeSession(_openrouter_answer(json.dumps(body)))).detect(str(frame), ("computer",))
+    assert batch.bands == ("high",)
+    assert batch.detections[0]["score_kind"] == "VLM_CONFIDENCE_BAND"
+
+
+def test_gemini_is_told_a_computer_is_a_laptop_or_monitor_and_never_a_printer(frame):
+    """Operator decision 2026-09-22, after a real frame's printer came back as a computer."""
+    from sentinel.survey.providers.gemini import OpenRouterGeminiDetector
+    session = FakeSession(_openrouter_answer('{"objects": []}'))
+    OpenRouterGeminiDetector(api_key="k", model="google/gemini-2.5-flash",
+                             session=session).detect(str(frame), ("computer", "phone"))
+    prompt = next(p["text"] for p in session.calls[0]["json"]["messages"][0]["content"]
+                  if p["type"] == "text")
+    assert "computer (a laptop or a desktop computer monitor; not a printer" in prompt
+    assert "phone (" not in prompt   # no hint invented for a class without one
+

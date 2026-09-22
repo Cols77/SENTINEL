@@ -194,9 +194,19 @@ class LlmProposer:
                 return self._record(context, ESCALATE_LABEL, "illegal_tool:survey.submit_report")
             label = reports[0].label
             self.sink.write({"record": "survey_route", "mode": "E", "outcome": "accepted",
-                             "label": label, "run_id": context.run_id})
+                             "label": label, "run_id": context.run_id,
+                             "adapter_raw": self._raw()})
             return _call(context, label, "")
 
+        if tool_name == "survey.escalate":
+            # The escape hatch the adapter offers on purpose, not an illegal call:
+            # recorded as the model's own decision, with its reason kept.
+            reason = arguments.get("reason")
+            reason = reason.strip() if isinstance(reason, str) else ""
+            self.sink.write({"record": "survey_route", "mode": "E", "outcome": "model_escalated",
+                             "label": ESCALATE_LABEL, "run_id": context.run_id,
+                             "model_reason": reason, "adapter_raw": self._raw()})
+            return _escalate(context, f"the model asked for the operator: {reason or '(no reason given)'}")
         if tool_name != "survey.propose_sweep":
             return self._record(context, ESCALATE_LABEL, f"illegal_tool:{tool_name}")
 
@@ -211,10 +221,18 @@ class LlmProposer:
 
         label = sweeps[option_id]
         self.sink.write({"record": "survey_route", "mode": "E", "outcome": "accepted",
-                         "label": label, "run_id": context.run_id})
+                         "label": label, "run_id": context.run_id,
+                         "adapter_raw": self._raw()})
         return _call(context, label, reason.strip())
+
+    def _raw(self):
+        """The model's reply as the provider sent it, when the adapter keeps one
+        (``survey.llm_adapter.LlmAdapter.last_raw``); the same audit habit as
+        ``JevProposer``'s ``judge_answer``."""
+        return getattr(self.adapter, "last_raw", None)
 
     def _record(self, context: SurveyContext, label: str, outcome: str) -> dict:
         self.sink.write({"record": "survey_route", "mode": "E", "outcome": outcome,
-                         "label": label, "run_id": context.run_id})
+                         "label": label, "run_id": context.run_id,
+                         "adapter_raw": self._raw()})
         return _escalate(context, f"llm: {outcome}")

@@ -10,19 +10,23 @@ sink)``, never wrapped.
 policy (any ``ContextualPolicy``, tested here with a scripted stub -- Codex's
 ``LlmProposer`` plugs into the same seam later, P3b1 Task 2, P4 Task 6) is
 asked first. ``ArchitectureRouter`` is the approval boundary: it accepts a
-proposal only if it is well-formed and names a real catalogue plan, and folds
-every other outcome -- an exception, an escalate, an illegal tool, an unknown
-plan, a malformed result -- back onto the same ladder (architecture F) on
-that same turn. E never lets a model act without this check.
+proposal only if it is well-formed and names a real catalogue plan, forwards
+the proposer's controller-canonical escalation, and folds every other outcome
+-- an exception, an illegal tool, an unknown plan, or a malformed result --
+back onto the same ladder (architecture F) on that same turn. E never lets a
+model act without this check.
 """
 from __future__ import annotations
 
 import os
 from typing import Mapping, Sequence
 
-from .legal_tools import SELECT_PLAN
+from sentinel.contracts import AgentModelResult
+
+from .legal_tools import ESCALATE_LABEL, SELECT_PLAN
 from .policies import RulePolicy
 from .policy import ContextualPolicy, PolicyContext
+from .proposer import is_canonical_escalation
 from .shadow import AuditSink, ShadowLadder
 
 ARCHITECTURES = ("F", "E")
@@ -54,7 +58,8 @@ class ArchitectureRouter:
     ``proposer``; everything else, and every proposer failure, goes to
     ``ladder`` (architecture F). The router, not the proposer, is the
     boundary: only a well-formed, catalogue-legal ``inspection.propose_plan``
-    call is ever accepted and returned as-is."""
+    call or a controller-canonical explicit escalation is ever accepted and
+    returned as-is."""
 
     def __init__(self, ladder: ContextualPolicy, proposer: ContextualPolicy, sink: AuditSink) -> None:
         self.ladder = ladder
@@ -70,33 +75,43 @@ class ArchitectureRouter:
         except Exception as exc:  # noqa: BLE001 -- any proposer failure degrades to F
             return self._fallback(request, context, f"exception:{type(exc).__name__}")
 
-        reason = self._reject_reason(result, context)
+        if is_canonical_escalation(result, agent_run_id=request["agent_run_id"]):
+            self._write_route(
+                context, route="proposer_escalation", label=ESCALATE_LABEL,
+            )
+            return result
+
+        reason = self._reject_reason(
+            result, context, agent_run_id=request["agent_run_id"],
+        )
         if reason is not None:
             return self._fallback(request, context, reason)
 
         label = result["tool_calls"][0]["arguments"]["catalogue_plan_id"]
-        self.sink.write({
-            "record": "architecture_route", "architecture": "E",
-            "run_id": context.state.run_id, "state_version": context.state.state_version,
-            "decision_point": context.legal.decision_point, "route": "proposer", "label": label,
-        })
+        self._write_route(context, route="proposer", label=label)
         return result
 
     def _fallback(self, request: dict, context: PolicyContext, reason: str) -> dict:
+        self._write_route(context, route="fallback_F", reason=reason)
+        return self.ladder.decide(request, context)
+
+    def _write_route(self, context: PolicyContext, *, route: str, **details: str) -> None:
         self.sink.write({
             "record": "architecture_route", "architecture": "E",
             "run_id": context.state.run_id, "state_version": context.state.state_version,
-            "decision_point": context.legal.decision_point, "route": "fallback_F", "reason": reason,
+            "decision_point": context.legal.decision_point, "route": route, **details,
         })
-        return self.ladder.decide(request, context)
 
     @staticmethod
-    def _reject_reason(result: object, context: PolicyContext) -> str | None:
+    def _reject_reason(
+        result: object, context: PolicyContext, *, agent_run_id: str,
+    ) -> str | None:
         """``None`` iff ``result`` is accepted: exactly one ``TOOL_CALLS``
-        tool call, named ``inspection.propose_plan``, whose
+        result in the controller's exact normalized envelope, bound to this
+        agent run, containing ``inspection.propose_plan`` whose
         ``catalogue_plan_id`` is the label of a candidate in
         ``context.legal.candidates`` with that same tool name."""
-        if not isinstance(result, dict):
+        if type(result) is not dict:
             return "malformed_result"
         if result.get("status") != "TOOL_CALLS":
             return "proposer_escalated"
@@ -109,6 +124,14 @@ class ArchitectureRouter:
         tool_name = call.get("tool_name")
         if tool_name != "inspection.propose_plan":
             return f"illegal_tool:{tool_name}"
+        try:
+            normalized = AgentModelResult.from_dict(result).to_dict()
+        except Exception:  # noqa: BLE001 -- untrusted proposer result is fail-closed
+            return "malformed_result"
+        if normalized.get("agent_run_id") != agent_run_id:
+            return "agent_run_id_mismatch"
+        if result != normalized:
+            return "malformed_result"
         arguments = call.get("arguments")
         if not isinstance(arguments, dict) or "catalogue_plan_id" not in arguments:
             return "malformed_result"

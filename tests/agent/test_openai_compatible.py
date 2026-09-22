@@ -91,3 +91,81 @@ def test_provider_failure_is_unavailable_with_bounded_non_secret_diagnostic():
     assert result.status == "UNAVAILABLE"
     assert result.diagnostic and len(result.diagnostic) <= 512
     assert "super-secret" not in result.diagnostic
+
+
+def test_transport_observation_reports_only_bounded_identity_and_usage():
+    observations = []
+
+    class Response:
+        def model_dump(self):
+            return {
+                "id": "provider-response-id",
+                "model": "z-ai/glm-5.3",
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 7,
+                    "total_tokens": 18,
+                    "bad_bool": True,
+                    "negative": -1,
+                },
+                "choices": valid_response()["choices"],
+                "secret": "super-secret",
+            }
+
+    completions = Completions(Response())
+    adapter = OpenAICompatibleAgentModel(
+        load_config(ENV),
+        client_factory=lambda **_: Client(completions),
+        environ=ENV,
+        observation_callback=observations.append,
+    )
+
+    assert adapter.propose(REQUEST).status == "TOOL_CALLS"
+    assert observations == [{
+        "model": "z-ai/glm-5.3",
+        "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+    }]
+    serialized = repr(observations)
+    assert "super-secret" not in serialized
+    assert "choices" not in serialized
+    assert "messages" not in serialized
+
+
+def test_transport_observation_preserves_missing_or_invalid_usage_as_null():
+    observations = []
+    response = {"model": "m" * 1000, "usage": {"prompt_tokens": True, "completion_tokens": -2},
+                **valid_response()}
+    adapter = OpenAICompatibleAgentModel(
+        load_config(ENV),
+        client_factory=lambda **_: Client(Completions(response)),
+        environ=ENV,
+        observation_callback=observations.append,
+    )
+
+    adapter.propose(REQUEST)
+
+    assert observations[0]["model"] is None
+    assert observations[0]["usage"] == {
+        "prompt_tokens": None, "completion_tokens": None, "total_tokens": None,
+    }
+
+
+def test_enormous_usage_integer_is_rejected_without_discarding_model_identity():
+    observations = []
+    response = {
+        "model": "z-ai/glm-5.3",
+        "usage": {"prompt_tokens": 10 ** 10_000, "completion_tokens": 2, "total_tokens": 3},
+        **valid_response(),
+    }
+    adapter = OpenAICompatibleAgentModel(
+        load_config(ENV),
+        client_factory=lambda **_: Client(Completions(response)),
+        environ=ENV,
+        observation_callback=observations.append,
+    )
+
+    assert adapter.propose(REQUEST).status == "TOOL_CALLS"
+    assert observations == [{
+        "model": "z-ai/glm-5.3",
+        "usage": {"prompt_tokens": None, "completion_tokens": 2, "total_tokens": 3},
+    }]

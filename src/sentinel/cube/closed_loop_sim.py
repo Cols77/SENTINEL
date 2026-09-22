@@ -3,7 +3,10 @@ simulated Tello whose moves drift, and localises from simulated pose bursts.
 
 Only the airframe and the camera are simulated. Planning, the quality and
 plausibility gates, re-anchoring, trims, containment and the mission log are
-the production code in ``cube.mission``. The pose noise defaults are the
+the production code in ``cube.mission``. With a coverage model (``cube.coverage``,
+built from the site file and the camera calibration) the runner refuses the
+same blind stops a real flight would, and the simulated camera returns no fix
+wherever the drifted drone really cannot see a tag. The pose noise defaults are the
 2026-09-21 stand-test figures; the move-drift defaults are assumptions, since
 no in-flight data exists yet.
 """
@@ -16,9 +19,11 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from sentinel.contracts.pose import DronePoseReport, TagObservation
-from sentinel.cube.mission import CubeMissionRunner, load_mission
+from sentinel.cube.coverage import CoverageModel
+from sentinel.cube.mission import RETURN_NAME, CubeMissionRunner, PlanError, load_mission
 from sentinel.cube.site import load_site
 from sentinel.dry_run import DryRunClient
 
@@ -57,6 +62,8 @@ class DriftingClient(DryRunClient):
         bias_dir = rng.uniform(0, 2 * math.pi)
         self._pose_bias = (model.pose_bias_cm * math.cos(bias_dir),
                            model.pose_bias_cm * math.sin(bias_dir))
+        #: set by fly_once when a coverage model is given: can the camera see a tag right now?
+        self.sees_tags: Callable[[], bool] = lambda: True
 
     def move(self, direction, distance_cm):
         response = super().move(direction, distance_cm)
@@ -81,6 +88,8 @@ class DriftingClient(DryRunClient):
         return response
 
     def burst(self, n: int = 12) -> list:
+        if not self.sees_tags():
+            return []
         now = datetime.now(timezone.utc)
         reports = []
         for index in range(n):
@@ -106,18 +115,27 @@ class _ScoredRunner(CubeMissionRunner):
         super()._append_log(entry)
 
 
-def fly_once(mission, site, pose_mode: str, model: DriftModel, seed: int, log_path: Path) -> dict:
+def fly_once(mission, site, pose_mode: str, model: DriftModel, seed: int, log_path: Path,
+             coverage: CoverageModel | None = None) -> dict:
     rng = random.Random(seed)
+    env = site.envelope()
     if mission.start_x_cm is None:
-        # a start-free mission: the operator put the drone anywhere in the commanded area
-        env = site.envelope()
-        start = (rng.uniform(env.min_x_cm, env.max_x_cm), rng.uniform(env.min_y_cm, env.max_y_cm))
+        # a start-free mission: the operator put the drone anywhere in the commanded area from
+        # where, after takeoff, it clearly sees the tags
+        for _ in range(50):
+            start = (rng.uniform(env.min_x_cm, env.max_x_cm), rng.uniform(env.min_y_cm, env.max_y_cm))
+            if coverage is None or coverage.verdict(*start, env.min_z_cm).level == "OK":
+                break
     else:
         start = (mission.start_x_cm, mission.start_y_cm)
     client = DriftingClient(start[0], start[1], model, rng)
     runner = _ScoredRunner(client, "dry-run", mission=mission, site=site, pose_mode=pose_mode,
                            mission_log=log_path, burst_fn=client.burst,
-                           sleep_fn=lambda seconds: None)
+                           sleep_fn=lambda seconds: None, coverage=coverage)
+    if coverage is not None:
+        client.sees_tags = lambda: coverage.tags_in_view(
+            client.x_cm, client.y_cm, runner.envelope.position.z_cm,
+            yaw_err_deg=client.heading_deg - 90.0) > 0
     result = runner.run(confirm=True)
     rows = ([json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
             if log_path.exists() else [])
@@ -126,14 +144,17 @@ def fly_once(mission, site, pose_mode: str, model: DriftModel, seed: int, log_pa
 
 
 def monte_carlo(mission, site, pose_mode: str, model: DriftModel, runs: int,
-                tolerance_cm: float) -> dict:
-    errors: dict[str, list[float]] = {wp.name: [] for wp in mission.waypoints}
-    completed = trims = moves = outer = 0
+                tolerance_cm: float, coverage: CoverageModel | None = None) -> dict:
+    names = [wp.name for wp in mission.waypoints] + ([RETURN_NAME] if mission.return_to_start else [])
+    errors: dict[str, list[float]] = {name: [] for name in names}
+    completed = trims = moves = outer = unlocalised = 0
     landings: dict[str, int] = {}
     with tempfile.TemporaryDirectory() as tmp:
         for seed in range(runs):
-            flight = fly_once(mission, site, pose_mode, model, seed, Path(tmp) / f"{seed}.jsonl")
-            finished = flight["status"] == "PASS" and sum(r["waypoint"] != "START" for r in flight["rows"]) == len(mission.waypoints)
+            flight = fly_once(mission, site, pose_mode, model, seed, Path(tmp) / f"{seed}.jsonl",
+                              coverage)
+            finished = (flight["status"] == "PASS"
+                        and sum(r["waypoint"] != "START" for r in flight["rows"]) == len(names))
             completed += finished
             if not finished:
                 cause = str(flight["error"]).split(":")[0]
@@ -144,11 +165,13 @@ def monte_carlo(mission, site, pose_mode: str, model: DriftModel, runs: int,
                     continue
                 trims += row["trim_rounds_sent"]
                 outer += row.get("tolerance") == "OUTER"
+                unlocalised += row["status"] == "UNLOCALISED"
                 if finished:
                     errors[row["waypoint"]].append(row["true_error_cm"])
     summary = {"pose_mode": pose_mode, "runs": runs, "completed": completed,
                "mean_moves": round(moves / runs, 1), "mean_trim_rounds": round(trims / runs, 2),
-               "outer_circle_stops": outer, "landings": landings, "waypoints": {}}
+               "outer_circle_stops": outer, "unlocalised_stops": unlocalised,
+               "landings": landings, "waypoints": {}}
     for name, values in errors.items():
         if values:
             ordered = sorted(values)
@@ -167,17 +190,27 @@ def main(argv=None) -> int:
     parser.add_argument("--tolerance-cm", type=float, default=15.0)
     parser.add_argument("--drift-factor", type=float, default=1.0,
                         help="multiplies every assumed drift term (2.0 = pessimistic)")
+    parser.add_argument("--calibration-from", default="calibration/tag-map-calibrated.json",
+                        help="camera calibration for the tag-coverage guard ('none' turns it off)")
     args = parser.parse_args(argv)
     mission, site = load_mission(args.mission), load_site(args.site)
     model = DriftModel().scaled(args.drift_factor)
+    coverage = (None if args.calibration_from == "none"
+                else CoverageModel.from_files(site, args.calibration_from))
     for pose_mode in ("off", "passive", "reanchor"):
         if pose_mode == "off" and mission.start_x_cm is None:
             print("\noff: skipped - a mission without a start pad needs a pose mode")
             continue
-        summary = monte_carlo(mission, site, pose_mode, model, args.runs, args.tolerance_cm)
+        try:
+            summary = monte_carlo(mission, site, pose_mode, model, args.runs, args.tolerance_cm,
+                                  coverage)
+        except PlanError as exc:
+            print(f"\n{pose_mode}: refused before takeoff - {exc}")
+            continue
         print(f"\n{pose_mode}: {summary['completed']}/{summary['runs']} flights completed, "
               f"{summary['mean_moves']} moves and {summary['mean_trim_rounds']} trim rounds per flight")
         print(f"  stops accepted in the outer circle: {summary['outer_circle_stops']}; "
+              f"unlocalised stops: {summary['unlocalised_stops']}; "
               f"early landings by cause: {summary['landings'] or 'none'}")
         for name, stats in summary["waypoints"].items():
             print(f"  {name:<12} true error median {stats['median_cm']:5.1f} cm  "

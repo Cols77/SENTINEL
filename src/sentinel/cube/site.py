@@ -36,6 +36,20 @@ class Site:
     inset_m: float
     min_z_cm: int
     max_z_cm: int
+    #: Height of the takeoff surface in site-frame cm (the survey's CubeFlight reads the same
+    #: field). The Tello's `height?` is relative to the takeoff point, and commanded altitudes are
+    #: `height?` values, so the drone's height in the room is commanded + takeoff_z_cm (+ bias).
+    takeoff_z_cm: float = 0.0
+    #: How much higher the drone hovers than `height?` + takeoff_z_cm (positive: higher). The
+    #: 2026-09-21/22 ground takeoffs need ~18 cm for the model to reproduce which stops lost the
+    #: tags (they sat on the bottom edge of the frame), and the tag centres were tape-measured at
+    #: 53 cm, so it is the altimeter that reads low. The survey's CubeFlight adds it too.
+    altitude_bias_cm: float = 0.0
+
+    @property
+    def height_offset_cm(self) -> float:
+        """Room height of the drone minus its commanded altitude."""
+        return self.takeoff_z_cm + self.altitude_bias_cm
 
     def tag_map_doc(self, camera_calibration: dict) -> dict:
         tags = []
@@ -82,7 +96,8 @@ def parse_site(doc: dict) -> Site:
     cube, commanded = doc["cube"], doc["commanded"]
     site = Site(float(doc["line_y_m"]), stands, float(cube["min_x_m"]), float(cube["max_x_m"]),
                 float(cube["min_y_m"]), float(cube["max_y_m"]), float(cube["max_z_m"]),
-                float(commanded["inset_m"]), int(commanded["min_z_cm"]), int(commanded["max_z_cm"]))
+                float(commanded["inset_m"]), int(commanded["min_z_cm"]), int(commanded["max_z_cm"]),
+                float(doc.get("takeoff_z_cm", 0.0)), float(doc.get("altitude_bias_cm", 0.0)))
     if site.cube_max_y_m > site.line_y_m - MIN_LINE_STANDOFF_M:
         raise ValueError(f"the cube must end at least {MIN_LINE_STANDOFF_M} m before the tag line")
     if site.max_z_cm > site.cube_max_z_m * 100 or site.min_z_cm >= site.max_z_cm:

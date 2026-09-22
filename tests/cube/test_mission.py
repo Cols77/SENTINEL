@@ -1,4 +1,5 @@
 import json
+import math
 import time
 from datetime import datetime, timezone
 
@@ -561,3 +562,279 @@ def test_a_stop_already_inside_the_tolerance_circle_is_not_trimmed(tmp_path):
     wp1 = _log(tmp_path)[0]
     assert wp1["tolerance"] == "INSIDE" and wp1["trim_rounds_sent"] == 0
     assert "left 20" not in client.commands
+
+
+# -- mission tuning: trim rounds per stop, leg speed ---------------------------
+
+def test_a_mission_can_allow_up_to_ten_trim_rounds_and_stops_once_inside(tmp_path):
+    """The convergence test: keep trimming while the drone is outside the 15 cm circle."""
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), max_trim_rounds=10)
+    far = [[_report(270, 280)] * 10] * 5            # 20 cm short, five trims that do nothing
+    runner, client = _runner(tmp_path, "reanchor", far + [[_report(272, 296)] * 10], mission=mission)
+    assert runner.run(confirm=True).status == "PASS"
+    wp1 = _log(tmp_path)[0]
+    assert wp1["trim_rounds_sent"] == 5 and wp1["tolerance"] == "INSIDE"
+    assert wp1["trim_errors_cm"] == [20.0] * 5 + [pytest.approx(4.5, abs=0.1)]
+    assert client.commands.count("forward 20") == 5
+
+
+def test_trim_rounds_are_bounded_by_the_mission(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), max_trim_rounds=4)
+    runner, client = _runner(tmp_path, "reanchor", [[_report(270, 280)] * 10] * 5, mission=mission)
+    assert runner.run(confirm=True).status == "PASS"
+    wp1 = _log(tmp_path)[0]
+    assert wp1["trim_rounds_sent"] == 4 and wp1["tolerance"] == "OUTER"
+    assert len(wp1["trim_errors_cm"]) == 5
+
+
+@pytest.mark.parametrize("rounds", [0, 11])
+def test_trim_rounds_outside_one_to_ten_are_refused(rounds):
+    with pytest.raises(ValueError, match="max_trim_rounds"):
+        Mission(None, None, (Waypoint("WP1", 270, 300, 100),), max_trim_rounds=rounds)
+
+
+@pytest.mark.parametrize("speed", [10, 60])
+def test_leg_speeds_outside_twenty_to_fifty_are_refused(speed):
+    with pytest.raises(ValueError, match="leg_speed_cm_s"):
+        Mission(None, None, (Waypoint("WP1", 270, 300, 100),), leg_speed_cm_s=speed)
+
+
+def test_legs_fly_at_the_mission_speed_and_trims_go_back_to_twenty(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100), Waypoint("WP2", 150, 300, 100)),
+                      leg_speed_cm_s=40)
+    bursts = [[_report(270, 282)] * 10, [_report(271, 299)] * 10, [_report(150, 300)] * 10]
+    runner, client = _runner(tmp_path, "reanchor", bursts, mission=mission)
+    assert runner.run(confirm=True).status == "PASS"
+    moves = [c for c in client.commands if c.split()[0] in {"speed", "forward", "left", "back", "right"}]
+    assert moves == ["speed 20",                         # preflight
+                     "speed 40", "forward 50",           # leg to WP1
+                     "speed 20", "forward 20",           # trim
+                     "speed 40", "left 121"]             # leg to WP2 from the trimmed fix
+    assert {e["leg_speed_cm_s"] for e in _log(tmp_path)} == {40}
+
+
+def test_load_mission_reads_the_tuning_fields(tmp_path):
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps({"schema_version": "cube-mission-v1", "max_trim_rounds": 10,
+                                "leg_speed_cm_s": 35,
+                                "waypoints": [{"name": "A", "x_cm": 250, "y_cm": 250, "z_cm": 100}]}))
+    mission = load_mission(path)
+    assert (mission.max_trim_rounds, mission.leg_speed_cm_s, mission.start_x_cm) == (10, 35, None)
+
+
+def test_load_mission_defaults_keep_the_old_behaviour(tmp_path):
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps({"schema_version": "cube-mission-v1",
+                                "waypoints": [{"name": "A", "x_cm": 250, "y_cm": 250, "z_cm": 100}]}))
+    mission = load_mission(path)
+    assert (mission.max_trim_rounds, mission.leg_speed_cm_s) == (2, 20)
+
+
+# -- speed against inset, tag coverage, return to takeoff, vertical check (2026-09-22) ------------
+
+class _Coverage:
+    """Stands in for cube.coverage.CoverageModel: a verdict per (x, y)."""
+
+    def __init__(self, levels):
+        self.levels = levels
+
+    def verdict(self, x_cm, y_cm, z_cm):
+        from sentinel.cube.coverage import Coverage
+        level = self.levels.get((x_cm, y_cm), "OK")
+        return Coverage(level, 0 if level == "BLIND" else 2, 0 if level == "BLIND" else 1, None)
+
+
+def _site(inset_m):
+    return parse_site({**SITE_DOC, "commanded": {**SITE_DOC["commanded"], "inset_m": inset_m}})
+
+
+def _plan(tmp_path, mission, *, site=SITE, coverage=None, land_during_move=False, pose_mode="reanchor"):
+    events = []
+    runner = CubeMissionRunner(DryRunClient(), "dry-run", mission=mission, site=site,
+                               pose_mode=pose_mode, mission_log=tmp_path / "m.jsonl",
+                               burst_fn=lambda: [], sleep_fn=lambda s: None, coverage=coverage,
+                               land_during_move=land_during_move,
+                               progress=lambda event, message: events.append((event, message)))
+    return runner, events
+
+
+def test_legs_at_fifty_need_a_forty_cm_inset(tmp_path):
+    fast = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), leg_speed_cm_s=50)
+    with pytest.raises(PlanError, match="50 cm/s need the commanded area 40 cm"):
+        _plan(tmp_path, fast, site=_site(0.3))
+    _plan(tmp_path, fast, site=_site(0.4))
+    _plan(tmp_path, Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), leg_speed_cm_s=40),
+          site=_site(0.3))
+
+
+def test_land_during_move_is_refused_where_the_watchdog_would_trip_inside_the_commanded_area(tmp_path):
+    at_forty = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), leg_speed_cm_s=40)
+    with pytest.raises(PlanError, match="land_during_move"):
+        _plan(tmp_path, at_forty, land_during_move=True)
+    _plan(tmp_path, Mission(270, 250, (Waypoint("WP1", 270, 300, 100),)), land_during_move=True)
+
+
+def test_a_stop_the_tags_cannot_be_seen_from_is_refused_unless_flown_open_loop(tmp_path):
+    blind = _Coverage({(270, 300): "BLIND"})
+    with pytest.raises(PlanError, match="WP1: the tags can be lost"):
+        _plan(tmp_path, Mission(270, 250, (Waypoint("WP1", 270, 300, 100),)), coverage=blind)
+    _plan(tmp_path, Mission(270, 250, (Waypoint("WP1", 270, 300, 100, localise=False),)),
+          coverage=blind)
+    _plan(tmp_path, Mission(270, 250, (Waypoint("WP1", 270, 300, 100),)), coverage=blind,
+          pose_mode="off")
+
+
+def test_a_marginal_stop_flies_with_an_alert(tmp_path):
+    _, events = _plan(tmp_path, Mission(270, 250, (Waypoint("WP1", 270, 300, 100),)),
+                      coverage=_Coverage({(270, 300): "MARGINAL"}))
+    assert any(e == "alert" and "WP1: tag coverage is marginal" in m for e, m in events)
+
+
+def test_return_to_start_flies_back_to_the_measured_takeoff_point(tmp_path):
+    mission = Mission(None, None, (Waypoint("WP1", 270, 300, 100),), return_to_start=True)
+    bursts = [[_report(250, 240)] * 10, [_report(270, 300)] * 10, [_report(252, 243)] * 10]
+    runner, client = _runner(tmp_path, "reanchor", bursts, mission=mission)
+    assert runner.run(confirm=True).status == "PASS"
+    start, wp1, back = _log(tmp_path)
+    assert back["waypoint"] == "RETURN" and back["commanded_cm"] == [250, 240, 100]
+    assert back["status"] == "LOCALISED" and back["return_error_cm"] == pytest.approx(3.6, abs=0.1)
+    moves = [c for c in client.commands if c.split()[0] in {"forward", "back", "left", "right"}]
+    assert moves[-2:] == ["left 20", "back 60"]
+
+
+def test_return_to_a_takeoff_point_outside_the_commanded_area_goes_to_the_nearest_one(tmp_path):
+    mission = Mission(None, None, (Waypoint("WP1", 270, 300, 100),), return_to_start=True)
+    bursts = [[_report(250, 215)] * 10, [_report(270, 300)] * 10, [_report(250, 230)] * 10]
+    events = []
+    runner, _ = _runner(tmp_path, "reanchor", bursts, mission=mission)
+    runner.progress = lambda event, message: events.append((event, message))
+    assert runner.run(confirm=True).status == "PASS"
+    assert _log(tmp_path)[-1]["commanded_cm"] == [250, 230, 100]     # SITE commands y >= 230
+    assert any("RETURN: takeoff point" in m for _, m in events)
+
+
+def test_return_counts_toward_the_stop_limit():
+    with pytest.raises(ValueError, match="at most 8 stops"):
+        Mission(None, None, tuple(Waypoint(f"W{i}", 250, 250, 100) for i in range(8)),
+                return_to_start=True)
+
+
+def test_load_mission_reads_return_to_start(tmp_path):
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps({"schema_version": "cube-mission-v1", "return_to_start": True,
+                                "waypoints": [{"name": "A", "x_cm": 250, "y_cm": 250, "z_cm": 100}]}))
+    assert load_mission(path).return_to_start is True
+
+
+class _TagMap:
+    room_scale_m_per_unit = 0.1
+
+    def tag(self, tag_id):
+        from types import SimpleNamespace
+        return SimpleNamespace(x_units=25.0, y_units=40.0, z_units=0.55)
+
+
+def _ranged(x_cm, y_cm, slant_m):
+    return DronePoseReport(
+        report_id="p", run_id="r", observed_at=datetime.now(timezone.utc),
+        source_kind="SIMULATED", point=(x_cm / 10.0, y_cm / 10.0), heading_deg=90.0,
+        altitude_m=None, method="APRILTAG_36H11_PNP",
+        tag_observations=(TagObservation(0, "STAND_0", slant_m, 0.5),), reprojection_error_px=0.5)
+
+
+def test_tag_implied_height_is_the_vertical_leg_of_the_range_triangle():
+    from sentinel.cube.mission import tag_implied_height_cm
+    # 160 cm in front of a tag at 55 cm, 30 cm above it: slant = hypot(160, 30)
+    reports = [_ranged(250, 240, 1.6279)] * 5
+    assert tag_implied_height_cm(reports, _TagMap(), (250.0, 240.0)) == pytest.approx(85.0, abs=0.5)
+    assert tag_implied_height_cm(reports, None, (250.0, 240.0)) is None
+
+
+def test_a_takeoff_height_the_tags_disagree_with_raises_an_alert(tmp_path):
+    runner, events = _plan(tmp_path, Mission(270, 250, (Waypoint("WP1", 270, 300, 100),)))
+    runner.tag_map = _TagMap()
+    entry = {"height_cm": 100}
+    # tags say 55 + 40 = 95 cm... with the site's takeoff height 0 that agrees with 100
+    runner._check_vertical("WP1", [_ranged(250, 240, math.hypot(1.6, 0.40))] * 5, (250.0, 240.0), entry)
+    assert entry["vertical_mismatch_cm"] == pytest.approx(-5.0, abs=0.5) and not events
+    # tags say 55 + 75 = 130 cm against 100: the site's vertical model is 30 cm out
+    runner._check_vertical("WP1", [_ranged(250, 240, math.hypot(1.6, 0.75))] * 5, (250.0, 240.0), entry)
+    assert entry["tag_height_cm"] == pytest.approx(130.0, abs=0.5)
+    assert any(e == "alert" and "altitude bias or tag heights are wrong" in m for e, m in events)
+
+
+def _timeline(runner, client):
+    """Commands with a ('sleep', s) marker wherever the runner paused."""
+    events = []
+    runner.sleep_fn = lambda seconds: events.append(("sleep", seconds, len(client.commands)))
+    return events
+
+
+def _moves_and_pauses(client, events):
+    out, marks = [], {}
+    for _, seconds, index in events:
+        marks.setdefault(index, []).append(seconds)
+    for index, command in enumerate(client.commands):
+        out += [("sleep", s) for s in marks.get(index, [])]
+        if command.split()[0] in {"forward", "back", "left", "right"}:
+            out.append(command)
+    return out
+
+
+def test_a_move_straight_after_another_waits_for_the_drone_to_settle(tmp_path):
+    """09-22: `left 95` sent the instant `back 31` returned "ok" at 50 cm/s was refused with
+    "error Not joystick" and the flight landed. A move that follows a move now waits."""
+    from sentinel.cube.mission import SETTLE_AFTER_FAST_MOVE_S
+    mission = Mission(270, 250, (Waypoint("WP1", 300, 300, 100),), leg_speed_cm_s=50)
+    client = DryRunClient()
+    runner = CubeMissionRunner(client, "dry-run", mission=mission, site=_site(0.4),
+                               pose_mode="off", mission_log=tmp_path / "m.jsonl",
+                               sleep_fn=lambda s: None)
+    events = _timeline(runner, client)
+    assert runner.run(confirm=True).status == "PASS"
+    moves = _moves_and_pauses(client, events)
+    first, second = [i for i, m in enumerate(moves) if isinstance(m, str)][:2]
+    assert ("sleep", SETTLE_AFTER_FAST_MOVE_S) in moves[first + 1:second]
+    assert all(not isinstance(m, tuple) for m in moves[:first])
+
+
+def test_a_hover_fix_counts_as_settling(tmp_path):
+    """After a localisation burst (SETTLE_S hover) the next leg goes without an extra pause."""
+    from sentinel.cube.mission import SETTLE_S
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100), Waypoint("WP2", 150, 300, 100)),
+                      leg_speed_cm_s=40)
+    queue = [[_report(270, 300)] * 10, [_report(150, 300)] * 10]
+    client = DryRunClient()
+    runner = CubeMissionRunner(client, "dry-run", mission=mission, site=SITE,
+                               pose_mode="reanchor", mission_log=tmp_path / "m.jsonl",
+                               burst_fn=lambda: queue.pop(0), sleep_fn=lambda s: None)
+    events = _timeline(runner, client)
+    assert runner.run(confirm=True).status == "PASS"
+    moves = _moves_and_pauses(client, events)
+    assert [m for m in moves if isinstance(m, str)] == ["forward 50", "left 120"]
+    between = moves[moves.index("forward 50") + 1:moves.index("left 120")]
+    # the hover before WP1's fix and the look; no move-settle pause on top
+    assert between.count(("sleep", SETTLE_S)) == 2 and len(between) == 2
+
+
+def test_trimming_stops_when_a_trim_makes_the_error_worse(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), max_trim_rounds=5)
+    bursts = [[_report(270, 275)] * 10,      # 25 cm short: trim forward 25
+              [_report(270, 330)] * 10,      # overshot to 30 cm: worse, stop here
+              [_report(270, 300)] * 10]      # never asked for
+    runner, client = _runner(tmp_path, "reanchor", bursts, mission=mission)
+    assert runner.run(confirm=True).status == "PASS"      # 30 cm is the outer circle
+    (wp1,) = _log(tmp_path)
+    assert wp1["trim_errors_cm"] == [25.0, 30.0] and wp1["trims_stopped"] == "WORSE"
+    assert wp1["trim_rounds_sent"] == 1 and wp1["tolerance"] == "OUTER"
+
+
+def test_a_trim_within_the_fix_noise_does_not_stop_trimming(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), max_trim_rounds=5)
+    bursts = [[_report(270, 278)] * 10,      # 22 cm
+              [_report(270, 322)] * 10,      # 22 cm the other way: not worse by more than 2
+              [_report(270, 303)] * 10]      # 3 cm
+    runner, _ = _runner(tmp_path, "reanchor", bursts, mission=mission)
+    assert runner.run(confirm=True).status == "PASS"
+    (wp1,) = _log(tmp_path)
+    assert wp1["trim_errors_cm"] == [22.0, 22.0, 3.0] and "trims_stopped" not in wp1

@@ -4,7 +4,7 @@ title: "SENTINEL survey and counting - design"
 status: review-pending
 ---
 
-# SENTINEL survey and counting — design (rev 6)
+# SENTINEL survey and counting — design (rev 7)
 
 > **Status:** approved in brainstorm 2026-09-20; spec pending operator review
 > **Owner:** Colin (operator), implemented by the P4/orchestrating Claude session
@@ -328,6 +328,37 @@ than 30 % of their median, the geometry has failed for that object: it stays `UN
 sweep records `geometry_degraded`. If more than half the objects are degraded, the whole sweep falls
 back to `SINGLE_VIEW_LOWER_BOUND` for every class and says so.
 
+> **Rev 7 correction (2026-09-22).** Three merge rules changed after the WP5 session's end-to-end
+> dry runs and its Monte Carlo on the real code:
+>
+> - **Two sightings of one class in one frame are two objects**, whatever the geometry says about
+> how close they are. Groups sharing a frame never merge. Two laptops 52 cm apart, both in every
+> frame, had been fused into one at their midpoint. Heavily overlapping boxes in one frame (IoU ≥
+> 0.5), which providers do return, collapse onto the better-banded one first.
+> - **A stop is a viewpoint of one sweep.** Keyed on the sweep-local index alone, a follow-up's
+> stop 0 was the rail's stop 0 again, so a second look could never add the third viewpoint that
+> confirms. Stops are keyed on (sweep, stop). For the same reason a first sweep must have ≥ 3
+> stops (the two-stop close look is a follow-up only), and a follow-up never re-offers a sweep
+> already flown.
+> - **The tolerance is not round.** Along the line of sight it stays 25 % of range: depth from a
+> shallow ray meeting a plane is the poorly conditioned part. Across it the error is where the
+> camera really was, so it depends on the frame's `position_kind`: **MEASURED** floor 22 cm / 9 %,
+> **COMMANDED** floor 45 cm / 18 %. The WP5 Monte Carlo (300 trials per cell, perfect boxes,
+> uncorrelated drift of 12 cm per commanded stop and 4 cm pose error per measured one) found
+> that with commanded frames a lower floor splits single laptops faster than it separates pairs,
+> so nothing under ~60 cm apart can be told apart; with measured frames 22 cm / 9 % separates
+> 35–40 cm pairs at no split cost, and a pessimistic 9 cm pose error still separates from ~50 cm.
+> Two rows of desks ~80 cm apart are borderline along the line of sight; that is a known limit.
+>
+> The consequence for a flight: **the survey separates laptops on one desk only when frames are
+> MEASURED**, i.e. pose on and tags in view of the rail. The 2026-09-22 enlarged-cube flight
+> localised the near row (8–10 cm) and not the back row 1 m further from two tags, so a rail
+> must sit within tag coverage or the count is a laptop-per-60-cm count.
+>
+> Also since rev 6: a report may not drop what the store could not confirm — the loop appends a
+> code-written *"Not confirmed: N more possible …"* when the writer leaves it out; the default
+> writer states confirmed and total.
+
 Appearance (`description`) breaks ties between geometrically-ambiguous candidates of the same class:
 useful in a sparse garden, weak in a row of identical laptops, and never load-bearing.
 
@@ -443,6 +474,26 @@ tolerance abort) never reaches the mission runner's `_look` step, so it contribu
 drone has already been landed by the existing controlled-landing path either way.
 
 ## 7. Jev
+
+> **Rev 7 (2026-09-22): the three proposers, named.** The CLI calls them `rules` (F), `judge` (J)
+> and `agent` (E); the letters remain the architecture names in the coordinator's specs and in
+> every audit record. All three share the candidate list, the tool surface, the approval text,
+> consent, flight, detection, merge and report check; they differ only in who picks and how it
+> is gated:
+>
+> | Mode | Who picks | Gate | Reason the operator reads | Live path |
+> |---|---|---|---|---|
+> | `rules` | code: the first sweep offered | none needed | written by code | none, none needed |
+> | `judge` | a model picks ONE offered label (§7.1 below) | confidence ≥ 0.60 and margin ≥ 0.15, else escalate | written by code from the candidate description | `--live-judge {jev,llm}` |
+> | `agent` | a model writes the tool call itself | legality only: legal tool, legal option, non-blank reason, else escalate | **the model's own words** | `--live-agent` (`survey.llm_adapter`, approved by the operator 2026-09-22) |
+>
+> `agent`'s point is also its risk: a fluent wrong reason passes, because nothing but legality is
+> checked. Its adapter declares the legal set as function tools with `option_id` an enum of the
+> legal ids, so the provider refuses an unoffered sweep before the proposer refuses it again; a
+> model that calls the escalate tool is recorded as `model_escalated` with its reason, not as an
+> illegal call. Every live path: at most three paid calls per run (a proposal and two reviews),
+> refused without `--i-authorise-paid-calls` and a key, the raw reply kept in the audit
+> (`judge_answer` / `adapter_raw`), the model pinned by exact name.
 
 ### 7.1 What Jev can actually do here
 

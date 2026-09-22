@@ -231,3 +231,63 @@ def test_a_live_judge_is_refused_without_an_api_key(tmp_path, monkeypatch):
     monkeypatch.setattr(env_file, "load_env_file", lambda *a, **k: {})
     with pytest.raises((SystemExit, ValueError)):
         main(_live_argv(tmp_path, "J", "--live-judge", "llm", "--i-authorise-paid-calls"))
+
+
+# -- mode names: words for people, letters kept as aliases ---------------------
+
+def test_mode_words_and_letters_are_the_same_modes(tmp_path, capsys):
+    import json as _json
+
+    for index, (word, letter) in enumerate((("rules", "F"), ("judge", "J"), ("agent", "E"))):
+        for spelling in (word, letter):
+            run_dir = tmp_path / f"{index}-{spelling}"
+            run_dir.mkdir()
+            argv, frames = _base_argv(run_dir)
+            argv[argv.index("--mode") + 1] = spelling
+            main(argv + ["--frames", str(frames)])
+            summary = _json.loads(capsys.readouterr().out)
+            assert (summary["mode"], summary["mode_name"]) == (letter, word)
+
+
+def test_a_live_agent_is_refused_without_the_go_ahead_and_outside_agent_mode(tmp_path, monkeypatch):
+    with pytest.raises((SystemExit, ValueError)):
+        main(_live_argv(tmp_path, "agent", "--live-agent"))
+    with pytest.raises((SystemExit, ValueError)):
+        main(_live_argv(tmp_path, "judge", "--live-agent", "--i-authorise-paid-calls"))
+    import sentinel.env_file as env_file
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(env_file, "load_env_file", lambda *a, **k: {})
+    with pytest.raises((SystemExit, ValueError)):
+        main(_live_argv(tmp_path, "agent", "--live-agent", "--i-authorise-paid-calls"))
+
+
+def test_a_live_agent_with_key_and_go_ahead_reaches_the_proposer(tmp_path, monkeypatch, capsys):
+    """The positive wiring: with the flag, the mode and a key, main() builds the real
+    LlmAdapter and hands it to LlmProposer. The adapter's transport is stubbed so the
+    proof needs no network: its reply picks the first sweep, and the run reports."""
+    import sentinel.env_file as env_file
+    import sentinel.survey.llm_adapter as llm_adapter
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(env_file, "load_env_file", lambda *a, **k: {})
+    seen = {}
+
+    def fake_transport(url, headers, payload):
+        seen["url"], seen["tools"] = url, payload["tools"]
+        option_id = payload["tools"][0]["function"]["parameters"]["properties"]["option_id"]["enum"][0]
+        return {"model": "z-ai/glm-5.3", "choices": [{"message": {"tool_calls": [
+            {"function": {"name": "survey_propose_sweep",
+                          "arguments": json.dumps({"option_id": option_id,
+                                                   "reason": "the rail sees the whole room"})}}]}}]}
+
+    real_init = llm_adapter.LlmAdapter.__init__
+
+    def stubbed_init(self, *args, **kwargs):
+        real_init(self, *args, transport=fake_transport, **kwargs)
+
+    monkeypatch.setattr(llm_adapter.LlmAdapter, "__init__", stubbed_init)
+    code = main(_live_argv(tmp_path, "agent", "--live-agent", "--i-authorise-paid-calls"))
+    summary = json.loads(capsys.readouterr().out)
+    assert code == 0 and summary["mode_name"] == "agent"
+    assert seen["url"].endswith("/v1/chat/completions")
+    assert summary["outcome"]["status"] == "REPORTED"

@@ -42,6 +42,7 @@ landed by the existing controlled-landing path either way.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -86,6 +87,15 @@ def mission_from_option(option, start_x_cm: int | None, start_y_cm: int | None) 
     return Mission(start_x_cm, start_y_cm, waypoints)
 
 
+def survey_heading_deg(cube_heading_deg: float) -> float:
+    """The cube measures headings like a mathematician: 0 along +x, counter-clockwise,
+    so facing the tables (+y) is 90 (``FACING_DEG``). The survey measures them like a
+    compass on the room plan: 0 along +y, clockwise (``geometry.position_of``). Passed
+    through unconverted, every object lands a quarter turn away from where it is --
+    three metres to the side instead of three metres ahead."""
+    return (90.0 - cube_heading_deg + 180.0) % 360.0 - 180.0
+
+
 class CubeFlight:
     """Implements ``FlightPort`` by flying a real (or dry-run) cube
     mission through ``CubeMissionRunner``."""
@@ -93,7 +103,8 @@ class CubeFlight:
     def __init__(self, *, client, site: Site, mode: str, pose_mode: str,
                  run_id: str, mission_log, capture_dir=None,
                  start_x_cm: int | None = None, start_y_cm: int | None = None,
-                 surface_z_cm: float, sr063_amended: bool = False,
+                 surface_z_cm: float, takeoff_z_cm: float | None = None,
+                 sr063_amended: bool = False,
                  tag_map=None, conn=None, burst_fn: Callable[[], list] | None = None,
                  sleep_fn: Callable[[float], None] = time.sleep,
                  minimum_battery: int = 40, confirm: bool = True,
@@ -122,6 +133,17 @@ class CubeFlight:
         self.capture_dir = capture_dir
         self.start_x_cm, self.start_y_cm = start_x_cm, start_y_cm
         self.surface_z_cm = surface_z_cm
+        # `height?` is height above the TAKEOFF point, not above the site's z = 0.
+        # A takeoff from a raised pad put every range ~30 % short on 2026-09-22
+        # (WP5 session's tag-implied heights). The site file may carry it
+        # (`takeoff_z_cm`, WP5 side); an explicit value overrides it.
+        if takeoff_z_cm is None:
+            takeoff_z_cm = getattr(site, "takeoff_z_cm", None) or 0.0
+        self.takeoff_z_cm = float(takeoff_z_cm)
+        # The cube Site also carries `altitude_bias_cm`: how much higher the drone hovers
+        # than height? + takeoff says, as the tags see it (flight3 = 20, pending the tape).
+        # Separate from the takeoff height; the frame height is the sum of all three.
+        self.altitude_bias_cm = float(getattr(site, "altitude_bias_cm", None) or 0.0)
         self.sr063_amended = sr063_amended
         self.tag_map, self.conn = tag_map, conn
         self.burst_fn, self.sleep_fn = burst_fn, sleep_fn
@@ -177,15 +199,24 @@ class CubeFlight:
         measured = entry["status"] == "LOCALISED"
         if measured:
             x_cm, y_cm = entry["fix_cm"]
-            heading_deg = entry["heading_deg"]
+            heading_deg = survey_heading_deg(entry["heading_deg"])
         else:
             x_cm, y_cm = entry["commanded_cm"][0], entry["commanded_cm"][1]
-            heading_deg = FACING_DEG
-        z_cm = entry["height_cm"]
+            heading_deg = survey_heading_deg(FACING_DEG)
+        # site frame, not takeoff-relative
+        z_cm = entry["height_cm"] + self.takeoff_z_cm + self.altitude_bias_cm
+        image_path, sha256 = frame["path"], frame["sha256"]
+        if image_path is None:
+            # A dry run records no image (the runner saves frames only in real mode).
+            # The frame still needs an identity the store and a replay detector can key
+            # on; the hash is of that name and says so, never of an image that isn't there.
+            image_path = f"dry-run/{entry['waypoint']}-{frame['look_deg']}.png"
+            sha256 = hashlib.sha256(f"no image: {image_path}".encode()).hexdigest()
         return FlightFrame(
-            stop_index=stop_index, look_deg=frame["look_deg"], x_cm=x_cm, y_cm=y_cm,
+            # a cube look offset is positive to the LEFT; the survey's is positive to the right
+            stop_index=stop_index, look_deg=-float(frame["look_deg"]), x_cm=x_cm, y_cm=y_cm,
             z_cm=z_cm, heading_deg=heading_deg,
             position_kind="MEASURED" if measured else "COMMANDED",
-            image_path=frame["path"], sha256=frame["sha256"],
+            image_path=image_path, sha256=sha256,
             artifact_id=f"cube:{self.run_id}:{entry['waypoint']}:{frame['look_deg']}",
             delta_z_cm=z_cm - self.surface_z_cm, tolerance=entry.get("tolerance"))

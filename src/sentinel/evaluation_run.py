@@ -15,7 +15,7 @@ from pathlib import Path
 import subprocess
 import time
 import uuid
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 CONSENT_ENV = "SENTINEL_PROPOSAL_EVAL_CONSENT"
 VERSION = "proposal-eval-run.v1"
@@ -53,9 +53,30 @@ def source_digest(root: Path) -> str:
     return manifest_digest({p.relative_to(root).as_posix(): file_digest(p) for p in files})
 
 
+def quality_claim(mode: str, label_statuses: Iterable[str]) -> str:
+    """Describe only the evidence the selected case labels can support."""
+    if mode != "live":
+        return "not a fresh model-quality measurement"
+    statuses = set(label_statuses)
+    if statuses == {"independently_labelled"}:
+        return "fresh independently labelled cases only"
+    if statuses == {"synthetic_declared"}:
+        return (
+            "fresh provider calls on synthetic-declared cases; "
+            "harness and prompt-sensitivity evidence only"
+        )
+    if "synthetic_declared" in statuses:
+        return (
+            "fresh provider calls on mixed label provenance; only independently "
+            "labelled cases support model-quality conclusions"
+        )
+    return "fresh provider calls with unverified label provenance; no model-quality claim"
+
+
 def build_manifest(*, root: Path, fixture: Path, catalogue: Path, arms: list[str],
                    mode: str, repeats: int, max_calls: int, configurations: dict,
-                   cost_per_call_usd: float | None = None, recording: Path | None = None) -> dict:
+                   cost_per_call_usd: float | None = None, recording: Path | None = None,
+                   label_statuses: Iterable[str] = ()) -> dict:
     if mode not in {"scripted", "recorded", "live"}:
         raise ValueError("unknown execution mode")
     if repeats < 1 or max_calls < 0:
@@ -73,7 +94,7 @@ def build_manifest(*, root: Path, fixture: Path, catalogue: Path, arms: list[str
         "cost_per_call_usd_assumption": cost_per_call_usd,
         "cost_estimate_status": "operator_supplied_estimate" if cost_per_call_usd is not None else "unknown",
         "release_thresholds": None, "approval_policy": "scripted operator decisions; simulated approval tests",
-        "quality_claim": "fresh independently labelled cases only" if mode == "live" else "not a fresh model-quality measurement",
+        "quality_claim": quality_claim(mode, label_statuses),
     }
 
 
