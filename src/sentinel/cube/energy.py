@@ -24,6 +24,15 @@ class ReserveDecision(str, Enum):
     LAND_CONTINGENCY = "LAND_CONTINGENCY"
 
 
+# Tello's ``time?`` telemetry is integral seconds.  A read can therefore lead
+# monotonic elapsed time by one reported second at a counter boundary.  It is
+# also motor-runtime telemetry, so a positive tick can lag wall time; retain a
+# calibrated nine-second telemetry tolerance after the one-second quantization
+# envelope.  A zero tick is only tolerated for the first quantized second.
+MOTOR_TIME_QUANTIZATION_ENVELOPE_S = Decimal("1")
+MOTOR_TIME_RUNTIME_TOLERANCE_S = Decimal("9")
+
+
 def _exact_decimal(value: object, field: str) -> Decimal:
     """Accept finite external numbers as their documented decimal spelling.
 
@@ -234,7 +243,12 @@ class ReserveGuard:
             motor_elapsed = _exact_decimal(current.motor_time_s, "motor_time_s") - _exact_decimal(
                 previous.motor_time_s, "motor_time_s",
             )
-            if motor_elapsed <= 0 or motor_elapsed > elapsed:
+            if (motor_elapsed < 0
+                    or motor_elapsed - elapsed > MOTOR_TIME_QUANTIZATION_ENVELOPE_S
+                    or (motor_elapsed == 0 and elapsed > MOTOR_TIME_QUANTIZATION_ENVELOPE_S)
+                    or elapsed - motor_elapsed > (
+                        MOTOR_TIME_QUANTIZATION_ENVELOPE_S + MOTOR_TIME_RUNTIME_TOLERANCE_S
+                    )):
                 self._telemetry_invalid = True
                 return
         burn = previous.battery_pct - current.battery_pct

@@ -128,19 +128,44 @@ def test_exact_decimal_reserve_math_does_not_overcharge_a_binary_float_boundary(
 def test_motor_time_is_cross_checked_against_monotonic_measurement_time() -> None:
     guard = _guard()
 
-    guard.observe(_sample(80, 0, motor_time_s=10), _sample(79, 5, motor_time_s=16))
+    guard.observe(_sample(80, 0, motor_time_s=10), _sample(79, 5, motor_time_s=17))
     estimate = guard.assess(current=_sample(79, 10, motor_time_s=17), next_plan=None,
                             recovery_plan=None, provider_wait_s=0, termination_plan=_plan("home", 1))
 
     assert estimate.decision is ReserveDecision.LAND_CONTINGENCY
 
 
-def test_motor_time_stall_is_invalid_when_monotonic_time_advanced() -> None:
-    guard = _guard()
+@pytest.mark.parametrize("current_motor_time_s", [10, 11])
+def test_integer_motor_time_quantization_accepts_unchanged_or_boundary_crossing_subsecond_samples(
+    current_motor_time_s: int,
+) -> None:
+    guard = _guard(now=10.25)
 
-    guard.observe(_sample(80, 0, motor_time_s=10), _sample(80, 5, motor_time_s=10))
+    guard.observe(_sample(80, 10, motor_time_s=10),
+                  _sample(80, 10.25, motor_time_s=current_motor_time_s))
 
-    estimate = guard.assess(current=_sample(80, 5, motor_time_s=10), next_plan=None,
+    estimate = guard.assess(current=_sample(80, 10.25, motor_time_s=current_motor_time_s),
+                            next_plan=None, recovery_plan=None, provider_wait_s=0,
+                            termination_plan=_plan("home", 1))
+    assert estimate.decision is ReserveDecision.CONTINUE
+
+
+def test_motor_time_prolonged_stall_exceeds_its_one_second_quantization_envelope() -> None:
+    guard = _guard(now=12)
+
+    guard.observe(_sample(80, 10, motor_time_s=10), _sample(80, 12, motor_time_s=10))
+
+    estimate = guard.assess(current=_sample(80, 12, motor_time_s=10), next_plan=None,
+                            recovery_plan=None, provider_wait_s=0, termination_plan=_plan("home", 1))
+    assert estimate.decision is ReserveDecision.LAND_CONTINGENCY
+
+
+def test_motor_time_regression_is_immediately_invalid_even_within_quantization_envelope() -> None:
+    guard = _guard(now=10.25)
+
+    guard.observe(_sample(80, 10, motor_time_s=11), _sample(80, 10.25, motor_time_s=10))
+
+    estimate = guard.assess(current=_sample(80, 10.25, motor_time_s=10), next_plan=None,
                             recovery_plan=None, provider_wait_s=0, termination_plan=_plan("home", 1))
     assert estimate.decision is ReserveDecision.LAND_CONTINGENCY
 
