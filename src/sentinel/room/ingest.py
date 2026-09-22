@@ -7,7 +7,7 @@ starts a stable hypothesis; later tracking may append revisions explicitly.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
@@ -24,6 +24,12 @@ from .store import IdempotencyConflict, RoomStore
 
 SCHEMA_VERSION = "room-perception-v1"
 MAX_IDENTITY_LENGTH = 4096
+# Includes the terminating LF. Oversized records are drained in bounded chunks,
+# never parsed, and hashed only over this prefix (recorded in the receipt).
+MAX_INBOX_RECORD_BYTES = 1024 * 1024
+MAX_INBOX_POLL_BYTES = 4 * 1024 * 1024
+MAX_INBOX_POLL_RECORDS = 256
+_INBOX_FINGERPRINT_BYTES = 4096
 _INBOX_LOCK = threading.RLock()
 _ERROR_CATEGORIES = frozenset({
     "TIMEOUT", "AUTH", "TRANSPORT", "RATE_LIMIT", "SCHEMA", "RESPONSE_TOO_LARGE",
@@ -440,32 +446,211 @@ def _unique_keys(pairs):
     return document
 
 
+def _fingerprint(handle, offset, length):
+    handle.seek(offset)
+    return hashlib.sha256(handle.read(length)).hexdigest()
+
+
+def _load_cursor(store, handle, inbox_id, end):
+    with store._lock:
+        store._require_open()
+        row = store.connection.execute(
+            "SELECT * FROM room_inbox_cursors WHERE inbox_id = ?", (inbox_id,),
+        ).fetchone()
+    cursor = dict(row) if row is not None else None
+    # The writer replaces the inode on every append. Match the bounded initial
+    # prefix and the checkpoint immediately preceding scan progress instead.
+    # Truncation/divergence restarts safely through delivery/receipt idempotency.
+    if cursor is not None and (
+        end < cursor["file_size"]
+        or _fingerprint(handle, 0, cursor["prefix_length"]) != cursor["prefix_sha256"]
+        or _fingerprint(handle, cursor["checkpoint_offset"], cursor["checkpoint_length"])
+            != cursor["checkpoint_sha256"]
+    ):
+        cursor = None
+    verification_bytes = 0
+    if cursor is not None and cursor["record_sha256"] is not None:
+        # A discard can span many polls. Its receipt digest must still describe
+        # this generation's prefix, even if a replacement altered bytes outside
+        # the smaller progress fingerprints. Count this read in the poll budget.
+        verification_bytes = MAX_INBOX_RECORD_BYTES
+        if _fingerprint(handle, cursor["byte_offset"], verification_bytes) != cursor["record_sha256"]:
+            cursor = None
+    if cursor is None:
+        cursor = {"inbox_id": inbox_id, "byte_offset": 0, "scan_offset": 0, "record_sha256": None}
+    cursor["file_size"] = end
+    cursor["prefix_length"] = min(_INBOX_FINGERPRINT_BYTES, end)
+    cursor["prefix_sha256"] = _fingerprint(handle, 0, cursor["prefix_length"])
+    return cursor, verification_bytes
+
+
+def _save_cursor(store, handle, cursor):
+    if cursor["scan_offset"] == cursor["file_size"] and cursor["record_sha256"] is None:
+        # Small complete inboxes retain the existing duplicate-replay behavior;
+        # large inboxes finish one bounded traversal before starting another.
+        cursor["byte_offset"] = cursor["scan_offset"] = 0
+    length = min(_INBOX_FINGERPRINT_BYTES, cursor["scan_offset"])
+    cursor["checkpoint_offset"] = cursor["scan_offset"] - length
+    cursor["checkpoint_length"] = length
+    cursor["checkpoint_sha256"] = _fingerprint(handle, cursor["checkpoint_offset"], length)
+    cursor["updated_at"] = datetime.now(timezone.utc).isoformat()
+    columns = ("inbox_id", "byte_offset", "scan_offset", "record_sha256", "file_size", "prefix_length",
+               "prefix_sha256", "checkpoint_offset", "checkpoint_length", "checkpoint_sha256", "updated_at")
+    with store._lock:
+        store._require_open()
+        with store.connection:
+            store.connection.execute(
+                "INSERT INTO room_inbox_cursors (" + ",".join(columns) + ") VALUES (" +
+                ",".join("?" for _ in columns) + ") ON CONFLICT(inbox_id) DO UPDATE SET " +
+                ",".join(f"{column}=excluded.{column}" for column in columns[1:]),
+                tuple(cursor[column] for column in columns),
+            )
+
+
+def _complete_records(handle, cursor, verification_bytes):
+    """Bound both per-record memory/hash work and total poll bytes/records.
+
+    Oversized partial records retain only a prefix digest and scan position;
+    small partial records restart at their beginning until the LF is present.
+    Four bounded fingerprint reads are reserved in the total I/O budget.
+    """
+    remaining = MAX_INBOX_POLL_BYTES - 4 * _INBOX_FINGERPRINT_BYTES - verification_bytes
+    end = cursor["file_size"]
+    handle.seek(cursor["scan_offset"])
+    completed = 0
+    while handle.tell() < end and completed < MAX_INBOX_POLL_RECORDS:
+        offset = cursor["byte_offset"]
+        prefix = None
+        if cursor["record_sha256"] is None:
+            size = min(MAX_INBOX_RECORD_BYTES, end - offset)
+            if remaining < size:
+                return
+            prefix = handle.readline(size)
+            remaining -= len(prefix)
+            if not prefix:
+                return
+            if prefix.endswith(b"\n"):
+                digest, hashed_length = hashlib.sha256(prefix).hexdigest(), len(prefix)
+            elif len(prefix) < MAX_INBOX_RECORD_BYTES:
+                return
+            else:
+                cursor["record_sha256"] = hashlib.sha256(prefix).hexdigest()
+                cursor["scan_offset"] = handle.tell()
+                prefix = None
+        if cursor["record_sha256"] is not None:
+            while handle.tell() < end and remaining > 0:
+                chunk = handle.readline(min(MAX_INBOX_RECORD_BYTES, remaining, end - handle.tell()))
+                remaining -= len(chunk)
+                cursor["scan_offset"] = handle.tell()
+                if not chunk:
+                    return
+                if chunk.endswith(b"\n"):
+                    break
+            else:
+                return
+            digest, hashed_length = cursor["record_sha256"], MAX_INBOX_RECORD_BYTES
+        length = handle.tell() - offset
+        cursor["byte_offset"] = cursor["scan_offset"] = handle.tell()
+        cursor["record_sha256"] = None
+        completed += 1
+        yield offset, length, digest, hashed_length, prefix
+
+
+def _known_rejection(store, rejection_id):
+    with store._lock:
+        store._require_open()
+        return store.connection.execute(
+            "SELECT 1 FROM room_inbox_rejections WHERE rejection_id = ?", (rejection_id,),
+        ).fetchone() is not None
+
+
+def _reject_record(store, *, rejection_id, inbox_id, offset, length, digest, hashed_length, category):
+    # Recheck under the write transaction so concurrent pollers preserve exactly
+    # one receipt and its original timestamps. Never persist exception messages.
+    with store._lock:
+        store._require_open()
+        connection = store.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            if not _known_rejection(store, rejection_id):
+                connection.execute(
+                    "INSERT INTO room_inbox_rejections VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (rejection_id, inbox_id, offset, length, digest, hashed_length, category,
+                     datetime.now(timezone.utc).isoformat(), time.monotonic_ns() // 1_000_000),
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+
+def _poll_records(store, path, current_snapshot_version):
+    # Hash the local inbox identity; paths may themselves contain credentials.
+    inbox_id = hashlib.sha256(os.fsencode(os.path.normcase(str(path.resolve())))).hexdigest()
+    try:
+        handle = path.open("rb")
+    except FileNotFoundError:
+        return (), False
+    outcomes = []
+    with handle:
+        end = os.fstat(handle.fileno()).st_size
+        cursor, verification_bytes = _load_cursor(store, handle, inbox_id, end)
+        for offset, length, digest, hashed_length, prefix in _complete_records(handle, cursor, verification_bytes):
+            rejection_id = _digest((inbox_id, offset, length, digest))
+            if _known_rejection(store, rejection_id):
+                continue
+            category = None
+            if length > MAX_INBOX_RECORD_BYTES:
+                category = "RECORD_TOO_LARGE"
+            elif not prefix.strip():
+                category = "SCHEMA"
+            else:
+                try:
+                    document = json.loads(prefix, object_pairs_hook=_unique_keys)
+                except (ValueError, UnicodeError, RecursionError):
+                    category = "JSON"
+                else:
+                    try:
+                        result = result_from_dict(document)
+                    except (InvalidPerception, RecursionError, OverflowError):
+                        category = "SCHEMA"
+                    else:
+                        try:
+                            outcomes.append(ingest_result(store, result,
+                                                         current_snapshot_version=current_snapshot_version))
+                        except InvalidPerception:
+                            category = "INVALID_EVIDENCE"
+                        except IdempotencyConflict:
+                            category = "IDENTITY_CONFLICT"
+            if category is not None:
+                _reject_record(store, rejection_id=rejection_id, inbox_id=inbox_id, offset=offset,
+                               length=length, digest=digest, hashed_length=hashed_length, category=category)
+        _save_cursor(store, handle, cursor)
+    return tuple(outcomes), bool(end)
+
+
 def poll_inbox(store: RoomStore, path: Path, *, current_snapshot_version: int,
                wait_s: float = 0, poll_s: float = 0.1,
                monotonic_fn=time.monotonic, sleep_fn=time.sleep) -> tuple[IngestOutcome, ...]:
     """Wait at most wait_s for whole records; retries recover immutable results.
 
-    Partial tails are ignored until a later poll. Malformed complete records
-    raise a sanitized error and are never treated as successful observations.
+    Each call reads at most MAX_INBOX_POLL_BYTES from the inbox and processes at
+    most MAX_INBOX_POLL_RECORDS. Metadata-only durable cursors resume bounded
+    scans after restart and across the writer's atomic prefix-preserving append.
+    Partial tails are ignored until a later poll. Each invalid complete record
+    gets one sanitized append-only rejection receipt, allowing later valid rows
+    to proceed. Rejected records are recognized without parsing after restart.
     """
     if not _number(wait_s) or wait_s < 0 or not _number(poll_s) or poll_s <= 0:
         raise ValueError("invalid inbox polling interval")
+    if not _integer(current_snapshot_version):
+        raise InvalidPerception("invalid current snapshot version")
     deadline = monotonic_fn() + wait_s
     while True:
         with _INBOX_LOCK:
-            content = Path(path).read_bytes() if Path(path).exists() else b""
-        complete = content[:content.rfind(b"\n") + 1]
-        outcomes = []
-        for line in complete.splitlines():
-            if not line.strip():
-                continue
-            try:
-                result = result_from_dict(json.loads(line, object_pairs_hook=_unique_keys))
-            except (ValueError, UnicodeError):
-                raise InvalidPerception("malformed inbox record") from None
-            outcomes.append(ingest_result(store, result, current_snapshot_version=current_snapshot_version))
-        if outcomes:
-            return tuple(outcomes)
+            outcomes, scanned = _poll_records(store, Path(path), current_snapshot_version)
+        if scanned:
+            return outcomes
         remaining = deadline - monotonic_fn()
         if remaining <= 0:
             return ()

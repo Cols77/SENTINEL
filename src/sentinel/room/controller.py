@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 import math
+import time
 from typing import Callable, TYPE_CHECKING
 import uuid
 
@@ -81,12 +82,22 @@ class RoomController:
                 continue
 
     def step(self, session_id: str) -> TurnOutcome:
+        ingest_failed = False
         if self.ingest_pending is not None:
-            self.ingest_pending(session_id)
+            try:
+                self.ingest_pending(session_id)
+            except Exception:
+                ingest_failed = True
         snapshot = self.queries.project(session_id)
         if snapshot.terminal_state:
             return TurnOutcome("TERMINAL", False, (), snapshot.terminal_state)
         correlation = str(uuid.uuid4())
+        if ingest_failed:
+            payload = self._outcome(snapshot, "INGEST_PENDING", "INGEST_PENDING",
+                                    relevant_hash(CandidateKind.READ_OBSERVATIONS, snapshot),
+                                    "SOURCE_FAILURE", refusal="SOURCE_FAILURE")
+            payload["error_category"] = "INGEST_ERROR"
+            return self._record(snapshot, correlation, payload)
         try:
             snapshot, source_events = self._audit_source_failures(snapshot, correlation)
         except VersionConflict:
@@ -135,6 +146,7 @@ class RoomController:
         criteria = {key: c.description for key, c in candidates.items()}
         state = asdict(snapshot)
         provider_error = None
+        started = time.monotonic_ns()
         try:
             answer = self.judge.choice(deepcopy(state),
                                        "Choose one legal action. Reads are historical. Never compose factual values.",
@@ -148,7 +160,8 @@ class RoomController:
                                     for label, probability in assessment.probabilities]
         attempt = {"snapshot_version": snapshot.state_version, "state": state,
                    "candidates": [asdict(c) for c in candidates.values()], "assessment": audited,
-                   "provider_error": provider_error, "act_at": self.act_at, "min_margin": self.min_margin}
+                   "provider_error": provider_error, "act_at": self.act_at, "min_margin": self.min_margin,
+                   "latency_ms": (time.monotonic_ns() - started) // 1_000_000}
         selected = candidates.get(assessment.selected_label)
         # Illegal provider labels are one failed decision operation. Retain the
         # actual proposed label in the assessment, but do not let arbitrary new

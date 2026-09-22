@@ -20,8 +20,9 @@ _MIGRATION_002 = Path(__file__).with_name("sql") / "migration_002_event_insert_g
 _MIGRATION_003 = Path(__file__).with_name("sql") / "migration_003_event_batches.sql"
 _MIGRATION_004 = Path(__file__).with_name("sql") / "migration_004_perception_evidence.sql"
 _MIGRATION_005 = Path(__file__).with_name("sql") / "migration_005_perception_mismatch_failures.sql"
+_MIGRATION_006 = Path(__file__).with_name("sql") / "migration_006_inbox_rejections.sql"
 _MIGRATIONS = ((1, _SCHEMA), (2, _MIGRATION_002), (3, _MIGRATION_003), (4, _MIGRATION_004),
-               (5, _MIGRATION_005))
+               (5, _MIGRATION_005), (6, _MIGRATION_006))
 # Keys are case-folded and reduced to alphanumeric characters before comparison.
 # Sensitive aliases are rejected as complete keys or compound stems.  The only
 # exceptions are the narrowly named metadata entries below; no suffix alone

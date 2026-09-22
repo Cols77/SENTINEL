@@ -1,5 +1,6 @@
 """Decision-grade perception, persisted independently of provider and flight."""
 from dataclasses import asdict, replace
+from datetime import datetime
 import hashlib
 import json
 import sqlite3
@@ -191,7 +192,7 @@ def test_all_perception_tables_are_immutable_even_for_replace(tmp_path):
             store.connection.rollback()
 
 
-def test_jsonl_roundtrip_rejects_extra_fields_and_partial_or_malformed_records(tmp_path):
+def test_jsonl_roundtrip_rejects_extra_fields_and_defers_partial_records(tmp_path):
     store, result = store_for(tmp_path), sample(tmp_path)
     inbox = tmp_path / "inbox.jsonl"
     append_inbox_result(inbox, result)
@@ -205,9 +206,10 @@ def test_jsonl_roundtrip_rejects_extra_fields_and_partial_or_malformed_records(t
     with pytest.raises(InvalidPerception):
         append_inbox_result(inbox, result)
     inbox.write_text('{"token":"secret"}\n', encoding="utf-8")
-    with pytest.raises(InvalidPerception) as error:
-        poll_inbox(store, inbox, current_snapshot_version=0, wait_s=0)
-    assert "secret" not in str(error.value)
+    assert poll_inbox(store, inbox, current_snapshot_version=0, wait_s=0) == ()
+    receipt = store.connection.execute("SELECT * FROM room_inbox_rejections").fetchone()
+    assert receipt["category"] == "SCHEMA"
+    assert "secret" not in str(dict(receipt))
     with pytest.raises(InvalidPerception):
         result_from_dict({**asdict(result), "unexpected": "secret"})
 
@@ -281,8 +283,8 @@ def test_inbox_rejects_duplicate_json_keys(tmp_path):
     line = canonical_line(asdict(result)).decode()
     inbox = tmp_path / "duplicate-keys.jsonl"
     inbox.write_text(line.replace('"provider":"fixture"', '"provider":"ignored","provider":"fixture"'))
-    with pytest.raises(InvalidPerception):
-        poll_inbox(store, inbox, current_snapshot_version=0)
+    assert poll_inbox(store, inbox, current_snapshot_version=0) == ()
+    assert count(store, "room_inbox_rejections") == 1
     assert count(store, "room_observations") == 0
 
 
@@ -306,7 +308,7 @@ def test_migration_upgrades_real_version_three_database_without_rewriting_events
     assert upgraded.events("s1") == (event,)
     result = sample(tmp_path, snapshot=1)
     assert ingest_result(upgraded, result, current_snapshot_version=1).authorizes_current_state
-    assert upgraded.connection.execute("SELECT MAX(version) FROM room_schema_version").fetchone()[0] == 5
+    assert upgraded.connection.execute("SELECT MAX(version) FROM room_schema_version").fetchone()[0] == 6
 
 
 def test_unverified_payload_identity_cannot_be_replaced_through_null_index_alias(tmp_path):
@@ -424,7 +426,7 @@ def test_v4_upgrade_retains_existing_results_evidence_and_foreign_keys(tmp_path,
                        resolved_model="other-model", identity_status="MISMATCH", detections=(),
                        error_category="IDENTITY_MISMATCH")
     assert not ingest_result(upgraded, mismatch, current_snapshot_version=0).authorizes_current_state
-    assert upgraded.connection.execute("SELECT MAX(version) FROM room_schema_version").fetchone()[0] == 5
+    assert upgraded.connection.execute("SELECT MAX(version) FROM room_schema_version").fetchone()[0] == 6
 
 
 def test_exact_replay_after_frame_retention_expires_does_not_read_file(tmp_path):
@@ -473,3 +475,287 @@ def test_new_delivery_rechecks_identity_after_hash_validation_race(tmp_path, mon
     assert ingest_result(store, result, current_snapshot_version=0).duplicate
     assert count(store, "room_perception_results") == 1
     other.close()
+
+
+@pytest.mark.parametrize("bad_line,category", [
+    (b'{"token":"never-persist-this-secret",\n', "JSON"),
+    (b'\xff\n', "JSON"),
+    (b'{"token":"never-persist-this-secret"}\n', "SCHEMA"),
+    (b'\n', "SCHEMA"),
+])
+def test_rejected_record_does_not_block_valid_delivery_and_replays_after_restart(tmp_path, bad_line, category):
+    store, result = store_for(tmp_path), sample(tmp_path)
+    inbox = tmp_path / "never-persist-this-secret.jsonl"
+    inbox.write_bytes(bad_line + canonical_line(asdict(result)))
+    outcomes = poll_inbox(store, inbox, current_snapshot_version=0)
+    assert len(outcomes) == 1 and not outcomes[0].duplicate
+    receipt = dict(store.connection.execute("SELECT * FROM room_inbox_rejections").fetchone())
+    assert receipt["category"] == category
+    assert receipt["byte_offset"] == 0 and receipt["byte_length"] == len(bad_line)
+    assert receipt["record_sha256"] == hashlib.sha256(bad_line).hexdigest()
+    assert receipt["hashed_byte_length"] == len(bad_line)
+    assert len(receipt["inbox_id"]) == len(receipt["rejection_id"]) == 64
+    assert datetime.fromisoformat(receipt["rejected_at"]).tzinfo is not None
+    assert receipt["monotonic_ms"] >= 0
+    assert "never-persist-this-secret" not in str(receipt)
+    for reopened in (False, True):
+        if reopened:
+            store.close()
+            store = RoomStore.open(tmp_path / "room.sqlite3")
+        replay = poll_inbox(store, inbox, current_snapshot_version=0)
+        assert len(replay) == 1 and replay[0].duplicate
+        assert [dict(row) for row in store.connection.execute("SELECT * FROM room_inbox_rejections")] == [receipt]
+        assert count(store, "room_perception_results") == 1
+    store.close()
+
+
+def test_structurally_complete_invalid_envelope_is_rejected_before_valid_typed_failure(tmp_path):
+    store, result = store_for(tmp_path), sample(tmp_path)
+    invalid = replace(result, status="FAILED", error_category="private-error-secret")
+    failure = replace(result, status="FAILED", resolved_model=None, identity_status="UNVERIFIED",
+                      detections=(), error_category="TIMEOUT")
+    inbox = tmp_path / "inbox.jsonl"
+    inbox.write_bytes(canonical_line(asdict(invalid)) + canonical_line(asdict(failure)))
+    outcomes = poll_inbox(store, inbox, current_snapshot_version=0)
+    assert len(outcomes) == 1 and not outcomes[0].authorizes_current_state
+    receipt = dict(store.connection.execute("SELECT * FROM room_inbox_rejections").fetchone())
+    assert receipt["category"] == "SCHEMA" and "private-error-secret" not in str(receipt)
+    assert count(store, "room_perception_results") == 1
+
+
+def test_partial_poison_tail_is_not_rejected_until_newline_and_then_valid_row_continues(tmp_path):
+    store, result = store_for(tmp_path), sample(tmp_path)
+    inbox = tmp_path / "inbox.jsonl"
+    inbox.write_bytes(b'{"token":"secret"')
+    assert poll_inbox(store, inbox, current_snapshot_version=0) == ()
+    assert count(store, "room_inbox_rejections") == 0
+    store.close()
+    store = RoomStore.open(tmp_path / "room.sqlite3")
+    with inbox.open("ab") as handle:
+        handle.write(b'\n' + canonical_line(asdict(result)))
+    assert len(poll_inbox(store, inbox, current_snapshot_version=0)) == 1
+    assert count(store, "room_inbox_rejections") == 1
+
+
+def test_oversized_record_uses_bounded_reads_and_hashes_without_parsing(tmp_path, monkeypatch):
+    from pathlib import Path
+    import sentinel.room.ingest as module
+    store, result = store_for(tmp_path), sample(tmp_path)
+    maximum = getattr(module, "MAX_INBOX_RECORD_BYTES", 1024 * 1024)
+    inbox = tmp_path / "inbox.jsonl"
+    oversized = b'x' * (maximum * 3) + b'\n'
+    inbox.write_bytes(oversized + canonical_line(asdict(result)))
+    original_open, original_loads, original_hash = Path.open, module.json.loads, module.hashlib.sha256
+
+    class BoundedReader:
+        def __init__(self, handle):
+            self.handle = handle
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.handle.close()
+        def read(self, size=-1):
+            assert 0 <= size <= maximum + 1
+            return self.handle.read(size)
+        def readline(self, size=-1):
+            assert 0 <= size <= maximum + 1
+            return self.handle.readline(size)
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
+    def open_bounded(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        return BoundedReader(handle) if path == inbox else handle
+
+    def load_bounded(value, **kwargs):
+        assert len(value) <= maximum
+        return original_loads(value, **kwargs)
+
+    def hash_bounded(value=b''):
+        assert len(value) <= maximum
+        return original_hash(value)
+
+    monkeypatch.setattr(Path, "open", open_bounded)
+    monkeypatch.setattr(module.json, "loads", load_bounded)
+    monkeypatch.setattr(module.hashlib, "sha256", hash_bounded)
+    assert len(poll_inbox(store, inbox, current_snapshot_version=0)) == 1
+    receipt = store.connection.execute("SELECT * FROM room_inbox_rejections").fetchone()
+    assert receipt["category"] == "RECORD_TOO_LARGE"
+    assert receipt["byte_length"] == len(oversized)
+    assert receipt["hashed_byte_length"] == maximum
+    assert receipt["record_sha256"] == original_hash(oversized[:maximum]).hexdigest()
+    assert len(poll_inbox(store, inbox, current_snapshot_version=0)) == 1
+    assert count(store, "room_inbox_rejections") == 1
+
+
+def test_oversized_partial_tail_waits_for_completion(tmp_path):
+    import sentinel.room.ingest as module
+    store = store_for(tmp_path)
+    inbox = tmp_path / "inbox.jsonl"
+    inbox.write_bytes(b'x' * (getattr(module, "MAX_INBOX_RECORD_BYTES", 1024 * 1024) + 1))
+    assert poll_inbox(store, inbox, current_snapshot_version=0) == ()
+    assert count(store, "room_inbox_rejections") == 0
+    with inbox.open("ab") as handle:
+        handle.write(b'\n')
+    assert poll_inbox(store, inbox, current_snapshot_version=0) == ()
+    assert count(store, "room_inbox_rejections") == 1
+
+
+def test_rejection_receipts_are_immutable_including_replace_and_migrate_from_v5(tmp_path, monkeypatch):
+    from sentinel.room import store as module
+    path = tmp_path / "room.sqlite3"
+    with monkeypatch.context() as context:
+        context.setattr(module, "_MIGRATIONS", module._MIGRATIONS[:5])
+        store = RoomStore.open(path)
+    assert store.connection.execute("SELECT MAX(version) FROM room_schema_version").fetchone()[0] == 5
+    store.close()
+    store = RoomStore.open(path)
+    inbox = tmp_path / "inbox.jsonl"
+    inbox.write_bytes(b'bad\n')
+    poll_inbox(store, inbox, current_snapshot_version=0)
+    assert count(store, "room_inbox_rejections") == 1
+    for sql in ("UPDATE room_inbox_rejections SET category = category", "DELETE FROM room_inbox_rejections",
+                "INSERT OR REPLACE INTO room_inbox_rejections SELECT * FROM room_inbox_rejections"):
+        with sqlite3.connect(path) as foreign:
+            with pytest.raises(sqlite3.IntegrityError, match="append-only|immutable"):
+                foreign.execute(sql)
+
+
+def test_bounded_record_poll_resumes_across_restart_and_atomic_writer_append(tmp_path, monkeypatch):
+    import sentinel.room.ingest as module
+    monkeypatch.setattr(module, "MAX_INBOX_POLL_RECORDS", 2, raising=False)
+    store, result = store_for(tmp_path), sample(tmp_path)
+    inbox = tmp_path / "inbox.jsonl"
+    for index in range(3):
+        append_inbox_result(inbox, replace(result, request=replace(result.request, observation_id=f"o{index}")))
+    first = poll_inbox(store, inbox, current_snapshot_version=0)
+    assert len(first) == 2 and all(not item.duplicate for item in first)
+    store.close()
+    append_inbox_result(inbox, replace(result, request=replace(result.request, observation_id="o3")))
+    store = RoomStore.open(tmp_path / "room.sqlite3")
+    second = poll_inbox(store, inbox, current_snapshot_version=0)
+    assert len(second) == 2 and all(not item.duplicate for item in second)
+    assert count(store, "room_perception_results") == 4
+    assert all(item.duplicate for item in poll_inbox(store, inbox, current_snapshot_version=0))
+
+
+def test_huge_record_discard_is_byte_bounded_and_resumes_after_restart(tmp_path, monkeypatch):
+    from pathlib import Path
+    import sentinel.room.ingest as module
+    store, result = store_for(tmp_path), sample(tmp_path)
+    budget = getattr(module, "MAX_INBOX_POLL_BYTES", 4 * 1024 * 1024)
+    inbox = tmp_path / "private-path-secret.jsonl"
+    oversized = b'private-row-secret' + b'x' * (2 * budget) + b'\n'
+    inbox.write_bytes(oversized + canonical_line(asdict(result)))
+    original_open = Path.open
+    bytes_read = [0]
+
+    class CountedReader:
+        def __init__(self, handle):
+            self.handle = handle
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.handle.close()
+        def read(self, size=-1):
+            data = self.handle.read(size)
+            bytes_read[0] += len(data)
+            assert bytes_read[0] <= budget
+            return data
+        def readline(self, size=-1):
+            data = self.handle.readline(size)
+            bytes_read[0] += len(data)
+            assert bytes_read[0] <= budget
+            return data
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
+    def open_counted(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        return CountedReader(handle) if path == inbox else handle
+
+    monkeypatch.setattr(Path, "open", open_counted)
+    assert poll_inbox(store, inbox, current_snapshot_version=0) == ()
+    assert count(store, "room_inbox_rejections") == 0
+    progress = dict(store.connection.execute("SELECT * FROM room_inbox_cursors").fetchone())
+    assert 0 < progress["scan_offset"] < len(oversized)
+    assert "private-row-secret" not in str(progress) and "private-path-secret" not in str(progress)
+    store.close()
+    store = RoomStore.open(tmp_path / "room.sqlite3")
+    all_outcomes = []
+    for _ in range(3):
+        bytes_read[0] = 0
+        all_outcomes.extend(poll_inbox(store, inbox, current_snapshot_version=0))
+        if all_outcomes:
+            break
+    assert len(all_outcomes) == 1 and not all_outcomes[0].duplicate
+    assert count(store, "room_inbox_rejections") == 1
+    receipt = store.connection.execute("SELECT * FROM room_inbox_rejections").fetchone()
+    assert receipt["byte_length"] == len(oversized)
+    for _ in range(4):
+        bytes_read[0] = 0
+        poll_inbox(store, inbox, current_snapshot_version=0)
+    assert count(store, "room_inbox_rejections") == 1
+
+
+@pytest.mark.parametrize("replacement", ["truncated", "divergent_prefix"])
+def test_cursor_resets_idempotently_on_truncation_or_replacement(tmp_path, monkeypatch, replacement):
+    import sentinel.room.ingest as module
+    monkeypatch.setattr(module, "MAX_INBOX_POLL_RECORDS", 1, raising=False)
+    store, result = store_for(tmp_path), sample(tmp_path)
+    inbox = tmp_path / "inbox.jsonl"
+    line = canonical_line(asdict(result))
+    inbox.write_bytes(line + line)
+    assert len(poll_inbox(store, inbox, current_snapshot_version=0)) == 1
+    new = canonical_line(asdict(replace(result, request=replace(result.request, observation_id="o2"))))
+    inbox.write_bytes(new if replacement == "truncated" else new + line)
+    outcomes = poll_inbox(store, inbox, current_snapshot_version=0)
+    assert len(outcomes) == 1 and not outcomes[0].duplicate
+    assert count(store, "room_perception_results") == 2
+
+
+def test_partial_huge_tail_resumes_after_atomic_append_without_receipt_until_complete(tmp_path):
+    import sentinel.room.ingest as module
+    store, result = store_for(tmp_path), sample(tmp_path)
+    inbox = tmp_path / "inbox.jsonl"
+    budget = getattr(module, "MAX_INBOX_POLL_BYTES", 4 * 1024 * 1024)
+    tail = b'x' * (budget + 1)
+    inbox.write_bytes(tail)
+    assert poll_inbox(store, inbox, current_snapshot_version=0) == ()
+    assert count(store, "room_inbox_rejections") == 0
+    cursor = dict(store.connection.execute("SELECT * FROM room_inbox_cursors").fetchone())
+    assert 0 < cursor["scan_offset"] < len(tail)
+    assert poll_inbox(store, inbox, current_snapshot_version=0) == ()
+    assert count(store, "room_inbox_rejections") == 0
+    store.close()
+    # Complete the trailing line using the producer's atomic replacement pattern.
+    replacement = tmp_path / "replacement.jsonl"
+    replacement.write_bytes(tail + b'\n' + canonical_line(asdict(result)))
+    replacement.replace(inbox)
+    store = RoomStore.open(tmp_path / "room.sqlite3")
+    assert len(poll_inbox(store, inbox, current_snapshot_version=0)) == 1
+    assert count(store, "room_inbox_rejections") == 1
+
+
+def test_resumed_oversized_record_revalidates_its_hashed_prefix_on_replacement(tmp_path):
+    import sentinel.room.ingest as module
+    store = store_for(tmp_path)
+    inbox = tmp_path / "inbox.jsonl"
+    maximum = module.MAX_INBOX_RECORD_BYTES
+    oversized = bytearray(b'x' * (module.MAX_INBOX_POLL_BYTES + 1) + b'\n')
+    inbox.write_bytes(oversized)
+    assert poll_inbox(store, inbox, current_snapshot_version=0) == ()
+    # Change the stored digest's input outside the small initial/checkpoint
+    # fingerprints, keeping the file length and cursor checkpoint unchanged.
+    oversized[maximum // 2] = ord('y')
+    replacement = tmp_path / "replacement.jsonl"
+    replacement.write_bytes(oversized)
+    replacement.replace(inbox)
+    store.close()
+    store = RoomStore.open(tmp_path / "room.sqlite3")
+    for _ in range(3):
+        poll_inbox(store, inbox, current_snapshot_version=0)
+        if count(store, "room_inbox_rejections"):
+            break
+    receipt = store.connection.execute("SELECT * FROM room_inbox_rejections").fetchone()
+    assert receipt["record_sha256"] == hashlib.sha256(oversized[:maximum]).hexdigest()

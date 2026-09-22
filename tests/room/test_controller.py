@@ -165,6 +165,56 @@ def test_pending_ingestion_precedes_snapshot_and_terminal_has_no_extra_judge_cal
     assert "64" in room.events("s1")[-1].payload["answer"]
 
 
+@pytest.mark.parametrize("response", ["READ_DRONE", RuntimeError("private provider detail")])
+def test_choice_attempt_records_nonnegative_monotonic_latency(room, response):
+    goal(room)
+    RoomController(room, Judge(response)).step("s1")
+    attempt = next(e for e in room.events("s1") if e.event_type == "ROOM_CHOICE_ATTEMPT")
+    assert type(attempt.payload.get("latency_ms")) in (int, float)
+    assert attempt.payload["latency_ms"] >= 0
+
+
+def test_unexpected_pending_ingestion_failure_is_sanitized_and_terminal_after_restart(room, tmp_path):
+    from sentinel.room.store import RoomStore
+    goal(room)
+    judge = Judge()
+    def fail(session_id):
+        raise OSError("token=private-ingest-secret")
+    first = RoomController(room, judge, ingest_pending=fail).step("s1")
+    assert not first.accepted and first.terminal_state is None
+    event = room.events("s1")[-1]
+    assert event.event_type == "ROOM_TOOL_OUTCOME"
+    assert event.payload["candidate_id"] == "INGEST_PENDING"
+    assert event.payload["refusal_code"] == "SOURCE_FAILURE"
+    assert event.payload["error_category"] == "INGEST_ERROR"
+    assert "private-ingest-secret" not in str(event.payload)
+    room.close()
+    reopened = RoomStore.open(tmp_path / "room.sqlite3")
+    try:
+        second = RoomController(reopened, judge, ingest_pending=fail).step("s1")
+        assert not second.accepted and second.terminal_state == TerminalState.ESCALATED
+        assert reopened.events("s1")[-1].payload["code"] == "NO_PROGRESS"
+        assert judge.calls == []
+    finally:
+        reopened.close()
+
+
+def test_controller_ingests_valid_record_after_poison_and_completes_answer(room, tmp_path):
+    from dataclasses import asdict
+    from sentinel.room.ingest import canonical_line, poll_inbox
+    goal(room, GoalKind.FIND_OBSERVE)
+    result = sample(tmp_path, snapshot=room.session_version("s1"))
+    inbox = tmp_path / "inbox.jsonl"
+    inbox.write_bytes(b'{"token":"secret",\n' + canonical_line(asdict(result)))
+    judge = Judge("READ_OBSERVATIONS", "ANSWER")
+    controller = RoomController(room, judge, ingest_pending=lambda session: poll_inbox(
+        room, inbox, current_snapshot_version=room.session_version(session)))
+    assert controller.run_until_terminal("s1") == TerminalState.COMPLETED
+    assert "computer" in room.events("s1")[-1].payload["answer"]
+    assert room.connection.execute("SELECT COUNT(*) FROM room_inbox_rejections").fetchone()[0] == 1
+    assert "secret" not in str([e.payload for e in room.events("s1")])
+
+
 def test_parser_rejection_is_mandatory_clarification_without_judge(room):
     append(room, "GOAL_COMPILE_REJECTED", {"status": "CLARIFICATION_REQUIRED", "reason": "AMBIGUOUS"})
     judge = Judge()
