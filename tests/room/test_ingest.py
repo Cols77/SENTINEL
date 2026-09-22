@@ -759,3 +759,50 @@ def test_resumed_oversized_record_revalidates_its_hashed_prefix_on_replacement(t
             break
     receipt = store.connection.execute("SELECT * FROM room_inbox_rejections").fetchone()
     assert receipt["record_sha256"] == hashlib.sha256(oversized[:maximum]).hexdigest()
+
+
+def _result_with_wire_size(tmp_path, size):
+    """Build a valid envelope of an exact canonical byte size using bounded fields."""
+    result = sample(tmp_path, observation="sized")
+    result = replace(result, request=replace(result.request, request_digest="b" * 64))
+    evidence = [replace(result.detections[0], detection_id=f"d{index}") for index in range(260)]
+    result = replace(result, detections=tuple(evidence))
+    remaining = size - len(canonical_line(asdict(result)))
+    assert remaining >= 0
+    for index, item in enumerate(evidence):
+        growth = min(remaining, 4096 - len(item.class_name))
+        item = replace(item, class_name=item.class_name + "x" * growth)
+        evidence[index] = replace(item, evidence_sha256=detection_digest(item))
+        remaining -= growth
+        if not remaining:
+            break
+    assert remaining == 0
+    result = replace(result, detections=tuple(evidence))
+    assert len(canonical_line(asdict(result))) == size
+    return result
+
+
+@pytest.mark.parametrize("extra_byte", [0, 1], ids=["at-limit", "one-byte-over-limit"])
+@pytest.mark.parametrize("existing", [False, True], ids=["new-inbox", "existing-inbox"])
+def test_direct_publisher_enforces_exact_wire_limit_before_file_mutation(tmp_path, extra_byte, existing):
+    import sentinel.room.ingest as module
+    store = store_for(tmp_path)
+    inbox = tmp_path / "published" / "inbox.jsonl"
+    if existing:
+        append_inbox_result(inbox, sample(tmp_path))
+    before = inbox.read_bytes() if existing else None
+    result = _result_with_wire_size(tmp_path, module.MAX_INBOX_RECORD_BYTES + extra_byte)
+    if extra_byte:
+        with pytest.raises(getattr(module, "InboxRecordTooLarge", InvalidPerception)) as error:
+            append_inbox_result(inbox, result)
+        assert error.value.error_category == "RESPONSE_TOO_LARGE"
+        assert (inbox.read_bytes() if inbox.exists() else None) == before
+        if not existing:
+            assert not inbox.parent.exists()
+    else:
+        append_inbox_result(inbox, result)
+        assert inbox.read_bytes() == (before or b"") + canonical_line(asdict(result))
+        outcomes = poll_inbox(store, inbox, current_snapshot_version=0)
+        assert len(outcomes) == (2 if existing else 1)
+        assert all(outcome.authorizes_current_state for outcome in outcomes)
+        assert count(store, "room_inbox_rejections") == 0

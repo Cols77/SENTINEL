@@ -474,3 +474,55 @@ def test_partial_frame_announcement_log_alerts_without_failing_the_mission(tmp_p
     assert runner.run(confirm=True).status == "PASS"
     assert log.read_bytes() == b'{"partial":'
     assert any(event == "alert" and "frame not announced" in message for event, message in events)
+
+
+def test_260_detection_oversized_success_publishes_bounded_failure_and_follower_continues(tmp_path):
+    from dataclasses import asdict
+    from sentinel.room.ingest import MAX_INBOX_RECORD_BYTES, poll_inbox, result_from_dict
+    from sentinel.room.models import CapabilityProfile
+    from sentinel.room.store import RoomStore
+    records = [_correlated_record(tmp_path), _correlated_record(tmp_path)]
+    # Each resulting detection ID remains legal (<4096 characters), but the
+    # complete 260-detection success would exceed the canonical inbox limit.
+    records[0]["perception_request"]["observation_id"] = "observation:" + "o" * 3980
+    frames, inbox, output = tmp_path / "frames.jsonl", tmp_path / "inbox.jsonl", tmp_path / "out.jsonl"
+    frames.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    identity = {"provider": "fixture", "model": "pinned-model", "secret": "private-provider-secret"}
+    batches = [DetectionBatch(_laptop().detections * 260, "OK", ("high",) * 260, raw=identity),
+               DetectionBatch(_laptop().detections, "OK", ("high",), raw=identity)]
+    assert follow(frames, output, FakeDetector(batches), done=lambda: True,
+                  inbox_log=inbox, print_fn=lambda _: None) == 2
+    lines = inbox.read_bytes().splitlines(keepends=True)
+    assert len(lines) == 2 and all(len(line) <= MAX_INBOX_RECORD_BYTES for line in lines)
+    failed, success = [result_from_dict(json.loads(line)) for line in lines]
+    assert failed.status == "FAILED" and failed.error_category == "RESPONSE_TOO_LARGE"
+    assert failed.identity_status == "UNVERIFIED" and failed.resolved_model is None
+    assert failed.detections == ()
+    assert asdict(failed.request) == records[0]["perception_request"]
+    assert success.status == "SUCCEEDED" and len(success.detections) == 1
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert rows[0]["detections"] == [] and rows[0]["raw"] is None
+    assert rows[0]["error"] == "RESPONSE_TOO_LARGE"
+    assert "private-provider-secret" not in inbox.read_text() + output.read_text()
+    store = RoomStore.open(tmp_path / "room.sqlite3")
+    store.create_session("s1", "look", CapabilityProfile(()))
+    outcomes = poll_inbox(store, inbox, current_snapshot_version=0)
+    assert len(outcomes) == 2 and not outcomes[0].authorizes_current_state and outcomes[1].authorizes_current_state
+    assert store.connection.execute("SELECT COUNT(*) FROM room_inbox_rejections").fetchone()[0] == 0
+    assert store.connection.execute("SELECT COUNT(*) FROM room_perception_results").fetchone()[0] == 2
+    store.close()
+
+
+def test_oversized_success_fallback_bounds_request_timestamp_without_losing_capture_instant(tmp_path):
+    from datetime import datetime
+    from sentinel.room.ingest import MAX_INBOX_RECORD_BYTES, canonical_line, result_from_dict
+    record = _correlated_record(tmp_path)
+    captured_at = "2026-09-22T00:00:00." + "0" * MAX_INBOX_RECORD_BYTES + "+00:00"
+    record["perception_request"]["captured_at"] = captured_at
+    batch = DetectionBatch((), "OK", raw={"provider": "fixture", "model": "pinned-model"})
+    row = detect_frame(FakeDetector([batch]), record)
+    result = result_from_dict(row["perception_result"])
+    assert result.status == "FAILED" and result.error_category == "RESPONSE_TOO_LARGE"
+    assert len(canonical_line(row["perception_result"])) <= MAX_INBOX_RECORD_BYTES
+    assert datetime.fromisoformat(result.request.captured_at) == datetime.fromisoformat(captured_at)
+    assert result.request.observation_id == record["perception_request"]["observation_id"]

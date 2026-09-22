@@ -24,8 +24,9 @@ from .store import IdempotencyConflict, RoomStore
 
 SCHEMA_VERSION = "room-perception-v1"
 MAX_IDENTITY_LENGTH = 4096
-# Includes the terminating LF. Oversized records are drained in bounded chunks,
-# never parsed, and hashed only over this prefix (recorded in the receipt).
+# Shared publisher/consumer wire limit, including the terminating LF. Oversized
+# external records are drained in bounded chunks, never parsed, and hashed only
+# over this prefix (recorded in the receipt).
 MAX_INBOX_RECORD_BYTES = 1024 * 1024
 MAX_INBOX_POLL_BYTES = 4 * 1024 * 1024
 MAX_INBOX_POLL_RECORDS = 256
@@ -39,6 +40,12 @@ _ERROR_CATEGORIES = frozenset({
 
 class InvalidPerception(ValueError):
     """Invalid envelope; messages deliberately exclude payloads and file paths."""
+
+
+class InboxRecordTooLarge(InvalidPerception):
+    """A valid envelope cannot fit the canonical inbox wire-size contract."""
+
+    error_category = "RESPONSE_TOO_LARGE"
 
 
 @dataclass(frozen=True)
@@ -406,6 +413,11 @@ def _hypothesis_ids(connection, result_id) -> tuple[str, ...]:
 
 
 def append_jsonl_record(path: Path, document) -> None:
+    """Publish a generic JSONL document (for example, a frame announcement)."""
+    _append_jsonl_line(path, canonical_line(document))
+
+
+def _append_jsonl_line(path: Path, line: bytes) -> None:
     """Publish an entire fsynced replacement under the single-writer process lock.
 
     The temporary file lives beside the inbox so os.replace is atomic. Readers
@@ -413,7 +425,6 @@ def append_jsonl_record(path: Path, document) -> None:
     the preceding complete file visible. This is a single sidecar writer API,
     not a lock shared between independent writer processes.
     """
-    line = canonical_line(document)
     path = Path(path)
     with _INBOX_LOCK:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -432,9 +443,22 @@ def append_jsonl_record(path: Path, document) -> None:
             Path(temporary).unlink(missing_ok=True)
 
 
-def append_inbox_result(path: Path, result: PerceptionResult) -> None:
+def inbox_result_line(result: PerceptionResult) -> bytes:
+    """Validate and encode the shared canonical wire contract, including its LF.
+
+    Raise InboxRecordTooLarge before touching any file. Sidecars may replace an
+    oversized success with a typed failure and validate that fallback here too.
+    """
     validate_result(result, check_frame=False)
-    append_jsonl_record(path, asdict(result))
+    line = canonical_line(asdict(result))
+    if len(line) > MAX_INBOX_RECORD_BYTES:
+        raise InboxRecordTooLarge("perception inbox record exceeds the wire-size limit")
+    return line
+
+
+def append_inbox_result(path: Path, result: PerceptionResult) -> None:
+    """Publish a valid bounded result; oversized calls leave the inbox unchanged."""
+    _append_jsonl_line(path, inbox_result_line(result))
 
 
 def _unique_keys(pairs):

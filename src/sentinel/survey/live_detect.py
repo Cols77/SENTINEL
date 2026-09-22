@@ -129,8 +129,9 @@ def _detect_correlated(detector, record, row, classes, *, provider):
     from PIL import Image
     from .providers import ModelIdentityMismatch
     from sentinel.room.ingest import (
-        DetectionEvidence, InvalidPerception, MAX_IDENTITY_LENGTH, PerceptionResult, detection_digest,
-        request_from_dict, validate_request, validate_result,
+        DetectionEvidence, InboxRecordTooLarge, InvalidPerception, MAX_IDENTITY_LENGTH,
+        PerceptionResult, detection_digest, inbox_result_line, request_from_dict, validate_request,
+        validate_result,
     )
     started = time.monotonic()
     row.update(status="DETECTOR_ERROR", detections=[], dropped=[], raw=None)
@@ -223,7 +224,18 @@ def _detect_correlated(detector, record, row, classes, *, provider):
         )
     # The fallback follows the same contract as a provider response; no invalid
     # identity survives into an envelope merely because its first validation failed.
-    validate_result(result, check_frame=False)
+    try:
+        inbox_result_line(result)
+    except InboxRecordTooLarge:
+        # Identity fields are individually bounded by the request contract. A
+        # timestamp may have arbitrarily many fractional digits, so canonicalize
+        # that representation while preserving the capture instant and IDs.
+        bounded_request = replace(request, captured_at=datetime.fromisoformat(request.captured_at).isoformat())
+        result = PerceptionResult(
+            bounded_request, "FAILED", provider_name, None, "UNVERIFIED",
+            datetime.now(timezone.utc).isoformat(), (), "RESPONSE_TOO_LARGE",
+        )
+        inbox_result_line(result)
     row["perception_result"] = asdict(result)
     row["detect_s"] = round(time.monotonic() - started, 2)
     if result.status == "SUCCEEDED":
