@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, asdict, field
-from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import torch
 from PIL import Image
 from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
+from .config import STUFF_QUERIES
 from .models import pick_device, pick_dtype
 
 DETECTION_VERSION = "detect/2026-09-16.2"
@@ -93,9 +92,19 @@ class GroundingDinoDetector:
         ).parameters
         self._box_kw = "threshold" if "threshold" in sig else "box_threshold"
 
+    def detect(self, image_path, queries, frame_index, sector):
+        image = Image.open(image_path).convert("RGB")
+        return self._detect_pil(image, queries, frame_index, sector)
+
+    def detect_array(self, bgr: "np.ndarray", queries, frame_index, sector):
+        """Same inference, from an in-memory OpenCV frame."""
+        import cv2
+        image = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        return self._detect_pil(image, queries, frame_index, sector)
+    
     @torch.inference_mode()
-    def detect(self, image_path: str | Path, queries: list[str],
-               frame_index: int, sector: int) -> DetectionResult:
+    def _detect_pil(self, image: Image.Image, queries: list[str],
+                    frame_index: int, sector: int) -> DetectionResult:
         import time
         t0 = time.time()
 
@@ -107,7 +116,6 @@ class GroundingDinoDetector:
         )
 
         try:
-            image = Image.open(image_path).convert("RGB")
             inputs = self.processor(images=image, text=prompt, return_tensors="pt")
             inputs = {k: (v.to(self.device, self.dtype)
                           if torch.is_floating_point(v) else v.to(self.device))
@@ -161,29 +169,18 @@ def sweep_thresholds(detections: list[Detection],
         })
     return rows
 
-"""Post-processing for Grounding DINO output.
-
-Measured behaviour on real footage that this module exists to handle:
-
-  Degenerate boxes. When the model cannot ground a phrase it returns boxes
-  spanning most of the frame, or several near-identical overlapping boxes.
-  These are failures dressed as detections.
-
-  Tokenizer fragments. Returned labels are spans of the prompt, so a failed
-  grounding yields subword pieces -- '##ree', 'looseree', '' -- or merges of
-  adjacent queries like 'rock boulder'. None map to a real class.
-
-  Stuff versus objects. A box detector locates countable things. Material
-  regions (scree, gravel, snow) have no object boundary, so a box around them
-  is either the whole region or noise. Those queries belong in segmentation.
-"""
-
-STUFF_QUERIES = {
-    # Material regions. Detected as boxes these produce frame-sized or
-    # meaningless output; route them to segmentation instead.
-    "scree", "loose scree", "gravel", "snow", "vegetation", "grass",
-    "brick paving", "paving", "soil", "sand", "rubble", "debris field",
-}
+# ---------------------------------------------------------------------------
+# Post-processing. Measured behaviour on real footage this handles:
+#
+#   Degenerate boxes -- when the model cannot ground a phrase it returns boxes
+#   spanning most of the frame, or near-identical overlapping boxes.
+#
+#   Tokenizer fragments -- returned labels are spans of the prompt, so failed
+#   grounding yields '##ree', 'looseree', '', or merges like 'rock boulder'.
+#
+#   Stuff versus objects -- material regions have no object boundary, so a
+#   box around them is the whole region or noise. See config.STUFF_QUERIES.
+# ---------------------------------------------------------------------------
 
 
 def is_degenerate(box, img_w: int, img_h: int,

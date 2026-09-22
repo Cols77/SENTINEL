@@ -1,11 +1,10 @@
 """Append-only event stream.
 
-Run history must be reconstructable by replaying this file in order: records
+Run history must be reconstructable by replaying one file in order: records
 are appended, never rewritten, carry a contiguous sequence number, and share a
 single run_id. A gap in `seq` means events were lost.
 
-Provenance is mandatory on every record, because it is the difference between
-evidence and a plausible story:
+Provenance is mandatory on every record:
 
     LIVE              captured, or computed from captured data
     SIMULATED         produced by a stub or mock
@@ -24,23 +23,35 @@ from pathlib import Path
 VALID_PROVENANCE = {"LIVE", "SIMULATED", "REPLAYED", "OPERATOR_PROVIDED", "INFERRED"}
 
 
+def run_stream_path(outdir: str | Path, name: str = "perception") -> Path:
+    """Timestamped filename so each run gets its own stream.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return Path(outdir) / f"{name}_{stamp}.jsonl"
+
+
 class EvidenceWriter:
     def __init__(self, path: str | Path, run_id: str | None = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.run_id = run_id or f"run-{uuid.uuid4().hex[:12]}"
         self._seq = 0
+
+        # Backstop for the timestamped filename, which only has one-second
+        # resolution. One stream holds exactly one run; refuse at open time
+        # rather than silently producing a file that cannot be replayed.
         if self.path.exists() and self.path.stat().st_size > 0:
-            import json as _json
-            first_line = self.path.open(encoding="utf-8").readline()
+            with self.path.open(encoding="utf-8") as fh:
+                first_line = fh.readline()
             if first_line.strip():
-                existing = _json.loads(first_line)["run_id"]
+                existing = json.loads(first_line)["run_id"]
                 if existing != self.run_id:
                     raise FileExistsError(
                         f"{self.path} already holds run {existing}. "
                         f"An append-only stream holds exactly one run."
                     )
-                self._seq = sum(1 for _ in self.path.open(encoding="utf-8"))
+                with self.path.open(encoding="utf-8") as fh:
+                    self._seq = sum(1 for line in fh if line.strip())
 
     def emit(self, event_type: str, provenance: str, payload: dict) -> dict:
         if provenance not in VALID_PROVENANCE:
@@ -67,9 +78,3 @@ def replay(path: str | Path) -> list[dict]:
     if [r["seq"] for r in records] != list(range(1, len(records) + 1)):
         raise ValueError("sequence gap: events lost or stream corrupted")
     return records
-
-def run_stream_path(outdir: str | Path, name: str = "perception") -> Path:
-    """Timestamped filename so each run gets its own stream.
-    """
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return Path(outdir) / f"{name}_{stamp}.jsonl"
