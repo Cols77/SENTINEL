@@ -305,3 +305,51 @@ def test_room_and_survey_stores_share_a_database_through_separate_wal_connection
     assert room.connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
     assert survey.connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
     assert survey.flights_used("run-1") == 0
+
+
+def _batch():
+    return tuple({
+        "event_type": kind, "payload": {"index": index},
+        "correlation_id": "compile-1", "causation_id": None,
+        "idempotency_key": f"compile-1:{index}",
+    } for index, kind in enumerate(("GOAL_CHOICE_ATTEMPT", "GOAL_LEDGER_ACCEPTED")))
+
+
+def test_batch_is_contiguous_and_duplicate_delivery_recovers_every_original_event(tmp_path):
+    store = _store(tmp_path)
+    batch = _batch()
+    events = store.append_events(session_id="session-1", expected_version=0, events=batch)
+    assert [event.state_version for event in events] == [1, 2]
+    assert [event.sequence_no for event in events] == [1, 2]
+    assert store.session_version("session-1") == 2
+    assert store.append_events(session_id="session-1", expected_version=0, events=batch) == events
+    altered = (batch[0], {**batch[1], "payload": {"index": 99}})
+    with pytest.raises(IdempotencyConflict):
+        store.append_events(session_id="session-1", expected_version=2, events=altered)
+    assert store.events("session-1") == events
+
+
+def test_batch_rolls_back_earlier_events_when_last_insert_fails(tmp_path):
+    store = _store(tmp_path)
+    store.connection.execute(
+        "CREATE TRIGGER fail_last_event BEFORE INSERT ON room_events "
+        "WHEN NEW.event_type = 'GOAL_LEDGER_ACCEPTED' "
+        "BEGIN SELECT RAISE(ABORT, 'forced last event failure'); END",
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="forced last event failure"):
+        store.append_events(session_id="session-1", expected_version=0, events=_batch())
+    assert store.events("session-1") == ()
+    assert store.session_version("session-1") == 0
+
+
+def test_batch_rejects_partial_replay_duplicate_keys_and_stale_version_without_writes(tmp_path):
+    store = _store(tmp_path)
+    batch = _batch()
+    first = store.append_event(session_id="session-1", expected_version=0, **batch[0])
+    with pytest.raises(IdempotencyConflict):
+        store.append_events(session_id="session-1", expected_version=1, events=batch)
+    with pytest.raises(IdempotencyConflict):
+        store.append_events(session_id="session-1", expected_version=1, events=(batch[1], batch[1]))
+    with pytest.raises(VersionConflict):
+        store.append_events(session_id="session-1", expected_version=0, events=(batch[1],))
+    assert store.events("session-1") == (first,)

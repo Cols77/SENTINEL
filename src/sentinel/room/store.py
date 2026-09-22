@@ -10,7 +10,7 @@ import re
 import sqlite3
 import threading
 import time
-from typing import Mapping
+from typing import Mapping, Sequence
 import uuid
 
 from .models import CapabilityProfile
@@ -151,29 +151,60 @@ class RoomStore:
         causation_id: str | None,
         idempotency_key: str,
     ) -> StoredEvent:
-        payload_json = _canonical_payload(payload)
-        digest = _event_sha256(
-            session_id=session_id,
-            event_type=event_type,
-            payload_json=payload_json,
-            correlation_id=correlation_id,
-            causation_id=causation_id,
-        )
+        return self.append_events(
+            session_id=session_id, expected_version=expected_version,
+            events=({"event_type": event_type, "payload": payload,
+                     "correlation_id": correlation_id, "causation_id": causation_id,
+                     "idempotency_key": idempotency_key},),
+        )[0]
+
+    def append_events(
+        self, *, session_id: str, expected_version: int,
+        events: Sequence[Mapping[str, object]],
+    ) -> tuple[StoredEvent, ...]:
+        """Append a complete ordered batch, or recover its complete prior delivery.
+
+        Partial replay and duplicate keys are rejected: an atomic batch cannot
+        have committed only some of its events. No version or event survives
+        validation, insertion, or compare-and-set failure.
+        """
+        prepared = []
+        keys = set()
+        for event in events:
+            key = event["idempotency_key"]
+            if key in keys:
+                raise IdempotencyConflict("duplicate idempotency key within batch")
+            keys.add(key)
+            payload_json = _canonical_payload(event["payload"])
+            digest = _event_sha256(
+                session_id=session_id, event_type=event["event_type"],
+                payload_json=payload_json, correlation_id=event["correlation_id"],
+                causation_id=event["causation_id"],
+            )
+            prepared.append((dict(event), payload_json, digest))
+        if not prepared:
+            raise ValueError("event batch must not be empty")
         with self._lock:
             self._require_open()
             try:
                 self.connection.execute("BEGIN IMMEDIATE")
-                existing = self.connection.execute(
-                    "SELECT * FROM room_events WHERE session_id = ? AND idempotency_key = ?",
-                    (session_id, idempotency_key),
-                ).fetchone()
-                if existing is not None:
-                    if existing["event_sha256"] != digest:
-                        raise IdempotencyConflict(
-                            f"idempotency key {idempotency_key!r} has different event content",
-                        )
+                recovered = []
+                for event, _, digest in prepared:
+                    existing = self.connection.execute(
+                        "SELECT * FROM room_events WHERE session_id = ? AND idempotency_key = ?",
+                        (session_id, event["idempotency_key"]),
+                    ).fetchone()
+                    if existing is not None:
+                        if existing["event_sha256"] != digest:
+                            raise IdempotencyConflict("idempotency key has different event content")
+                        recovered.append(_stored_event(existing))
+                if recovered:
+                    if len(recovered) != len(prepared):
+                        raise IdempotencyConflict("partial replay of an atomic event batch")
+                    if any(b.sequence_no != a.sequence_no + 1 for a, b in zip(recovered, recovered[1:])):
+                        raise IdempotencyConflict("replayed batch is not contiguous and ordered")
                     self.connection.commit()
-                    return _stored_event(existing)
+                    return tuple(recovered)
                 session = self.connection.execute(
                     "SELECT state_version FROM room_sessions WHERE session_id = ?", (session_id,),
                 ).fetchone()
@@ -188,33 +219,35 @@ class RoomStore:
                     "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM room_events WHERE session_id = ?",
                     (session_id,),
                 ).fetchone()[0])
-                state_version = expected_version + 1
-                event_id = str(uuid.uuid4())
-                wall_time = _utc_now()
-                monotonic_ms = time.monotonic_ns() // 1_000_000
-                self.connection.execute(
-                    "INSERT INTO room_events "
-                    "(sequence_no, event_id, session_id, state_version, event_type, correlation_id, "
-                    "causation_id, idempotency_key, event_sha256, payload_json, wall_time, monotonic_ms) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (sequence_no, event_id, session_id, state_version, event_type, correlation_id,
-                     causation_id, idempotency_key, digest, payload_json, wall_time, monotonic_ms),
-                )
+                appended = []
+                for index, (event, payload_json, digest) in enumerate(prepared):
+                    stored = StoredEvent(
+                        sequence_no=sequence_no + index, event_id=str(uuid.uuid4()),
+                        session_id=session_id, state_version=expected_version + index + 1,
+                        event_type=event["event_type"], correlation_id=event["correlation_id"],
+                        causation_id=event["causation_id"], idempotency_key=event["idempotency_key"],
+                        event_sha256=digest, payload=json.loads(payload_json), wall_time=_utc_now(),
+                        monotonic_ms=time.monotonic_ns() // 1_000_000,
+                    )
+                    self.connection.execute(
+                        "INSERT INTO room_events "
+                        "(sequence_no, event_id, session_id, state_version, event_type, correlation_id, "
+                        "causation_id, idempotency_key, event_sha256, payload_json, wall_time, monotonic_ms) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (stored.sequence_no, stored.event_id, session_id, stored.state_version,
+                         stored.event_type, stored.correlation_id, stored.causation_id,
+                         stored.idempotency_key, digest, payload_json, stored.wall_time, stored.monotonic_ms),
+                    )
+                    appended.append(stored)
                 updated = self.connection.execute(
-                    "UPDATE room_sessions SET state_version = state_version + 1 "
+                    "UPDATE room_sessions SET state_version = state_version + ? "
                     "WHERE session_id = ? AND state_version = ?",
-                    (session_id, expected_version),
+                    (len(appended), session_id, expected_version),
                 )
                 if updated.rowcount != 1:
                     raise VersionConflict(f"session {session_id!r} changed during append")
                 self.connection.commit()
-                return StoredEvent(
-                    sequence_no=sequence_no, event_id=event_id, session_id=session_id,
-                    state_version=state_version, event_type=event_type,
-                    correlation_id=correlation_id, causation_id=causation_id,
-                    idempotency_key=idempotency_key, event_sha256=digest,
-                    payload=json.loads(payload_json), wall_time=wall_time, monotonic_ms=monotonic_ms,
-                )
+                return tuple(appended)
             except Exception:
                 self.connection.rollback()
                 raise
