@@ -78,28 +78,40 @@ class ProjectionService:
             options={o.option_id:o for o in svc.adapters.options}
             chosen=options.get(offer['candidate']['arguments']['option_id']) if offer else None
             last=facts['sweeps'][-1] if facts['sweeps'] else None
-            option=chosen or (options[last['option_id']] if last else svc.adapters.options[0])
+            last_option=options[last['option_id']] if last else None
+            option=chosen or last_option or svc.adapters.options[0]
             if offer:
                 proposer_mode = s['decision']['mode']
                 proposer_source = s['decision']['source']
                 escalation_reason = offer['candidate'].get('escalation_reason')
                 s['proposal']=dict(id=offer['id'],sha256=offer['sha256'],option_id=option.option_id,stops=[stop_view(option,i) for i in range(len(option.stops))],range_m=option.range_cm/100,altitude_m=option.z_cm/100,extent_m=option.viewed_width_cm/100,duration_s=option.estimated_seconds,resolvable_classes=list(option.resolvable_classes),proposer=dict(mode=proposer_mode,source=proposer_source,escalation_reason=escalation_reason),justification=offer['candidate'].get('description',''),escalation_reason=escalation_reason,guardrail_disagreements=[],target_object_ids=offer['candidate'].get('arguments',{}).get('addresses',[]),eligibility=dict(consent=True,envelope=True,preflight=True,current=True),disabled_reasons=[],run_id=run_id,decision_version=offer['decision_version'],correlation_id=offer['correlation_id'])
             operational = state.get('stops', {})
-            route=[dict(stop_id=f'{option.option_id}:{i}',x=x,y=y,**{k:v for k,v in stop_view(option,i,operational=operational.get(f'{option.option_id}:{i}')) .items() if k not in {'id','range_m','altitude_m','extent_m','duration_s','resolvable_classes'}}) for i,(x,y) in enumerate(option.stops)]
+            route_options=[]
+            for sweep in facts['sweeps']:
+                route_option=options[sweep['option_id']]
+                if route_option.option_id not in {row.option_id for row in route_options}:
+                    route_options.append(route_option)
+            if chosen and chosen.option_id not in {row.option_id for row in route_options}:
+                route_options.append(chosen)
+            if not route_options:
+                route_options.append(option)
+            route=[]
+            for route_option in route_options:
+                route.extend(dict(stop_id=f'{route_option.option_id}:{i}',x=x,y=y,**{k:v for k,v in stop_view(route_option,i,operational=operational.get(f'{route_option.option_id}:{i}')).items() if k not in {'id','range_m','altitude_m','extent_m','duration_s','resolvable_classes'}}) for i,(x,y) in enumerate(route_option.stops))
             xs=[x for o in options.values() for x,y in o.stops];ys=[y for o in options.values() for x,y in o.stops]
             return_error = next((row.get('return_error_cm') for row in operational.values() if row.get('return_leg')), None)
             s['mission'].update(route=route,envelope=dict(min_x=min(xs),max_x=max(xs),min_y=min(ys),max_y=max(ys)),flights=dict(used=facts['results']['flights_used'],max=2),return_to_start=any(row.get('return_leg') for row in operational.values()),return_error_cm=return_error)
             if last:
                 sweep_status=sweep_status_view(last['status'])
                 stop_default='COMPLETED' if last['status']=='FLOWN' else ('ABORTED' if last['status']=='ABORTED' else 'UNKNOWN')
-                s['mission']['sweep']=dict(id=last['sweep_id'],option_id=last['option_id'],status=sweep_status,merged=last['status']=='FLOWN',flights_used_before=max(0,len(facts['sweeps'])-1),stops=[stop_view(option,i,stop_default,operational=operational.get(f"{option.option_id}:{i}")) for i in range(len(option.stops))])
+                s['mission']['sweep']=dict(id=last['sweep_id'],option_id=last['option_id'],status=sweep_status,merged=last['status']=='FLOWN',flights_used_before=max(0,len(facts['sweeps'])-1),stops=[stop_view(last_option,i,stop_default,operational=operational.get(f"{last_option.option_id}:{i}")) for i in range(len(last_option.stops))])
                 if last['status'] in {'FLOWN','ABORTED'}:
                     for stop in s['mission']['sweep']['stops']:
                         if last['status']=='FLOWN' and stop['status'] not in {'FAILED','ABORTED'}:
                             stop['status']='COMPLETED'
                         elif last['status']=='ABORTED' and stop['status'] != 'FAILED':
                             stop['status']='ABORTED'
-                    for stop in route:
+                    for stop in (row for row in route if row['stop_id'].startswith(f'{last_option.option_id}:')):
                         if last['status']=='FLOWN' and stop['status'] not in {'FAILED','ABORTED'}:
                             stop['status']='COMPLETED'
                         elif last['status']=='ABORTED' and stop['status'] != 'FAILED':
@@ -107,14 +119,15 @@ class ProjectionService:
             s['localization']['vertical_consistency']=vertical_consistency_view(state.get('vertical'))
             return_row=next((row for row in operational.values() if row.get('return_leg')),None)
             if return_row:
-                rv=stop_view(option,0,operational=return_row,return_leg=True)
+                return_option=options.get(return_row.get('option_id'),last_option or option)
+                rv=stop_view(return_option,0,operational=return_row,return_leg=True)
                 if last and last['status']=='FLOWN' and rv['status'] not in {'FAILED','ABORTED'}:
                     rv['status']='COMPLETED'
                 elif last and last['status']=='ABORTED' and rv['status'] != 'FAILED':
                     rv['status']='ABORTED'
                 s['mission']['route'].append(dict(stop_id='RETURN',x=return_row.get('x_cm'),y=return_row.get('y_cm'),**{k:rv[k] for k in ('status','coverage','coverage_reason','predicted_tag_count','predicted_fix_error_cm','leg_speed_cm_s','trim_budget','trim_progress','return_leg','arrival_error_cm','tolerance_cm','tolerance_verdict')}))
                 if s['mission']['sweep']:
-                    s['mission']['sweep']['stops'].append(dict(id='RETURN',status=rv['status'],range_m=option.range_cm/100,altitude_m=option.z_cm/100,extent_m=option.viewed_width_cm/100,duration_s=option.estimated_seconds,resolvable_classes=list(option.resolvable_classes),coverage=rv['coverage'],coverage_reason=rv['coverage_reason'],predicted_tag_count=rv['predicted_tag_count'],predicted_fix_error_cm=rv['predicted_fix_error_cm'],leg_speed_cm_s=rv['leg_speed_cm_s'],trim_budget=rv['trim_budget'],trim_progress=rv['trim_progress'],return_leg=True,arrival_error_cm=rv['arrival_error_cm'],tolerance_cm=rv['tolerance_cm'],tolerance_verdict=rv['tolerance_verdict']))
+                    s['mission']['sweep']['stops'].append(dict(id='RETURN',status=rv['status'],range_m=return_option.range_cm/100,altitude_m=return_option.z_cm/100,extent_m=return_option.viewed_width_cm/100,duration_s=return_option.estimated_seconds,resolvable_classes=list(return_option.resolvable_classes),coverage=rv['coverage'],coverage_reason=rv['coverage_reason'],predicted_tag_count=rv['predicted_tag_count'],predicted_fix_error_cm=rv['predicted_fix_error_cm'],leg_speed_cm_s=rv['leg_speed_cm_s'],trim_budget=rv['trim_budget'],trim_progress=rv['trim_progress'],return_leg=True,arrival_error_cm=rv['arrival_error_cm'],tolerance_cm=rv['tolerance_cm'],tolerance_verdict=rv['tolerance_verdict']))
             if state.get('stop'):
                 stop=state['stop'];s['mission']['active_stop_id']=active_stop_id(stop)
                 s['mission']['commanded_position']=dict(x=stop['x_cm'],y=stop['y_cm'])

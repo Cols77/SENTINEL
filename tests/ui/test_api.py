@@ -51,3 +51,35 @@ def test_projection_uses_return_route_id_for_none_stop_index(tmp_path):
         assert validate_snapshot(snapshot)==snapshot
     finally:
         service.close()
+
+
+def test_follow_up_projection_keeps_prior_frame_routes_resolvable(tmp_path):
+    config=SessionConfig(data_dir=tmp_path,scenario_path=Path('fixtures/mission-control/uncertain-followup.json'))
+    service=build_service(config)
+    run=config.run_id
+    future=service.worker.start(dict(run_id=run,request_text='count the computers',correlation_id='corr'))
+    try:
+        assert service.approval.changed.wait(2)
+        first=service.approval.current(run)
+        service.approval.changed.clear()
+        result=service.approval.decide(dict(
+            session_id=service.session_id,run_id=run,proposal_id=first['id'],
+            proposal_sha256=first['sha256'],expected_version=first['decision_version'],
+            decision='APPROVE',command_id='first-command',correlation_id='corr',
+            attempt_id='first-attempt',idempotency_key='first-key'))
+        assert result['status']=='ACKNOWLEDGED'
+        assert service.approval.changed.wait(5)
+        follow_up=service.approval.current(run)
+        assert follow_up and follow_up['id'] != first['id']
+        snapshot=service.read_snapshot(run)
+        route_ids={stop['stop_id'] for stop in snapshot['mission']['route']}
+        assert {frame['stop_id'] for frame in snapshot['evidence']['frames']} <= route_ids
+        assert {stop['id'] for stop in snapshot['proposal']['stops']} <= route_ids
+        assert snapshot['mission']['sweep']['option_id']==first['candidate']['arguments']['option_id']
+        follow_up_ids={stop['id'] for stop in snapshot['proposal']['stops']}
+        assert all(stop['status']=='PLANNED' for stop in snapshot['mission']['route'] if stop['stop_id'] in follow_up_ids)
+        assert validate_snapshot(snapshot)==snapshot
+    finally:
+        service.approval.cancel(run)
+        future.result(timeout=5)
+        service.close()
