@@ -95,6 +95,34 @@ def test_provenance_source_is_closed():
         validate_snapshot(snapshot)
 
 
+def test_return_active_stop_uses_real_route_identity_not_none_suffix():
+    snapshot = empty_snapshot('s', 'r', 'REHEARSAL')
+    snapshot['mission']['route'] = [{
+        'stop_id': 'RETURN', 'x': 0.0, 'y': 0.0, 'coverage': 'OK',
+        'coverage_reason': 'return leg', 'predicted_tag_count': None,
+        'predicted_fix_error_cm': None, 'leg_speed_cm_s': 20.0,
+        'trim_budget': 0, 'trim_progress': 0, 'return_leg': True,
+        'arrival_error_cm': 0.0, 'tolerance_cm': 15.0,
+        'tolerance_verdict': 'INSIDE', 'status': 'ACTIVE',
+    }]
+    snapshot['mission']['active_stop_id'] = 'RETURN'
+    assert validate_snapshot(snapshot) == snapshot
+    snapshot['mission']['active_stop_id'] = 'RETURN:None'
+    with pytest.raises(ValueError):
+        validate_snapshot(snapshot)
+
+
+def test_rehearsal_and_live_adapters_expose_detector_identity_separately(tmp_path):
+    from sentinel.ui.scenarios import ScenarioAdapters, build_rehearsal_adapters
+    rehearsal = build_rehearsal_adapters('fixtures/mission-control/clean-computer.json', tmp_path / 'images')
+    assert (rehearsal.source_kind, rehearsal.detector_name, rehearsal.detector_model) == (
+        'SIMULATED', 'scripted', 'scenario')
+    fake_live = ScenarioAdapters((), object(), object(), object(), object(), object(), 'LIVE',
+                                 detector_name='approved-detector', detector_model='approved-model')
+    assert (fake_live.source_kind, fake_live.detector_name, fake_live.detector_model) == (
+        'LIVE', 'approved-detector', 'approved-model')
+
+
 @pytest.mark.parametrize('age', [-1, float('nan'), True])
 def test_invalid_pose_age_rejected(age):
     snapshot = empty_snapshot('s', 'r', 'REHEARSAL')

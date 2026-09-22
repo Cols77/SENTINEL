@@ -129,7 +129,7 @@ class ProjectionService:
                 norm=None
                 if box and artifact:
                     w,h=artifact['width'],artifact['height'];norm=[box['x']/w,box['y']/h,(box['x']+box['width'])/w,(box['y']+box['height'])/h]
-                s['evidence']['sightings'].append(dict(id=sight['sighting_id'],frame_id=sight['frame_id'],class_name=sight['class'],bbox=norm,raw_score=sight['raw_score'],score_semantics=sight['score_kind'],provider=svc.config.detector_name,model=svc.adapters.source_kind))
+                s['evidence']['sightings'].append(dict(id=sight['sighting_id'],frame_id=sight['frame_id'],class_name=sight['class'],bbox=norm,raw_score=sight['raw_score'],score_semantics=sight['score_kind'],provider=svc.adapters.detector_name,model=svc.adapters.detector_model))
             for o in facts['objects']:
                 s['evidence']['objects'].append(dict(id=o['object_id'],class_name=o['class'],state=o['band'],sighting_ids=o['sighting_ids'],reason=f"{o['distinct_stops']} distinct observation stops",geometry_degraded=o['x_cm'] is None))
             for c in facts['results']['class_counts']:
@@ -145,7 +145,7 @@ class ProjectionService:
                 for count in s['results']['counts']:
                     if count['semantics']=='RANGE':
                         count.update(semantics='UNKNOWN',uncertain=None,observability='LIMITED',reason=f"{count['confirmed']} confirmed observations; upper bound unavailable due to analysis gaps")
-            s['evidence']['provider'].update(name=svc.config.detector_name,model=svc.adapters.source_kind,source_kind=svc.adapters.source_kind)
+            s['evidence']['provider'].update(name=svc.adapters.detector_name,model=svc.adapters.detector_model,source_kind=svc.adapters.source_kind)
             if facts['report']:
                 s['report'].update(status='ACCEPTED',text=facts['report']['body'],id=facts['report']['report_id'])
             elif state.get('outcome',{}).get('status')=='REPORT_REJECTED':

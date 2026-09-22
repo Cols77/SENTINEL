@@ -16,3 +16,13 @@ export function toSurveyView(s){
  analysis:s.evidence.analysis,provider:s.evidence.provider,failures:s.evidence.failures,mode:s.session.mode,
  localization:s.localization,route:s.mission.route,return_to_start:s.mission.return_to_start,return_error_cm:s.mission.return_error_cm};
 }
+
+export function missionStatusText(view){
+ const flights=view?.flights??{};
+ const sweep=view?.sweep??{};
+ const stops=Array.isArray(sweep.stops)?sweep.stops:[];
+ const completed=stops.filter(stop=>stop.status==='COMPLETED').length;
+ const localization=view?.localization??{};
+ const age=Number.isFinite(localization.age_ms)?`${Math.round(localization.age_ms)} ms old`:'no observation age';
+ return `Flights ${flights.used??0}/${flights.max??0} · Sweep ${sweep.status??'PLANNED'} · Stops ${completed}/${stops.length} · Localization ${localization.status??'UNAVAILABLE'} · ${age}`;
+}

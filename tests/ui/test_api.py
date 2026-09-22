@@ -18,6 +18,8 @@ def test_host_projection_and_capability_boundaries(tmp_path):
             snapshot=client.get(f'/api/v1/runs/{run}/snapshot').json()
             validate_snapshot(snapshot)
             assert snapshot['source']['mode']=='REHEARSAL'
+            assert snapshot['evidence']['provider'] == {
+                'name': 'scripted', 'model': 'scenario', 'source_kind': 'SIMULATED'}
             assert client.get(f'/api/v1/runs/{run}/events?limit=201').status_code==422
             assert client.get('/api/v1/runs/other/snapshot').status_code==404
             assert client.get(f'/api/v1/runs/{run}/evidence/unknown').status_code==404

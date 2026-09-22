@@ -1,7 +1,7 @@
 import {el,button,meta,replace} from './dom.mjs';
 import {createHttpClient,startPolling} from './http-client.mjs';
 import {createController} from './controller.mjs';
-import {missionContract,toSurveyView} from './view-model.mjs';
+import {missionContract,toSurveyView,missionStatusText} from './view-model.mjs';
 import {createDecisionController,renderApproval} from './approval.mjs';
 import {createEvidenceView,supportingSightings,frameDetectionText} from './evidence.mjs';
 import {renderCounts} from './counts.mjs';
@@ -12,8 +12,9 @@ import {missionMapModel,renderMissionMap} from './mission-map.mjs';
 const root=document.getElementById('app');
 root.classList.add('mission-console');document.title='SENTINEL · Mission Control';
 const status=el('p',{id:'mission-state',role:'status',class:'meta'},['Connecting to local runtime…']);
+const statusFacts=el('p',{id:'mission-facts-status',role:'status',class:'meta'},['Mission facts unavailable']);
 const safetyHost=el('div',{id:'safety-controls'});
-const top=el('header',{class:'mission-command-bar'},[el('div',{},[el('p',{class:'section-label'},['SENTINEL / MISSION CONTROL']),status]),safetyHost]);
+const top=el('header',{class:'mission-command-bar'},[el('div',{},[el('p',{class:'section-label'},['SENTINEL / MISSION CONTROL']),status,statusFacts]),safetyHost]);
 const chatHost=el('section',{id:'chat',class:'mission-chat','aria-label':'Mission thread'},[el('h2',{},['Mission thread'])]);
 const proposalHost=el('section',{id:'approval'});chatHost.append(proposalHost);
 const mapHost=el('section',{id:'mission-map'},[el('h2',{},['Mission workspace'])]);
@@ -44,6 +45,7 @@ controller.subscribe(state=>{
  status.textContent=`${snapshot.session.mode} · ${snapshot.source.kind} · ${snapshot.run.phase} · ${snapshot.run.id}${state.needs_refresh?' · refresh required':''}`;
  safety.render(snapshot);localization.render(snapshot);renderMissionMap(mapHost,missionMapModel(snapshot));
  const view=toSurveyView(snapshot);
+ statusFacts.textContent=missionStatusText(view);
  chat.render(snapshot.chat.messages);decision.update(view,state.needs_refresh);drawDecision();
  renderCounts(counts,view,{onClass:id=>select('class',id),onObject:id=>select('object',id)});
  replace(framesHost,snapshot.evidence.frames.map(f=>{const b=button('',()=>select('frame',f.id),{'data-frame-id':f.id,'aria-label':`Frame ${f.stop_id} ${frameDetectionText(f)}`});b.append(el('strong',{},[`Frame ${f.stop_id}`]),meta(frameDetectionText(f)),meta(`${f.evidence}${f.gap_reason?` - gap ${f.gap_reason}`:''}`),meta(`Commanded ${f.commanded_pose?'bound':'--'} / Measured ${f.measured_pose?'bound':'--'}`));return b;}));

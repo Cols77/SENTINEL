@@ -105,6 +105,7 @@ class SurveyRuntime:
                                  'FLOWN':'COMPLETED','FAILED':'FAILED',
                                  'ABORTED':'ABORTED','ABORTED_EN_ROUTE':'ABORTED'}.get(
                                      event.status, event.status or 'UNKNOWN')
+            payload['stop']['status'] = payload['status']
         elif isinstance(event, FrameCapturedEvent):
             payload['refs'] = [event.artifact_id] if event.artifact_id else []
         elif isinstance(event, DetectorResultEvent):
@@ -117,10 +118,15 @@ class SurveyRuntime:
             state=self.state.setdefault(run_id,{})
             state['phase']=phase; state['updated_at']=now()
             if isinstance(event, StopProgressEvent):
-                state['stop']=payload['stop']
-                state.setdefault('stops', {})[f"{payload['stop']['option_id']}:{payload['stop']['stop_index']}"] = payload['stop']
-                if any(payload['stop'].get(k) is not None for k in ('tag_height_cm','height_cm','vertical_mismatch_cm')):
-                    state['vertical'] = {k: payload['stop'].get(k) for k in ('tag_height_cm','height_cm','vertical_mismatch_cm')}
+                stop = payload['stop']
+                key = stop['option_id'] if stop['stop_index'] is None else f"{stop['option_id']}:{stop['stop_index']}"
+                previous = state.setdefault('stops', {}).get(key, {})
+                merged = dict(previous)
+                merged.update({k: v for k, v in stop.items() if v is not None})
+                state['stop'] = merged
+                state['stops'][key] = merged
+                vertical = state.setdefault('vertical', {})
+                vertical.update({k: merged[k] for k in ('tag_height_cm','height_cm','vertical_mismatch_cm') if merged.get(k) is not None})
             elif isinstance(event, FrameCapturedEvent) and event.frame_id:
                 state.setdefault('frame_telemetry', {}).setdefault(event.frame_id, {}).update(status='CAPTURED')
             elif isinstance(event, DetectorResultEvent) and event.frame_id:

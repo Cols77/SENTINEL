@@ -69,9 +69,15 @@ def test_runtime_retains_allowlisted_vertical_facts_and_durable_escalation(tmp_p
     observer.observe(StopProgressEvent(run_id='r', stop='GRID_0', stop_index=0, option_id='GRID', status='ACTIVE', payload={
         'tag_height_cm': 132.0, 'height_cm': 130.0, 'vertical_mismatch_cm': 2.0,
         'private_path':'must not persist'}))
+    observer.observe(StopProgressEvent(run_id='r', stop='GRID_0', stop_index=0, option_id='GRID', status='ACTIVE', payload={
+        'coverage': 'OK', 'trim_progress': 2}))
     observer.observe(PublicEscalationEvent(run_id='r', point='PROPOSAL', reason='judge unavailable'))
     state=runtime.state['r']
     assert state['stops']['GRID:0']['tag_height_cm'] == 132.0
+    assert state['stops']['GRID:0']['height_cm'] == 130.0
+    assert state['stops']['GRID:0']['vertical_mismatch_cm'] == 2.0
+    assert state['stops']['GRID:0']['coverage'] == 'OK'
+    assert state['stops']['GRID:0']['trim_progress'] == 2
     assert 'private_path' not in state['stops']['GRID:0']
     assert state['decision']['source'] == 'RULES'
     assert state['decision']['escalation_reason'] == 'judge unavailable'

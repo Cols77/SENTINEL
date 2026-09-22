@@ -30,6 +30,8 @@ class ScenarioAdapters:
     location: str | None = None
     consent_date: str | None = None
     provenance_mode: str | None = None
+    detector_name: str = 'scripted'
+    detector_model: str = 'scenario'
 
 class ScenarioFlight:
     def __init__(self, frames, artifacts):
@@ -115,7 +117,7 @@ def build_rehearsal_adapters(scenario_path, artifact_root):
             return f"Between {row['confirmed']} and {row['confirmed']+row['uncertain']} computers; unresolved observations remain."
         return f"I found {row['confirmed']} computers."
     policy=ScenarioPolicy() if scene.get('follow_up') else RuleProposer()
-    return ScenarioAdapters(options,policy,flight,ScriptedDetector(script),writer,SYNTHETIC_LEVEL,'SIMULATED',provenance_mode='F')
+    return ScenarioAdapters(options,policy,flight,ScriptedDetector(script),writer,SYNTHETIC_LEVEL,'SIMULATED',provenance_mode='F',detector_name='scripted',detector_model='scenario')
 
 
 class ScenarioPolicy(RuleProposer):
