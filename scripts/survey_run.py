@@ -334,6 +334,9 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
     parser.add_argument("--surface-z-cm", type=float, default=None,
                         help="tape-measured surface height, for the per-frame delta_z_cm "
                              "(V12); required with --site")
+    parser.add_argument("--takeoff-z-cm", type=float, default=None,
+                        help="height of the takeoff surface in the site frame; height? is "
+                             "measured from takeoff (default: the site file's, else 0)")
     parser.add_argument("--live-judge", choices=("none", "jev", "llm"), default="none",
                         help="--mode J only: a live model reads the request and picks the "
                              "sweep. jev = the Jev decision model, llm = a general LLM through "
@@ -437,7 +440,8 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
             pose_mode=args.pose, run_id=run_id, mission_log=mission_log,
             capture_dir=capture_dir,
             start_x_cm=start[0], start_y_cm=start[1],
-            surface_z_cm=args.surface_z_cm, sr063_amended=args.sr063_amended,
+            surface_z_cm=args.surface_z_cm, takeoff_z_cm=args.takeoff_z_cm,
+            sr063_amended=args.sr063_amended,
             tag_map=tag_map, conn=conn,
             # A real flight always requires the explicit --confirm flag
             # (CubeMissionRunner.run() refuses without it regardless of
