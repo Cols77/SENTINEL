@@ -73,7 +73,7 @@ from sentinel.survey.loop import run_survey  # noqa: E402
 from sentinel.survey.observability import CAMERAS, SYNTHETIC_LEVEL, TELLO_MEASURED  # noqa: E402
 from sentinel.survey.options import generate_options  # noqa: E402
 from sentinel.survey.proposer import JevProposer, LlmProposer, RuleProposer  # noqa: E402
-from sentinel.survey.providers.gemini import GeminiDetector  # noqa: E402
+from sentinel.survey.providers.gemini import GeminiDetector, OpenRouterGeminiDetector  # noqa: E402
 from sentinel.survey.providers.moondream import MoondreamDetector  # noqa: E402
 from sentinel.survey.store import SurveyStore  # noqa: E402
 
@@ -81,6 +81,9 @@ from sentinel.survey.store import SurveyStore  # noqa: E402
 _PROVIDER_ENV = {
     "moondream": ("MOONDREAM_API_KEY", "MOONDREAM_MODEL", MoondreamDetector),
     "gemini": ("GEMINI_API_KEY", "GEMINI_MODEL", GeminiDetector),
+    # the same Gemini model through OpenRouter, on the key the repo already holds
+    "gemini-openrouter": ("OPENROUTER_API_KEY", "GEMINI_OPENROUTER_MODEL",
+                          OpenRouterGeminiDetector),
 }
 
 #: The same fixed envelope used across the survey test suite (tests/survey/
@@ -370,10 +373,10 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
     parser.add_argument("--responses", type=Path, required=True,
                         help="a ReplayDetector responses dir (one json per frame); ignored "
                              "unless --detector replay")
-    parser.add_argument("--detector", choices=("replay", "moondream", "gemini"), default="replay",
+    parser.add_argument("--detector", choices=("replay", "moondream", "gemini", "gemini-openrouter"), default="replay",
                         help="replay (default) never leaves the machine; moondream/gemini are "
                              "live providers gated on an API key and recorded filming consent")
-    parser.add_argument("--fallback", choices=("none", "moondream", "gemini"), default="none",
+    parser.add_argument("--fallback", choices=("none", "moondream", "gemini", "gemini-openrouter"), default="none",
                         help="tried only when --detector cannot answer (plan section C3); "
                              "gated the same way --detector is")
     parser.add_argument("--db", type=Path, required=True)

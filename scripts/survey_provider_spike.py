@@ -55,7 +55,7 @@ SURVEY_CLASSES = tuple(sorted(NOMINAL_WIDTH_CM))
 #: GeminiDetector.detect). This is the spike script's responsibility, not
 #: either adapter's -- MoondreamDetector.detect(path, classes) already loops
 #: over `classes` itself and is not wrong to be called once per class here.
-CALLS_PER_FRAME = {"moondream": len(SURVEY_CLASSES), "gemini": 1}
+CALLS_PER_FRAME = {"moondream": len(SURVEY_CLASSES), "gemini": 1, "gemini-openrouter": 1}
 
 #: $/call estimates -- PLACEHOLDER, not a measured invoice. Design spec 6.2
 #: cites Moondream at $0.30/M input tokens, $2.50/M output tokens, ~3
@@ -63,7 +63,9 @@ CALLS_PER_FRAME = {"moondream": len(SURVEY_CLASSES), "gemini": 1}
 #: per-call figure, so both providers share the same conservative
 #: placeholder here. Revisit only once a real, authorised run produces an
 #: actual invoice -- not by guessing harder.
-EST_COST_PER_CALL_USD = {"moondream": 0.0006, "gemini": 0.0006}
+#: gemini-openrouter: MEASURED on the 2026-09-22 spike (google/gemini-2.5-flash,
+#: 960x720 still, 1352 tokens in, 18-61 out): $0.00045-0.00056 per call, rounded up.
+EST_COST_PER_CALL_USD = {"moondream": 0.0006, "gemini": 0.0006, "gemini-openrouter": 0.0006}
 
 #: name -> the .env / environment variable that must hold an API key for
 #: that provider to count as AVAILABLE (mirrors scripts/survey_run.py's
@@ -87,8 +89,9 @@ def paid_call_plan(n_frames: int, providers: tuple[str, ...]) -> dict:
     before any call, real or refused, is made."""
     per_provider = {}
     for name in providers:
-        calls = n_frames * CALLS_PER_FRAME[name]
-        per_provider[name] = {"calls": calls, "cost_usd": calls * EST_COST_PER_CALL_USD[name]}
+        calls = n_frames * CALLS_PER_FRAME[name.split(":")[0]]
+        per_provider[name] = {"calls": calls,
+                              "cost_usd": calls * EST_COST_PER_CALL_USD[name.split(":")[0]]}
     return {
         "per_provider": per_provider,
         "total_calls": sum(row["calls"] for row in per_provider.values()),
@@ -197,22 +200,32 @@ def _run_moondream(api_key: str, model: str, stills: list[Path], out_dir: Path) 
     return responses
 
 
-def _run_gemini(api_key: str, model: str, stills: list[Path], out_dir: Path) -> dict:
+def _run_gemini(api_key: str, model: str, stills: list[Path], out_dir: Path,
+                via_openrouter: bool = False) -> dict:
     """One ``.detect(path, SURVEY_CLASSES)`` call per still. Only reached
     past the refusal gate."""
     from sentinel.survey.providers import ProviderError
-    from sentinel.survey.providers.gemini import GeminiDetector
+    from sentinel.survey.providers.gemini import GeminiDetector, OpenRouterGeminiDetector
 
-    detector = GeminiDetector(api_key=api_key, model=model, session=_http_session())
+    cls = OpenRouterGeminiDetector if via_openrouter else GeminiDetector
+    detector = cls(api_key=api_key, model=model, session=_http_session())
+    prefix = "gemini_or_" + model.replace("/", "_") if via_openrouter else "gemini"
     responses = {}
     for still in stills:
         try:
             batch = detector.detect(str(still), SURVEY_CLASSES)
-            raw = batch.raw
+            raw = batch.raw if batch.raw is not None else {"status": batch.status}
+            # what the survey would store from this answer, beside the provider's own words
+            raw = {**raw, "_status": batch.status, "_parsed": [
+                {**detection, "band": band}
+                for detection, band in zip(batch.detections, batch.bands or ())]}
         except ProviderError as exc:
-            raw = {"error": type(exc).__name__}
+            # the message names the provider and, for a model mismatch, both names;
+            # it never carries the key or the image
+            raw = {"error": type(exc).__name__, "detail": str(exc)}
         responses[still.name] = raw
-        (out_dir / f"gemini_{still.stem}.json").write_text(json.dumps(raw), encoding="utf-8")
+        (out_dir / f"{prefix}_{still.stem}.json").write_text(
+            json.dumps(raw, default=str), encoding="utf-8")
     return responses
 
 
@@ -231,6 +244,10 @@ def _read_gdino_responses(responses_dir: Path, stills: list[Path]) -> dict:
 def _count_objects(payload) -> str:
     if not isinstance(payload, dict):
         return "?"
+    if isinstance(payload.get("_parsed"), list):
+        return f"{len(payload['_parsed'])} ({payload.get('_status')})"
+    if "error" in payload:
+        return f"error: {payload['error']}"
     if isinstance(payload.get("objects"), list):
         return str(len(payload["objects"]))
     if payload and all(isinstance(v, dict) for v in payload.values()):
@@ -274,6 +291,9 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
     parser.add_argument("--date", default=None)
     parser.add_argument("--out", type=Path, default=REPO_ROOT / "artifacts/provider-spike",
                         help="where raw responses and the comparison table are written")
+    parser.add_argument("--openrouter-gemini", action="append", default=[], metavar="MODEL",
+                        help="also run this Gemini model through OpenRouter (OPENROUTER_API_KEY), "
+                             "e.g. google/gemini-2.5-flash; repeatable, one column per model")
     parser.add_argument("--i-authorise-paid-calls", action="store_true",
                         help="required before ANY real provider call is made -- "
                              "never pass this during plan phase 4")
@@ -287,6 +307,10 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
 
     n_frames = len(list(args.garden_stills.iterdir())) if args.garden_stills else args.n_frames
     providers = available_paid_providers(env)
+    if args.openrouter_gemini and not env.get("OPENROUTER_API_KEY"):
+        print("refusing: --openrouter-gemini needs OPENROUTER_API_KEY")
+        return 1
+    providers += tuple(f"gemini-openrouter:{model}" for model in args.openrouter_gemini)
     plan = paid_call_plan(n_frames, providers)
 
     print(f"frames          : {n_frames}")
@@ -322,6 +346,10 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
     if "gemini" in providers:
         results["gemini"] = _run_gemini(
             env["GEMINI_API_KEY"], env.get(_PROVIDER_MODEL_VAR["gemini"], ""), stills, args.out)
+
+    for model in args.openrouter_gemini:
+        results[f"gemini-openrouter:{model}"] = _run_gemini(
+            env["OPENROUTER_API_KEY"], model, stills, args.out, via_openrouter=True)
 
     _write_comparison_table(results, args.out / "comparison.md")
     print(f"wrote {args.out / 'comparison.md'}")
