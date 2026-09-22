@@ -179,6 +179,39 @@ test('lost capture cancels only a still-held gesture', () => {
   assert.equal(cancels, 1);
 });
 
+test('cancel after release invalidates late recognition and restores the composer', () => {
+  const recognizer = recognizerHarness();
+  const submitted = [];
+  const text = [];
+  const controller = createVoiceCommandController({
+    recognizerFactory: () => recognizer,
+    onSubmit: value => submitted.push(value),
+    onText: value => text.push(value),
+  });
+  controller.begin('keep this');
+  controller.release();
+  controller.cancel();
+  recognizer.onresult({results: [{0: {transcript: 'late command'}, isFinal: true}]});
+  recognizer.onend();
+  assert.deepEqual(submitted, []);
+  assert.equal(text.at(-1), 'keep this');
+});
+
+test('dispose after release invalidates late recognition and never submits', () => {
+  const recognizer = recognizerHarness();
+  const submitted = [];
+  const controller = createVoiceCommandController({
+    recognizerFactory: () => recognizer,
+    onSubmit: value => submitted.push(value),
+  });
+  controller.begin();
+  controller.release();
+  controller.dispose();
+  recognizer.onresult({results: [{0: {transcript: 'late command'}, isFinal: true}]});
+  recognizer.onend();
+  assert.deepEqual(submitted, []);
+});
+
 test('exact land is refused safely when legality changes before execution', () => {
   let callback;
   let landCalls = 0;

@@ -168,7 +168,7 @@ export function createVoiceCommandController({
     if (ended) finish();
   };
   const cancel = () => {
-    if (active && !released) {
+    if (active) {
       active = false;
       released = true;
       failed = true;
