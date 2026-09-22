@@ -72,6 +72,8 @@ PLAUSIBILITY_CM = 60.0
 TOLERANCE_CM = 15.0
 OUTER_TOLERANCE_CM = 30.0
 SETTLE_S = 1.5
+#: Written beside the captured frames, one JSON line per frame as it is saved.
+FRAMES_LOG_NAME = "frames.jsonl"
 BURST_MAX_S = 12.0
 BURST_TARGET_REPORTS = 12
 CM_PER_UNIT = 10.0
@@ -691,10 +693,25 @@ class CubeMissionRunner(FlightTestRunner):
                 saved_path = self.recorder.save(frame)
                 path = str(saved_path)
                 digest = hashlib.sha256(saved_path.read_bytes()).hexdigest()
-            entry["frames"].append({"look_deg": offset, "path": path, "sha256": digest,
-                                    "captured_at": datetime.now(timezone.utc).isoformat()})
+            record = {"look_deg": offset, "path": path, "sha256": digest,
+                      "captured_at": datetime.now(timezone.utc).isoformat()}
+            entry["frames"].append(record)
+            if path is not None:
+                self._announce_frame(wp.name, record)
             self._emit("observe", f"{wp.name}: captured at look offset {offset}")
         self._look_to(0)
+
+    def _announce_frame(self, stop: str, record: dict) -> None:
+        """One line per saved frame in ``frames.jsonl`` beside the frames, written the
+        moment the frame is on disk, so a separate process (scripts/live_detect.py)
+        can detect on it while the drone flies on. The mission log is only written
+        when a stop ends. A write failure is an alert, never a flight failure."""
+        try:
+            log = Path(record["path"]).parent / FRAMES_LOG_NAME
+            with log.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"stop": stop, "run_id": self.run_id, **record}) + "\n")
+        except OSError as error:
+            self._emit("alert", f"{stop}: frame not announced for live detection ({error})")
 
     def _append_log(self, entry: dict) -> None:
         self.mission_log.parent.mkdir(parents=True, exist_ok=True)
