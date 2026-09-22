@@ -3187,3 +3187,33 @@ downloaded and no bridge run against them.**
 - The joint Colin+Dzivha provider-profile approval (WP3 §3; coherence spec D-007/G3), which remains
   **BLOCKED**.
 
+---
+
+## Rev 7 amendment (2026-09-22) — after the first end-to-end dry runs and flights
+
+Built on `feat/survey-counting`, all on `integration/survey-demo` at `5a7cdc8` or later:
+
+- **V15. Modes named** `rules` / `judge` / `agent` (letters kept as aliases); summary carries
+  `mode_name`.
+- **V16. Live judge** (`--live-judge {jev,llm}`) and **live agent** (`--live-agent`,
+  `survey.llm_adapter`, operator-approved 2026-09-22), both behind `--i-authorise-paid-calls`,
+  ≤ 3 paid calls per run, raw reply in the audit, model pinned exactly. Independently reviewed
+  before merge (findings fixed at `c8e3fe6`).
+- **V17. Measured start.** `--start X,Y` is a tape-measured pad; without it a real flight with pose
+  on measures its start from the tags; pose off without a start is refused. A follow-up sweep
+  starts where the previous one landed.
+- **V18. Heading convention.** The cube's headings (0 = +x, counter-clockwise) are converted to the
+  survey's (0 = +y, clockwise) in `cube_bridge`; look offsets change sign. Before this every object
+  from a real flight was placed a quarter turn away.
+- **V19. Merge** as design §5.4 rev 7: same-frame exclusion, in-frame duplicate collapse, (sweep,
+  stop) keying, first sweep ≥ 3 stops, no re-offer of a flown sweep, tolerance split along/across
+  the line of sight with the across floor per `position_kind`.
+- **V20. Report** may not drop unconfirmed objects: code appends the caveat.
+- **V21. Dry-run frames** carry a stable name and a hash of that name, so the whole chain dry-runs
+  on a real site file (`tests/survey/test_dry_run_chain.py`).
+
+**Binding on tomorrow's flight:** the rail must sit within tag coverage (near row on the flight-2
+site, or a site with `cube.min_y_m` ≥ 2.0), else every frame is COMMANDED and the count is a
+laptop-per-60-cm count. Leg speed 20, two trim rounds. Filming consent recorded for the location
+and date before any frame reaches a provider. Paid calls per run authorised with the flag.
+
