@@ -323,8 +323,11 @@ async function main() {
           "report-rejected",
           "source-stale",
         ].includes(id)
-      )
-        assert.equal(await page.locator("#approve").isDisabled(), true);
+      ) {
+        const approve = page.locator("#approve");
+        if (await approve.count()) assert.equal(await approve.isDisabled(), true);
+        else assert.match(await page.locator("#approval").innerText(), /COMPLETE|ABORTED|RECOVERY_REQUIRED/);
+      }
       await page.locator(".pane").evaluateAll((es) =>
         es.forEach((e) => {
           e.scrollTop = 0;

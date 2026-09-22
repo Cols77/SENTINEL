@@ -2,6 +2,8 @@
 
 `src/sentinel/ui/schema.py` owns the closed JSON schema, generated into `mission-schema.mjs`. Python and browser validate the same payload. `mission-contract.mjs` adds reference checks. Unknown nested fields are rejected; private paths, provider credentials, encoded images and internal prompts are excluded. Route facts, coverage, detection progression, provenance, and terminal responses are public allowlisted values.
 
+Browser speech does not add an HTTP route or audio payload. Final non-safety transcripts use the existing idempotent chat command. Only the exact normalized phrase `Sentinel, land now` may call the existing controlled-Land command after a visible cancellable three-second countdown and a fresh `LAND` legality check. Voice cannot submit a proposal decision or Emergency command.
+
 | HTTP route | Purpose |
 |---|---|
 | `GET /api/v1/session` | Immutable mode and session/run identity |

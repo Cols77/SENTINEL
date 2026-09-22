@@ -32,13 +32,14 @@ uv run sentinel mission-control --mode live --confirm \
   --tag-map /absolute/path/to/tag-map.json \
   --pose-db /absolute/path/to/pose.sqlite --pose passive \
   --detector gemini --provider-profile /absolute/path/to/approved-profile.json \
+  --i-authorise-paid-calls \
   --location lecture-room --consent-date YYYY-MM-DD \
   --local-ip 192.168.10.2 --surface-z-cm 50
 ```
 
 Supply actual measured configuration. `--pose off` also requires `--start-x-cm` and `--start-y-cm`; both coordinates must lie inside the selected envelope. Reanchor retains the existing `--sr063-amended` gate. The provider profile must conform to `provider-profile.v1`, be approved, and match the selected provider/model. Moondream uses `MOONDREAM_API_KEY` and `MOONDREAM_MODEL`. Consent must already be recorded for that exact location/date in the survey database; the host does not record it on the operator's behalf.
 
-The Mission Control browser projection is schema v3: route coverage and return-leg facts, commanded/measured freshness, capture detection progression, public proposer provenance, and explicit COMPLETE/ABORTED/RECOVERY_REQUIRED terminal states are rendered from validated backend facts.
+The Mission Control browser projection is schema v3: route coverage and return-leg facts, commanded/measured freshness, capture detection progression, public proposer provenance, and explicit COMPLETE/ABORTED/RECOVERY_REQUIRED terminal states are rendered from validated backend facts. Live detection starts in a separate supervised process before capture, binds cached results to run/sweep/path/hash identity, and never repeats a provider call during survey ingestion. Detector failure is an explicit analysis gap and does not take over flight control. Paid calls remain refused without `--i-authorise-paid-calls`.
 
 Startup checks the selected independent UDP interface and existing no-takeoff preflight. Actual flight still needs an explicit proposal approval. The Live adapter uses `CubeFlight`, the measured Tello camera model, real provider perception, and the existing F rules proposer. The bounded chat currently supports computer-count requests and status; it clarifies unsupported intent. Pose evidence comes from the runner's real localization bursts, so it can honestly age between bursts. Restarted Live sessions require recovery and cannot dispatch again automatically. Start a new session only after the operator has reconciled the aircraft and previous run.
 
@@ -53,7 +54,7 @@ uv run python scripts/ui_assets/check_assets.py
 node scripts/ui_assets/verify_mission_control.cjs
 ```
 
-The browser verifier starts and stops its own real local backend and temporary data directory. It requires Playwright/Chromium in the tooling environment; no frontend build is needed. Acceptance covers approval reload/reconciliation, production survey/report/evidence, stale-to-fresh localization, independent safety controls, three viewports, reduced motion, and local-only traffic. Artifacts go under ignored `artifacts/mission-control/`.
+The browser verifier starts and stops three real local backends with separate temporary data directories. It requires Playwright/Chromium in the tooling environment; no frontend build is needed. Acceptance covers clean count, approved uncertain follow-up, missing analysis, approval reload/reconciliation, production survey/report/evidence, stale-to-fresh localization, deterministic browser speech, independent safety controls, 1440×900, 1920×1080 and narrow layouts, reduced motion, and local-only traffic. Artifacts go under ignored `artifacts/mission-control/`.
 
 ## Retained fixture regression surface
 
@@ -67,6 +68,6 @@ node scripts/ui_assets/verify_survey_console.cjs http://127.0.0.1:8770
 That surface is labelled FIXTURE DEMO and cannot dispatch a flight. Its reviewer controls exercise snapshots, uncertain/lower-bound counts, evidence races, and approval state transitions. It does not prove runtime integration. The legacy asset-kit study remains `/assets/sentinel-ui/console.html`.
 
 See [the contract](contract.md), [approved design](../../docs/superpowers/specs/2026-09-21-sentinel-mission-control-design.md), and [execution handoff](../../docs/handoffs/2026-09-21-mission-control.md).
-### Browser voice input
+## Browser voice input
 
 When the browser exposes `SpeechRecognition`, the mission composer provides an explicit hold-to-talk control. Recognition is English using the browser's English regional tag where available. The browser speech service may process audio remotely; Sentinel does not upload or store audio and never listens passively. Only the exact spoken phrase `Sentinel, land now` enters the visible three-second controlled-Land countdown. Other voice phrases use the bounded chat path, including a safe refusal for unsupported safety and flight requests. Text remains available when speech recognition is unsupported or permission is denied.

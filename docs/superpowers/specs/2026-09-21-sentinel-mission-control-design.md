@@ -10,6 +10,7 @@ date: 2026-09-21
 > Revised on 2026-09-21 after Alan approved the shared-runtime, dry-run-first approach.
 > Alan approved this written revision on 2026-09-21; the implementation plan is being revised.
 > It supersedes the earlier delivery sequence; implementation ownership remains with LightCode.
+> Delivery amendment on 2026-09-23 adds the approved bounded browser-voice surface and schema v3 runtime observations.
 
 ## 1. Purpose and release boundary
 
@@ -40,9 +41,13 @@ The first release contains one golden path:
 8. Show the validated evidence-backed report.
 9. Keep controlled Land and independent Emergency motor stop available throughout.
 
-Voice input is a second implementation plan. V1 does not include voice, draggable panels,
-free-form waypoint editing, multi-run management, provider or credential configuration, a
-general telemetry dashboard, or a full event-replay editor.
+The delivered browser may expose restrained hold-to-talk input when `SpeechRecognition` is
+available. It submits one final English transcript through the existing idempotent chat path.
+Only the exact normalized phrase `Sentinel, land now` starts a visible, cancellable three-second
+controlled-Land countdown, and execution requires `LAND` to remain legal. Voice cannot approve
+or reject proposals or trigger Emergency. V1 still excludes draggable panels, free-form waypoint
+editing, multi-run management, provider or credential configuration, a general telemetry
+dashboard, and a full event-replay editor.
 
 ## 2. Product decisions
 
@@ -89,10 +94,11 @@ that branch must incorporate the latest `integration/survey-demo` ancestry conta
 survey, proposer, flight, and pose work. The implementer must not wire against sibling worktree
 files or bypass missing runtime contracts by reading their databases directly from browser code.
 
-The original design was prepared against local integration commit `9b6b5f1`. This revision
-checked the published `integration/survey-demo` at `6d7f24b641feb94188d15507a10da5ec65ae1aaa`.
-Implementation must fetch and record the current published tip, incorporate its ancestry, and
-verify the runtime interfaces before product changes. No sibling-worktree dependency is allowed.
+The original design was prepared against local integration commit `9b6b5f1`. Delivery fetched
+and normally merged published `integration/survey-demo` commit
+`4aa9e19361b3ed31a4c8025405405e3c4a6b1b44` as merge commit
+`15be1e6573eb1dc2c309f6b2e4faf7cfdc1c4faa`; no history was rewritten. Runtime composition is
+from that ancestry, with no sibling-worktree dependency.
 
 ## 4. Architecture
 
@@ -277,7 +283,9 @@ events        latest exposed sequence and snapshot watermark
 legal_actions exact current operator actions and disabled reasons
 ```
 
-The contract carries an explicit `schema_version` separate from `run.version`. A separate
+The delivered contract uses `schema_version: 3`, separate from `run.version`. It adds per-stop
+coverage/prediction/trim/return/arrival facts, capture detection state and latency, proposer
+provenance and escalation reason, and vertical-height consistency. A separate
 `run.decision_version` tracks authoritative decision changes: approval `expected_version` binds
 to it, so display-only pose-age refreshes cannot invalidate an otherwise current proposal. The implementation
 plan must define the exact versioned payload, identity fields and response envelopes together
@@ -455,6 +463,9 @@ physical/terminal fallback.
 - Evidence descriptions identify capture and status. Full hashes are inspectable and copyable.
 - Raw image bytes, provider secrets, private prompts, filesystem paths, and storage keys are not
   exposed in snapshots or logs.
+- Microphone permission is requested only on an operator hold-to-talk action. The browser speech
+  service may process audio remotely; SENTINEL uploads or retains no audio and never listens
+  passively. Text remains available when speech is unsupported, denied, cancelled, or fails.
 - Chat, safety controls, and snapshot reads remain responsive while the mission worker is waiting,
   flying, or analysing.
 

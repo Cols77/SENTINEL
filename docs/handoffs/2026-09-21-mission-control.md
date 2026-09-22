@@ -1,63 +1,102 @@
-# Mission Control execution handoff
+# Mission Control integration, schema v3, and voice handoff
 
-Implemented on `codex/survey-console-fixtures` for PR #8, building on the PR #7 asset foundation. Published integration source `6d7f24b641feb94188d15507a10da5ec65ae1aaa` was merged as `9796db0`; no history was rewritten. Implementation review head: `bb73ef2`. Verified fixes: `e764217`.
+Implemented on PR #8 (`codex/survey-console-fixtures`). The published
+`integration/survey-demo` tip `4aa9e19361b3ed31a4c8025405405e3c4a6b1b44` was incorporated by the normal
+merge commit `15be1e6573eb1dc2c309f6b2e4faf7cfdc1c4faa`; no force-push or history
+rewrite is required. Integration behavior remains authoritative for survey,
+flight, coverage, proposer, localization, and live detection.
 
 ## Delivered
 
-- Local NiceGUI/FastAPI host, vanilla browser UI, closed shared v3 snapshot schema, allowlisted projection and binary evidence capabilities.
-- One durable mission thread, bounded computer-count/status intent, explicit inline approval/rejection, payload-bound idempotency and lost-response reconciliation. Display aging does not invalidate approval.
-- One guarded mission worker using the real `run_survey` loop, legal candidate policy, merge and report validator in both modes. Rehearsal supplies synthetic boundaries rather than precomputed result snapshots.
-- Clean-computer, uncertain follow-up and missing-analysis input scenarios; explicit source/provenance and unavailable/partial facts.
-- Backend route/progress, measured versus commanded position, actual AprilTag estimation over synthetic camera inputs in Rehearsal, exact-image tag overlays and backend freshness. Live pose evidence comes from existing runner localization bursts.
-- Registered Live `CubeFlight` runners, measured camera model, selected Gemini/Moondream perception, existing F rules proposer, consent/profile/configuration/preflight checks and independent emergency transport. No automatic Live-to-Rehearsal fallback.
-- Controlled Land and independent Emergency; session/runner latch before emergency transport, asynchronous audit, separate UI pending states. Shutdown closes new-run admission and requests controlled landing; a failed landing request attempts independent emergency. Acknowledgements never assert physical completion.
-- Locally bundled IBM Plex fonts/license; preserved isolated eight-scenario fixture surface.
+- Typed optional mission observations with no-op compatibility for existing callers: runner
+  lifecycle, stop progress, pose and pose health, frame capture, detector result, merge, report,
+  abort, and public escalation.
+- Runner lifecycle owns fail-closed active-runner registration for controlled Land and Emergency.
+  Exact encoded pose evidence and AprilTag diagnostics remain available to the backend projection.
+- A backend-only allowlisted `SurveyReadModel`; the browser receives no database or SQL capability.
+- Integration flight behavior retained: coverage guarding, configurable trim rounds, leg speed,
+  corrected transforms, return-to-start, bounded proposer modes, and escalation semantics.
+- Live detection supervision uses the integration `live_detect` subprocess design. Results are
+  cached by run, sweep, path, and SHA-256 so survey ingestion cannot repeat a paid provider call.
+  Process-tree cleanup is retained through service shutdown; malformed or failed results become
+  explicit analysis gaps without taking over flight. Paid calls require
+  `--i-authorise-paid-calls`.
+- Closed Mission Control snapshot schema v3 with route coverage, tag predictions, trim and arrival
+  facts, return leg, commanded/measured pose, freshness and vertical consistency, capture detection
+  progression/latency, proposer provenance, escalation reasons, strict cross-references, and
+  explicit COMPLETE/ABORTED/RECOVERY_REQUIRED responses.
+- The browser renders route coverage and return-to-start, separate commanded and measured markers,
+  exact pose images with AprilTag polygons/IDs, fresh/aging/stale localization, detection gaps,
+  authoritative counts, evidence linkage, reports, and terminal recovery guidance.
+- Browser hold-to-talk shares the existing idempotent chat submission path. Interim recognition is
+  shown in the composer and one final transcript submits on release. Duplicate result/end/pointer
+  events collapse to one command. Denial, cancellation, failure, or no final result preserves the
+  draft and sends nothing.
+- Only the exact normalized phrase `Sentinel, land now` starts a visible three-second controlled-Land
+  countdown. Cancel or Escape aborts it; `LAND` is checked at start and execution using one command
+  identity. Voice cannot approve/reject a proposal or trigger Emergency. Other phrases remain
+  bounded chat input.
 
 ## Launch
 
 ```sh
 uv sync
-uv run python -m sentinel.ui --mode rehearsal --data-dir artifacts/my-rehearsal --port 8771
+uv run python -m sentinel.ui --mode rehearsal \
+  --data-dir artifacts/my-rehearsal --port 8771
 ```
 
-Open http://127.0.0.1:8771/console/ and request “count the computers”. A proposal is not a flight; explicitly approve it. Use a fresh data directory for a new rehearsal. See [setup and Live flags](../../examples/survey-console/README.md) and [contract](../../examples/survey-console/contract.md).
+Open http://127.0.0.1:8771/console/ and request “count the computers”. A proposal is not a flight;
+approve it explicitly. Use a fresh data directory for every rehearsal. The uncertain and
+missing-analysis inputs are selected with `--scenario fixtures/mission-control/uncertain-followup.json`
+and `--scenario fixtures/mission-control/missing-analysis.json`.
+
+See [setup and Live prerequisites](../../examples/survey-console/README.md) and the
+[schema-v3 contract](../../examples/survey-console/contract.md).
 
 ## Verification
 
-All final commands ran against the implementation including the review fixes:
+Final verification on 2026-09-23:
 
 | Check | Result |
 |---|---|
-| `.venv/bin/python -m pytest -q --ignore=fixtures` | **1358 passed, 13 skipped, 5 warnings**, 102.59s |
-| `node --test tests/survey_console/*.test.mjs` | **55 passed**, no failures/skips |
-| `.venv/bin/python scripts/ui_assets/check_assets.py` | Passed, including contrast checks |
-| `node scripts/ui_assets/verify_mission_control.cjs` | Passed against an owned temporary real host |
-| `node scripts/ui_assets/verify_survey_console.cjs http://127.0.0.1:8772` | Passed all eight retained fixture scenarios |
-| `.venv/bin/uv lock --no-cache` | Resolved 71 packages |
+| `uv run pytest -q --ignore=fixtures` | **1622 passed, 3 skipped, 5 warnings**, 687.21s |
+| `node --test tests/survey_console/*.test.mjs` | **79 passed**, no failures/skips |
+| `uv run python scripts/ui_assets/check_assets.py` | **414 checks passed across 83 assets** |
+| `node scripts/ui_assets/verify_mission_control.cjs` | Passed clean, uncertain-follow-up, and missing-analysis real-host rehearsals |
+| `node scripts/ui_assets/verify_survey_console.cjs http://127.0.0.1:8772` | Passed all 8 retained fixture scenarios |
 | `git diff --check` | Passed |
-| Unconfigured Live CLI | Refused with `LIVE_CONFIRM_REQUIRED`, no hardware contact |
 
-Browser acceptance covers request, reload at approval, lost committed response and reconciliation, one real survey-loop execution, count/report/evidence, stale-to-fresh pose while approval waits, exact tag overlay, keyboard hold, Emergency available during pending Land, 1440×900/1920×1080/390×844, reduced motion and no external requests/browser exceptions. Additional component checks cover late/displayed pose revocation and accurate Live image labels. The browser harness owns and removes its temporary backend data. Port 8772 was a temporary static regression host; the user's original preview was not replaced.
+The real-host browser run owns and removes a separate data directory and backend for each scenario.
+It verifies schema v3, request/approval/reload and lost-response reconciliation, route and pose
+progression, stale-to-fresh AprilTags, detection/report/evidence/count linkage, controlled Land and
+Emergency boundaries, deterministic fake speech, 1440×900, 1920×1080 and 390×844 layouts, reduced
+motion, and no external requests. The retained fixture run covers eight reviewer timelines,
+evidence races, terminal states, decision identity, keyboard operation, and responsive layout.
+Warnings are the existing `jsonschema.RefResolver`, Starlette/httpx and AnyIO deprecations plus the
+unregistered `unit` marker; skipped tests are not counted as passed.
 
-Python warnings: two `jsonschema.RefResolver` deprecations, Starlette/httpx and AnyIO deprecations, and the existing unregistered `unit` marker. Skipped tests are not counted as passed. No paid provider calls or drone operation were used.
+## Review fixes found during final acceptance
 
-Toolchain: Python 3.12 project venv sharing the bundled scientific runtime, pytest 9.1.1, NiceGUI 3.17.1, jsonschema 4.26.0, Pillow 12.3.0, OpenCV contrib 5.0.0.93, PyAV 14.2.0. Limited local disk initially prevented duplicate dependency installation; the pinned environment was repaired and the full suite passed. JSON-schema and Pillow are explicit runtime dependencies.
+- Follow-up projection originally replaced the first sweep route with the new proposal route while
+  prior frames and the active stop still referenced the first option. A failing real-host scenario
+  and Python regression now prove that flown and proposed routes are unioned, the completed sweep
+  retains its own option, and the follow-up route remains planned.
+- Browser acceptance now waits for the initial snapshot before submitting chat, uses real pointer
+  gestures for pointer-capture voice tests, waits for owned host shutdown before deleting SQLite,
+  and accepts the intentional absence of decision buttons in explicit terminal states.
+- The observer privacy regression now expects the public normalized stop status while continuing to
+  prove that private image paths never enter the journal.
 
-## Independent review and fix pass
+## Privacy and operational limits
 
-A fresh `gpt-6-astra` reviewer inspected the whole branch against the approved plan/spec, with particular attention to identity collisions, display/decision versions, blocked safety paths, revocation races and lost approval responses. It found four issues; all entered one author fix pass:
+Text remains the primary reliable input. Browser speech may be processed by the browser vendor only
+after the operator presses the microphone. SENTINEL does not upload or retain audio, perform passive
+listening, support multilingual command interpretation, approve by voice, or expose voice Emergency.
 
-1. Shutdown previously latched emergency without transport, suppressing landing. An injected active-run regression failed, then passed with controlled shutdown/admission closure.
-2. A detached uncertain approval could not reconcile without reload. A lost-response/follow-up test failed, then passed with immutable retries independent of current proposal eligibility.
-3. Revoked pose artifacts remained projected/displayed. A backend revocation regression failed, then passed; browser checks cover displayed and in-flight image removal while numeric pose remains available.
-4. Live captures inherited synthetic captions. A real-browser component assertion failed, then passed with mode/frame-derived provenance labels.
+Automated tests used synthetic/injected clients only. No paid provider request, drone command, or
+physical microphone test was performed. Measured flight readiness, real network timing, calibration,
+provider performance, actual landing, motor stop, and Chrome/Edge microphone permission behavior on
+the demo laptop still require supervised hardware validation. Acknowledgement is never evidence that
+the aircraft landed or the motors stopped.
 
-An additional failing/passing regression marks interrupted Rehearsal runs ABORTED instead of leaving orphaned approvals active. The final full suite passed after the fix pass. There was no second independent review and no deferred minor finding.
-
-## Operational limits
-
-Software composition is verified; measured flight readiness, real network timing, calibration quality, landing completion and motor-stop outcomes are **not hardware-verified**. Live checks are refusal gates, not certification. Live chat currently supports computer-count requests/status and the existing deterministic F proposer; unsupported intent clarifies instead of dispatching. A session is one run. Restart never resumes an interrupted flight: Live requires recovery; Rehearsal requires a fresh data directory. Live localization can age between runner bursts. Latest-only display queues can drop display frames without altering authoritative pose processing.
-
-PR #8 targets `integration/survey-demo` so its review excludes the already-published runtime commits; it includes the two PR #7 foundation commits until those are incorporated upstream. PR #7 remains the foundation review. Neither PR was merged.
-
-The complete implementation decisions, costs and review exclusions are retained in [the execution record](2026-09-21-mission-control-execution.md). Approved [design](../superpowers/specs/2026-09-21-sentinel-mission-control-design.md) and [plan](../superpowers/plans/2026-09-21-sentinel-mission-control.md) remain the source requirements.
+PR #8 remains the delivery vehicle and is not merged automatically.

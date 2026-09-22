@@ -145,4 +145,7 @@ def test_runtime_normalizes_stop_payload_and_never_journals_private_frame_paths(
     payload = events[0]
     assert payload["type"] == "STOP_ARRIVED"
     assert "private" not in json.dumps(payload)
-    assert runtime.state["r"]["stop"] == {"option_id": "RAIL", "stop_index": 2, "x_cm": 11, "y_cm": 22}
+    assert runtime.state["r"]["stop"] == {
+        "option_id": "RAIL", "stop_index": 2, "x_cm": 11, "y_cm": 22,
+        "status": "LOCALISED",
+    }

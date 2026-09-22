@@ -45,3 +45,15 @@ Task 0: complete (integration merged at 9796db0; initial baseline environment is
 Task 1: complete (a3c69d7; shared schema/journal tests pass in full suite).
 Final: fixed four reviewed findings in e764217; final suite 1358 passed/13 skipped/5 warnings; Node 55 passed; both browser suites and asset checker passed.
 Task 12: verification and documentation complete; authorized normal push, PR retarget/update and review renewal follow.
+
+## 2026-09-23 integration-alignment addendum
+
+PR #8 subsequently merged published `integration/survey-demo`
+`4aa9e19361b3ed31a4c8025405405e3c4a6b1b44` as normal merge
+`15be1e6573eb1dc2c309f6b2e4faf7cfdc1c4faa`. The original counts above describe the earlier
+implementation checkpoint and are superseded by the current
+[Mission Control handoff](2026-09-21-mission-control.md). The aligned delivery adds typed mission
+observations, the backend survey read model, supervised/cache-bound live detection, schema v3,
+bounded hold-to-talk input, and expanded three-scenario real-host acceptance. Hardware flight,
+paid-provider performance, and a physical Chrome/Edge microphone smoke remain separate supervised
+checks.
