@@ -48,6 +48,57 @@ test('voice hold release submits one final transcript and interim text', () => {
   assert.equal(recognizer.stopped, 1);
 });
 
+test('release waits for a late final result until recognition ends, exactly once', () => {
+  const recognizer = recognizerHarness();
+  const submitted = [];
+  const listening = [];
+  const controller = createVoiceCommandController({
+    recognizerFactory: () => recognizer,
+    onSubmit: text => submitted.push(text),
+    onListeningChange: value => listening.push(value),
+  });
+  controller.begin();
+  controller.release();
+  recognizer.onresult({results: [{0: {transcript: 'status now'}, isFinal: true}]});
+  recognizer.onend();
+  recognizer.onend();
+  controller.release();
+  assert.deepEqual(submitted, ['status now']);
+  assert.deepEqual(listening, [true, false]);
+});
+
+test('recognition ending before release waits for release and finalizes once', () => {
+  const recognizer = recognizerHarness();
+  const submitted = [];
+  const controller = createVoiceCommandController({recognizerFactory: () => recognizer, onSubmit: text => submitted.push(text)});
+  controller.begin();
+  recognizer.onend();
+  recognizer.onresult({results: [{0: {transcript: 'status now'}, isFinal: true}]});
+  controller.release();
+  recognizer.onend();
+  assert.deepEqual(submitted, ['status now']);
+});
+
+test('cancel is distinct from release and suppresses a final result', () => {
+  for (const cancel of ['pointercancel', 'lostpointercapture', 'escape']) {
+    const recognizer = recognizerHarness();
+    const submitted = [];
+    const listening = [];
+    const controller = createVoiceCommandController({
+      recognizerFactory: () => recognizer,
+      onSubmit: text => submitted.push(text),
+      onListeningChange: value => listening.push(value),
+    });
+    controller.begin('keep this');
+    recognizer.onresult({results: [{0: {transcript: 'status now'}, isFinal: true}]});
+    controller.cancel();
+    recognizer.onend();
+    assert.deepEqual(submitted, [], cancel);
+    assert.equal(controller.isHeld, false, cancel);
+    assert.deepEqual(listening, [true, false], cancel);
+  }
+});
+
 test('voice cancellation, denial, errors and no final preserve text without submission', () => {
   for (const outcome of ['cancel', 'denial', 'error', 'no-final']) {
     const recognizer = recognizerHarness();
@@ -62,7 +113,7 @@ test('voice cancellation, denial, errors and no final preserve text without subm
     if (outcome === 'denial') recognizer.onerror({error: 'not-allowed'});
     else if (outcome === 'error') recognizer.onerror({error: 'network'});
     else if (outcome === 'cancel') controller.cancel();
-    else controller.release();
+    else { controller.release(); recognizer.onend(); }
     assert.deepEqual(submitted, [], outcome);
     assert.equal(restored.at(-1), 'keep this', outcome);
   }
@@ -90,6 +141,7 @@ test('exact land starts a cancellable countdown and executes once only when lega
   controller.begin();
   recognizer.onresult({results: [{0: {transcript: 'Sentinel, land now'}, isFinal: true}]});
   controller.release();
+  recognizer.onend();
   assert.equal(landCalls, 0);
   callback(); callback();
   assert.equal(landCalls, 1);
@@ -110,6 +162,7 @@ test('exact land is refused safely when legality changes before execution', () =
   controller.begin();
   controller.recognizer.onresult({results: [{0: {transcript: 'Sentinel land now'}, isFinal: true}]});
   controller.release();
+  controller.recognizer.onend();
   snapshot.legal_actions[0].enabled = false;
   callback();
   assert.equal(landCalls, 0);
@@ -128,6 +181,7 @@ test('approval, emergency and other non-exact phrases use chat only', () => {
     controller.begin();
     recognizer.onresult({results: [{0: {transcript: phrase}, isFinal: true}]});
     controller.release();
+    recognizer.onend();
   }
   assert.deepEqual(chat, ['approve the mission', 'emergency stop motors', 'Sentinel land now please']);
   assert.deepEqual(land, []);

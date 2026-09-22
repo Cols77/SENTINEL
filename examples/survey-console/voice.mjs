@@ -31,6 +31,7 @@ export function createVoiceCommandController({
   onText = () => {},
   onInterim = () => {},
   onStatus = () => {},
+  onListeningChange = () => {},
   onLand = () => {},
   getSnapshot = () => null,
   locale = globalThis.document?.documentElement?.lang || globalThis.navigator?.language,
@@ -38,6 +39,9 @@ export function createVoiceCommandController({
 } = {}) {
   let recognizer = null;
   let held = false;
+  let active = false;
+  let ended = false;
+  let released = false;
   let finished = false;
   let failed = false;
   let originalText = '';
@@ -45,6 +49,12 @@ export function createVoiceCommandController({
   let countdown = null;
   let landTriggered = false;
   let disposed = false;
+
+  const setHeld = value => {
+    if (held === value) return;
+    held = value;
+    onListeningChange(value);
+  };
 
   const restore = () => onText(originalText);
   const clearCountdown = () => {
@@ -72,6 +82,8 @@ export function createVoiceCommandController({
   const finish = () => {
     if (finished) return;
     finished = true;
+    active = false;
+    setHeld(false);
     if (failed || !finalText) return restore();
     restore();
     if (isExactLandPhrase(finalText)) return beginCountdown();
@@ -79,7 +91,7 @@ export function createVoiceCommandController({
     onSubmit(finalText);
   };
   const setResult = event => {
-    if (finished || failed) return;
+    if (finished || failed || !active) return;
     for (const result of Array.from(event?.results ?? [])) {
       const text = transcriptFromResult(result);
       if (!text) continue;
@@ -101,13 +113,18 @@ export function createVoiceCommandController({
       next.onresult = setResult;
       next.onerror = event => {
         failed = true;
-        held = false;
+        active = false;
+        setHeld(false);
         onStatus(event?.error === 'not-allowed'
           ? 'Microphone permission denied. Use the text composer.'
           : 'Voice input failed. Your text composer is still available.');
-        restore();
+        finish();
       };
-      next.onend = () => { if (!held) finish(); };
+      next.onend = () => {
+        ended = true;
+        setHeld(false);
+        if (released) finish();
+      };
       return next;
     } catch {
       onStatus('Microphone permission denied. Use the text composer.');
@@ -115,38 +132,46 @@ export function createVoiceCommandController({
     }
   };
   const begin = (text = '') => {
-    if (disposed || held || countdown !== null) return false;
+    if (disposed || active || countdown !== null) return false;
     originalText = String(text);
     finalText = '';
     finished = false;
     failed = false;
+    active = false;
+    ended = false;
+    released = false;
     recognizer = setup();
     if (!recognizer) return false;
-    held = true;
+    active = true;
+    setHeld(true);
     onStatus('Listening… release to send.');
     try { recognizer.start(); }
     catch {
       failed = true;
-      held = false;
-      restore();
+      active = false;
+      setHeld(false);
+      finish();
       onStatus('Microphone permission denied. Use the text composer.');
       return false;
     }
     return true;
   };
   const release = () => {
-    if (!held) return;
-    held = false;
+    if (!active || released) return;
+    released = true;
+    setHeld(false);
     try { recognizer?.stop(); } catch { /* recognizer already ended */ }
-    finish();
+    if (ended) finish();
   };
   const cancel = () => {
-    if (held) {
-      held = false;
+    if (active && !released) {
+      active = false;
+      released = true;
       failed = true;
+      setHeld(false);
       try { recognizer?.abort?.(); } catch { /* already ended */ }
       try { recognizer?.stop?.(); } catch { /* already ended */ }
-      restore();
+      finish();
     }
     clearCountdown();
     if (!disposed) onStatus('Voice command cancelled.');
@@ -189,6 +214,7 @@ export function createVoiceView(host, input, getSnapshot, chatController, landCo
     onText: setText,
     onInterim: text => setText(text),
     onStatus: text => { status.textContent = text; cancel.hidden = !text.includes('Controlled Land starts'); },
+    onListeningChange: listening => mic.setAttribute('aria-pressed', String(listening)),
     onLand: () => landController.request(),
   });
   if (!controller.supported) status.textContent = 'Voice input unavailable in this browser. Use the text composer.';
@@ -202,13 +228,16 @@ export function createVoiceView(host, input, getSnapshot, chatController, landCo
   };
   const release = () => {
     controller.release();
-    mic.setAttribute('aria-pressed', 'false');
     cancel.hidden = !controller.isCountingDown;
+  };
+  const cancelListening = () => {
+    controller.cancel();
+    if (!controller.isCountingDown) cancel.hidden = true;
   };
   mic.addEventListener('pointerdown', start);
   mic.addEventListener('pointerup', release);
-  mic.addEventListener('pointercancel', release);
-  mic.addEventListener('lostpointercapture', release);
+  mic.addEventListener('pointercancel', cancelListening);
+  mic.addEventListener('lostpointercapture', cancelListening);
   mic.addEventListener('keydown', event => {
     if ([' ', 'Enter'].includes(event.key)) { event.preventDefault(); if (!event.repeat) start(event); }
   });
