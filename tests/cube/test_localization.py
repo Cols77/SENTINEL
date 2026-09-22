@@ -184,3 +184,16 @@ def test_heading_uncertainty_propagates_into_translational_uncertainty():
     value.accept_fix(fix(clock, heading_uncertainty_deg=10))
     health = value.note_command(command(direction="right", distance_cm=100), 10)
     assert health.xy_uncertainty_cm >= 18  # 1 cm fix error + ~17.43 cm heading error
+
+
+@pytest.mark.parametrize("changes", [
+    {"heading_deg": "90"}, {"measured_at": None}, {"xy_uncertainty_cm": "1"},
+    {"heading_uncertainty_deg": True}, {"position": Position(None, 100, 100)},
+    {"position": None}, {"tag_ids": ([], 2)},
+    pytest.param({"heading_deg": 10 ** 1000}, id="overflowing-number"),
+])
+def test_malformed_sensor_fix_is_a_controlled_rejection_not_an_exception(changes):
+    value, clock = tracker()
+    health = value.accept_fix(fix(clock, **changes))
+    assert health.state == LocalizationState.RECOVERY_REQUIRED
+    assert health.position == Position(100, 100, 100)

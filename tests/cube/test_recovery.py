@@ -24,7 +24,7 @@ POLYGON = ((0, 0), (200, 0), (200, 200), (0, 200))
 
 def site():
     return RoomSite("room", "a" * 64, "b" * 64,
-                    (Volume3D("free", POLYGON, (0, 200)),), (),
+                    (Volume3D("free", POLYGON, (-20, 220)),), (),
                     (Volume3D("corridor", POLYGON, (0, 200)),),
                     (RouteDefinition("home-route", (Position(100, 100, 100),), ("corridor",)),),
                     HomeDefinition("pad", Position(100, 100, 0), 90, "home-route"),
@@ -524,7 +524,7 @@ def test_full_aircraft_descent_footprint_must_fit_free_space_even_with_wide_land
     from sentinel.room.site import admit_terminal_contingency
     _, value, _ = controller()
     records, context = terminal_context(value)
-    narrow_free = replace(site(), free_space_volumes=(Volume3D("free", ((95, 0), (200, 0), (200, 200), (95, 200)), (0, 200)),))
+    narrow_free = replace(site(), free_space_volumes=(Volume3D("free", ((95, 0), (200, 0), (200, 200), (95, 200)), (-20, 220)),))
     assert admit_terminal_contingency(narrow_free, records, contingency_id="NAVIGATION_UNAVAILABLE",
         trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, **context,
         now_monotonic_ms=11000, pose=value.health, energy_available=True) is None
@@ -606,3 +606,164 @@ def test_clock_guard_normalizes_fractional_and_integer_observations_to_one_tick_
     assert guard.observe(11000, **bindings)  # same floor-normalized clock tick
     assert guard.observe(12000, **bindings)
     assert not guard.observe(11999.9, **bindings)
+
+
+@pytest.mark.parametrize("change", ["expired", "exact_deadline", "energy", "clearance", "projected_drift"])
+def test_pending_action_is_readmitted_against_its_deadline_and_current_conditions(change):
+    recovery, value, clock = controller()
+    env = environment()
+    pending = recovery.next_action(value.health, env, ())
+    if change in {"expired", "exact_deadline"}:
+        clock.now = 11.1 if change == "expired" else 11
+    elif change == "energy":
+        recovery.energy_admits = lambda action: False
+    elif change == "clearance":
+        env = replace(env, rotation_clearance_volumes=())
+    else:
+        value.profile = replace(value.profile, xy_drift_cm_s=25)
+    current = recovery.next_action(value.health, env, ())
+    assert current.action_id != pending.action_id
+    if change not in {"expired", "exact_deadline"}:
+        assert current.kind == "CONTINGENCY"
+    else:
+        assert current.kind == "STATIONARY_BURST"
+        assert not recovery.assess_burst(pending, reports(clock)).accepted
+        recovery.max_attempts = 2
+        recovery.assess_burst(current, ())
+        assert recovery.next_action(value.health, env, ()).kind == "CONTINGENCY"
+
+
+def yaw_recovery(*, max_yaw=180):
+    recovery, value, clock = controller()
+    value.profile = replace(value.profile, max_yaw_deg=max_yaw)
+    first = recovery.next_action(value.health, environment(), ())
+    recovery.assess_burst(first, ())
+    yaw = recovery.next_action(value.health, environment(), ())
+    assert yaw.kind == "YAW_BURST" and yaw.heading_deg == 60
+    sample = tuple(replace(report, fix=replace(report.fix, heading_deg=60)) for report in reports(clock))
+    return recovery, value, clock, yaw, sample
+
+
+def test_verified_exploratory_yaw_updates_history_and_blocks_restore_beyond_cumulative_limit():
+    recovery, value, _, yaw, sample = yaw_recovery(max_yaw=40)
+    before = value.health
+    assert recovery.assess_burst(yaw, sample).reason == "restore_canonical_heading"
+    rotated = value.health
+    assert rotated.heading_deg == pytest.approx(60) and rotated.yaw_deg == 30
+    assert rotated.translation_cm == before.translation_cm
+    assert rotated.xy_uncertainty_cm > before.xy_uncertainty_cm
+    assert rotated.heading_uncertainty_deg > before.heading_uncertainty_deg
+    assert not recovery.assess_burst(yaw, sample).accepted
+    assert value.health == rotated
+    assert recovery.next_action(value.health, environment(), ()).kind == "CONTINGENCY"
+
+
+def test_exploratory_yaw_already_propagated_by_executor_is_not_counted_twice():
+    from tests.cube.test_localization import command
+    recovery, value, clock, yaw, sample = yaw_recovery()
+    value.note_command(command("ROTATE", degrees=30, direction="cw"), clock.now)
+    recovery.assess_burst(yaw, sample)
+    assert value.health.heading_deg == pytest.approx(60) and value.health.yaw_deg == 30
+
+
+def test_restore_yaw_is_accounted_once_even_when_reanchor_commit_retries():
+    recovery, value, clock, yaw, sample = yaw_recovery()
+    recovery.assess_burst(yaw, sample)
+    restore = recovery.next_action(value.health, environment(), ())
+    assert restore.kind == "RESTORE_CANONICAL"
+    histories = []
+    def commit(outcome):
+        histories.append((value.health.heading_deg, value.health.yaw_deg))
+        if len(histories) == 1:
+            raise RuntimeError("retry commit")
+    recovery.commit_reanchor = commit
+    with pytest.raises(RuntimeError, match="retry commit"):
+        recovery.assess_burst(restore, reports(clock))
+    assert value.health.yaw_deg == 60
+    assert recovery.assess_burst(restore, reports(clock)).accepted
+    assert histories == [(90, 60), (90, 60)]
+    assert value.health.yaw_deg == 0
+
+
+@pytest.mark.parametrize("fault", ["hover_band", "ceiling", "touchdown"])
+def test_terminal_descent_contains_full_calibrated_vertical_uncertainty(fault):
+    from sentinel.room.site import admit_terminal_contingency
+    _, value, _ = controller()
+    records, context = terminal_context(value)
+    base = site()
+    if fault == "hover_band":
+        base = replace(base, terminal_contingencies=tuple(replace(item, z_band_cm=(99, 101))
+                                                       for item in base.terminal_contingencies))
+    else:
+        band = (-20, 105) if fault == "ceiling" else (-5, 220)
+        base = replace(base, free_space_volumes=(Volume3D("free", POLYGON, band),))
+    assert admit_terminal_contingency(base, records, contingency_id="NAVIGATION_UNAVAILABLE",
+        trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, **context,
+        now_monotonic_ms=11000, pose=value.health, energy_available=True) is None
+
+
+@pytest.mark.parametrize("field,bad", [("xy_uncertainty_cm", None), ("xy_uncertainty_cm", "1"),
+    ("xy_uncertainty_cm", -1), ("heading_uncertainty_deg", True),
+    ("max_height_error_cm", None), ("max_height_error_cm", -1), ("max_height_error_cm", float("nan"))])
+def test_terminal_missing_or_invalid_uncertainty_is_refused_without_exception(field, bad):
+    from sentinel.room.site import admit_terminal_contingency
+    _, value, _ = controller()
+    records, context = terminal_context(value)
+    pose = value.health
+    if field == "max_height_error_cm":
+        damaged = replace(value.profile)
+        object.__setattr__(damaged, field, bad)  # damaged persisted/provider object bypassed constructor
+        context["drift_profile"] = damaged
+    else:
+        pose = replace(pose, **{field: bad})
+    assert admit_terminal_contingency(site(), records, contingency_id="NAVIGATION_UNAVAILABLE",
+        trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, **context,
+        now_monotonic_ms=11000, pose=pose, energy_available=True) is None
+
+
+def test_terminal_descent_vertical_uncertainty_cannot_intersect_a_forbidden_volume():
+    from sentinel.room.site import admit_terminal_contingency
+    _, value, _ = controller()
+    records, context = terminal_context(value)
+    base = replace(site(), forbidden_volumes=(Volume3D("below-touchdown",
+        ((90, 90), (110, 90), (110, 110), (90, 110)), (-15, -5)),))
+    assert admit_terminal_contingency(base, records, contingency_id="NAVIGATION_UNAVAILABLE",
+        trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, **context,
+        now_monotonic_ms=11000, pose=value.health, energy_available=True) is None
+
+
+@pytest.mark.parametrize("refs", [("",), ("  ",), ("line\nbreak",), ("two words",),
+    ("evidence/../escape",), (None,), (123,)])
+def test_assurance_requires_each_evidence_reference_to_be_a_safe_nonblank_identifier(refs):
+    with pytest.raises(ValueError, match="evidence"):
+        assurance(evidence_refs=refs)
+
+
+def test_assurance_evidence_identifiers_are_normalized_at_construction():
+    assert assurance(evidence_refs=(" evidence:frame-1 ",)).evidence_refs == ("evidence:frame-1",)
+
+
+def test_adapter_revalidates_evidence_references_on_restored_assurance_objects():
+    damaged = assurance()
+    object.__setattr__(damaged, "evidence_refs", ("",))
+    with pytest.raises(ValueError, match="evidence"):
+        adapt((damaged,))
+
+
+@pytest.mark.parametrize("changes", [{"heading_deg": "60"}, {"xy_uncertainty_cm": None},
+    {"position": Position("100", 100, 100)}, {"position": None}, {"tag_ids": ([], 2)}])
+def test_malformed_report_fix_is_refused_without_losing_integrity_or_raising(changes):
+    recovery, value, clock = controller()
+    action = recovery.next_action(value.health, environment(), ())
+    sample = list(reports(clock))
+    sample[0] = replace(sample[0], fix=replace(sample[0].fix, **changes))
+    result = recovery.assess_burst(action, tuple(sample))
+    assert not result.accepted and not result.events
+    assert value.health.state != LocalizationState.LOST
+
+
+def test_malformed_report_identity_is_a_controlled_rejection():
+    recovery, value, clock = controller()
+    action = recovery.next_action(value.health, environment(), ())
+    sample = (replace(reports(clock)[0], report_id=["invalid"]),) + reports(clock)[1:]
+    assert not recovery.assess_burst(action, sample).accepted

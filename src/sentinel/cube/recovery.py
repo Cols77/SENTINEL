@@ -5,7 +5,7 @@ Yaw admission uses a complete swept disk, including propagated position error.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import math
 from typing import Callable
 import uuid
@@ -109,6 +109,7 @@ class RecoveryController:
         self._restore = False
         self._finished = False
         self._clock_failed = False
+        self._accounted_rotations: set[str] = set()
 
     def _clock(self) -> float:
         now = self.clock()
@@ -170,15 +171,17 @@ class RecoveryController:
         pose = current
         superseded = (self._pending is not None and (
             self._pending.pose_revision != current.pose_revision
-            or self._pending.measured_at != current.measured_at))
+            or self._pending.measured_at != current.measured_at
+            or now - self._pending_at >= self._pending.upper_bound_s
+            or not self._can_recover(current, environment, self._pending)))
         if superseded:
             self._pending = None
             self._pending_at = None
             self._pose = None
             self._restore = False
-            # Recheck a stationary attempt at the new measured pose. Retain the
-            # original deadline and attempt count so fresh fixes cannot extend
-            # the bounded recovery budget or revive the cancelled action.
+            # Recheck a stationary attempt after any invalidated admission.
+            # Retain the original deadline and attempt count: a changed pose,
+            # expired action or revoked clearance cannot extend recovery.
         if self._started_at is None:
             self._started_at = now
         profile = self.tracker.profile
@@ -233,6 +236,25 @@ class RecoveryController:
     def acquire(self, action: RecoveryAction) -> RecoveryOutcome:
         return self.assess_burst(action, self.burst_source(action))
 
+    def _account_verified_rotation(self, action: RecoveryAction, fixes: list[PoseFix],
+                                   position: Position, heading: float, now: float) -> None:
+        if action.kind == "STATIONARY_BURST" or action.action_id in self._accounted_rotations:
+            return
+        current = self.tracker.health
+        # The executor may already have propagated some or all of this rotation.
+        # Account only the remaining angular displacement; completed action IDs
+        # also make a failed reanchor persistence retry unable to add yaw twice.
+        delta = (action.heading_deg - current.heading_deg + 180) % 360 - 180
+        command = PlannedCommand.from_mapping("ROTATE",
+            {"degrees": abs(delta), "direction": "ccw" if delta > 0 else "cw"},
+            upper_bound_s=action.upper_bound_s, interruptible=False)
+        propagated = self.tracker.note_command(command, now)
+        self.tracker._health = self.tracker._advance(replace(propagated,
+            position=position, heading_deg=heading,
+            xy_uncertainty_cm=max(propagated.xy_uncertainty_cm, *(fix.xy_uncertainty_cm for fix in fixes)),
+            heading_uncertainty_deg=max(propagated.heading_uncertainty_deg, *(fix.heading_uncertainty_deg for fix in fixes))), now)
+        self._accounted_rotations.add(action.action_id)
+
     def assess_burst(self, action: RecoveryAction, reports: tuple[PoseReport, ...]) -> RecoveryOutcome:
         now = self._clock()
         environment = self._environment
@@ -260,6 +282,9 @@ class RecoveryController:
             return reject("superseded_pose")
         if pose.state == LocalizationState.LOST or current.state == LocalizationState.LOST:
             return reject("lost")
+        if (not isinstance(reports, (tuple, list)) or any(not isinstance(report, PoseReport)
+                or not isinstance(report.report_id, str) or not report.report_id.strip() for report in reports)):
+            return reject("malformed_report")
         if len({report.report_id for report in reports if report.report_id}) < profile.min_burst_reports:
             return reject("insufficient_distinct_reports")
         # Duplicate identities may not weight the aggregate or hide spread.
@@ -298,6 +323,7 @@ class RecoveryController:
         if any(not any(contains_disk(volume, fix.position, fix.xy_uncertainty_cm)
                        for volume in environment.rotation_clearance_volumes) for fix in fixes):
             return reject("uncontained_report")
+        self._account_verified_rotation(action, fixes, position, heading, now)
         if heading_distance(heading, self.tracker.canonical_heading_deg) > profile.canonical_heading_tolerance_deg:
             self._restore = True
             return reject("restore_canonical_heading")

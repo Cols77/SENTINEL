@@ -119,12 +119,26 @@ def heading_distance(a: float, b: float) -> float:
     return abs((a - b + 180) % 360 - 180)
 
 
+def finite_number(value: object) -> bool:
+    """Reject malformed sensor numerics without coercing strings or booleans."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
 def valid_fix(fix: PoseFix) -> bool:
+    if not isinstance(fix, PoseFix) or not isinstance(fix.position, Position):
+        return False
     values = (fix.position.x_cm, fix.position.y_cm, fix.position.z_cm,
               fix.heading_deg, fix.measured_at, fix.xy_uncertainty_cm, fix.heading_uncertainty_deg)
-    return (all(math.isfinite(value) for value in values)
+    return (all(finite_number(value) for value in values)
             and fix.xy_uncertainty_cm >= 0 and fix.heading_uncertainty_deg >= 0
-            and fix.measured_at >= 0 and bool(fix.source))
+            and fix.measured_at >= 0 and isinstance(fix.source, str) and bool(fix.source.strip())
+            and isinstance(fix.tag_ids, tuple)
+            and all(type(tag) is int and tag >= 0 for tag in fix.tag_ids))
 
 
 class LocalizationTracker:
