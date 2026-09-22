@@ -402,3 +402,15 @@ def test_gemini_confidence_word_bands_the_sighting_so_it_can_confirm(frame):
     assert batch.bands == ("high",)
     assert batch.detections[0]["score_kind"] == "VLM_CONFIDENCE_BAND"
 
+
+def test_gemini_is_told_a_computer_is_a_laptop_or_monitor_and_never_a_printer(frame):
+    """Operator decision 2026-09-22, after a real frame's printer came back as a computer."""
+    from sentinel.survey.providers.gemini import OpenRouterGeminiDetector
+    session = FakeSession(_openrouter_answer('{"objects": []}'))
+    OpenRouterGeminiDetector(api_key="k", model="google/gemini-2.5-flash",
+                             session=session).detect(str(frame), ("computer", "phone"))
+    prompt = next(p["text"] for p in session.calls[0]["json"]["messages"][0]["content"]
+                  if p["type"] == "text")
+    assert "computer (a laptop or a desktop computer monitor; not a printer" in prompt
+    assert "phone (" not in prompt   # no hint invented for a class without one
+
