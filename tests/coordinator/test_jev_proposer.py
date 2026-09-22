@@ -318,6 +318,28 @@ def test_rejected_attempt_preserves_gate_metrics(confidence, probabilities, outc
     assert attempt["margin"] == pytest.approx(probabilities[ROUTE] - probabilities[FULL])
 
 
+@pytest.mark.parametrize(("confidence", "expected_label", "expected_outcome"), [
+    (0.8, ROUTE, "accepted"),
+    (0.4, ESCALATE_LABEL, "low_confidence"),
+])
+def test_jev_attempt_audit_keeps_its_label_and_gate_reason_after_shared_validation(
+    confidence, expected_label, expected_outcome,
+):
+    sink = MemoryAuditSink()
+    answer = {
+        "value": ROUTE,
+        "confidence": confidence,
+        "probabilities": {ROUTE: 0.8, FULL: 0.1, ESCALATE_LABEL: 0.1},
+    }
+
+    JevProposer(Judge(answer), sink).decide(_request(), _context())
+
+    attempt = sink.records[0]
+    assert attempt["judge_label"] == ROUTE
+    assert attempt["policy_label"] == expected_label
+    assert attempt["gate_outcome"] == expected_outcome
+
+
 def test_gates_are_frozen_and_have_the_approved_defaults() -> None:
     gates = JevProposalGates()
     assert gates.act_at == 0.60

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-import math
 import time
 from typing import Any
 
@@ -13,6 +12,8 @@ from sentinel.decision_prompt import (
     SELECT_PLAN_INSTRUCTION,
     SELECT_PLAN_PLAN_CRITERION_PREFIX,
 )
+from sentinel.jev_choice import ChoiceAssessment, assess_choice
+from sentinel.judgment import ChoiceJudge
 
 from .legal_tools import ESCALATE_LABEL, Candidate, SELECT_PLAN
 from .policy import PolicyContext, one_call
@@ -173,7 +174,7 @@ class JevProposer:
 
     def __init__(
         self,
-        judge: Any,
+        judge: ChoiceJudge,
         sink: AuditSink,
         gates: JevProposalGates = JevProposalGates(),
     ) -> None:
@@ -226,26 +227,43 @@ class JevProposer:
                            gate_outcome="provider_error",
                            policy_label=ESCALATE_LABEL)
             return self._escalate(request)
-        try:
-            assessment = self._assess_answer(answer, tuple(candidates))
-        except Exception:  # noqa: BLE001 -- untrusted answer is fail-closed
-            assessment = {"gate_outcome": "invalid_answer"}
-        policy_label = (
-            assessment.get("raw_choice")
-            if assessment["gate_outcome"] == "accepted"
-            else ESCALATE_LABEL
+        assessment = assess_choice(
+            answer, tuple(candidates), escalation_label=ESCALATE_LABEL,
+            act_at=self.gates.act_at, min_margin=self.gates.min_margin,
         )
+        if (
+            assessment.outcome not in {"MALFORMED_ANSWER", "ILLEGAL_OR_MALFORMED"}
+            and {label for label, _ in assessment.probabilities} != set(candidates)
+        ):
+            assessment = ChoiceAssessment(
+                selected_label=assessment.selected_label,
+                final_label=ESCALATE_LABEL,
+                outcome="ILLEGAL_OR_MALFORMED",
+                confidence=assessment.confidence,
+                selected_probability=assessment.selected_probability,
+                confidence_source=assessment.confidence_source,
+                margin=assessment.margin,
+                probabilities=assessment.probabilities,
+            )
+        gate_outcome = self._audit_outcome(assessment)
+        policy_label = assessment.final_label
         _write_attempt(
             self.sink, context, advisor="jev", started=started,
-            policy_label=policy_label, **assessment,
+            gate_outcome=gate_outcome, policy_label=policy_label,
+            raw_choice=assessment.selected_label,
+            confidence=assessment.confidence,
+            probabilities=dict(assessment.probabilities),
+            margin=assessment.margin,
+            selected_probability=assessment.selected_probability,
+            confidence_source=self._audit_confidence_source(assessment),
         )
-        if assessment["gate_outcome"] != "accepted":
+        if assessment.outcome != "ACCEPTED":
             return self._escalate(request)
 
-        label = assessment["raw_choice"]
-        confidence = assessment["confidence"]
-        probabilities = assessment["probabilities"]
-        margin = assessment["margin"]
+        label = assessment.final_label
+        confidence = assessment.confidence
+        probabilities = dict(assessment.probabilities)
+        margin = assessment.margin
         candidate = candidates[label]
         if candidate.tool_name == "finish":
             return self._escalate(request)
@@ -274,72 +292,20 @@ class JevProposer:
         )
         return AgentModelResult.from_dict(result).to_dict()
 
-    def _assess_answer(
-        self, answer: Any, labels: tuple[str, ...]
-    ) -> dict[str, Any]:
-        assessment: dict[str, Any] = {"gate_outcome": "invalid_answer"}
-        if not isinstance(answer, Mapping):
-            return assessment
-        label = answer.get("value")
-        assessment["raw_choice"] = label
-        raw_confidence = answer.get("confidence")
-        confidence = self._probability(raw_confidence)
-        assessment["confidence"] = confidence
-        assessment["confidence_source"] = (
-            "provider_distribution_confidence" if confidence is not None else None
-        )
-        raw_probabilities = answer.get("probabilities")
-        probabilities: dict[str, float] = {}
-        if isinstance(raw_probabilities, Mapping):
-            for key, value in raw_probabilities.items():
-                probability = self._probability(value)
-                if isinstance(key, str) and probability is not None:
-                    probabilities[key] = probability
-            assessment["probabilities"] = probabilities
-        if isinstance(label, str):
-            assessment["selected_probability"] = probabilities.get(label)
-        if (
-            not isinstance(label, str)
-            or label not in labels
-            or not isinstance(raw_probabilities, Mapping)
-            or set(raw_probabilities) != set(labels)
-            or set(probabilities) != set(labels)
-        ):
-            return assessment
-
-        # Jev's optional confidence is commonly present as None. Only absent
-        # or None values fall back; explicitly malformed values stay invalid.
-        if raw_confidence is None:
-            confidence = probabilities[label]
-            assessment["confidence"] = confidence
-            assessment["confidence_source"] = "selected_probability_fallback"
-        if confidence is None:
-            return assessment
-        if max(probabilities, key=probabilities.get) != label:
-            return assessment
-
-        runners_up = [value for key, value in probabilities.items() if key != label]
-        margin = probabilities[label] - (max(runners_up) if runners_up else 0.0)
-        assessment["margin"] = margin
-        if confidence < self.gates.act_at:
-            assessment["gate_outcome"] = "low_confidence"
-        elif margin < self.gates.min_margin:
-            assessment["gate_outcome"] = "low_margin"
-        else:
-            assessment["gate_outcome"] = "accepted"
-        return assessment
+    @staticmethod
+    def _audit_outcome(assessment: ChoiceAssessment) -> str:
+        return {
+            "ACCEPTED": "accepted",
+            "LOW_CONFIDENCE": "low_confidence",
+            "THIN_MARGIN": "low_margin",
+        }.get(assessment.outcome, "invalid_answer")
 
     @staticmethod
-    def _probability(value: Any) -> float | None:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        try:
-            resolved = float(value)
-        except (OverflowError, ValueError):
-            return None
-        if not math.isfinite(resolved) or not 0.0 <= resolved <= 1.0:
-            return None
-        return resolved
+    def _audit_confidence_source(assessment: ChoiceAssessment) -> str | None:
+        return {
+            "SCALAR": "provider_distribution_confidence",
+            "SELECTED_PROBABILITY": "selected_probability_fallback",
+        }.get(assessment.confidence_source)
 
     @staticmethod
     def _escalate(request: dict[str, Any]) -> dict[str, Any]:
