@@ -60,12 +60,14 @@ def test_the_verdict_follows_the_tags_not_a_fixed_region():
     assert _model(moved).verdict(210, 250, 100).level == BLIND
 
 
-def test_the_flight3_site_has_no_blind_cell_in_its_commanded_band():
+def test_the_flight3_site_is_flyable_low_everywhere_and_high_on_its_far_half():
     site = json.loads((ROOT / "docs/wp5-flight3-site.json").read_text())
     model = CoverageModel(parse_site(site), CALIBRATION)
-    for z in (site["commanded"]["min_z_cm"], site["commanded"]["max_z_cm"]):
-        levels = {v.level for _, row in model.grid(z, step_cm=30) for _, v in row}
-        assert BLIND not in levels, z
+    low = {v.level for _, row in model.grid(site["commanded"]["min_z_cm"], step_cm=30) for _, v in row}
+    assert BLIND not in low
+    top = model.grid(site["commanded"]["max_z_cm"], step_cm=30)
+    assert all(v.level != BLIND for y, row in top if y <= 170 for _, v in row)
+    assert any(v.level == BLIND for y, row in top if y >= 230 for _, v in row)
 
 
 def test_cube_run_refuses_a_tag_map_that_disagrees_with_the_site_file():
