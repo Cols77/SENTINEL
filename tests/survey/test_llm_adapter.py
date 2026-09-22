@@ -107,11 +107,38 @@ def test_the_adapter_refuses_a_fourth_paid_call(monkeypatch):
     assert len(transport.calls) == 3
 
 
-def test_a_different_model_than_pinned_is_refused(monkeypatch):
+@pytest.mark.parametrize("resolved", ["other/model", "z-ai/glm-5.3-mini"])
+def test_a_different_model_than_pinned_is_refused(monkeypatch, resolved):
+    """Including a sibling that merely shares the pinned name as a prefix."""
     adapter, _ = _adapter(monkeypatch, _reply(
-        "survey_propose_sweep", {"option_id": "RAIL_MID_HEIGHT", "reason": "r"}, model="other/model"))
+        "survey_propose_sweep", {"option_id": "RAIL_MID_HEIGHT", "reason": "r"}, model=resolved))
     with pytest.raises(AdapterUnavailable, match="resolved"):
         adapter.propose(REQUEST, CONTEXT)
+
+
+def test_the_models_own_escalation_keeps_its_reason_and_is_not_called_illegal(monkeypatch):
+    adapter, _ = _adapter(monkeypatch, _reply(
+        "survey_escalate", {"reason": "the request does not say which desks to count"}))
+    sink = _Sink()
+    result = LlmProposer(adapter, sink).decide(REQUEST, CONTEXT)
+    assert chosen_label(result) == ESCALATE_LABEL
+    assert sink.records[-1]["outcome"] == "model_escalated"
+    assert sink.records[-1]["model_reason"] == "the request does not say which desks to count"
+    assert "which desks" in result["tool_calls"][0]["arguments"]["reason"]
+
+
+def test_a_report_call_at_the_review_point_is_accepted_end_to_end(monkeypatch):
+    adapter, transport = _adapter(monkeypatch, _reply("survey_submit_report", {}))
+    result = LlmProposer(adapter, _Sink()).decide(REQUEST, REVIEW_CONTEXT)
+    assert result["tool_calls"][0]["tool_name"] == "survey.submit_report"
+    declared = {t["function"]["name"] for t in transport.calls[0]["payload"]["tools"]}
+    assert "survey_submit_report" in declared
+
+
+def test_pre_parsed_arguments_are_malformed_not_a_crash():
+    raw = {"choices": [{"message": {"tool_calls": [
+        {"function": {"name": "survey_propose_sweep", "arguments": {"option_id": "X"}}}]}}]}
+    assert to_document(raw)["status"] == "MALFORMED"
 
 
 def test_to_document_shapes():

@@ -198,6 +198,15 @@ class LlmProposer:
                              "adapter_raw": self._raw()})
             return _call(context, label, "")
 
+        if tool_name == "survey.escalate":
+            # The escape hatch the adapter offers on purpose, not an illegal call:
+            # recorded as the model's own decision, with its reason kept.
+            reason = arguments.get("reason")
+            reason = reason.strip() if isinstance(reason, str) else ""
+            self.sink.write({"record": "survey_route", "mode": "E", "outcome": "model_escalated",
+                             "label": ESCALATE_LABEL, "run_id": context.run_id,
+                             "model_reason": reason, "adapter_raw": self._raw()})
+            return _escalate(context, f"the model asked for the operator: {reason or '(no reason given)'}")
         if tool_name != "survey.propose_sweep":
             return self._record(context, ESCALATE_LABEL, f"illegal_tool:{tool_name}")
 
