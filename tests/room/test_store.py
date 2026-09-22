@@ -1,8 +1,10 @@
 import sqlite3
 from dataclasses import dataclass
+import threading
 
 import pytest
 
+from sentinel.room import store as room_store_module
 from sentinel.room.models import CapabilityProfile
 from sentinel.room.store import (
     ForbiddenPayload,
@@ -86,6 +88,12 @@ def test_event_rows_are_immutable_and_keys_are_pinned_in_sql(tmp_path):
     {"frame": b"raw image bytes"},
     {"nested": [_PayloadEnvelope({"authorization_header": "Bearer secret"})]},
     {"nested": {"envelope": _PayloadEnvelope([b"raw image bytes"])}},
+    {"nested": {"drone_credentials": "secret"}},
+    {"nested": [{"api_key_value": "secret"}]},
+    {"nested": _PayloadEnvelope({"auth_token": "secret"})},
+    {"nested": {"secret-key": "secret"}},
+    {"headers": [{"name": "Authorization", "value": "Bearer secret"}]},
+    {"headers": [["API-Key", "secret"]]},
 ])
 def test_payload_boundary_rejects_secrets_and_raw_bytes_without_partial_append(tmp_path, payload):
     store = _store(tmp_path)
@@ -93,6 +101,9 @@ def test_payload_boundary_rejects_secrets_and_raw_bytes_without_partial_append(t
         _append(store, payload=payload)
     assert store.events("session-1") == ()
     assert store.session_version("session-1") == 0
+    assert "secret" not in "\n".join(
+        [row[0] for row in store.connection.execute("SELECT payload_json FROM room_events")],
+    )
 
 
 def test_payload_boundary_keeps_safe_descriptive_fields(tmp_path):
@@ -101,8 +112,84 @@ def test_payload_boundary_keeps_safe_descriptive_fields(tmp_path):
         "api_key_description": "key rotation is managed elsewhere",
         "authorization_digest": "a" * 64,
         "password_policy": "minimum length 16",
+        "token_count": 2,
+        "credential_reference": "vault://credential-1",
+        "api_key_value_digest": "b" * 64,
     })
     assert event.state_version == 1
+
+
+def test_concurrent_first_open_applies_each_migration_once(tmp_path):
+    path = tmp_path / "first-open.sqlite3"
+    barrier = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def open_store() -> None:
+        try:
+            barrier.wait()
+            store = RoomStore.open(path)
+            store.close()
+        except BaseException as exc:  # captured so assertions remain in this test thread
+            errors.append(exc)
+
+    workers = [threading.Thread(target=open_store) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=5)
+    assert not any(worker.is_alive() for worker in workers)
+    assert errors == []
+    connection = sqlite3.connect(path)
+    assert connection.execute("SELECT version FROM room_schema_version ORDER BY version").fetchall() == [
+        (1,), (2,),
+    ]
+
+
+def test_invalid_multi_statement_migration_rolls_back_all_ddl_and_version_rows(tmp_path, monkeypatch):
+    path = tmp_path / "migration.sqlite3"
+    RoomStore.open(path).close()
+    broken = tmp_path / "broken_migration.sql"
+    broken.write_text(
+        "CREATE TABLE should_not_survive (value TEXT);\nTHIS IS INVALID SQL;\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        room_store_module,
+        "_MIGRATIONS",
+        room_store_module._MIGRATIONS + ((3, broken),),
+    )
+    connection = sqlite3.connect(path)
+    with pytest.raises(sqlite3.OperationalError):
+        room_store_module._run_migrations(connection)
+    assert connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'should_not_survive'",
+    ).fetchone() is None
+    assert connection.execute("SELECT version FROM room_schema_version ORDER BY version").fetchall() == [
+        (1,), (2,),
+    ]
+
+
+def test_same_store_instance_supports_cross_thread_append_read_and_close(tmp_path):
+    store = _store(tmp_path)
+    result: list[object] = []
+
+    def append_then_read() -> None:
+        result.append(_append(store))
+        result.append(store.events("session-1"))
+
+    worker = threading.Thread(target=append_then_read)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert len(result) == 2
+    assert result[1] == (result[0],)
+
+    closer = threading.Thread(target=store.close)
+    closer.start()
+    closer.join(timeout=5)
+    assert not closer.is_alive()
+    with pytest.raises(RuntimeError, match="closed"):
+        store.events("session-1")
 
 
 def test_session_update_failure_after_insert_rolls_back_the_event_and_allows_next_append(tmp_path):

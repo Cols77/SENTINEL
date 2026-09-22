@@ -17,13 +17,14 @@ from .models import CapabilityProfile
 _SCHEMA = Path(__file__).with_name("sql") / "schema.sql"
 _MIGRATION_002 = Path(__file__).with_name("sql") / "migration_002_event_insert_guard.sql"
 _MIGRATIONS = ((1, _SCHEMA), (2, _MIGRATION_002))
-# Keys are case-folded and reduced to alphanumeric characters before this exact
-# comparison.  This catches spelling variants such as ``API-Key`` and
-# ``access_token`` without rejecting descriptive metadata (for example,
-# ``authorization_digest`` or ``password_policy``).
-_FORBIDDEN_PAYLOAD_KEYS = frozenset({
+# Keys are case-folded and reduced to alphanumeric characters before comparison.
+# Sensitive aliases are rejected as complete keys or compound stems; explicit
+# metadata suffixes stay admissible because they describe a secret rather than
+# carry it (for example, ``authorization_digest`` or ``password_policy``).
+_SENSITIVE_PAYLOAD_KEY_STEMS = frozenset({
     "accesstoken",
     "apikey",
+    "authtoken",
     "authorization",
     "authorizationheader",
     "bearertoken",
@@ -32,8 +33,15 @@ _FORBIDDEN_PAYLOAD_KEYS = frozenset({
     "credentials",
     "password",
     "refreshtoken",
+    "secretkey",
     "xapikey",
 })
+_SAFE_METADATA_SUFFIXES = frozenset({
+    "count", "description", "digest", "format", "hash", "id", "identifier",
+    "kind", "name", "policy", "reference", "refs", "sha256", "source", "status", "type",
+})
+_OPEN_RETRY_ATTEMPTS = 5
+_OPEN_RETRY_SECONDS = 0.05
 
 
 class RoomStoreError(RuntimeError):
@@ -69,30 +77,51 @@ class StoredEvent:
 
 
 class RoomStore:
+    """Thread-safe room persistence boundary.
+
+    A store serializes all access to its SQLite connection.  ``close`` waits
+    for any current operation, is terminal, and makes later store calls raise
+    ``RuntimeError``; callers must not use ``connection`` directly after sharing
+    the store with controller or supervisor threads.
+    """
+
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.connection = connection
         self._lock = threading.RLock()
+        self._closed = False
 
     @classmethod
     def open(cls, path: str | Path) -> "RoomStore":
         database_path = Path(path)
         database_path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(str(database_path), timeout=5.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout = 5000")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA foreign_keys = ON")
-        _run_migrations(connection)
-        return cls(connection)
+        for attempt in range(_OPEN_RETRY_ATTEMPTS):
+            connection = sqlite3.connect(str(database_path), timeout=5.0, check_same_thread=False)
+            try:
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA busy_timeout = 5000")
+                connection.execute("PRAGMA journal_mode = WAL")
+                connection.execute("PRAGMA foreign_keys = ON")
+                _run_migrations(connection)
+                return cls(connection)
+            except sqlite3.OperationalError as exc:
+                connection.close()
+                if "locked" not in str(exc).lower() or attempt + 1 == _OPEN_RETRY_ATTEMPTS:
+                    raise
+                time.sleep(_OPEN_RETRY_SECONDS * (attempt + 1))
+        raise RuntimeError("room store opening exhausted its retry budget")
 
     def close(self) -> None:
-        self.connection.close()
+        with self._lock:
+            if not self._closed:
+                self.connection.close()
+                self._closed = True
 
     def create_session(
         self, session_id: str, request_text: str, capabilities: CapabilityProfile,
     ) -> None:
         capability_json = _canonical_json(_json_value(capabilities))
         with self._lock, self.connection:
+            self._require_open()
             self.connection.execute(
                 "INSERT INTO room_sessions "
                 "(session_id, request_text, capability_json, status, state_version, created_at) "
@@ -101,12 +130,14 @@ class RoomStore:
             )
 
     def session_version(self, session_id: str) -> int:
-        row = self.connection.execute(
-            "SELECT state_version FROM room_sessions WHERE session_id = ?", (session_id,),
-        ).fetchone()
-        if row is None:
-            raise KeyError(f"unknown room session {session_id!r}")
-        return int(row["state_version"])
+        with self._lock:
+            self._require_open()
+            row = self.connection.execute(
+                "SELECT state_version FROM room_sessions WHERE session_id = ?", (session_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown room session {session_id!r}")
+            return int(row["state_version"])
 
     def append_event(
         self,
@@ -128,6 +159,7 @@ class RoomStore:
             causation_id=causation_id,
         )
         with self._lock:
+            self._require_open()
             try:
                 self.connection.execute("BEGIN IMMEDIATE")
                 existing = self.connection.execute(
@@ -187,36 +219,64 @@ class RoomStore:
                 raise
 
     def events(self, session_id: str, *, after_sequence: int = 0) -> tuple[StoredEvent, ...]:
-        rows = self.connection.execute(
-            "SELECT * FROM room_events WHERE session_id = ? AND sequence_no > ? "
-            "ORDER BY sequence_no",
-            (session_id, after_sequence),
-        ).fetchall()
-        return tuple(_stored_event(row) for row in rows)
+        with self._lock:
+            self._require_open()
+            rows = self.connection.execute(
+                "SELECT * FROM room_events WHERE session_id = ? AND sequence_no > ? "
+                "ORDER BY sequence_no",
+                (session_id, after_sequence),
+            ).fetchall()
+            return tuple(_stored_event(row) for row in rows)
 
     def snapshot_to(self, destination: Path) -> None:
         """Take a consistent SQLite backup; never copy a live database or WAL file."""
         destination = Path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
+            self._require_open()
             with sqlite3.connect(str(destination)) as snapshot:
                 self.connection.backup(snapshot)
 
+    def _require_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("room store is closed")
+
 
 def _run_migrations(connection: sqlite3.Connection) -> None:
-    connection.execute(
-        "CREATE TABLE IF NOT EXISTS room_schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
-    )
-    current = connection.execute("SELECT COALESCE(MAX(version), 0) FROM room_schema_version").fetchone()[0]
-    for version, migration in _MIGRATIONS:
-        if version <= current:
-            continue
-        with connection:
-            connection.executescript(migration.read_text(encoding="utf-8"))
+    try:
+        # SQLite's write lock serializes first-open callers.  Version rows are
+        # read only after obtaining it, so a waiting opener sees completed work.
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS room_schema_version "
+            "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
+        )
+        current = connection.execute(
+            "SELECT COALESCE(MAX(version), 0) FROM room_schema_version",
+        ).fetchone()[0]
+        for version, migration in _MIGRATIONS:
+            if version <= current:
+                continue
+            _execute_migration(connection, migration.read_text(encoding="utf-8"))
             connection.execute(
                 "INSERT INTO room_schema_version(version, applied_at) VALUES (?, ?)",
                 (version, _utc_now()),
             )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def _execute_migration(connection: sqlite3.Connection, script: str) -> None:
+    statement = ""
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            connection.execute(statement)
+            statement = ""
+    if statement.strip():
+        raise ValueError("migration ends with an incomplete SQL statement")
 
 
 def _canonical_payload(payload: Mapping[str, object]) -> str:
@@ -229,18 +289,43 @@ def _reject_forbidden_payload(value: object) -> None:
     if isinstance(value, (bytes, bytearray, memoryview)):
         raise ForbiddenPayload("event payloads cannot include raw bytes")
     if isinstance(value, Mapping):
+        if _is_named_header(value):
+            raise ForbiddenPayload("event payloads cannot include credential headers")
         for key, child in value.items():
-            normalized = _normalize_payload_key(key)
-            if normalized in _FORBIDDEN_PAYLOAD_KEYS:
+            if _is_forbidden_payload_key(key):
                 raise ForbiddenPayload(f"event payload key {key!r} is forbidden")
             _reject_forbidden_payload(child)
     elif isinstance(value, (tuple, list, set, frozenset)):
+        if _is_header_pair(value):
+            raise ForbiddenPayload("event payloads cannot include credential headers")
         for child in value:
             _reject_forbidden_payload(child)
 
 
 def _normalize_payload_key(key: object) -> str:
     return "".join(character for character in str(key).casefold() if character.isalnum())
+
+
+def _is_forbidden_payload_key(key: object) -> bool:
+    normalized = _normalize_payload_key(key)
+    if any(normalized.endswith(suffix) for suffix in _SAFE_METADATA_SUFFIXES):
+        return False
+    return any(
+        normalized == stem or normalized.startswith(stem) or normalized.endswith(stem)
+        for stem in _SENSITIVE_PAYLOAD_KEY_STEMS
+    )
+
+
+def _is_header_pair(value: tuple[object, ...] | list[object] | set[object] | frozenset[object]) -> bool:
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        return False
+    return isinstance(value[0], str) and _is_forbidden_payload_key(value[0])
+
+
+def _is_named_header(value: Mapping[object, object]) -> bool:
+    name = next((child for key, child in value.items() if _normalize_payload_key(key) == "name"), None)
+    has_value = any(_normalize_payload_key(key) == "value" for key in value)
+    return has_value and isinstance(name, str) and _is_forbidden_payload_key(name)
 
 
 def _event_sha256(
