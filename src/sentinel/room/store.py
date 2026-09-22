@@ -267,6 +267,36 @@ class RoomStore:
             ).fetchall()
             return tuple(_stored_event(row) for row in rows)
 
+    def append_contingency_assurance(self, assurance, *, expected_version: int) -> StoredEvent:
+        """Persist issuance or revocation through the existing immutable ledger.
+
+        One assurance ID has one immutable issuance and one irreversible
+        revocation. A later qualifying observation must use a new assurance ID.
+        """
+        from .site import ContingencyAssurance
+        if not isinstance(assurance, ContingencyAssurance):
+            raise TypeError("expected ContingencyAssurance")
+        return self.append_event(session_id=assurance.session_id, expected_version=expected_version,
+            event_type="CONTINGENCY_ASSURED" if assurance.state == "CURRENT" else "CONTINGENCY_REVOKED",
+            payload=asdict(assurance), correlation_id=assurance.assurance_id, causation_id=None,
+            idempotency_key=f"contingency:{assurance.assurance_id}:{assurance.state}")
+
+    def contingency_assurances(self, session_id: str, *, clock_domain_id: str) -> tuple:
+        """Return append-only evidence; reopening a store never renews a deadline."""
+        from .site import ContingencyAssurance
+        return tuple(ContingencyAssurance(**{**event.payload, "evidence_refs": tuple(event.payload["evidence_refs"])})
+                     for event in self.events(session_id)
+                     if event.event_type in {"CONTINGENCY_ASSURED", "CONTINGENCY_REVOKED"}
+                     and event.payload["clock_domain_id"] == clock_domain_id)
+
+    def append_reanchor(self, outcome, *, expected_version: int) -> tuple[StoredEvent, ...]:
+        """Commit reanchor plus every dependent invalidation as one replayable batch."""
+        required = ("POSE_REANCHORED", "ROUTES_INVALIDATED", "CANDIDATES_INVALIDATED", "TARGET_LOCKS_INVALIDATED")
+        if not outcome.accepted or tuple(event["event_type"] for event in outcome.events) != required:
+            raise ValueError("reanchor requires the complete accepted invalidation batch")
+        return self.append_events(session_id=outcome.session_id, expected_version=expected_version,
+                                  events=outcome.events)
+
     def snapshot_to(self, destination: Path) -> None:
         """Take a consistent SQLite backup; never copy a live database or WAL file."""
         destination = Path(destination)

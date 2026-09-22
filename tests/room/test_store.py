@@ -29,6 +29,88 @@ def _append(store, *, expected_version=0, key="key-1", payload=None):
     )
 
 
+def test_contingency_assurances_are_append_only_session_bound_and_idempotent(tmp_path):
+    from dataclasses import replace
+    from tests.cube.test_recovery import assurance
+    store = _store(tmp_path)
+    current = assurance(session_id="session-1")
+    first = store.append_contingency_assurance(current, expected_version=0)
+    assert store.append_contingency_assurance(current, expected_version=1) == first
+    with pytest.raises(IdempotencyConflict):
+        store.append_contingency_assurance(replace(current, expires_monotonic_ms=99999), expected_version=1)
+    revoked = replace(current, state="REVOKED")
+    store.append_contingency_assurance(revoked, expected_version=1)
+    assert store.contingency_assurances("session-1", clock_domain_id="clock") == (current, revoked)
+    assert store.contingency_assurances("session-1", clock_domain_id="other") == ()
+    store.close()
+    reopened = RoomStore.open(tmp_path / "room.sqlite3")
+    assert reopened.contingency_assurances("session-1", clock_domain_id="clock") == (current, revoked)
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        reopened.connection.execute("DELETE FROM room_events WHERE event_type = 'CONTINGENCY_ASSURED'")
+
+
+def test_reanchor_and_invalidation_persistence_is_one_atomic_idempotent_batch(tmp_path):
+    from tests.cube.test_recovery import controller, environment, reports
+    store = _store(tmp_path)
+    recovery, value, clock = controller()
+    env = environment()
+    from dataclasses import replace
+    env = replace(env, session_id="session-1")
+    action = recovery.next_action(value.health, env, ())
+    outcome = recovery.assess_burst(action, reports(clock))
+    events = store.append_reanchor(outcome, expected_version=0)
+    assert len(events) == 4
+    assert store.append_reanchor(outcome, expected_version=4) == events
+    assert [event.event_type for event in events] == [
+        "POSE_REANCHORED", "ROUTES_INVALIDATED", "CANDIDATES_INVALIDATED", "TARGET_LOCKS_INVALIDATED"]
+    assert events[0].payload["requires_route_validation"]
+    assert events[0].payload["requires_energy_validation"]
+    for event in events[1:]:
+        assert event.payload["pose_revision"] == events[0].payload["pose_revision"]
+    assert store.session_version("session-1") == 4
+
+
+def test_reanchor_failed_append_rolls_back_every_invalidation(tmp_path):
+    from dataclasses import replace
+    from tests.cube.test_recovery import controller, environment, reports
+    store = _store(tmp_path)
+    recovery, value, clock = controller()
+    action = recovery.next_action(value.health, replace(environment(), session_id="session-1"), ())
+    outcome = recovery.assess_burst(action, reports(clock))
+    store.connection.execute("CREATE TRIGGER fail_invalidation BEFORE INSERT ON room_events "
+        "WHEN NEW.event_type = 'CANDIDATES_INVALIDATED' "
+        "BEGIN SELECT RAISE(ABORT, 'forced failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="forced failure"):
+        store.append_reanchor(outcome, expected_version=0)
+    assert store.events("session-1") == ()
+    assert store.session_version("session-1") == 0
+
+
+def test_failed_reanchor_persistence_never_resets_tracker_before_atomic_commit(tmp_path):
+    from dataclasses import replace
+    from sentinel.cube.recovery import RecoveryController
+    from tests.cube.test_recovery import environment, reports
+    from tests.cube.test_localization import command, tracker
+    store = _store(tmp_path)
+    value, clock = tracker()
+    value.note_command(command(direction="right", distance_cm=20), 10)
+    before = value.health
+    recovery = RecoveryController(value, clock=clock, burst_source=lambda action: reports(clock),
+        energy_admits=lambda action: True, commit_reanchor=lambda result: store.append_reanchor(result, expected_version=0))
+    action = recovery.next_action(value.health, replace(environment(), session_id="session-1"), ())
+    store.connection.execute("CREATE TRIGGER fail_reanchor BEFORE INSERT ON room_events "
+        "WHEN NEW.event_type = 'CANDIDATES_INVALIDATED' "
+        "BEGIN SELECT RAISE(ABORT, 'forced failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="forced failure"):
+        recovery.assess_burst(action, reports(clock))
+    assert value.health == before
+    assert store.events("session-1") == ()
+    store.connection.execute("DROP TRIGGER fail_reanchor")
+    result = recovery.assess_burst(action, reports(clock))
+    assert result.accepted and value.health.translation_cm == 0
+    assert len(store.events("session-1")) == 4
+
+
 @dataclass(frozen=True)
 class _PayloadEnvelope:
     values: object

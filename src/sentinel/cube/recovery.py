@@ -1,0 +1,303 @@
+"""Finite stationary recovery. This module deliberately has no room dependency.
+
+Actions describe work for a supervised executor; they never issue aircraft I/O.
+Yaw admission uses a complete swept disk, including propagated position error.
+"""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, replace
+import math
+from typing import Callable
+import uuid
+
+from sentinel.models import Position
+from .checkpoint import PlannedCommand
+from .localization import (
+    LocalizationState, LocalizationTracker, PoseFix, PoseHealth, heading_distance, valid_fix,
+)
+
+
+@dataclass(frozen=True)
+class RecoveryVolume:
+    volume_id: str
+    polygon_xy_cm: tuple[tuple[float, float], ...]
+    z_interval_cm: tuple[float, float]
+
+
+@dataclass(frozen=True)
+class RecoveryEnvironment:
+    session_id: str
+    clock_domain_id: str
+    mapped_heading_tag_ids: tuple[tuple[int, tuple[int, ...]], ...]
+    rotation_clearance_volumes: tuple[RecoveryVolume, ...]
+    navigation_contingency_id: str
+    navigation_contingency_expires_monotonic_ms: int
+
+
+@dataclass(frozen=True)
+class PoseReport:
+    report_id: str
+    fix: PoseFix
+
+
+@dataclass(frozen=True)
+class RecoveryAction:
+    action_id: str
+    kind: str
+    heading_deg: float | None = None
+    contingency_id: str | None = None
+    reason: str = ""
+    upper_bound_s: float = 0.0
+
+
+@dataclass(frozen=True)
+class RecoveryOutcome:
+    accepted: bool
+    reason: str
+    session_id: str
+    clock_domain_id: str
+    events: tuple[dict, ...] = ()
+
+
+def contains_disk(volume: RecoveryVolume, position: Position, radius_cm: float) -> bool:
+    """Contain the entire horizontal disk, not merely a sampled set of headings."""
+    if (not math.isfinite(radius_cm) or radius_cm < 0
+            or not volume.z_interval_cm[0] <= position.z_cm <= volume.z_interval_cm[1]):
+        return False
+    polygon = volume.polygon_xy_cm
+    if len(polygon) < 3:
+        return False
+    x, y = position.x_cm, position.y_cm
+    inside = False
+    boundary = False
+    for (ax, ay), (bx, by) in zip(polygon, polygon[1:] + polygon[:1]):
+        dx, dy = bx - ax, by - ay
+        length_sq = dx * dx + dy * dy
+        if length_sq == 0:
+            return False
+        t = min(1.0, max(0.0, ((x - ax) * dx + (y - ay) * dy) / length_sq))
+        distance = math.hypot(x - ax - t * dx, y - ay - t * dy)
+        if distance + 1e-9 < radius_cm:
+            return False
+        boundary |= distance < 1e-9
+        if (ay > y) != (by > y) and x < ax + (y - ay) * dx / dy:
+            inside = not inside
+    return inside or boundary
+
+
+class RecoveryController:
+    def __init__(self, tracker: LocalizationTracker, *, clock: Callable[[], float],
+                 burst_source: Callable[[RecoveryAction], tuple[PoseReport, ...]],
+                 energy_admits: Callable[[RecoveryAction], bool],
+                 commit_reanchor: Callable[[RecoveryOutcome], object] | None = None):
+        self.tracker = tracker
+        self.clock = clock
+        self.burst_source = burst_source
+        self.energy_admits = energy_admits
+        self.commit_reanchor = commit_reanchor
+        self.max_attempts = tracker.profile.max_recovery_attempts if tracker.profile else 0
+        self._started_at: float | None = None
+        self._last_now: float | None = None
+        self._environment: RecoveryEnvironment | None = None
+        self._pending: RecoveryAction | None = None
+        self._pending_at: float | None = None
+        self._pose: PoseHealth | None = None
+        self._attempts = 0
+        self._tried: set[float] = set()
+        self._restore = False
+        self._finished = False
+        self._clock_failed = False
+
+    def _clock(self) -> float:
+        now = self.clock()
+        if not math.isfinite(now) or (self._last_now is not None and now < self._last_now):
+            self._clock_failed = True
+        self._last_now = now
+        return now
+
+    def _terminal(self, environment: RecoveryEnvironment, reason: str) -> RecoveryAction:
+        self._pending = None
+        self._finished = True
+        current = (not self._clock_failed and self._last_now is not None
+                   and self._last_now * 1000 < environment.navigation_contingency_expires_monotonic_ms)
+        return RecoveryAction(str(uuid.uuid4()), "CONTINGENCY" if current else "EMERGENCY",
+                              contingency_id=environment.navigation_contingency_id if current else None,
+                              reason=reason)
+
+    def _can_rotate(self, pose: PoseHealth, environment: RecoveryEnvironment,
+                    action: RecoveryAction) -> bool:
+        profile = self.tracker.profile
+        if profile is None:
+            return False
+        delta = (action.heading_deg - pose.heading_deg + 180) % 360 - 180
+        command = PlannedCommand.from_mapping("ROTATE", {"degrees": abs(delta), "direction": "ccw" if delta > 0 else "cw"},
+                                              upper_bound_s=action.upper_bound_s, interruptible=False)
+        projected = self.tracker._advance(pose, self._last_now + action.upper_bound_s)
+        projected = self.tracker._command(projected, command)
+        # Estimator failures are why recovery was requested; they cannot veto
+        # the attempt that resolves them. Physical drift limits still apply.
+        limits = set(self.tracker._limits(projected)) - {"estimator_failures"}
+        return bool(profile and pose.state != LocalizationState.LOST
+                    and not limits
+                    and any(volume.z_interval_cm[0] <= projected.position.z_cm - profile.max_height_error_cm
+                            and projected.position.z_cm + profile.max_height_error_cm <= volume.z_interval_cm[1]
+                            and contains_disk(volume, projected.position,
+                            profile.rotation_radius_cm + projected.xy_uncertainty_cm)
+                            for volume in environment.rotation_clearance_volumes)
+                    and self.energy_admits(action))
+
+    def next_action(self, pose: PoseHealth, environment: RecoveryEnvironment,
+                    attempted_headings: tuple[int, ...]) -> RecoveryAction:
+        now = self._clock()
+        if self._environment is not None and (
+            environment.session_id != self._environment.session_id
+            or environment.clock_domain_id != self._environment.clock_domain_id
+        ):
+            self._clock_failed = True
+            return self._terminal(environment, "session_or_clock_changed")
+        self._environment = environment
+        current = self.tracker.health
+        if (pose.state == LocalizationState.LOST or current.state == LocalizationState.LOST
+                or current.pose_revision != pose.pose_revision):
+            return self._terminal(environment, "lost_or_stale_pose")
+        # Age and accumulated uncertainty must come from the tracker at admission.
+        pose = current
+        self._pose = pose
+        if self._started_at is None:
+            self._started_at = now
+        profile = self.tracker.profile
+        if self._clock_failed or now * 1000 >= environment.navigation_contingency_expires_monotonic_ms:
+            return self._terminal(environment, "clearance_expired_or_clock_reset")
+        if pose.state == LocalizationState.LOST:
+            return self._terminal(environment, "lost")
+        if profile is None or (self.tracker.real_mode and not (profile.validated and profile.evidence_refs)):
+            return self._terminal(environment, "validated_drift_profile_required")
+        horizon = now + profile.recovery_action_upper_bound_s
+        if (self._finished or horizon - self._started_at >= profile.recovery_deadline_s
+                or horizon * 1000 >= environment.navigation_contingency_expires_monotonic_ms
+                or self._attempts >= self.max_attempts):
+            return self._terminal(environment, "recovery_exhausted")
+        if self._pending is not None:
+            return self._pending
+        if self._attempts == 0:
+            action = RecoveryAction(str(uuid.uuid4()), "STATIONARY_BURST", pose.heading_deg,
+                                    upper_bound_s=profile.recovery_action_upper_bound_s)
+            if not self.energy_admits(action):
+                return self._terminal(environment, "insufficient_energy")
+        elif self._restore:
+            action = RecoveryAction(str(uuid.uuid4()), "RESTORE_CANONICAL", self.tracker.canonical_heading_deg,
+                                    upper_bound_s=profile.recovery_action_upper_bound_s)
+            if not self._can_rotate(pose, environment, action):
+                return self._terminal(environment, "canonical_restoration_unavailable")
+        else:
+            tried = self._tried | set(attempted_headings)
+            ranked = sorted(environment.mapped_heading_tag_ids, key=lambda item: (-len(set(item[1])), item[0]))
+            action = None
+            for heading, tags in ranked:
+                if len(set(tags)) < 2 or heading in tried:
+                    continue
+                candidate = RecoveryAction(str(uuid.uuid4()), "YAW_BURST", heading,
+                                           upper_bound_s=profile.recovery_action_upper_bound_s)
+                if self._can_rotate(pose, environment, candidate):
+                    action = candidate
+                    break
+            if action is None:
+                return self._terminal(environment, "no_admissible_heading")
+        self._pending = action
+        self._pending_at = now
+        self._attempts += 1
+        if action.kind != "STATIONARY_BURST":
+            self._tried.add(action.heading_deg)
+        return action
+
+    def acquire(self, action: RecoveryAction) -> RecoveryOutcome:
+        return self.assess_burst(action, self.burst_source(action))
+
+    def assess_burst(self, action: RecoveryAction, reports: tuple[PoseReport, ...]) -> RecoveryOutcome:
+        now = self._clock()
+        environment = self._environment
+        session = environment.session_id if environment else ""
+        clock_domain = environment.clock_domain_id if environment else ""
+
+        def reject(reason):
+            return RecoveryOutcome(False, reason, session, clock_domain)
+
+        if action != self._pending or self._finished or environment is None:
+            return reject("unknown_or_consumed_action")
+        self._pending = None
+        profile = self.tracker.profile
+        pose = self._pose
+        if now - self._pending_at > action.upper_bound_s:
+            self._finished = True
+            return reject("action_deadline_exhausted")
+        if (self._clock_failed or profile is None or pose is None
+                or now - self._started_at >= profile.recovery_deadline_s
+                or now * 1000 >= environment.navigation_contingency_expires_monotonic_ms):
+            return reject("expired")
+        if pose.state == LocalizationState.LOST or self.tracker.health.state == LocalizationState.LOST:
+            return reject("lost")
+        if len({report.report_id for report in reports if report.report_id}) < profile.min_burst_reports:
+            return reject("insufficient_distinct_reports")
+        # Duplicate identities may not weight the aggregate or hide spread.
+        if len({report.report_id for report in reports}) != len(reports):
+            return reject("duplicate_reports")
+        mapped = set().union(*(set(tags) for heading, tags in environment.mapped_heading_tag_ids
+                                  if heading_distance(heading, action.heading_deg) <= profile.max_fix_heading_jump_deg))
+        for report in reports:
+            fix = report.fix
+            if (not valid_fix(fix) or not 0 <= now - fix.measured_at <= profile.max_fix_age_on_arrival_s
+                    or fix.measured_at < self._pending_at
+                    or fix.source != "mapped_joint_tags" or len(set(fix.tag_ids)) < 2
+                    or not set(fix.tag_ids) <= mapped
+                    or fix.xy_uncertainty_cm >= profile.max_xy_uncertainty_cm
+                    or fix.heading_uncertainty_deg >= profile.max_heading_uncertainty_deg):
+                return reject("untrusted_report")
+            if (math.dist((pose.position.x_cm, pose.position.y_cm),
+                          (fix.position.x_cm, fix.position.y_cm)) > profile.max_fix_jump_cm
+                    or heading_distance(fix.heading_deg, action.heading_deg) > profile.max_fix_heading_jump_deg
+                    or abs(fix.position.z_cm - pose.position.z_cm) > profile.max_height_error_cm
+                    or not any(contains_disk(volume, fix.position, fix.xy_uncertainty_cm)
+                               for volume in environment.rotation_clearance_volumes)):
+                return reject("implausible_or_uncontained_report")
+        fixes = [report.fix for report in reports]
+        if any(math.dist((a.position.x_cm, a.position.y_cm), (b.position.x_cm, b.position.y_cm)) > profile.max_burst_spread_cm
+               or abs(a.position.z_cm - b.position.z_cm) > profile.max_height_error_cm
+               or heading_distance(a.heading_deg, b.heading_deg) > profile.max_burst_heading_spread_deg
+               for a in fixes for b in fixes):
+            return reject("burst_spread")
+        count = len(fixes)
+        position = Position(*(sum(getattr(fix.position, axis) for fix in fixes) / count
+                              for axis in ("x_cm", "y_cm", "z_cm")))
+        heading = math.degrees(math.atan2(sum(math.sin(math.radians(fix.heading_deg)) for fix in fixes),
+                                         sum(math.cos(math.radians(fix.heading_deg)) for fix in fixes))) % 360
+        if heading_distance(heading, self.tracker.canonical_heading_deg) > profile.canonical_heading_tolerance_deg:
+            self._restore = True
+            return reject("restore_canonical_heading")
+        accepted_fix = PoseFix(position, heading, min(fix.measured_at for fix in fixes),
+                              max(fix.xy_uncertainty_cm for fix in fixes),
+                              max(fix.heading_uncertainty_deg for fix in fixes),
+                              tuple(sorted(set().union(*(set(fix.tag_ids) for fix in fixes)))))
+        health = self.tracker._anchored(accepted_fix, now, invalidate=True)
+        if health.state != LocalizationState.ANCHORED:
+            return reject("reanchor_exceeds_profile")
+        reanchor_id = action.action_id
+        events = tuple({"event_type": event_type,
+                        "payload": ({**asdict(health), "clock_domain_id": clock_domain}
+                                    if index == 0 else {"pose_revision": health.pose_revision}),
+                        "correlation_id": reanchor_id, "causation_id": None,
+                        "idempotency_key": f"reanchor:{reanchor_id}:{event_type}"}
+                       for index, event_type in enumerate(("POSE_REANCHORED", "ROUTES_INVALIDATED",
+                                                           "CANDIDATES_INVALIDATED", "TARGET_LOCKS_INVALIDATED")))
+        outcome = RecoveryOutcome(True, "reanchored", session, clock_domain, events)
+        # Room integration supplies an atomic ledger append here. A failed
+        # commit leaves the old pose/history intact and the same batch retryable.
+        if self.commit_reanchor is not None:
+            try:
+                self.commit_reanchor(outcome)
+            except Exception:
+                self._pending = action
+                raise
+        self.tracker._health = health
+        self.tracker._initialized = True
+        self._finished = True
+        return outcome

@@ -79,3 +79,19 @@ def test_cube_run_refuses_a_tag_map_that_disagrees_with_the_site_file():
                                               FLIGHT2["stands"][1]]})
     with pytest.raises(ValueError, match="tag 2 sits elsewhere"):
         check_tag_map_matches_site(TagMap(moved.tag_map_doc(CALIBRATION)), site)
+
+
+def test_commanded_heading_preserves_defaults_and_changes_visibility():
+    model = FLIGHT2_MODEL
+    assert model.verdict(250, 190, 100) == model.verdict(250, 190, 100, commanded_yaw_deg=90)
+    assert model.tags_in_view(250, 190, 100, commanded_yaw_deg=270) == 0
+    assert model.verdict(250, 190, 100, commanded_yaw_deg=270).level == BLIND
+
+
+def test_heading_and_xy_uncertainty_expand_the_evaluated_region():
+    model = FLIGHT2_MODEL
+    assert model.verdict(250, 190, 100).level == OK
+    assert model.verdict(250, 190, 100, heading_uncertainty_deg=180).level == BLIND
+    assert model.verdict(250, 190, 100, xy_uncertainty_cm=200).level == BLIND
+    with pytest.raises(ValueError):
+        model.verdict(250, 190, 100, heading_uncertainty_deg=-1)
