@@ -21,6 +21,8 @@ test('voice derives English regional recognition language and exact phrase norma
   assert.equal(deriveRecognitionLanguage('en-AU'), 'en-AU');
   assert.equal(deriveRecognitionLanguage('en-GB'), 'en-GB');
   assert.equal(deriveRecognitionLanguage('fr-FR'), 'en-US');
+  assert.equal(deriveRecognitionLanguage('en', 'en-AU'), 'en-AU');
+  assert.equal(deriveRecognitionLanguage('fr-FR', 'en-GB'), 'en-GB');
   assert.equal(isExactLandPhrase('  SENTINEL, land now! '), true);
   assert.equal(isExactLandPhrase('Sentinel land now please'), false);
   assert.equal(isExactLandPhrase('Sentinel land now 🚁'), false);

@@ -59,7 +59,7 @@ Final verification on 2026-09-23:
 
 | Check | Result |
 |---|---|
-| `uv run pytest -q --ignore=fixtures` | **1622 passed, 3 skipped, 5 warnings**, 687.21s |
+| `.venv\\Scripts\\python.exe -m pytest -q --ignore=fixtures` | **1625 passed, 3 skipped, 5 warnings**, 725.99s |
 | `node --test tests/survey_console/*.test.mjs` | **79 passed**, no failures/skips |
 | `uv run python scripts/ui_assets/check_assets.py` | **414 checks passed across 83 assets** |
 | `node scripts/ui_assets/verify_mission_control.cjs` | Passed clean, uncertain-follow-up, and missing-analysis real-host rehearsals |
@@ -86,6 +86,11 @@ unregistered `unit` marker; skipped tests are not counted as passed.
   and accepts the intentional absence of decision buttons in explicit terminal states.
 - The observer privacy regression now expects the public normalized stop status while continuing to
   prove that private image paths never enter the journal.
+- The live-detection cache now rejects unknown or incoherent follower statuses, sightings attached
+  to failure rows, and pixel boxes outside the normalized 960×720 frame as explicit analysis gaps,
+  while preserving intentional `CLASS_MAP_MISS` partial results.
+- A generic document language (for example `en`) now defers to a regional English browser locale
+  (for example `en-AU`) before falling back to `en-US`.
 
 ## Privacy and operational limits
 

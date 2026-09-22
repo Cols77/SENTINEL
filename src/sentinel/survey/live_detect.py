@@ -30,7 +30,7 @@ from typing import Callable, Iterable
 
 from .consent import ConsentMissing, consent_policy
 from .detector import DetectionBatch
-from .observability import NOMINAL_WIDTH_CM
+from .observability import IMAGE_HEIGHT, IMAGE_WIDTH, NOMINAL_WIDTH_CM
 from .store import SurveyStore
 
 #: The survey's classes, the same set the survey resolves (observability).
@@ -42,6 +42,7 @@ _DETECTION_FIELDS = frozenset({
 _DETECTION_CLASSES = frozenset({"computer", "person", "phone", "pen"})
 _SCORE_KINDS = frozenset({"DETECTOR_RAW", "VLM_CONFIDENCE_BAND", "NONE"})
 _BANDS = frozenset({"high", "medium", "low"})
+_RESULT_STATUSES = frozenset({"OK", "PROVIDER_ERROR", "CLASS_MAP_MISS", "DETECTOR_ERROR"})
 
 
 def _number(value) -> bool:
@@ -74,6 +75,11 @@ def _clean_detection(document: object) -> tuple[dict, str, object] | None:
         if not isinstance(bbox, dict) or set(bbox) != {"x", "y", "width", "height"}:
             return None
         if not all(_number(bbox[key]) for key in ("x", "y", "width", "height")):
+            return None
+        if bbox["x"] < 0 or bbox["y"] < 0 or bbox["width"] <= 0 or bbox["height"] <= 0:
+            return None
+        if bbox["x"] + bbox["width"] > IMAGE_WIDTH \
+                or bbox["y"] + bbox["height"] > IMAGE_HEIGHT:
             return None
     if tile is not None and not isinstance(tile, str):
         return None
@@ -171,6 +177,18 @@ class DetectionCache:
                 if not ids_match:
                     foreign = True
                     continue
+                status = row.get("status")
+                error_document = row.get("error")
+                if not isinstance(status, str) or status not in _RESULT_STATUSES:
+                    return self._gap("ANALYSIS_GAP_INVALID_RESULT",
+                                     "status is invalid", classes)
+                if error_document is not None and (
+                        not isinstance(error_document, str) or not error_document.strip()):
+                    return self._gap("ANALYSIS_GAP_INVALID_RESULT",
+                                     "error must be a non-empty string", classes)
+                if status == "OK" and error_document is not None:
+                    return self._gap("ANALYSIS_GAP_INVALID_RESULT",
+                                     "OK result cannot include an error", classes)
                 raw_document = row.get("raw")
                 if raw_document is not None and not isinstance(raw_document, dict):
                     return self._gap("ANALYSIS_GAP_INVALID_RESULT", "raw must be an object", classes)
@@ -196,6 +214,9 @@ class DetectionCache:
                 if not isinstance(documents, list):
                     return self._gap("ANALYSIS_GAP_INVALID_RESULT",
                                      "detections must be a JSON list", classes)
+                if status in {"PROVIDER_ERROR", "DETECTOR_ERROR"} and documents:
+                    return self._gap("ANALYSIS_GAP_INVALID_RESULT",
+                                     "failure result cannot include detections", classes)
                 cleaned = []
                 bands = []
                 for index, document in enumerate(documents):
@@ -211,7 +232,7 @@ class DetectionCache:
                 dropped = row.get("dropped", [])
                 if not isinstance(dropped, list) or not all(isinstance(label, str) for label in dropped):
                     return self._gap("ANALYSIS_GAP_INVALID_RESULT", "dropped must be string list", classes)
-                return DetectionBatch(tuple(cleaned), str(row.get("status") or "DETECTOR_ERROR"),
+                return DetectionBatch(tuple(cleaned), status,
                                       bands=tuple(bands), dropped=tuple(dropped),
                                       raw=raw)
         if foreign:

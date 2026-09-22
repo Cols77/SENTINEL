@@ -3,9 +3,15 @@ import { isLandLegal } from './safety.mjs';
 
 const speechCtor = globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition;
 
-export function deriveRecognitionLanguage(locale = globalThis.document?.documentElement?.lang || globalThis.navigator?.language) {
-  const match = String(locale || '').match(/^en[-_]([A-Za-z]{2,3}|\d{3})(?:-|$)/i);
-  return match ? `en-${match[1].toUpperCase()}` : 'en-US';
+export function deriveRecognitionLanguage(
+  locale = globalThis.document?.documentElement?.lang,
+  browserLocale = globalThis.navigator?.language,
+) {
+  for (const candidate of [locale, browserLocale]) {
+    const match = String(candidate || '').match(/^en[-_]([A-Za-z]{2,3}|\d{3})(?:-|$)/i);
+    if (match) return `en-${match[1].toUpperCase()}`;
+  }
+  return 'en-US';
 }
 
 export function normalizeVoicePhrase(value) {
@@ -38,7 +44,8 @@ export function createVoiceCommandController({
   onListeningChange = () => {},
   onLand = () => {},
   getSnapshot = () => null,
-  locale = globalThis.document?.documentElement?.lang || globalThis.navigator?.language,
+  locale = globalThis.document?.documentElement?.lang,
+  browserLocale = globalThis.navigator?.language,
   clock = { schedule: setTimeout, cancel: clearTimeout },
 } = {}) {
   let recognizer = null;
@@ -110,7 +117,7 @@ export function createVoiceCommandController({
     }
     try {
       const next = recognizerFactory();
-      next.lang = deriveRecognitionLanguage(locale);
+      next.lang = deriveRecognitionLanguage(locale, browserLocale);
       next.continuous = false;
       next.interimResults = true;
       next.maxAlternatives = 1;

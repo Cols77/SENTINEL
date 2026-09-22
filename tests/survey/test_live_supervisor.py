@@ -173,6 +173,52 @@ def test_cache_rejects_missing_or_extra_detection_fields_without_sightings(tmp_p
         assert cache.for_frame(frame).status == "ANALYSIS_GAP_INVALID_RESULT"
 
 
+def test_cache_rejects_unknown_or_incoherent_result_status(tmp_path):
+    frame = _frame(tmp_path / "f.png")
+    base = {"run_id": "r", "sweep_id": "s", "path": frame.image_path,
+            "sha256": frame.sha256, "detections": [], "dropped": [], "raw": {}}
+    for status, error in (("SUCCESS", None), ("OK", "provider failed")):
+        row = {**base, "status": status}
+        if error is not None:
+            row["error"] = error
+        cache = DetectionCache("r", [row], sweep_id="s", strict=True)
+        assert cache.for_frame(frame).status == "ANALYSIS_GAP_INVALID_RESULT"
+
+
+def test_cache_rejects_detections_attached_to_failure_status(tmp_path):
+    frame = _frame(tmp_path / "f.png")
+    base = {"run_id": "r", "sweep_id": "s", "path": frame.image_path,
+            "sha256": frame.sha256, "detections": [_detection()],
+            "dropped": [], "raw": {}}
+    for status in ("PROVIDER_ERROR", "DETECTOR_ERROR"):
+        row = {**base, "status": status}
+        if status == "DETECTOR_ERROR":
+            row["error"] = "provider failed"
+        cache = DetectionCache("r", [row], sweep_id="s", strict=True)
+        assert cache.for_frame(frame).status == "ANALYSIS_GAP_INVALID_RESULT"
+    partial = DetectionCache(
+        "r", [{**base, "status": "CLASS_MAP_MISS"}], sweep_id="s", strict=True)
+    batch = partial.for_frame(frame)
+    assert batch.status == "CLASS_MAP_MISS" and len(batch.detections) == 1
+
+
+def test_cache_rejects_invalid_pixel_bbox_geometry(tmp_path):
+    frame = _frame(tmp_path / "f.png")
+    base = {"run_id": "r", "sweep_id": "s", "path": frame.image_path,
+            "sha256": frame.sha256, "status": "OK", "dropped": [], "raw": {}}
+    for bbox in (
+        {"x": -1, "y": 0, "width": 3, "height": 4},
+        {"x": 0, "y": -1, "width": 3, "height": 4},
+        {"x": 0, "y": 0, "width": 0, "height": 4},
+        {"x": 0, "y": 0, "width": 3, "height": -1},
+        {"x": 959, "y": 0, "width": 2, "height": 4},
+        {"x": 0, "y": 719, "width": 3, "height": 2},
+    ):
+        row = {**base, "detections": [_detection(bbox=bbox)]}
+        cache = DetectionCache("r", [row], sweep_id="s", strict=True)
+        assert cache.for_frame(frame).status == "ANALYSIS_GAP_INVALID_RESULT"
+
+
 def test_cache_rejects_malformed_tile_provenance_and_latency(tmp_path):
     frame = _frame(tmp_path / "f.png")
     base = {"run_id": "r", "sweep_id": "s", "path": frame.image_path,
