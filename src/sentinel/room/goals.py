@@ -296,17 +296,25 @@ class _Compilation:
                 )
                 self.goals.append(producer)
                 target = producer.subject_ref
-            elif relation == "NEXT_TO_DRONE":
-                # Observe the same phone relative to this pose; a new nearest
-                # phone must never replace an explicitly resolved antecedent.
+            elif relation in ("NEXT_TO_DRONE", "HOLDS_PHONE"):
+                # An attached relation is a new evidence obligation even when
+                # its subject is already bound. Preserve the chosen identity.
+                dependencies = tuple(dict.fromkeys((target.source_objective_id, producer.objective_id)))
+                if target == producer.subject_ref:
+                    qualifier = qualifier or producer.qualifier
+                observed = self.observation(
+                    objective_id + ":observe", classes, qualifier, relation, scope, bind_new=True,
+                )
+                refined_subject = target
+                if relation == "HOLDS_PHONE":
+                    refined_subject = replace(observed.subject_ref, relative_to=target.ref_id)
                 producer = replace(
-                    self.observation(objective_id + ":observe", classes, qualifier, relation, scope, bind_new=True),
-                    subject_ref=target,
-                    depends_on_objective_ids=tuple(dict.fromkeys((target.source_objective_id, producer.objective_id))),
+                    observed, subject_ref=refined_subject, depends_on_objective_ids=dependencies,
                 )
                 self.goals.append(producer)
+                target = producer.subject_ref
             subject = self.drone
-            dependencies = tuple(dict.fromkeys((target.source_objective_id, producer.objective_id)))
+            dependencies = tuple(dict.fromkeys((*dependencies, target.source_objective_id, producer.objective_id)))
             # Anaphora carry the selected actor's qualifier; they cannot broaden
             # a verified designated-man result back to any generic person.
             if target == producer.subject_ref:

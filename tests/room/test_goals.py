@@ -615,3 +615,42 @@ def test_observation_it_next_to_you_keeps_phone_subject_and_drone_relation_objec
     assert relative.target_ref == EntityRef("drone:session-1:state:0:pose:7", None, "CURRENT_DRONE", None)
     assert relative.depends_on_objective_ids == (found.objective_id,)
     assert_audit(store, judge, ledger)
+
+
+def test_follow_attached_holding_relation_verifies_existing_actor_before_following(tmp_path):
+    request = "Find a man; follow him holding a phone"
+    script = objective("c1", "FIND_OBSERVE", "person", qualifier="MAN", terminal="OBSERVED")
+    script += objective("c2", "FOLLOW", "person", relation="HOLDS_PHONE",
+                        binding="REF:g1:c1:subject", terminal="FOLLOW_BOUNDED_RETURN")
+    compiler, judge, store = setup(tmp_path, request, script + FINISH)
+    ledger = compiler.compile("session-1", request, snapshot())
+    found, verified, follow = ledger.objectives
+    assert [goal.ordinal for goal in ledger.objectives] == [1, 2, 3]
+    assert verified.kind == GoalKind.FIND_OBSERVE
+    assert verified.terminal_condition == "RELATION_VERIFIED"
+    assert verified.relation == "HOLDS_PHONE"
+    assert verified.qualifier == "man"
+    assert verified.subject_ref == EntityRef(
+        "g1:c2:observe:subject", verified.objective_id, "VERIFIED_DESIGNATED_PERSON",
+        found.subject_ref.ref_id,
+    )
+    assert verified.target_ref == EntityRef(
+        "g1:c2:observe:phone", verified.objective_id, "RELATED_PHONE", None,
+    )
+    assert verified.subject_ref != verified.target_ref
+    assert verified.depends_on_objective_ids == (found.objective_id,)
+    assert follow.kind == GoalKind.FOLLOW
+    assert follow.qualifier == "man"
+    assert follow.target_ref == verified.subject_ref
+    assert follow.target_ref != found.subject_ref
+    assert follow.depends_on_objective_ids == (found.objective_id, verified.objective_id)
+    common = [(*FAMILIES, *SAFE), (*CLASSES, *SAFE), ("NONE", "MAN", "DESIGNATED", *SAFE),
+              ("NONE", "HOLDS_PHONE", "NEXT_TO_DRONE", *SAFE), ("ROOM", "CURRENT_VIEW", "REGION", *SAFE)]
+    assert [tuple(call[2]) for call in judge.calls] == [
+        ("NEXT_OBJECTIVE:c1", "NEXT_OBJECTIVE:c2", "DONE", *SAFE),
+        *common, ("NEW_ENTITY", *SAFE), ("OBSERVED", "VALIDATED", "RELATION_VERIFIED", "RETURN_HOME", *SAFE),
+        ("NEXT_OBJECTIVE:c2", "DONE", *SAFE),
+        *common, ("REF:g1:c1:subject", *SAFE), ("FOLLOW_BOUNDED_RETURN", *SAFE),
+        ("DONE", *SAFE), ("CONSISTENT", *SAFE),
+    ]
+    assert_audit(store, judge, ledger)
