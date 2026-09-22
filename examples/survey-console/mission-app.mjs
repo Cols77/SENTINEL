@@ -3,7 +3,7 @@ import {createHttpClient,startPolling} from './http-client.mjs';
 import {createController} from './controller.mjs';
 import {missionContract,toSurveyView} from './view-model.mjs';
 import {createDecisionController,renderApproval} from './approval.mjs';
-import {createEvidenceView,supportingSightings} from './evidence.mjs';
+import {createEvidenceView,supportingSightings,frameDetectionText} from './evidence.mjs';
 import {renderCounts} from './counts.mjs';
 import {createChatView} from './chat.mjs';
 import {createSafetyView} from './safety.mjs';
@@ -46,7 +46,7 @@ controller.subscribe(state=>{
  const view=toSurveyView(snapshot);
  chat.render(snapshot.chat.messages);decision.update(view,state.needs_refresh);drawDecision();
  renderCounts(counts,view,{onClass:id=>select('class',id),onObject:id=>select('object',id)});
- replace(framesHost,snapshot.evidence.frames.map(f=>button(`Frame ${f.stop_id} · ${f.analysis}`,()=>select('frame',f.id),{'data-frame-id':f.id})));
+ replace(framesHost,snapshot.evidence.frames.map(f=>{const b=button('',()=>select('frame',f.id),{'data-frame-id':f.id,'aria-label':`Frame ${f.stop_id} ${frameDetectionText(f)}`});b.append(el('strong',{},[`Frame ${f.stop_id}`]),meta(frameDetectionText(f)),meta(`${f.evidence}${f.gap_reason?` - gap ${f.gap_reason}`:''}`),meta(`Commanded ${f.commanded_pose?'bound':'--'} / Measured ${f.measured_pose?'bound':'--'}`));return b;}));
  replace(spine,state.events.map(e=>el('li',{},[e.summary])));
  replace(document.getElementById('audit-events'),state.events.map(e=>el('li',{},[`${e.sequence} · ${e.occurred_at} · ${e.summary}`])));
  if(state.log_gaps.length)spine.append(el('li',{class:'warning'},['Audit gap: '+state.log_gaps.join(', ')]));

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   fitBox,
   supportingSightings,
+  frameDetectionText,
 } from "../../examples/survey-console/evidence.mjs";
 import { makeScenario } from "../../examples/survey-console/fixtures.mjs";
 test("normalized boxes align within portrait and landscape letterboxing", () => {
@@ -24,6 +25,11 @@ test("normalized boxes align within portrait and landscape letterboxing", () => 
     [400, 400, 400, 400, [-1, 0, 1, 1]],
   ])
     assert.throws(() => fitBox(...values));
+});
+test('detection progression preserves latency, errors and explicit evidence gaps',()=>{
+ assert.equal(frameDetectionText({detection_status:'CAPTURED',detection_latency_ms:null,detection_error:null,gap_reason:null}),'CAPTURED');
+ assert.equal(frameDetectionText({detection_status:'ANALYSED',detection_latency_ms:42,detection_error:null,gap_reason:null}),'ANALYSED - 42 ms');
+ assert.equal(frameDetectionText({detection_status:'FAILED',detection_latency_ms:null,detection_error:'provider unavailable',gap_reason:'provider unavailable'}),'FAILED - provider unavailable');
 });
 test("class and object selection only traverse supplied supporting sightings", () => {
   const s = makeScenario("computers-followup").snapshots.at(-1);

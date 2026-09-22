@@ -1,4 +1,5 @@
 import {el,button,replace} from './dom.mjs';
+export function terminalChatResponse(status){return {COMPLETE:'COMPLETE - run is complete; no new dispatch is available.',ABORTED:'ABORTED - run was aborted; no new dispatch is available.',RECOVERY_REQUIRED:'RECOVERY_REQUIRED - reconcile the aircraft before dispatch.'}[status]||null;}
 export function createChatView(host,client,getSnapshot){
  const transcript=el('div',{class:'mission-transcript',role:'log','aria-label':'Mission conversation'});
  const input=el('textarea',{id:'mission-request','aria-label':'Mission request',rows:3,maxlength:4000,placeholder:'Ask to count the computers…'});
@@ -11,6 +12,7 @@ export function createChatView(host,client,getSnapshot){
  async function submit(text){
   if(pending||disposed||!text.trim())return;
   const s=getSnapshot();if(!s)return;
+  const terminal=terminalChatResponse(s.run.status);if(terminal){status.textContent=terminal;return;}
   if(!attempt||attempt.text!==text){const id=crypto.randomUUID();attempt={session_id:s.session.id,run_id:s.run.id,command_id:id,correlation_id:id,idempotency_key:id,expected_version:s.run.decision_version,text};}
   pending=true;send.disabled=true;status.textContent='Sending…';
   try{const result=await client.submit_chat(s.run.id,attempt);if(result.status==='ACKNOWLEDGED'){input.value='';attempt=null;}else if(result.status!=='IN_DOUBT'){attempt=null;}status.textContent=result.message;}

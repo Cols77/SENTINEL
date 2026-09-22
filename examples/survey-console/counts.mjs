@@ -57,7 +57,9 @@ export function renderCounts(host, survey, { onClass, onObject } = {}) {
   );
   const report = el("section", { id: "report-status" }, [
     el("h3", {}, ["Report"]),
-    meta(survey.report.status),
+    meta(`${survey.report.status}${survey.report.id?` - ${survey.report.id}`:""} - run ${survey.run_id}`),
+    ...(survey.proposer?[meta(`Provenance: ${survey.proposer.mode} / ${survey.proposer.source}`)]:[]),
+    ...(survey.escalation_reason?[meta(`Escalation: ${survey.escalation_reason}`)]:[]),
   ]);
   if (survey.report.status === "ACCEPTED")
     report.append(

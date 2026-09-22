@@ -1,4 +1,5 @@
 import { el, button, replace, meta } from "./dom.mjs";
+export function terminalDecisionText(status){return {COMPLETE:'COMPLETE - run is complete; no new dispatch is available.',ABORTED:'ABORTED - run was aborted; no new dispatch is available.',RECOVERY_REQUIRED:'RECOVERY_REQUIRED - reconcile the aircraft before dispatch.'}[status]||null;}
 export function canDecide(s, needsRefresh) {
   const p = s?.proposal,
     e = p?.eligibility;
@@ -162,6 +163,8 @@ export function renderApproval(
     el("div", { class: "section-label" }, ["OPERATOR DECISION"]),
     heading,
   ];
+  const terminal=terminalDecisionText(s?.status);
+  if(terminal){nodes.push(el('p',{class:'warning',role:'status'},[terminal]));replace(host,nodes);return;}
   if (p) {
     nodes.push(
       meta(`Proposal ${p.id} · ${p.option_id}`),
@@ -171,8 +174,9 @@ export function renderApproval(
         `${p.range_m} m range · ${p.altitude_m} m altitude · ${p.extent_m} m extent · ${p.duration_s} s`,
       ),
       meta(`Resolvable classes: ${p.resolvable_classes.join(", ")}`),
-      meta(`Proposer ${p.proposer.mode} · ${p.proposer.source}`),
+      meta(`Proposer ${p.proposer.mode} · ${p.proposer.source}${p.proposer.escalation_reason?` · escalation: ${p.proposer.escalation_reason}`:""}`),
       meta(`Code-derived justification: ${p.justification}`),
+      ...(p.escalation_reason?[meta(`Public escalation reason: ${p.escalation_reason}`)]:[]),
       meta(
         `Guardrail disagreements: ${p.guardrail_disagreements.join("; ") || "None reported"}`,
       ),
@@ -188,6 +192,8 @@ export function renderApproval(
               `${t.range_m} m range · ${t.altitude_m} m altitude · ${t.extent_m} m extent · ${t.duration_s} s`,
             ),
             meta(`Classes: ${t.resolvable_classes.join(", ")}`),
+            meta(`${t.coverage} · ${t.coverage_reason} · ${t.predicted_tag_count??"--"} predicted tags · fix ${t.predicted_fix_error_cm??"--"} cm`),
+            meta(`${t.trim_progress}/${t.trim_budget} trims · ${t.leg_speed_cm_s??"--"} cm/s · arrival ${t.arrival_error_cm??"--"} cm / tolerance ${t.tolerance_cm??"--"} cm (${t.tolerance_verdict})${t.return_leg?" · RETURN LEG":""}`),
           ]),
         ),
       ),

@@ -1,11 +1,11 @@
-# Mission Control projection v2
+# Mission Control projection v3
 
-`src/sentinel/ui/schema.py` owns the closed JSON schema, generated into `mission-schema.mjs`. Python and browser validate the same payload. `mission-contract.mjs` adds reference checks. Unknown nested fields are rejected; private paths, provider credentials, encoded images and internal prompts are excluded. The retained fixture v1 contract is documented below.
+`src/sentinel/ui/schema.py` owns the closed JSON schema, generated into `mission-schema.mjs`. Python and browser validate the same payload. `mission-contract.mjs` adds reference checks. Unknown nested fields are rejected; private paths, provider credentials, encoded images and internal prompts are excluded. Route facts, coverage, detection progression, provenance, and terminal responses are public allowlisted values.
 
 | HTTP route | Purpose |
 |---|---|
 | `GET /api/v1/session` | Immutable mode and session/run identity |
-| `GET /api/v1/runs/{run}/snapshot` | Full validated v2 projection |
+| `GET /api/v1/runs/{run}/snapshot` | Full validated v3 projection |
 | `GET /api/v1/runs/{run}/events?after_sequence=N&limit=200` | Ordered durable events |
 | `GET /api/v1/runs/{run}/evidence/{artifact}` | Run-bound verified PNG/JPEG bytes or explicit denial |
 | `POST /api/v1/runs/{run}/chat` | Durable scoped text command |

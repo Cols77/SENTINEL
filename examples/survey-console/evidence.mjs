@@ -1,4 +1,10 @@
 import { el, button, meta, replace } from "./dom.mjs";
+export function frameDetectionText(frame){
+ const state=frame?.detection_status||'CAPTURED';
+ if(state==='ANALYSED'&&frame.detection_latency_ms!==null&&frame.detection_latency_ms!==undefined)return `${state} - ${frame.detection_latency_ms} ms`;
+ if(state==='FAILED')return `${state} - ${frame.detection_error||frame.gap_reason||frame.failure||'analysis unavailable'}`;
+ return state;
+}
 export function supportingSightings(s, selection) {
   if (!selection) return [];
   if (selection.kind === "frame")
@@ -66,6 +72,8 @@ export function createEvidenceView(host, client) {
       meta(`${s.run_id} · ${selection.kind}: ${selection.id}`),
       meta(`${rows.length} supporting sightings · ${s.mode ?? "synthetic fixture"} evidence`),
     ]);
+    const frameFacts = [...new Set(ids)].map(id=>s.frames.find(frame=>frame.id===id)).filter(Boolean).map(frame=>meta(`${frame.id}: ${frameDetectionText(frame)} · ${frame.evidence}${frame.gap_reason?` · gap ${frame.gap_reason}`:""}`));
+    context.append(...frameFacts);
     const choices = el("div", { class: "evidence-choices" }),
       imageHost = el("div"),
       provenance = el("div");

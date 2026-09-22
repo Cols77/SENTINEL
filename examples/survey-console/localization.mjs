@@ -1,5 +1,6 @@
 import {el,button,meta,replace} from './dom.mjs';
 export function poseStyle(status,containment){return containment==='OUTSIDE'?'pose-outside':{FRESH:'pose-fresh',AGING:'pose-aging',STALE:'pose-stale',UNAVAILABLE:'pose-unavailable'}[status];}
+export function verticalConsistencyText(v){if(!v)return 'UNAVAILABLE - No vertical reference';if(v.error_m===null||v.error_m===undefined)return `${v.status} - ${v.reason||'No public reason'}`;return `${v.status} - ${v.error_m} m - ${v.reason||'No public reason'}`;}
 export function tagPolygon(corners,width,height){
  if(corners.length!==4||corners.some(p=>p.length!==2||p.some(v=>!Number.isFinite(v)||v<0||v>1)))throw Error('Invalid tag geometry');
  return corners.map(([x,y])=>`${x*width},${y*height}`).join(' ');
@@ -12,7 +13,7 @@ export function createLocalizationView(host,client){
  async function render(s){
   const p=s.localization;health.textContent=`${p.status} · ${p.age_ms===null?'no observation':`${Math.round(p.age_ms)} ms old`} · ${s.source.kind}`;
   health.className=`meta ${poseStyle(p.status,p.containment)}`;
-  const h=p.recent_stream;legend.textContent=`${h.reports_emitted} fixes / ${h.frames_seen} frames · ${h.no_tag_frames} no-tag · ${h.gated_frames} gated · ${h.timeouts} timeouts · ${p.containment}`;
+  const h=p.recent_stream;legend.textContent=`${h.reports_emitted} fixes / ${h.frames_seen} frames · ${h.no_tag_frames} no-tag · ${h.gated_frames} gated · ${h.timeouts} timeouts · ${p.containment} · vertical ${verticalConsistencyText(p.vertical_consistency)}`;
   const evidence=p.pose_evidence;
   if(!evidence){token++;if(url)URL.revokeObjectURL(url);url=null;artifact=null;replace(stage,[meta('No authorized localization image')]);return;}
   if(artifact===evidence.artifact_id)return;

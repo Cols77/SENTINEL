@@ -38,6 +38,8 @@ uv run sentinel mission-control --mode live --confirm \
 
 Supply actual measured configuration. `--pose off` also requires `--start-x-cm` and `--start-y-cm`; both coordinates must lie inside the selected envelope. Reanchor retains the existing `--sr063-amended` gate. The provider profile must conform to `provider-profile.v1`, be approved, and match the selected provider/model. Moondream uses `MOONDREAM_API_KEY` and `MOONDREAM_MODEL`. Consent must already be recorded for that exact location/date in the survey database; the host does not record it on the operator's behalf.
 
+The Mission Control browser projection is schema v3: route coverage and return-leg facts, commanded/measured freshness, capture detection progression, public proposer provenance, and explicit COMPLETE/ABORTED/RECOVERY_REQUIRED terminal states are rendered from validated backend facts.
+
 Startup checks the selected independent UDP interface and existing no-takeoff preflight. Actual flight still needs an explicit proposal approval. The Live adapter uses `CubeFlight`, the measured Tello camera model, real provider perception, and the existing F rules proposer. The bounded chat currently supports computer-count requests and status; it clarifies unsupported intent. Pose evidence comes from the runner's real localization bursts, so it can honestly age between bursts. Restarted Live sessions require recovery and cannot dispatch again automatically. Start a new session only after the operator has reconciled the aircraft and previous run.
 
 All hardware operation, measured calibration and actual landing/emergency outcomes remain subject to physical verification. Automated acceptance uses injected clients only.

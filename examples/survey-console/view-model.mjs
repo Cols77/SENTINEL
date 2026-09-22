@@ -10,8 +10,9 @@ export const missionContract={
 };
 export function toSurveyView(s){
  return {run_id:s.run.id,version:s.run.decision_version,event_sequence:s.events.watermark,updated_at:s.run.updated_at,
- source:s.source.kind==='LIVE'?'LIVE':'REPLAY',freshness:s.source.freshness,status:s.run.status==='ACTIVE'?'ACTIVE':s.run.status==='COMPLETE'?'COMPLETE':'ABORTED',step:s.run.phase,request_text:s.run.request_text,
- proposal:s.proposal,report:s.report,flights:s.mission.flights,sweep:s.mission.sweep,
+ source:s.source.kind==='LIVE'?'LIVE':'REPLAY',freshness:s.source.freshness,status:s.run.status,step:s.run.phase,request_text:s.run.request_text,
+ proposal:s.proposal,proposer:s.proposal?.proposer??null,escalation_reason:s.proposal?.escalation_reason??null,report:s.report,flights:s.mission.flights,sweep:s.mission.sweep,
  frames:s.evidence.frames,sightings:s.evidence.sightings,objects:s.evidence.objects,counts:s.results.counts,
- analysis:s.evidence.analysis,provider:s.evidence.provider,failures:s.evidence.failures,mode:s.session.mode};
+ analysis:s.evidence.analysis,provider:s.evidence.provider,failures:s.evidence.failures,mode:s.session.mode,
+ localization:s.localization,route:s.mission.route,return_to_start:s.mission.return_to_start,return_error_cm:s.mission.return_error_cm};
 }

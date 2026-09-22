@@ -4,7 +4,13 @@ import { makeScenario } from "../../examples/survey-console/fixtures.mjs";
 import {
   createDecisionController,
   canDecide,
+  terminalDecisionText,
 } from "../../examples/survey-console/approval.mjs";
+test('terminal decision text is explicit and cannot imply a conflict',()=>{
+ assert.equal(terminalDecisionText('COMPLETE'),'COMPLETE - run is complete; no new dispatch is available.');
+ assert.equal(terminalDecisionText('ABORTED'),'ABORTED - run was aborted; no new dispatch is available.');
+ assert.equal(terminalDecisionText('RECOVERY_REQUIRED'),'RECOVERY_REQUIRED - reconcile the aircraft before dispatch.');
+});
 const snapshot = () => makeScenario("computers-followup").snapshots.at(-1);
 const result = (a, status = "ACKNOWLEDGED") => ({
   attempt_id: a.attempt_id,
