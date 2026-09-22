@@ -144,6 +144,11 @@ class LocalizationTracker:
         self._health = self._advance(self._health, self.clock())
         return self._health
 
+    def mark_lost(self) -> PoseHealth:
+        """Latch a verified integrity contradiction until a new tracker is bootstrapped."""
+        self._health = replace(self.health, state=LocalizationState.LOST)
+        return self._health
+
     def _advance(self, health: PoseHealth, now: float) -> PoseHealth:
         if not math.isfinite(now) or now < health.propagated_at:
             return replace(health, state=LocalizationState.LOST)

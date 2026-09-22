@@ -15,7 +15,7 @@ from typing import Callable, Literal
 import uuid
 
 from sentinel.cube.checkpoint import HomeDefinition
-from sentinel.cube.localization import LocalizationState, PoseHealth
+from sentinel.cube.localization import DriftProfile, LocalizationState, PoseHealth
 from sentinel.cube.recovery import RecoveryEnvironment, RecoveryVolume, contains_disk
 from sentinel.models import Position
 
@@ -269,6 +269,42 @@ def adapt_recovery_environment(site: RoomSite, assurances: tuple[ContingencyAssu
                                navigation_contingency_id, deadline)
 
 
+class SessionClockGuard:
+    """One session's monotonic history, shared by every clearance consumer.
+
+    The owner creates one guard at session setup. A new guard always mints a new
+    clock domain, so restarting cannot import assurances from an old process.
+    A regression permanently poisons the existing guard, even after expiry.
+    """
+    def __init__(self, *, session_id: str):
+        if not session_id:
+            raise ValueError("clock guard requires a session identity")
+        self._session_id = session_id
+        self._clock_domain_id = str(uuid.uuid4())
+        self._last_now_ms: float | None = None
+        self._failed = False
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @property
+    def clock_domain_id(self) -> str:
+        return self._clock_domain_id
+
+    def observe(self, now_monotonic_ms: float, *, session_id: str, clock_domain_id: str) -> bool:
+        if (session_id, clock_domain_id) != (self.session_id, self.clock_domain_id):
+            return False
+        if (isinstance(now_monotonic_ms, bool) or not isinstance(now_monotonic_ms, (int, float))
+                or not math.isfinite(now_monotonic_ms) or now_monotonic_ms < 0
+                or (self._last_now_ms is not None and now_monotonic_ms < self._last_now_ms)):
+            self._failed = True
+        if self._failed:
+            return False
+        self._last_now_ms = now_monotonic_ms
+        return True
+
+
 class RecoveryEnvironmentAdapter:
     """Session-owned adapter; creating/restarting it always creates a new domain.
 
@@ -276,20 +312,21 @@ class RecoveryEnvironmentAdapter:
     adapter above is also useful for validating recorded observations in replay.
     A detected clock reset permanently invalidates this instance.
     """
-    def __init__(self, *, session_id: str, clock: Callable[[], float]):
-        self.session_id = session_id
-        self.clock_domain_id = str(uuid.uuid4())
+    def __init__(self, *, session_id: str, clock: Callable[[], float],
+                 clock_guard: SessionClockGuard | None = None):
+        self.clock_guard = clock_guard if clock_guard is not None else SessionClockGuard(session_id=session_id)
+        if self.clock_guard.session_id != session_id:
+            raise ValueError("clock guard belongs to another session")
+        self.session_id = self.clock_guard.session_id
+        self.clock_domain_id = self.clock_guard.clock_domain_id
         self.clock = clock
-        self._last_now = clock()
-        self._clock_failed = False
+        if not self.clock_guard.observe(clock() * 1000, session_id=self.session_id, clock_domain_id=self.clock_domain_id):
+            raise ValueError("clock guard is invalid")
 
     def adapt(self, site: RoomSite, assurances: tuple[ContingencyAssurance, ...], *,
               navigation_contingency_id: str, mapped_heading_tag_ids) -> RecoveryEnvironment:
         now = self.clock()
-        if not math.isfinite(now) or now < self._last_now:
-            self._clock_failed = True
-        self._last_now = now
-        if self._clock_failed:
+        if not self.clock_guard.observe(now * 1000, session_id=self.session_id, clock_domain_id=self.clock_domain_id):
             raise ValueError("clock reset invalidated this session clock domain")
         return adapt_recovery_environment(site, assurances, session_id=self.session_id,
             clock_domain_id=self.clock_domain_id, navigation_contingency_id=navigation_contingency_id,
@@ -298,12 +335,19 @@ class RecoveryEnvironmentAdapter:
 
 def admit_terminal_contingency(site: RoomSite, assurances: tuple[ContingencyAssurance, ...], *,
         contingency_id: str, trigger: ContingencyTrigger, session_id: str, clock_domain_id: str,
-        now_monotonic_ms: int, pose: PoseHealth, energy_available: bool) -> TerminalContingency | None:
+        now_monotonic_ms: int, pose: PoseHealth, energy_available: bool,
+        drift_profile: DriftProfile | None = None,
+        clock_guard: SessionClockGuard | None = None) -> TerminalContingency | None:
     """Resolve a usable policy, or leave escalation to the validated emergency path.
 
     Energy admission is supplied by the room reserve guard. Neither missing
-    navigation nor an ID returned by recovery itself authorizes a landing.
+    navigation nor an ID returned by recovery itself authorizes a landing. The
+    validated drift profile supplies the complete aircraft clearance radius;
+    the session-owned clock guard is mandatory even on expired observations.
     """
+    if clock_guard is None or not clock_guard.observe(now_monotonic_ms,
+            session_id=session_id, clock_domain_id=clock_domain_id):
+        return None
     site.validate(real_mode=True)
     entries = [item for item in site.terminal_contingencies if item.contingency_id == contingency_id and item.trigger == trigger]
     if len(entries) != 1 or not energy_available:
@@ -321,12 +365,15 @@ def admit_terminal_contingency(site: RoomSite, assurances: tuple[ContingencyAssu
         return None
     if entry.kind == ContingencyKind.EMERGENCY:
         return entry
+    if drift_profile is None or not (drift_profile.validated and drift_profile.evidence_refs):
+        return None
     allowed = ({LocalizationState.ANCHORED} if entry.required_pose_state == "ANCHORED"
                else {LocalizationState.ANCHORED, LocalizationState.COASTING})
     if pose.state not in allowed:
         return None
+    radius_cm = drift_profile.rotation_radius_cm + pose.xy_uncertainty_cm
     landing = RecoveryVolume(entry.contingency_id, entry.landing_polygon_xy_cm, entry.z_band_cm)
-    if not contains_disk(landing, pose.position, pose.xy_uncertainty_cm):
+    if not contains_disk(landing, pose.position, radius_cm):
         return None
     if any(_overlaps(landing, forbidden) for forbidden in site.forbidden_volumes):
         return None
@@ -334,7 +381,7 @@ def admit_terminal_contingency(site: RoomSite, assurances: tuple[ContingencyAssu
     # One convex free-space prism must contain both ends of the descent. This
     # proves the vertical swept segment instead of checking only the hover.
     if not any(all(contains_disk(RecoveryVolume(volume.volume_id, volume.polygon_xy_cm, volume.z_interval_cm),
-                                 point, pose.xy_uncertainty_cm) for point in (pose.position, touchdown))
+                                 point, radius_cm) for point in (pose.position, touchdown))
                for volume in site.free_space_volumes):
         return None
     return entry

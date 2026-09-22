@@ -5,7 +5,7 @@ Yaw admission uses a complete swept disk, including propagated position error.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 import math
 from typing import Callable
 import uuid
@@ -48,6 +48,8 @@ class RecoveryAction:
     contingency_id: str | None = None
     reason: str = ""
     upper_bound_s: float = 0.0
+    pose_revision: int | None = None
+    measured_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -124,14 +126,18 @@ class RecoveryController:
                               contingency_id=environment.navigation_contingency_id if current else None,
                               reason=reason)
 
-    def _can_rotate(self, pose: PoseHealth, environment: RecoveryEnvironment,
-                    action: RecoveryAction) -> bool:
+    def _can_recover(self, pose: PoseHealth, environment: RecoveryEnvironment,
+                     action: RecoveryAction) -> bool:
         profile = self.tracker.profile
         if profile is None:
             return False
-        delta = (action.heading_deg - pose.heading_deg + 180) % 360 - 180
-        command = PlannedCommand.from_mapping("ROTATE", {"degrees": abs(delta), "direction": "ccw" if delta > 0 else "cw"},
-                                              upper_bound_s=action.upper_bound_s, interruptible=False)
+        if action.kind == "STATIONARY_BURST":
+            command = PlannedCommand.from_mapping("SETTLE", {}, upper_bound_s=action.upper_bound_s,
+                                                  interruptible=True)
+        else:
+            delta = (action.heading_deg - pose.heading_deg + 180) % 360 - 180
+            command = PlannedCommand.from_mapping("ROTATE", {"degrees": abs(delta), "direction": "ccw" if delta > 0 else "cw"},
+                                                  upper_bound_s=action.upper_bound_s, interruptible=False)
         projected = self.tracker._advance(pose, self._last_now + action.upper_bound_s)
         projected = self.tracker._command(projected, command)
         # Estimator failures are why recovery was requested; they cannot veto
@@ -144,7 +150,7 @@ class RecoveryController:
                             and contains_disk(volume, projected.position,
                             profile.rotation_radius_cm + projected.xy_uncertainty_cm)
                             for volume in environment.rotation_clearance_volumes)
-                    and self.energy_admits(action))
+                    and self.energy_admits(action) is True)
 
     def next_action(self, pose: PoseHealth, environment: RecoveryEnvironment,
                     attempted_headings: tuple[int, ...]) -> RecoveryAction:
@@ -162,7 +168,6 @@ class RecoveryController:
             return self._terminal(environment, "lost_or_stale_pose")
         # Age and accumulated uncertainty must come from the tracker at admission.
         pose = current
-        self._pose = pose
         if self._started_at is None:
             self._started_at = now
         profile = self.tracker.profile
@@ -179,15 +184,19 @@ class RecoveryController:
             return self._terminal(environment, "recovery_exhausted")
         if self._pending is not None:
             return self._pending
+
+        def make_action(kind, heading):
+            return RecoveryAction(str(uuid.uuid4()), kind, heading,
+                                  upper_bound_s=profile.recovery_action_upper_bound_s,
+                                  pose_revision=pose.pose_revision, measured_at=pose.measured_at)
+
         if self._attempts == 0:
-            action = RecoveryAction(str(uuid.uuid4()), "STATIONARY_BURST", pose.heading_deg,
-                                    upper_bound_s=profile.recovery_action_upper_bound_s)
-            if not self.energy_admits(action):
-                return self._terminal(environment, "insufficient_energy")
+            action = make_action("STATIONARY_BURST", pose.heading_deg)
+            if not self._can_recover(pose, environment, action):
+                return self._terminal(environment, "stationary_recovery_unavailable")
         elif self._restore:
-            action = RecoveryAction(str(uuid.uuid4()), "RESTORE_CANONICAL", self.tracker.canonical_heading_deg,
-                                    upper_bound_s=profile.recovery_action_upper_bound_s)
-            if not self._can_rotate(pose, environment, action):
+            action = make_action("RESTORE_CANONICAL", self.tracker.canonical_heading_deg)
+            if not self._can_recover(pose, environment, action):
                 return self._terminal(environment, "canonical_restoration_unavailable")
         else:
             tried = self._tried | set(attempted_headings)
@@ -196,14 +205,14 @@ class RecoveryController:
             for heading, tags in ranked:
                 if len(set(tags)) < 2 or heading in tried:
                     continue
-                candidate = RecoveryAction(str(uuid.uuid4()), "YAW_BURST", heading,
-                                           upper_bound_s=profile.recovery_action_upper_bound_s)
-                if self._can_rotate(pose, environment, candidate):
+                candidate = make_action("YAW_BURST", heading)
+                if self._can_recover(pose, environment, candidate):
                     action = candidate
                     break
             if action is None:
                 return self._terminal(environment, "no_admissible_heading")
         self._pending = action
+        self._pose = pose
         self._pending_at = now
         self._attempts += 1
         if action.kind != "STATIONARY_BURST":
@@ -234,7 +243,11 @@ class RecoveryController:
                 or now - self._started_at >= profile.recovery_deadline_s
                 or now * 1000 >= environment.navigation_contingency_expires_monotonic_ms):
             return reject("expired")
-        if pose.state == LocalizationState.LOST or self.tracker.health.state == LocalizationState.LOST:
+        current = self.tracker.health
+        if (action.pose_revision != current.pose_revision or action.measured_at != current.measured_at):
+            self._finished = True
+            return reject("superseded_pose")
+        if pose.state == LocalizationState.LOST or current.state == LocalizationState.LOST:
             return reject("lost")
         if len({report.report_id for report in reports if report.report_id}) < profile.min_burst_reports:
             return reject("insufficient_distinct_reports")
@@ -246,19 +259,12 @@ class RecoveryController:
         for report in reports:
             fix = report.fix
             if (not valid_fix(fix) or not 0 <= now - fix.measured_at <= profile.max_fix_age_on_arrival_s
-                    or fix.measured_at < self._pending_at
+                    or fix.measured_at < max(self._pending_at, action.measured_at)
                     or fix.source != "mapped_joint_tags" or len(set(fix.tag_ids)) < 2
                     or not set(fix.tag_ids) <= mapped
                     or fix.xy_uncertainty_cm >= profile.max_xy_uncertainty_cm
                     or fix.heading_uncertainty_deg >= profile.max_heading_uncertainty_deg):
                 return reject("untrusted_report")
-            if (math.dist((pose.position.x_cm, pose.position.y_cm),
-                          (fix.position.x_cm, fix.position.y_cm)) > profile.max_fix_jump_cm
-                    or heading_distance(fix.heading_deg, action.heading_deg) > profile.max_fix_heading_jump_deg
-                    or abs(fix.position.z_cm - pose.position.z_cm) > profile.max_height_error_cm
-                    or not any(contains_disk(volume, fix.position, fix.xy_uncertainty_cm)
-                               for volume in environment.rotation_clearance_volumes)):
-                return reject("implausible_or_uncontained_report")
         fixes = [report.fix for report in reports]
         if any(math.dist((a.position.x_cm, a.position.y_cm), (b.position.x_cm, b.position.y_cm)) > profile.max_burst_spread_cm
                or abs(a.position.z_cm - b.position.z_cm) > profile.max_height_error_cm
@@ -270,6 +276,17 @@ class RecoveryController:
                               for axis in ("x_cm", "y_cm", "z_cm")))
         heading = math.degrees(math.atan2(sum(math.sin(math.radians(fix.heading_deg)) for fix in fixes),
                                          sum(math.cos(math.radians(fix.heading_deg)) for fix in fixes))) % 360
+        # Only fresh, mapped, distinct and internally coherent evidence can
+        # contradict the motion history. An isolated noisy report cannot latch LOST.
+        if (math.dist((pose.position.x_cm, pose.position.y_cm), (position.x_cm, position.y_cm)) > profile.max_fix_jump_cm
+                or heading_distance(heading, action.heading_deg) > profile.max_fix_heading_jump_deg
+                or abs(position.z_cm - pose.position.z_cm) > profile.max_height_error_cm):
+            self.tracker.mark_lost()
+            self._finished = True
+            return reject("contradictory_burst")
+        if any(not any(contains_disk(volume, fix.position, fix.xy_uncertainty_cm)
+                       for volume in environment.rotation_clearance_volumes) for fix in fixes):
+            return reject("uncontained_report")
         if heading_distance(heading, self.tracker.canonical_heading_deg) > profile.canonical_heading_tolerance_deg:
             self._restore = True
             return reject("restore_canonical_heading")

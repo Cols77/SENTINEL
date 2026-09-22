@@ -54,6 +54,15 @@ def reports(clock, **changes):
     return tuple(replace(PoseReport(str(i), fix(clock)), **changes) for i in range(3))
 
 
+def terminal_context(value):
+    from sentinel.room.site import SessionClockGuard
+    guard = SessionClockGuard(session_id="session")
+    return (assurance(clock_domain_id=guard.clock_domain_id),), {
+        "session_id": guard.session_id, "clock_domain_id": guard.clock_domain_id,
+        "clock_guard": guard, "drift_profile": value.profile,
+    }
+
+
 def test_stationary_burst_precedes_finite_headings_ranked_by_joint_tag_visibility():
     recovery, value, _ = controller()
     env = environment()
@@ -316,9 +325,10 @@ def test_room_contingency_admission_requires_current_pose_energy_clearance_and_g
         pose = replace(pose, state=LocalizationState.RECOVERY_REQUIRED)
     if fault == "outside":
         pose = replace(pose, position=Position(500, 100, 100))
-    result = admit_terminal_contingency(site(), (assurance(),), contingency_id="NAVIGATION_UNAVAILABLE",
+    records, context = terminal_context(value)
+    result = admit_terminal_contingency(site(), records, contingency_id="NAVIGATION_UNAVAILABLE",
         trigger=ContingencyTrigger.RETURN_ENERGY_UNAVAILABLE if fault == "wrong_trigger" else ContingencyTrigger.NAVIGATION_UNAVAILABLE,
-        session_id="session", clock_domain_id="clock", now_monotonic_ms=15000 if fault == "expired" else 11000,
+        **context, now_monotonic_ms=15000 if fault == "expired" else 11000,
         pose=pose, energy_available=fault != "energy")
     assert result is None
 
@@ -326,8 +336,9 @@ def test_room_contingency_admission_requires_current_pose_energy_clearance_and_g
 def test_room_contingency_admission_resolves_the_matching_current_landing_policy():
     from sentinel.room.site import admit_terminal_contingency
     _, value, _ = controller()
-    result = admit_terminal_contingency(site(), (assurance(),), contingency_id="NAVIGATION_UNAVAILABLE",
-        trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, session_id="session", clock_domain_id="clock",
+    records, context = terminal_context(value)
+    result = admit_terminal_contingency(site(), records, contingency_id="NAVIGATION_UNAVAILABLE",
+        trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, **context,
         now_monotonic_ms=11000, pose=value.health, energy_available=True)
     assert result == site().terminal_contingencies[0]
 
@@ -335,9 +346,11 @@ def test_room_contingency_admission_resolves_the_matching_current_landing_policy
 def test_return_energy_contingency_is_separate_and_admissible_with_its_own_assurance():
     from sentinel.room.site import admit_terminal_contingency
     _, value, _ = controller()
-    result = admit_terminal_contingency(site(), (assurance(contingency_id="RETURN_ENERGY_UNAVAILABLE"),),
+    records, context = terminal_context(value)
+    records = (replace(records[0], contingency_id="RETURN_ENERGY_UNAVAILABLE"),)
+    result = admit_terminal_contingency(site(), records,
         contingency_id="RETURN_ENERGY_UNAVAILABLE", trigger=ContingencyTrigger.RETURN_ENERGY_UNAVAILABLE,
-        session_id="session", clock_domain_id="clock", now_monotonic_ms=11000,
+        **context, now_monotonic_ms=11000,
         pose=value.health, energy_available=True)
     assert result == site().terminal_contingencies[1]
 
@@ -354,8 +367,9 @@ def test_terminal_landing_requires_entire_descent_inside_surveyed_volume():
     _, value, _ = controller()
     elevated = replace(site(), free_space_volumes=(Volume3D("free", POLYGON, (50, 200)),),
                        home=HomeDefinition("pad", Position(100, 100, 50), 90, "home-route"))
-    assert admit_terminal_contingency(elevated, (assurance(),), contingency_id="NAVIGATION_UNAVAILABLE",
-        trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, session_id="session", clock_domain_id="clock",
+    records, context = terminal_context(value)
+    assert admit_terminal_contingency(elevated, records, contingency_id="NAVIGATION_UNAVAILABLE",
+        trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, **context,
         now_monotonic_ms=11000, pose=value.health, energy_available=True) is None
 
 
@@ -370,3 +384,147 @@ def test_rotation_swept_clearance_includes_calibrated_height_error():
 def test_supervisor_lost_pose_cannot_be_upgraded_by_an_older_anchored_tracker():
     recovery, value, _ = controller()
     assert recovery.next_action(replace(value.health, state=LocalizationState.LOST), environment(), ()).kind == "CONTINGENCY"
+
+
+@pytest.mark.parametrize("fault", ["empty_clearance", "hover_drift", "height_clearance", "energy"])
+def test_stationary_recovery_admission_requires_the_complete_safe_hover(fault):
+    recovery, value, _ = controller()
+    env = environment()
+    if fault == "empty_clearance":
+        env = replace(env, rotation_clearance_volumes=())
+    elif fault == "hover_drift":
+        value.profile = replace(value.profile, xy_drift_cm_s=25)
+    elif fault == "height_clearance":
+        env = replace(env, rotation_clearance_volumes=(RecoveryVolume("thin", POLYGON, (99, 101)),))
+    else:
+        recovery.energy_admits = lambda action: False
+    assert recovery.next_action(value.health, env, ()).kind == "CONTINGENCY"
+
+
+@pytest.mark.parametrize("change", [
+    {"position": Position(140, 100, 100)}, {"heading_deg": 140}, {"position": Position(100, 100, 130)},
+])
+def test_coherent_mapped_contradictory_burst_latches_lost_without_exploratory_yaw(change):
+    recovery, value, clock = controller()
+    action = recovery.next_action(value.health, environment(), ())
+    sample = tuple(replace(report, fix=replace(report.fix, **change)) for report in reports(clock))
+    outcome = recovery.assess_burst(action, sample)
+    assert not outcome.accepted and not outcome.events
+    assert value.health.state == LocalizationState.LOST
+    assert recovery.next_action(value.health, environment(), ()).kind == "CONTINGENCY"
+
+
+def test_one_contradictory_outlier_is_noisy_evidence_not_a_coherent_contradiction():
+    recovery, value, clock = controller()
+    action = recovery.next_action(value.health, environment(), ())
+    sample = list(reports(clock))
+    sample[0] = replace(sample[0], fix=replace(sample[0].fix, position=Position(140, 100, 100)))
+    assert not recovery.assess_burst(action, tuple(sample)).accepted
+    assert value.health.state != LocalizationState.LOST
+
+
+@pytest.mark.parametrize("refresh_pending", [False, True])
+def test_newer_accepted_fix_supersedes_recovery_action_before_persistence(refresh_pending):
+    recovery, value, clock = controller()
+    committed = []
+    recovery.commit_reanchor = committed.append
+    action = recovery.next_action(value.health, environment(), ())
+    clock.now = 10.2
+    old_reports = reports(clock)
+    clock.now = 10.5
+    newest = value.accept_fix(fix(clock, position=Position(110, 100, 100)))
+    if refresh_pending:
+        recovery.next_action(value.health, environment(), ())
+    outcome = recovery.assess_burst(action, old_reports)
+    assert not outcome.accepted and not outcome.events
+    assert value.health == newest
+    assert not committed
+
+
+@pytest.mark.parametrize("fault", ["missing", "unvalidated", "missing_evidence"])
+def test_terminal_admission_without_validated_aircraft_dimensions_fails_closed(fault):
+    from sentinel.room.site import admit_terminal_contingency
+    _, value, _ = controller()
+    records, context = terminal_context(value)
+    context["drift_profile"] = {"missing": None, "unvalidated": replace(value.profile, validated=False),
+                                "missing_evidence": replace(value.profile, evidence_refs=())}[fault]
+    assert admit_terminal_contingency(site(), records, contingency_id="NAVIGATION_UNAVAILABLE",
+        trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, **context,
+        now_monotonic_ms=11000, pose=value.health, energy_available=True) is None
+
+
+@pytest.mark.parametrize("x,allowed", [(5, False), (15, False), (16, True)])
+def test_terminal_admission_rejects_center_inside_but_rotor_footprint_outside(x, allowed):
+    from sentinel.room.site import admit_terminal_contingency
+    _, value, _ = controller()
+    near_wall = replace(value.health, position=Position(x, 100, 100))
+    records, context = terminal_context(value)
+    assert (admit_terminal_contingency(site(), records, contingency_id="NAVIGATION_UNAVAILABLE",
+        trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, **context,
+        now_monotonic_ms=11000, pose=near_wall, energy_available=True) is not None) is allowed
+
+
+def test_terminal_clock_regression_cannot_revive_expired_assurance():
+    from sentinel.room.site import admit_terminal_contingency
+    _, value, _ = controller()
+    records, context = terminal_context(value)
+    admitted = [admit_terminal_contingency(site(), records, contingency_id="NAVIGATION_UNAVAILABLE",
+        trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, **context,
+        now_monotonic_ms=now, pose=value.health, energy_available=True) is not None
+        for now in (11000, 16000, 12000, 14000)]
+    assert admitted == [True, False, False, False]
+
+
+def test_terminal_admission_without_session_owned_clock_guard_fails_closed():
+    from sentinel.room.site import admit_terminal_contingency
+    _, value, _ = controller()
+    records, context = terminal_context(value)
+    del context["clock_guard"]
+    assert admit_terminal_contingency(site(), records, contingency_id="NAVIGATION_UNAVAILABLE",
+        trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, **context,
+        now_monotonic_ms=11000, pose=value.health, energy_available=True) is None
+
+
+def test_terminal_clock_poisoning_is_scoped_to_the_session_and_clock_domain():
+    from sentinel.room.site import admit_terminal_contingency, SessionClockGuard
+    _, value, _ = controller()
+    records, context = terminal_context(value)
+    context["clock_guard"].observe(16000, session_id="session", clock_domain_id=context["clock_domain_id"])
+    context["clock_guard"].observe(12000, session_id="session", clock_domain_id=context["clock_domain_id"])
+    for session in ("session", "other-session"):
+        fresh_guard = SessionClockGuard(session_id=session)
+        fresh = (assurance(session_id=session, clock_domain_id=fresh_guard.clock_domain_id),)
+        kwargs = {**context, "session_id": session, "clock_domain_id": fresh_guard.clock_domain_id, "clock_guard": fresh_guard}
+        assert admit_terminal_contingency(site(), fresh, contingency_id="NAVIGATION_UNAVAILABLE",
+            trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, **kwargs,
+            now_monotonic_ms=11000, pose=value.health, energy_available=True) is not None
+        assert admit_terminal_contingency(site(), records, contingency_id="NAVIGATION_UNAVAILABLE",
+            trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, **kwargs,
+            now_monotonic_ms=11000, pose=value.health, energy_available=True) is None
+
+
+def test_terminal_and_recovery_adapters_share_the_same_poisoned_clock_guard():
+    from sentinel.room.site import admit_terminal_contingency, RecoveryEnvironmentAdapter
+    _, value, clock = controller()
+    adapter = RecoveryEnvironmentAdapter(session_id="session", clock=clock)
+    records = (assurance(clock_domain_id=adapter.clock_domain_id),)
+    adapter.adapt(site(), records, navigation_contingency_id="NAVIGATION_UNAVAILABLE",
+                  mapped_heading_tag_ids=environment().mapped_heading_tag_ids)
+    assert admit_terminal_contingency(site(), records, contingency_id="NAVIGATION_UNAVAILABLE",
+        trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, session_id="session", clock_domain_id=adapter.clock_domain_id,
+        clock_guard=adapter.clock_guard, drift_profile=value.profile,
+        now_monotonic_ms=16000, pose=value.health, energy_available=True) is None
+    clock.now = 12
+    with pytest.raises(ValueError, match="clock"):
+        adapter.adapt(site(), records, navigation_contingency_id="NAVIGATION_UNAVAILABLE",
+                      mapped_heading_tag_ids=environment().mapped_heading_tag_ids)
+
+
+def test_full_aircraft_descent_footprint_must_fit_free_space_even_with_wide_landing_polygon():
+    from sentinel.room.site import admit_terminal_contingency
+    _, value, _ = controller()
+    records, context = terminal_context(value)
+    narrow_free = replace(site(), free_space_volumes=(Volume3D("free", ((95, 0), (200, 0), (200, 200), (95, 200)), (0, 200)),))
+    assert admit_terminal_contingency(narrow_free, records, contingency_id="NAVIGATION_UNAVAILABLE",
+        trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE, **context,
+        now_monotonic_ms=11000, pose=value.health, energy_available=True) is None
