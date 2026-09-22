@@ -64,6 +64,13 @@ def test_proposer_interfaces_expose_explicit_provenance():
     assert (CoordinatorLlm.provenance_mode, CoordinatorLlm.provenance_source) == ('E','AGENT')
 
 
+def test_aborted_sweep_status_is_closed_and_not_active():
+    from sentinel.ui.projection import sweep_status_view
+    assert sweep_status_view('ABORTED') == 'ABORTED'
+    assert sweep_status_view('FLOWN') == 'COMPLETE'
+    assert sweep_status_view('OPEN') == 'ACTIVE'
+
+
 def test_schema_v3_rejects_cross_run_and_unresolved_operational_references():
     snapshot = empty_snapshot('s', 'r', 'REHEARSAL')
     snapshot['evidence']['frames'].append({
