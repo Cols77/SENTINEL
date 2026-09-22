@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 import math
+import re
 import time
 from typing import Callable, TYPE_CHECKING
 import uuid
@@ -11,6 +12,7 @@ import uuid
 from sentinel.jev_choice import assess_choice
 from sentinel.judgment import ChoiceJudge
 from sentinel.cube.supervised_wait import SupervisedWait
+from sentinel.cube.step_executor import TerminalOutcome
 
 from .candidates import build_candidates
 from .models import CandidateKind, RoomCandidate, TerminalState
@@ -27,6 +29,9 @@ class TurnOutcome:
     accepted: bool
     event_ids: tuple[str, ...]
     terminal_state: TerminalState | None
+    terminal_source: str | None = None
+    terminal_reason: str | None = None
+    persistence_error: str | None = None
 
 
 class RoomController:
@@ -54,11 +59,37 @@ class RoomController:
             raise ValueError("provider wait must be finite and positive")
         self.supervisor, self.flight_executor, self.provider_wait_s = supervisor, flight_executor, provider_wait_s
 
-    def _preempted(self, session_id, decision):
-        snapshot = self.queries.project(session_id)
-        events = self.store.events(session_id)
+    def _local_terminal(self, terminal, candidate_id):
+        if not isinstance(terminal, TerminalOutcome):
+            return None
+        confirmed_landing = (terminal.state == "LANDED" and type(terminal.completed_at) in (int, float)
+                             and math.isfinite(terminal.completed_at) and terminal.completed_at >= 0)
+        state = TerminalState.SAFE_LANDED if confirmed_landing else TerminalState.ABORTED
+        reason = (terminal.reason if isinstance(terminal.reason, str)
+                  and re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", terminal.reason) else "TERMINAL_EXECUTION_STOPPED")
+        # Database exception messages can contain paths or credentials. Publish
+        # a stable category and label this result as local, with no claimed IDs.
+        error = "AUDIT_PERSISTENCE_FAILED" if self.supervisor.last_persistence_error else None
+        return TurnOutcome(candidate_id, False, (), state, "LOCAL_SUPERVISOR", reason, error)
+
+    def _preempted(self, session_id, decision, terminal_outcome=None):
+        candidate_id = decision.transition if decision else "LAND_CONTINGENCY"
+        terminal = (terminal_outcome if isinstance(terminal_outcome, TerminalOutcome)
+                    else self.supervisor.last_terminal_outcome)
+        local = self._local_terminal(terminal, candidate_id)
+        if local is not None and self.supervisor.last_persistence_error:
+            return local
+        try:
+            snapshot = self.queries.project(session_id)
+            events = self.store.events(session_id)
+        except Exception:
+            if local is not None:
+                return local
+            raise
+        if snapshot.terminal_state is None and local is not None:
+            return local
         version = decision.request.snapshot_version if decision else self.supervisor.last_preempted_version
-        return TurnOutcome(decision.transition if decision else "LAND_CONTINGENCY", False,
+        return TurnOutcome(candidate_id, False,
                            tuple(e.event_id for e in events if e.state_version > version),
                            snapshot.terminal_state)
 
@@ -107,6 +138,13 @@ class RoomController:
                 continue
 
     def step(self, session_id: str) -> TurnOutcome:
+        if self.supervisor is not None:
+            if self.supervisor.session_id != session_id:
+                raise ValueError("supervisor belongs to another session")
+            if self.supervisor.last_persistence_error:
+                local = self._local_terminal(self.supervisor.last_terminal_outcome, "TERMINAL")
+                if local is not None:
+                    return local
         ingest_failed = False
         if self.ingest_pending is not None:
             try:
@@ -117,17 +155,15 @@ class RoomController:
         if snapshot.terminal_state:
             return TurnOutcome("TERMINAL", False, (), snapshot.terminal_state)
         if self.supervisor is not None:
-            if self.supervisor.session_id != session_id:
-                raise ValueError("supervisor belongs to another session")
             try:
                 decision = self.supervisor.prepare(snapshot_version=snapshot.state_version,
                                                    provider_wait_s=self.provider_wait_s)
             except Exception:
-                self.supervisor.refresh_failure(self.flight_executor)
-                return self._preempted(session_id, None)
+                terminal = self.supervisor.refresh_failure(self.flight_executor)
+                return self._preempted(session_id, None, terminal)
             if decision.transition != "CONTINUE":
-                self.supervisor.dispatch(decision, self.flight_executor)
-                return self._preempted(session_id, decision)
+                terminal = self.supervisor.dispatch(decision, self.flight_executor)
+                return self._preempted(session_id, decision, terminal)
         correlation = str(uuid.uuid4())
         if ingest_failed:
             payload = self._outcome(snapshot, "INGEST_PENDING", "INGEST_PENDING",

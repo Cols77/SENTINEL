@@ -1,6 +1,8 @@
 """One dispatched read per turn; failures and facts replay from the ledger."""
 from copy import deepcopy
 import builtins
+from dataclasses import replace
+import sqlite3
 
 import pytest
 
@@ -8,8 +10,11 @@ from sentinel.room.controller import RoomController, TurnOutcome
 from sentinel.room.ingest import ingest_result
 from sentinel.room.models import CandidateKind, GoalKind, TerminalState
 from sentinel.room.queries import ReadQueries
+from sentinel.cube.localization import LocalizationState
+from sentinel.cube.step_executor import ExecutorState, TerminalOutcome
 from tests.room.test_ingest import sample
 from tests.room.test_queries import append, drone, goal, room, survey
+from tests.room.test_supervisor import Executor, safety
 
 
 class Judge:
@@ -28,6 +33,81 @@ class Judge:
             return response
         assert response in criteria
         return {"value": response, "probabilities": {k: .99 if k == response else .001 for k in criteria}}
+
+
+@pytest.mark.parametrize("initial", ["lost", "refresh_failure"])
+def test_permanent_ledger_failure_returns_local_terminal_on_two_steps_and_controller_restart(safety, monkeypatch, initial):
+    supervisor, store, clock, samples, refreshes, _ = safety
+    if initial == "lost":
+        samples["pose"] = replace(samples["pose"], state=LocalizationState.LOST)
+    else:
+        supervisor.refresh = lambda: (_ for _ in ()).throw(RuntimeError("telemetry unavailable"))
+    monkeypatch.setattr(store, "append_events", lambda **kwargs: (_ for _ in ()).throw(
+        sqlite3.OperationalError("disk I/O error private-path/private-secret")))
+    emergencies = []
+
+    def emergency(executor):
+        emergencies.append(True)
+        executor.state = ExecutorState.TERMINAL
+        return TerminalOutcome("EMERGENCY_ABORTED", "AUDIT_PERSISTENCE_FAILED", None, None, clock())
+
+    supervisor.emergency = emergency
+    executor = Executor(store, clock)
+    judge = Judge()
+    controller = RoomController(store, judge, supervisor=supervisor, flight_executor=executor)
+    before = store.events("session")
+    first = controller.step("session")
+    assert first.terminal_state == TerminalState.ABORTED and not first.accepted
+    assert first.event_ids == () and first.terminal_source == "LOCAL_SUPERVISOR"
+    assert first.terminal_reason == "AUDIT_PERSISTENCE_FAILED"
+    assert first.persistence_error == "AUDIT_PERSISTENCE_FAILED"
+    assert "private-secret" not in repr(first)
+    refresh_count = len(refreshes)
+    second = controller.step("session")
+    assert second.terminal_state == TerminalState.ABORTED and not second.accepted
+    # A new controller in the same process consumes the supervisor cache even
+    # if the failed database can no longer serve a projection.
+    restarted = RoomController(store, judge, supervisor=supervisor, flight_executor=executor)
+    monkeypatch.setattr(restarted.queries, "project", lambda *args: pytest.fail("terminal cache must precede ledger reads"))
+    assert restarted.run_until_terminal("session") == TerminalState.ABORTED
+    assert emergencies == [True] and judge.calls == [] and executor.calls == []
+    assert len(refreshes) == refresh_count and store.events("session") == before
+
+
+def test_run_until_terminal_stops_on_first_unpersisted_preemption(safety, monkeypatch):
+    supervisor, store, clock, samples, *_ = safety
+    samples["pose"] = replace(samples["pose"], state=LocalizationState.LOST)
+    monkeypatch.setattr(store, "append_events", lambda **kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("disk I/O error")))
+    calls = []
+    supervisor.emergency = lambda executor: TerminalOutcome("EMERGENCY_ABORTED", "AUDIT_PERSISTENCE_FAILED", None, None, clock())
+    controller = RoomController(store, Judge(), supervisor=supervisor, flight_executor=Executor(store, clock))
+    original = controller.step
+
+    def once(session_id):
+        calls.append(True)
+        assert len(calls) == 1, "terminal execution must not loop on an absent ledger event"
+        return original(session_id)
+
+    monkeypatch.setattr(controller, "step", once)
+    assert controller.run_until_terminal("session") == TerminalState.ABORTED
+
+
+@pytest.mark.parametrize("state,completed_at,expected", [
+    ("EMERGENCY_ABORTED", 10, TerminalState.ABORTED),
+    ("LANDED", None, TerminalState.ABORTED),
+    ("LANDED", 10, TerminalState.SAFE_LANDED),
+    ("NOT_AIRBORNE", 10, TerminalState.ABORTED),
+])
+def test_refresh_failure_consumes_returned_terminal_without_inventing_landing(safety, monkeypatch, state, completed_at, expected):
+    supervisor, store, clock, *_ = safety
+    supervisor.refresh = lambda: (_ for _ in ()).throw(RuntimeError("telemetry unavailable"))
+    supervisor.last_persistence_error = "private database path"
+    terminal = TerminalOutcome(state, "AUDIT_PERSISTENCE_FAILED", None, None, completed_at)
+    monkeypatch.setattr(supervisor, "refresh_failure", lambda executor: terminal)
+    controller = RoomController(store, Judge(), supervisor=supervisor, flight_executor=Executor(store, clock))
+    outcome = controller.step("session")
+    assert outcome.terminal_state == expected and not outcome.accepted and outcome.event_ids == ()
+    assert outcome.terminal_source == "LOCAL_SUPERVISOR"
 
 
 def test_drone_question_read_then_grounded_answer_without_provider_construction(room, monkeypatch):
