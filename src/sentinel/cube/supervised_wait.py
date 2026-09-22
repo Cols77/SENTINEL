@@ -4,6 +4,8 @@ Operations receive an Event and must return values instead of publishing them.
 Only a COMPLETED result may be consumed. A timed-out worker may still run, but
 its eventual result is discarded. ``on_deadline`` must be a short, nonblocking
 latch/dispatch callback; it must never wait for the operation it supervises.
+An optional external cancellation Event signals the operation and returns a
+CANCELLED outcome without waiting for a noncooperative worker to finish.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ class SupervisedWait:
         return value
 
     def run(self, operation: Callable[[Event], T], deadline: float,
-            on_deadline: Callable[[], None]) -> WaitOutcome[T]:
+            on_deadline: Callable[[], None], *, cancellation: Event | None = None) -> WaitOutcome[T]:
         if not math.isfinite(deadline):
             raise ValueError("deadline must be a finite monotonic instant")
         try:
@@ -53,11 +55,22 @@ class SupervisedWait:
             except BaseException:
                 pass
             return WaitOutcome("WATCHDOG_FAILED", None, None, None, True, "WATCHDOG_FAILED")
-        cancellation, done = Event(), Event()
+        cancellation, done = cancellation if cancellation is not None else Event(), Event()
         lock = Lock()
         result: list[WaitOutcome[T]] = []
         claimed = False
         launched = False
+
+        def cancel(now: float, *, completion_known: bool) -> None:
+            nonlocal claimed
+            with lock:
+                if claimed:
+                    return
+                claimed = True
+                cancellation.set()
+                result.append(WaitOutcome("CANCELLED", None, started, now,
+                                          completion_known, "CANCELLED"))
+            done.set()
 
         def expire(now: float, category: str | None = None) -> None:
             nonlocal claimed
@@ -65,7 +78,13 @@ class SupervisedWait:
                 if claimed:
                     return
                 claimed = True
+                was_cancelled = cancellation.is_set()
                 cancellation.set()
+                if was_cancelled:
+                    result.append(WaitOutcome("CANCELLED", None, started, now,
+                                              not launched, "CANCELLED"))
+                    done.set()
+                    return
             try:
                 on_deadline()
             except BaseException:
@@ -82,6 +101,7 @@ class SupervisedWait:
             value, category = None, None
             try:
                 if cancellation.is_set():
+                    cancel(started, completion_known=True)
                     return
                 value = operation(cancellation)
             except BaseException:
@@ -90,6 +110,9 @@ class SupervisedWait:
                 now = self._now()
             except BaseException:
                 expire(started, "WATCHDOG_FAILED")
+                return
+            if cancellation.is_set():
+                cancel(now, completion_known=True)
                 return
             if now >= deadline or now < started:
                 expire(now, "WATCHDOG_FAILED" if now < started else None)
@@ -106,6 +129,13 @@ class SupervisedWait:
 
         def supervise() -> None:
             while not done.is_set():
+                if cancellation.is_set():
+                    try:
+                        now = self._now()
+                    except BaseException:
+                        now = started
+                    cancel(now, completion_known=not launched)
+                    return
                 try:
                     now = self._now()
                 except BaseException:
@@ -116,7 +146,9 @@ class SupervisedWait:
                     return
                 done.wait(min(self.poll_interval_s, deadline - now))
 
-        if started >= deadline:
+        if cancellation.is_set():
+            cancel(started, completion_known=True)
+        elif started >= deadline:
             expire(started)
         else:
             launched = True

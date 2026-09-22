@@ -33,8 +33,8 @@ def command(kind="MOVE", bound=1.0, **arguments):
                                        interruptible=kind in {"CAPTURE", "LOCALISE", "SETTLE"})
 
 
-def plan(*commands):
-    return CheckpointPlan("p", HOME.nominal_pose, Position(0, 20, 200), 90, 90,
+def plan(*commands, start=None):
+    return CheckpointPlan("p", start or HOME.nominal_pose, Position(0, 20, 200), 90, 90,
                           commands, sum(c.upper_bound_s for c in commands))
 
 
@@ -97,7 +97,7 @@ def test_measured_home_route_and_time_are_validated():
 def test_return_latch_blocks_all_later_optional_work():
     run, client, _ = executor()
     run.start(HOME)
-    assert run.return_home(plan(command())).status == "COMPLETED"
+    assert run.return_home(plan(command(), start=run.runner.envelope.position)).status == "COMPLETED"
     assert run.state is ExecutorState.RETURNING
     with pytest.raises(RuntimeError, match="AIRBORNE"):
         run.execute(plan(command()))
@@ -327,7 +327,8 @@ def test_return_preempts_queued_optional_commands_without_overlapping_sdk_calls(
     run.start(HOME)
     optional, outcomes = threaded(lambda: run.execute(plan(command(bound=2), command())))
     assert entered.wait(1)
-    returning, returns = threaded(lambda: run.return_home(plan(command(direction="back", distance_cm=20))))
+    return_plan = plan(command(direction="back", distance_cm=20), start=run.runner.envelope.position)
+    returning, returns = threaded(lambda: run.return_home(return_plan))
     deadline = time.monotonic() + 1
     while run.state is not ExecutorState.RETURNING and time.monotonic() < deadline:
         time.sleep(0.001)
@@ -335,7 +336,12 @@ def test_return_preempts_queued_optional_commands_without_overlapping_sdk_calls(
     release.set()
     optional.join(1)
     returning.join(1)
-    assert outcomes[0].status == "PREEMPTED" and returns[0].status == "COMPLETED"
+    assert outcomes[0].status == "PREEMPTED" and returns[0].status == "REPLAN_REQUIRED"
+    assert outcomes[0].pose == return_plan.start.moved("forward", 20)
+    assert run.pose_revision == 1 and "back 20" not in client.commands
+    fresh = plan(command(direction="back", distance_cm=20), start=outcomes[0].pose)
+    assert run.return_home(fresh).status == "COMPLETED"
+    assert run.pose_revision == 2
     assert client.commands.count("forward 20") == client.commands.count("back 20") == 1
     run.close()
 
@@ -443,6 +449,7 @@ def test_each_sdk_command_requires_its_full_bound_before_dispatch():
         commands.append(command)
         now[0] = 0.9
         first_completed.set()
+        return CommandOutcome()
 
     run, client, _ = executor(clock=clock, deadline=2.0, command_sink=sink)
     run.start(HOME)
@@ -607,7 +614,7 @@ def test_blocked_capture_result_is_discarded_after_concurrent_land():
         release.set()
     worker.join(1)
     landing.join(1)
-    assert outcomes[0].status == "PREEMPTED" and outcomes[0].completion_known
+    assert outcomes[0].status == "PREEMPTED"
     assert outcomes[0].observation_ids == ()
     assert outcomes[0].command_states[0].status == "PREEMPTED"
     assert terminals[0].state == "LANDED"
@@ -628,14 +635,14 @@ def test_localise_result_is_discarded_after_return_home_preempts_it():
     run.start(HOME)
     worker, outcomes = threaded(lambda: run.execute(plan(command("LOCALISE", bound=2))))
     assert entered.wait(1)
-    returning, returns = threaded(lambda: run.return_home(plan()))
+    returning, returns = threaded(lambda: run.return_home(plan(start=measured.pose)))
     try:
         wait_for_state(run, ExecutorState.RETURNING)
     finally:
         release.set()
     worker.join(1)
     returning.join(1)
-    assert outcomes[0].status == "PREEMPTED" and outcomes[0].completion_known
+    assert outcomes[0].status == "PREEMPTED"
     assert outcomes[0].pose == measured.pose
     assert run.runner.envelope.position == measured.pose
     assert returns[0].status == "COMPLETED"
@@ -652,8 +659,8 @@ def test_completed_provider_result_cannot_publish_after_emergency_wins_race(kind
     run.start(HOME)
     wait = run._wait.run
 
-    def preempt_after_worker_completed(*args):
-        result = wait(*args)
+    def preempt_after_worker_completed(*args, **kwargs):
+        result = wait(*args, **kwargs)
         assert result.status == "COMPLETED"
         run.runner.trigger_emergency()
         return result
@@ -667,7 +674,7 @@ def test_completed_provider_result_cannot_publish_after_emergency_wins_race(kind
     run.close()
 
 
-def test_native_movement_reply_cannot_mutate_pose_after_landing_preempts_it():
+def test_known_native_movement_completion_updates_pose_after_landing_preempts_it():
     entered, release = Event(), Event()
 
     class Blocking(Client):
@@ -688,7 +695,9 @@ def test_native_movement_reply_cannot_mutate_pose_after_landing_preempts_it():
     worker.join(1)
     landing.join(1)
     assert outcomes[0].status == "PREEMPTED"
-    assert outcomes[0].pose == run.runner.envelope.position == measured.pose
+    assert outcomes[0].completion_known
+    assert outcomes[0].pose == run.runner.envelope.position == measured.pose.moved("forward", 20)
+    assert run.pose_revision == 1
     run.close()
 
 
@@ -704,7 +713,7 @@ def test_preempted_provider_deadline_cannot_cancel_the_return_that_replaced_it()
     run.start(HOME)
     worker, outcomes = threaded(lambda: run.execute(plan(command("LOCALISE", bound=0.1))))
     assert entered.wait(1)
-    returning, returns = threaded(lambda: run.return_home(plan()))
+    returning, returns = threaded(lambda: run.return_home(plan(start=measured.pose)))
     try:
         wait_for_state(run, ExecutorState.RETURNING)
         worker.join(1)
@@ -756,3 +765,126 @@ def test_sdk_deadline_globally_blocks_queued_return_after_generation_changed():
     assert client.commands.count("forward 20") == client.commands.count("land") == 1
     assert run.state is ExecutorState.CLOSED
     assert run.land().reason == "COMMAND_COMPLETION_UNKNOWN"
+
+
+@pytest.mark.parametrize("preempt", ["land", "return", "close"])
+@pytest.mark.parametrize("cooperative", [True, False])
+def test_preemption_signals_interruptible_wait_and_finishes_before_provider_reply(preempt, cooperative):
+    entered, release, finished = Event(), Event(), Event()
+    tokens = []
+
+    def provider(node, cancellation):
+        tokens.append(cancellation)
+        entered.set()
+        if cooperative:
+            cancellation.wait(2)
+        else:
+            release.wait(2)
+        finished.set()
+        return "late-observation"
+
+    run, client, measured = executor(command_sink=provider)
+    run.start(HOME)
+    worker, outcomes = threaded(lambda: run.execute(plan(command("CAPTURE", bound=30))))
+    assert entered.wait(1)
+    action = {"land": run.land, "close": run.close,
+              "return": lambda: run.return_home(plan(start=measured.pose))}[preempt]
+    terminal, results = threaded(action)
+    try:
+        assert tokens[0].wait(0.3), "preemption must signal cancellation before waiting for operation lock"
+        worker.join(0.3)
+        terminal.join(0.3)
+        assert not worker.is_alive() and not terminal.is_alive()
+        assert outcomes[0].status == "PREEMPTED" and outcomes[0].observation_ids == ()
+        if not cooperative:
+            assert not finished.is_set()
+        if preempt in {"land", "close"}:
+            assert client.commands[-1] == "land"
+            if preempt == "land":
+                assert results[0].state == "LANDED"
+            else:
+                assert run.state is ExecutorState.CLOSED
+        else:
+            assert results[0].status == "COMPLETED" and run.state is ExecutorState.RETURNING
+    finally:
+        tokens[0].set()
+        release.set()
+        assert finished.wait(1)
+        worker.join(1)
+        terminal.join(1)
+        run.close()
+
+
+@pytest.mark.parametrize("kind,value", [
+    ("CAPTURE", Position(10, 10, 200)),
+    ("CAPTURE", Telemetry(80, 200)),
+    ("CAPTURE", {"observation_ids": ["fake"]}),
+    ("CAPTURE", ""),
+    ("CAPTURE", "not an observation id"),
+    ("LOCALISE", "arbitrary"),
+    ("LOCALISE", Position(1000, 0, 200)),
+    ("LOCALISE", Position(0, 0, -1)),
+    ("LOCALISE", Position(float("nan"), 0, 200)),
+    ("LOCALISE", Position(0, float("inf"), 200)),
+    ("LOCALISE", Position(True, 0, 200)),
+    ("READ_TELEMETRY", Position(0, 0, 200)),
+    ("READ_TELEMETRY", Telemetry(True, 200)),
+    ("READ_TELEMETRY", Telemetry(101, 200)),
+    ("READ_TELEMETRY", Telemetry(80, -1)),
+    ("READ_TELEMETRY", Telemetry(80, float("nan"))),
+    ("READ_TELEMETRY", Telemetry(80, 200, -1)),
+    ("READ_TELEMETRY", Telemetry(80, 200, 0, float("inf"))),
+    ("MOVE", "ok"),
+    ("MOVE", Telemetry(80, 200)),
+    ("MOVE", Position(1000, 0, 200)),
+    ("ROTATE", Position(0, 0, 200)),
+    ("ROTATE", CommandOutcome("yes")),
+])
+def test_sink_results_are_validated_by_command_before_safety_state_mutation(kind, value):
+    run, client, measured = executor(command_sink=lambda node, cancel: value)
+    run.start(HOME)
+    node = command() if kind == "MOVE" else command(kind)
+    outcome = run.execute(plan(node))
+    assert outcome.status == "FAILED"
+    assert outcome.command_states[0].error_category == "INVALID_COMMAND_RESULT"
+    assert outcome.pose == run.runner.envelope.position == measured.pose
+    assert outcome.telemetry is None and outcome.observation_ids == ()
+    assert client.commands[-1] == "land" and client.close_count == 1
+
+
+def test_return_with_stale_start_requires_replan_before_any_movement():
+    run, client, measured = executor()
+    run.start(HOME)
+    outcome = run.return_home(plan(command(direction="back", distance_cm=20), start=Position(40, 40, 200)))
+    assert outcome.status == "REPLAN_REQUIRED" and outcome.pose == measured.pose
+    assert outcome.command_states[0].status == "NOT_STARTED"
+    assert outcome.command_states[0].error_category == "STALE_RETURN_PLAN"
+    assert "back 20" not in client.commands and run.state is ExecutorState.RETURNING
+    run.close()
+
+
+def test_return_preemption_before_sdk_dispatch_does_not_invent_a_movement_result():
+    entered, release = Event(), Event()
+    run, client, measured = executor()
+    run.start(HOME)
+    wait = run._wait.run
+
+    def delayed_wait(*args, **kwargs):
+        entered.set()
+        assert release.wait(2)
+        return wait(*args, **kwargs)
+
+    run._wait.run = delayed_wait
+    worker, outcomes = threaded(lambda: run.execute(plan(command(bound=2))))
+    assert entered.wait(1)
+    returning, returns = threaded(lambda: run.return_home(plan(start=measured.pose)))
+    try:
+        wait_for_state(run, ExecutorState.RETURNING)
+    finally:
+        release.set()
+    worker.join(1)
+    returning.join(1)
+    assert outcomes[0].status == "PREEMPTED" and returns[0].status == "COMPLETED"
+    assert run.pose_revision == 0 and run.runner.envelope.position == measured.pose
+    assert "forward 20" not in client.commands and "land" not in client.commands
+    run.close()
