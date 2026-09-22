@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import asdict, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -66,12 +68,15 @@ def summarise(stop: str, look_deg, status: str, detections: list[dict],
     return f"[detect] {where}: " + ", ".join(parts)
 
 
-def detect_frame(detector, record: dict, classes: tuple[str, ...] = LIVE_CLASSES) -> dict:
+def detect_frame(detector, record: dict, classes: tuple[str, ...] = LIVE_CLASSES, *,
+                 provider: str | None = None) -> dict:
     """One frame record from ``frames.jsonl`` -> one result row. Never raises: a
     detector failure is a row with the error named, not a stopped follower."""
     row = {"stop": record.get("stop"), "look_deg": record.get("look_deg"),
            "path": record.get("path"), "sha256": record.get("sha256"),
            "captured_at": record.get("captured_at"), "classes": list(classes)}
+    if "perception_request" in record:
+        return _detect_correlated(detector, record, row, classes, provider=provider)
     started = time.monotonic()
     try:
         batch = detector.detect(record["path"], classes)
@@ -88,10 +93,129 @@ def detect_frame(detector, record: dict, classes: tuple[str, ...] = LIVE_CLASSES
     return row
 
 
+def _reported_models(raw) -> tuple[str | None, ...]:
+    """Only response identity counts; a configured detector.model is not proof."""
+    if not isinstance(raw, dict):
+        return (None,)
+    identities = tuple(raw[key] for key in ("resolved_model", "modelVersion", "model") if key in raw)
+    if identities:
+        return identities
+    if "full" in raw:
+        answers = [raw["full"], *raw.get("tiles", {}).values()]
+    elif "requests" in raw:
+        answers = list(raw["requests"].values())
+    else:
+        return (None,)
+    return tuple(model for answer in answers for model in _reported_models(answer)) or (None,)
+
+
+def _failure_category(error: Exception) -> str:
+    from .providers import (
+        ModelIdentityMismatch, ProviderAuthError, ProviderRateLimited, ProviderResponseTooLarge,
+        ProviderSchemaError, ProviderTimeout, ProviderTransportError,
+    )
+    for kind, category in (
+        (ModelIdentityMismatch, "IDENTITY_MISMATCH"), (ProviderTimeout, "TIMEOUT"),
+        (TimeoutError, "TIMEOUT"), (ProviderAuthError, "AUTH"), (ProviderRateLimited, "RATE_LIMIT"),
+        (ProviderTransportError, "TRANSPORT"), (ProviderSchemaError, "SCHEMA"),
+        (ProviderResponseTooLarge, "RESPONSE_TOO_LARGE"),
+    ):
+        if isinstance(error, kind):
+            return category
+    return "DETECTOR_ERROR"
+
+
+def _detect_correlated(detector, record, row, classes, *, provider):
+    from PIL import Image
+    from sentinel.room.ingest import (
+        DetectionEvidence, InvalidPerception, PerceptionResult, detection_digest,
+        request_from_dict, validate_request, validate_result,
+    )
+    started = time.monotonic()
+    row.update(status="DETECTOR_ERROR", detections=[], dropped=[], raw=None)
+    try:
+        request = request_from_dict(record["perception_request"])
+        validate_request(request)
+        if record.get("path") != request.frame_path or record.get("sha256") != request.frame_sha256:
+            raise InvalidPerception("frame announcement disagrees with request")
+    except InvalidPerception:
+        row.update(error="INVALID_REQUEST", detect_s=round(time.monotonic() - started, 2))
+        return row
+    provider_name = provider or getattr(detector, "provider", type(detector).__name__)
+    resolved_model, identity_status, error_category, detections = None, "UNVERIFIED", None, ()
+    try:
+        batch = detector.detect(request.frame_path, classes)
+        raw = batch.raw or {}
+        reported_provider = raw.get("provider", provider_name)
+        if not isinstance(reported_provider, str) or not reported_provider.strip():
+            raise InvalidPerception("invalid provider identity")
+        provider_name = reported_provider
+        models = _reported_models(raw)
+        if any(model is not None and (not isinstance(model, str) or not model.strip()) for model in models):
+            raise InvalidPerception("invalid provider identity")
+        if any(model is not None and model != request.requested_model for model in models):
+            error_category = "IDENTITY_MISMATCH"
+            resolved_model = next(model for model in models if model is not None and model != request.requested_model)
+            identity_status = "MISMATCH"
+        elif all(model == request.requested_model for model in models):
+            resolved_model, identity_status = request.requested_model, "VERIFIED"
+        if error_category is None and batch.status != "OK":
+            category = raw.get("error_category")
+            error_category = category if category in {
+                "TIMEOUT", "AUTH", "TRANSPORT", "RATE_LIMIT", "SCHEMA", "RESPONSE_TOO_LARGE",
+            } else "PROVIDER_ERROR"
+        if error_category is None and identity_status != "VERIFIED":
+            error_category = "IDENTITY_UNVERIFIED"
+        if error_category is None:
+            if len(batch.detections) != len(batch.bands):
+                raise InvalidPerception("detection bands are not parallel")
+            with Image.open(request.frame_path) as frame:
+                width, height = frame.size
+            evidence = []
+            for index, (detection, band) in enumerate(zip(batch.detections, batch.bands)):
+                box = detection["bbox"]
+                coordinate_space = detection.get("bbox_coordinate_space", "PIXELS_TOP_LEFT")
+                if coordinate_space == "PIXELS_TOP_LEFT":
+                    coordinate_space = "FULL_FRAME_PIXELS"
+                origin = detection.get("tile_origin_xy_px")
+                item = DetectionEvidence(
+                    f"{request.observation_id}:{index}", detection["class"], band,
+                    detection.get("raw_score"), detection.get("score_kind"),
+                    tuple(box[key] for key in ("x", "y", "width", "height")), coordinate_space,
+                    width, height, tuple(origin) if origin is not None else None, "",
+                )
+                evidence.append(replace(item, evidence_sha256=detection_digest(item)))
+            detections = tuple(evidence)
+        result = PerceptionResult(
+            request, "FAILED" if error_category else "SUCCEEDED", provider_name, resolved_model,
+            identity_status, datetime.now(timezone.utc).isoformat(), detections, error_category,
+        )
+        validate_result(result, check_frame=False, allow_mismatch=True)
+    except Exception as error:  # never expose provider text, headers, or credentials
+        result = PerceptionResult(
+            request, "FAILED", provider_name, resolved_model, identity_status,
+            datetime.now(timezone.utc).isoformat(), (),
+            "SCHEMA" if isinstance(error, (InvalidPerception, KeyError, TypeError, ValueError))
+            else _failure_category(error),
+        )
+    row["perception_result"] = asdict(result)
+    row["detect_s"] = round(time.monotonic() - started, 2)
+    if result.status == "SUCCEEDED":
+        row.update(status="OK", detections=[{
+            "class": item.class_name, "band": item.confidence_band,
+            "raw_score": item.raw_score, "score_kind": item.score_kind,
+            "bbox": dict(zip(("x", "y", "width", "height"), item.bbox_xywh)),
+        } for item in result.detections])
+    else:
+        row["error"] = result.error_category
+    return row
+
+
 def follow(frames_log: Path, out_log: Path, detector, *,
            done: Callable[[], bool], print_fn: Callable[[str], None] = print,
            sleep_fn: Callable[[float], None] = time.sleep, poll_s: float = 0.25,
-           classes: tuple[str, ...] = LIVE_CLASSES) -> int:
+           classes: tuple[str, ...] = LIVE_CLASSES, inbox_log: Path | None = None,
+           provider: str | None = None) -> int:
     """Detect on every line appended to ``frames_log`` until ``done()`` is true and
     every line has been handled. Returns how many frames were detected."""
     handled = 0
@@ -102,7 +226,10 @@ def follow(frames_log: Path, out_log: Path, detector, *,
         # only whole lines: the last one may still be being written
         complete = [line for line in text[:text.rfind("\n") + 1].splitlines() if line.strip()]
         for line in complete[handled:]:
-            row = detect_frame(detector, json.loads(line), classes)
+            row = detect_frame(detector, json.loads(line), classes, provider=provider)
+            if inbox_log is not None and "perception_result" in row:
+                from sentinel.room.ingest import append_inbox_result, result_from_dict
+                append_inbox_result(inbox_log, result_from_dict(row["perception_result"]))
             with out_log.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(row, default=str) + "\n")
             print_fn(summarise(row["stop"], row["look_deg"], row["status"], row["detections"],

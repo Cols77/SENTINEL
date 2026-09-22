@@ -38,6 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="check the gates and the detector's key/model, send nothing")
     parser.add_argument("--frames-log", type=Path)
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--inbox", type=Path,
+                        help="atomically publish correlated room perception envelopes to this JSONL inbox")
     parser.add_argument("--tiles", choices=("none", "2x2", "3x3"), default="none",
                         help="also detect on enlarged overlapping crops (sentinel.survey.tiling): "
                              "finds small objects, costs 1 + rows*cols calls per frame")
@@ -70,7 +72,8 @@ def main(argv: list[str] | None = None, *, build_detector=None) -> int:
         print("--frames-log, --out and --done-file are required to follow a flight", flush=True)
         return 1
     count = follow(args.frames_log, args.out, detector, done=args.done_file.exists,
-                   print_fn=lambda line: print(line, flush=True))
+                   print_fn=lambda line: print(line, flush=True), inbox_log=args.inbox,
+                   provider=args.detector)
     print(f"[detect] done: {count} frame(s), results in {args.out}", flush=True)
     return 0
 

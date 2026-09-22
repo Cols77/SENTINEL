@@ -155,7 +155,7 @@ def test_concurrent_first_open_applies_each_migration_once(tmp_path):
     assert errors == []
     connection = sqlite3.connect(path)
     assert connection.execute("SELECT version FROM room_schema_version ORDER BY version").fetchall() == [
-        (1,), (2,), (3,),
+        (version,) for version, _ in room_store_module._MIGRATIONS
     ]
 
 
@@ -167,10 +167,11 @@ def test_invalid_multi_statement_migration_rolls_back_all_ddl_and_version_rows(t
         "CREATE TABLE should_not_survive (value TEXT);\nTHIS IS INVALID SQL;\n",
         encoding="utf-8",
     )
+    original_versions = [(version,) for version, _ in room_store_module._MIGRATIONS]
     monkeypatch.setattr(
         room_store_module,
         "_MIGRATIONS",
-        room_store_module._MIGRATIONS + ((4, broken),),
+        room_store_module._MIGRATIONS + ((original_versions[-1][0] + 1, broken),),
     )
     connection = sqlite3.connect(path)
     with pytest.raises(sqlite3.OperationalError):
@@ -178,9 +179,7 @@ def test_invalid_multi_statement_migration_rolls_back_all_ddl_and_version_rows(t
     assert connection.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'should_not_survive'",
     ).fetchone() is None
-    assert connection.execute("SELECT version FROM room_schema_version ORDER BY version").fetchall() == [
-        (1,), (2,), (3,),
-    ]
+    assert connection.execute("SELECT version FROM room_schema_version ORDER BY version").fetchall() == original_versions
 
 
 def test_same_store_instance_supports_cross_thread_append_read_and_close(tmp_path):

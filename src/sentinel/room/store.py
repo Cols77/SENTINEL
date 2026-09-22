@@ -18,7 +18,8 @@ from .models import CapabilityProfile
 _SCHEMA = Path(__file__).with_name("sql") / "schema.sql"
 _MIGRATION_002 = Path(__file__).with_name("sql") / "migration_002_event_insert_guard.sql"
 _MIGRATION_003 = Path(__file__).with_name("sql") / "migration_003_event_batches.sql"
-_MIGRATIONS = ((1, _SCHEMA), (2, _MIGRATION_002), (3, _MIGRATION_003))
+_MIGRATION_004 = Path(__file__).with_name("sql") / "migration_004_perception_evidence.sql"
+_MIGRATIONS = ((1, _SCHEMA), (2, _MIGRATION_002), (3, _MIGRATION_003), (4, _MIGRATION_004))
 # Keys are case-folded and reduced to alphanumeric characters before comparison.
 # Sensitive aliases are rejected as complete keys or compound stems.  The only
 # exceptions are the narrowly named metadata entries below; no suffix alone
@@ -271,6 +272,32 @@ class RoomStore:
             self._require_open()
             with sqlite3.connect(str(destination)) as snapshot:
                 self.connection.backup(snapshot)
+
+    def current_hypotheses(self, session_id: str, *, snapshot_version: int) -> tuple[dict, ...]:
+        """Consumer view: current verified boxes, with scores and bands separate."""
+        with self._lock:
+            self._require_open()
+            rows = self.connection.execute(
+                "SELECT hypothesis.hypothesis_id, evidence.*, revision.revision_no "
+                "FROM room_object_hypotheses AS hypothesis "
+                "JOIN room_sessions AS session ON session.session_id = hypothesis.session_id "
+                "JOIN room_hypothesis_revisions AS revision "
+                "ON revision.session_id = hypothesis.session_id AND revision.hypothesis_id = hypothesis.hypothesis_id "
+                "JOIN room_detection_evidence AS evidence ON evidence.session_id = hypothesis.session_id "
+                "AND evidence.observation_id = hypothesis.observation_id AND evidence.detection_id = hypothesis.detection_id "
+                "WHERE hypothesis.session_id = ? AND revision.snapshot_version = ? "
+                "AND session.state_version = revision.snapshot_version "
+                "AND revision.authorizes_current_state = 1 AND NOT EXISTS ("
+                "SELECT 1 FROM room_hypothesis_revisions AS later WHERE later.session_id = revision.session_id "
+                "AND later.hypothesis_id = revision.hypothesis_id AND later.revision_no > revision.revision_no) "
+                "ORDER BY hypothesis.hypothesis_id", (session_id, snapshot_version),
+            ).fetchall()
+            return tuple({**dict(row), "bbox_xywh": tuple(json.loads(row["full_frame_bbox_json"]))} for row in rows)
+
+    def poll_perception_inbox(self, path: Path, *, current_snapshot_version: int,
+                             wait_s: float = 0) -> tuple:
+        from .ingest import poll_inbox
+        return poll_inbox(self, path, current_snapshot_version=current_snapshot_version, wait_s=wait_s)
 
     def _require_open(self) -> None:
         if self._closed:

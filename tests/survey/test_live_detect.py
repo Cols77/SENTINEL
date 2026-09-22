@@ -258,3 +258,111 @@ def test_a_find_only_a_crop_made_is_marked_in_the_row_and_the_line():
     row = detect_frame(Tiled(), {"stop": "S", "look_deg": 0, "path": "x.png"})
     assert row["detections"][0]["tile"] == "r1c1"
     assert "1 phone (medium crop)" in summarise("S", 0, "OK", row["detections"])
+
+
+def _correlated_record(tmp_path):
+    from dataclasses import asdict
+    from PIL import Image
+    from sentinel.room.ingest import capture_request
+    path = tmp_path / "correlated.png"
+    Image.new("RGB", (640, 480)).save(path)
+    request = capture_request(
+        {"session_id": "s1", "action_id": "a1", "snapshot_version": 0,
+         "pose_revision_id": "pose1", "requested_model": "pinned-model"},
+        frame_path=path, run_id="RUN", captured_at="2026-09-22T00:00:00+00:00",
+        classes=("computer",),
+    )
+    return {"stop": "NEAR", "look_deg": 0, "path": str(path), "sha256": request.frame_sha256,
+            "captured_at": request.captured_at, "perception_request": asdict(request)}
+
+
+def test_correlated_detection_preserves_contract_and_never_invents_a_score(tmp_path):
+    from sentinel.room.ingest import result_from_dict
+    record = _correlated_record(tmp_path)
+    batch = DetectionBatch(_laptop().detections, "OK", ("high",),
+                           raw={"provider": "fixture", "model": "pinned-model"})
+    row = detect_frame(FakeDetector([batch]), record, classes=("computer",))
+    result = result_from_dict(row["perception_result"])
+    assert result.request.observation_id == record["perception_request"]["observation_id"]
+    assert result.status == "SUCCEEDED" and result.identity_status == "VERIFIED"
+    assert result.provider == "fixture" and result.resolved_model == "pinned-model"
+    assert result.detections[0].raw_score is None and result.detections[0].confidence_band == "high"
+    assert result.detections[0].frame_width_px == 640
+
+
+@pytest.mark.parametrize("exception_name,category", [
+    ("ProviderTimeout", "TIMEOUT"), ("ProviderAuthError", "AUTH"),
+    ("ProviderTransportError", "TRANSPORT"),
+])
+def test_correlated_failure_is_typed_without_leaking_exception_text(tmp_path, exception_name, category):
+    from sentinel.survey import providers
+    row = detect_frame(FakeDetector(error=getattr(providers, exception_name)("api-key-secret")),
+                       _correlated_record(tmp_path))
+    result = row["perception_result"]
+    assert result["status"] == "FAILED" and result["error_category"] == category
+    assert result["resolved_model"] is None and result["identity_status"] == "UNVERIFIED"
+    assert "api-key-secret" not in json.dumps(row)
+
+
+def test_correlated_success_without_provider_identity_fails_closed(tmp_path):
+    row = detect_frame(FakeDetector([_laptop()]), _correlated_record(tmp_path))
+    assert row["perception_result"]["status"] == "FAILED"
+    assert row["perception_result"]["error_category"] == "IDENTITY_UNVERIFIED"
+    assert row["detections"] == []
+
+
+def test_correlated_hash_failure_does_not_call_provider(tmp_path):
+    record = _correlated_record(tmp_path)
+    Path(record["path"]).write_bytes(b"changed")
+    detector = FakeDetector()
+    row = detect_frame(detector, record)
+    assert detector.calls == []
+    assert row["status"] == "DETECTOR_ERROR" and row["error"] == "INVALID_REQUEST"
+
+
+def test_follower_writes_correlated_inbox_and_skips_partial_last_record(tmp_path):
+    from sentinel.room.ingest import result_from_dict
+    record = _correlated_record(tmp_path)
+    frames, inbox, output = tmp_path / "frames.jsonl", tmp_path / "inbox.jsonl", tmp_path / "out.jsonl"
+    frames.write_text(json.dumps(record) + '\n{"partial":', encoding="utf-8")
+    batch = DetectionBatch((), "OK", raw={"provider": "fixture", "model": "pinned-model"})
+    assert follow(frames, output, FakeDetector([batch]), done=lambda: True,
+                  inbox_log=inbox, print_fn=lambda _: None) == 1
+    result = result_from_dict(json.loads(inbox.read_text()))
+    assert result.status == "SUCCEEDED"
+    assert live_detect_script.build_parser().parse_args(["--inbox", str(inbox)]).inbox == inbox
+
+
+def test_producer_assigns_unique_correlation_at_capture(tmp_path):
+    runner = CubeMissionRunner(
+        DryRunClient(), "dry-run", mission=MISSION, site=SITE, run_id="RUN",
+        mission_log=tmp_path / "mission.jsonl", sleep_fn=lambda _: None,
+        correlation_context={"session_id": "s1", "action_id": "a1", "snapshot_version": 0,
+                             "pose_revision_id": "pose1", "requested_model": "pinned-model"},
+    )
+    runner.recorder = FakeRecorder(tmp_path / "frames")
+    assert runner.run(confirm=True).status == "PASS"
+    records = [json.loads(line) for line in (tmp_path / "frames" / FRAMES_LOG_NAME).read_text().splitlines()]
+    requests = [row["perception_request"] for row in records]
+    assert len({request["observation_id"] for request in requests}) == 4
+    assert len({request["frame_id"] for request in requests}) == 4
+    assert all(request["session_id"] == "s1" and request["run_id"] == "RUN" for request in requests)
+
+
+def test_correlated_mismatch_reports_actual_identity_in_the_inbox(tmp_path):
+    from sentinel.room.ingest import append_inbox_result, result_from_dict
+    record = _correlated_record(tmp_path)
+    batch = DetectionBatch((), "OK", raw={"provider": "fixture", "model": "wrong-model"})
+    row = detect_frame(FakeDetector([batch]), record)
+    result = result_from_dict(row["perception_result"])
+    assert result.status == "FAILED" and result.identity_status == "MISMATCH"
+    assert result.resolved_model == "wrong-model" and result.error_category == "IDENTITY_MISMATCH"
+    append_inbox_result(tmp_path / "inbox.jsonl", result)
+
+
+def test_malformed_provider_metadata_still_emits_a_valid_typed_failure(tmp_path):
+    from sentinel.room.ingest import result_from_dict
+    row = detect_frame(FakeDetector([DetectionBatch((), "OK", raw={"provider": None, "model": []})]),
+                       _correlated_record(tmp_path))
+    result = result_from_dict(row["perception_result"])
+    assert result.status == "FAILED" and result.error_category == "SCHEMA"

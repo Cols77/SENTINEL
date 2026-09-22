@@ -234,7 +234,7 @@ class CubeMissionRunner(FlightTestRunner):
                  watchdog_fix_fn: Callable[[], tuple[float, float] | None] | None = None,
                  land_during_move: bool = False,
                  watchdog_poll_interval_s: float = POLL_INTERVAL_S,
-                 coverage=None, **runner_kwargs) -> None:
+                 coverage=None, correlation_context: dict | None = None, **runner_kwargs) -> None:
         if pose_mode not in POSE_MODES:
             raise ValueError(f"pose_mode must be one of {POSE_MODES}, got {pose_mode!r}")
         if pose_mode != "off" and burst_fn is None and (tag_map is None or conn is None):
@@ -244,6 +244,7 @@ class CubeMissionRunner(FlightTestRunner):
         super().__init__(client, mode, minimum_battery, **runner_kwargs)
         self.mission, self.site, self.pose_mode = mission, site, pose_mode
         self.tag_map, self.conn, self.run_id = tag_map, conn, run_id
+        self.correlation_context = dict(correlation_context) if correlation_context is not None else None
         self.mission_log = Path(mission_log)
         self.recorder = FrameRecorder(capture_dir) if capture_dir is not None and mode == "real" else None
         self.burst_fn = burst_fn if burst_fn is not None else self._live_burst
@@ -695,6 +696,14 @@ class CubeMissionRunner(FlightTestRunner):
                 digest = hashlib.sha256(saved_path.read_bytes()).hexdigest()
             record = {"look_deg": offset, "path": path, "sha256": digest,
                       "captured_at": datetime.now(timezone.utc).isoformat()}
+            if path is not None and self.correlation_context is not None:
+                from dataclasses import asdict
+                from sentinel.room.ingest import capture_request
+                from sentinel.survey.live_detect import LIVE_CLASSES
+                record["perception_request"] = asdict(capture_request(
+                    self.correlation_context, frame_path=path, run_id=self.run_id,
+                    captured_at=record["captured_at"], classes=LIVE_CLASSES,
+                ))
             entry["frames"].append(record)
             if path is not None:
                 self._announce_frame(wp.name, record)
@@ -708,8 +717,13 @@ class CubeMissionRunner(FlightTestRunner):
         when a stop ends. A write failure is an alert, never a flight failure."""
         try:
             log = Path(record["path"]).parent / FRAMES_LOG_NAME
-            with log.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps({"stop": stop, "run_id": self.run_id, **record}) + "\n")
+            document = {"stop": stop, "run_id": self.run_id, **record}
+            if self.correlation_context is not None:
+                from sentinel.room.ingest import append_jsonl_record
+                append_jsonl_record(log, document)
+            else:
+                with log.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(document) + "\n")
         except OSError as error:
             self._emit("alert", f"{stop}: frame not announced for live detection ({error})")
 
