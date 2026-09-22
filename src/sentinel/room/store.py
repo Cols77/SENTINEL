@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 import threading
 import time
@@ -18,9 +19,9 @@ _SCHEMA = Path(__file__).with_name("sql") / "schema.sql"
 _MIGRATION_002 = Path(__file__).with_name("sql") / "migration_002_event_insert_guard.sql"
 _MIGRATIONS = ((1, _SCHEMA), (2, _MIGRATION_002))
 # Keys are case-folded and reduced to alphanumeric characters before comparison.
-# Sensitive aliases are rejected as complete keys or compound stems; explicit
-# metadata suffixes stay admissible because they describe a secret rather than
-# carry it (for example, ``authorization_digest`` or ``password_policy``).
+# Sensitive aliases are rejected as complete keys or compound stems.  The only
+# exceptions are the narrowly named metadata entries below; no suffix alone
+# makes a potentially secret-bearing field admissible.
 _SENSITIVE_PAYLOAD_KEY_STEMS = frozenset({
     "accesstoken",
     "apikey",
@@ -36,9 +37,9 @@ _SENSITIVE_PAYLOAD_KEY_STEMS = frozenset({
     "secretkey",
     "xapikey",
 })
-_SAFE_METADATA_SUFFIXES = frozenset({
-    "count", "description", "digest", "format", "hash", "id", "identifier",
-    "kind", "name", "policy", "reference", "refs", "sha256", "source", "status", "type",
+_HEADER_CONTAINER_KEYS = frozenset({"headers", "requestheaders", "responseheaders"})
+_SAFE_METADATA_KEYS = frozenset({
+    "apikeydescription", "credentialreference", "passwordpolicy", "tokencount",
 })
 _OPEN_RETRY_ATTEMPTS = 5
 _OPEN_RETRY_SECONDS = 0.05
@@ -292,6 +293,11 @@ def _reject_forbidden_payload(value: object) -> None:
         if _is_named_header(value):
             raise ForbiddenPayload("event payloads cannot include credential headers")
         for key, child in value.items():
+            normalized = _normalize_payload_key(key)
+            if normalized in _HEADER_CONTAINER_KEYS:
+                raise ForbiddenPayload("event payloads cannot include headers")
+            if _is_safe_metadata_entry(normalized, child):
+                continue
             if _is_forbidden_payload_key(key):
                 raise ForbiddenPayload(f"event payload key {key!r} is forbidden")
             _reject_forbidden_payload(child)
@@ -308,12 +314,20 @@ def _normalize_payload_key(key: object) -> str:
 
 def _is_forbidden_payload_key(key: object) -> bool:
     normalized = _normalize_payload_key(key)
-    if any(normalized.endswith(suffix) for suffix in _SAFE_METADATA_SUFFIXES):
-        return False
     return any(
         normalized == stem or normalized.startswith(stem) or normalized.endswith(stem)
         for stem in _SENSITIVE_PAYLOAD_KEY_STEMS
     )
+
+
+def _is_safe_metadata_entry(normalized_key: str, value: object) -> bool:
+    if normalized_key in _SAFE_METADATA_KEYS:
+        return isinstance(value, (str, int)) and not isinstance(value, bool)
+    return normalized_key == "authorizationdigest" and _is_sha256(value)
+
+
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value) is not None
 
 
 def _is_header_pair(value: tuple[object, ...] | list[object] | set[object] | frozenset[object]) -> bool:

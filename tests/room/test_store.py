@@ -94,6 +94,13 @@ def test_event_rows_are_immutable_and_keys_are_pinned_in_sql(tmp_path):
     {"nested": {"secret-key": "secret"}},
     {"headers": [{"name": "Authorization", "value": "Bearer secret"}]},
     {"headers": [["API-Key", "secret"]]},
+    {"api_key_value_description": "secret"},
+    {"authorization_header_value_digest": "Bearer secret"},
+    {"headers": [{"key": "Authorization", "value": "Bearer secret"}]},
+    {"headers": [{"header": "API-Key", "value": "key-123"}]},
+    {"request_headers": {"trace": "secret"}},
+    {"response_headers": [{"name": "X-Trace", "value": "secret"}]},
+    {"authorization_digest": "not-a-64-character-digest"},
 ])
 def test_payload_boundary_rejects_secrets_and_raw_bytes_without_partial_append(tmp_path, payload):
     store = _store(tmp_path)
@@ -114,7 +121,7 @@ def test_payload_boundary_keeps_safe_descriptive_fields(tmp_path):
         "password_policy": "minimum length 16",
         "token_count": 2,
         "credential_reference": "vault://credential-1",
-        "api_key_value_digest": "b" * 64,
+        "authorization_digest": "b" * 64,
     })
     assert event.state_version == 1
 
