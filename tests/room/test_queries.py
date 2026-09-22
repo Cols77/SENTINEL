@@ -73,6 +73,7 @@ def test_drone_facts_have_exact_source_time_scope_and_uncertainty(room):
     assert fact.evidence_ids == (evidence.event_id,)
     assert fact.observed_at == evidence.payload["observed_at"]
     assert fact.scope == "aircraft:fixture"
+    assert fact.scope_kind == "AIRCRAFT_STATE"
     assert fact.uncertainty == evidence.payload["uncertainty"]
     text = render_answer(facts)
     for value in (fact.fact_id, evidence.event_id, fact.observed_at, fact.scope, fact.uncertainty, "73"):
@@ -97,6 +98,7 @@ def test_observations_are_historical_and_do_not_invent_numeric_confidence(room, 
     assert dict(fact.values)["confidence_band"] == "high"
     assert fact.observed_at == result.request.captured_at
     assert fact.scope == "observation:o1/frame:f1"
+    assert fact.scope_kind == "HISTORICAL_OBSERVATION"
     assert set(fact.evidence_ids) == {"o1", "f1", "d1", outcome.result_id}
     assert "historical" in fact.uncertainty
     assert "VLM_CONFIDENCE_BAND" in render_answer((fact,))
@@ -108,9 +110,11 @@ def test_legacy_reports_keep_lower_bound_uncertain_and_unobservable_semantics(ro
         queries = ReadQueries(room, survey_store=legacy, survey_run_id="run1")
         facts = queries.read(CandidateKind.READ_COUNTS, queries.project("s1"))
         assert len(facts) == 3
-        assert all(f.observed_at == "2026-09-21T12:00:00+00:00" for f in facts)
-        assert all(f.scope == "survey_run:run1; recorded frames only" for f in facts)
-        assert all(f.evidence_ids == (report, frame) for f in facts)
+        assert all(f.observed_at == "UNKNOWN" for f in facts)
+        assert all(f.scope == "survey_run:run1; report frame provenance unknown" for f in facts)
+        assert all(f.scope_kind == "LEGACY_SURVEY_RUN" for f in facts)
+        assert all(f.evidence_ids == (report,) for f in facts)
+        assert frame not in render_answer(facts)
         text = render_answer(facts)
         assert "2 confirmed" in text and "1 uncertain" in text
         assert "3" in text and "single-view lower bound" in text
@@ -121,14 +125,41 @@ def test_legacy_reports_keep_lower_bound_uncertain_and_unobservable_semantics(ro
         legacy.connection.close()
 
 
-def test_no_report_or_no_capture_time_is_missing_evidence(room, tmp_path):
+def test_report_without_linked_frames_has_explicit_unknown_observation_time(room, tmp_path):
     legacy = SurveyStore.open(tmp_path / "survey.sqlite3")
     try:
         legacy.create_run("run1", "count")
-        legacy.add_report("run1", "0 computers", [{"class": "computer", "confirmed": 0,
-                                                   "uncertain": 0, "method": "MERGED_MULTI_VIEW"}])
         queries = ReadQueries(room, survey_store=legacy, survey_run_id="run1")
         assert queries.read(CandidateKind.READ_COUNTS, queries.project("s1")) == ()
+        report = legacy.add_report("run1", "0 computers", [{"class": "computer", "confirmed": 0,
+                                                            "uncertain": 0, "method": "MERGED_MULTI_VIEW"}])
+        fact, = queries.read(CandidateKind.READ_COUNTS, queries.project("s1"))
+        assert fact.observed_at == "UNKNOWN"
+        assert fact.evidence_ids == (report,)
+        assert "observation time unknown" in render_answer((fact,))
+    finally:
+        legacy.connection.close()
+
+
+def test_later_run_frame_cannot_retroactively_change_report_provenance_or_hash(room, tmp_path):
+    legacy, frame, report = survey(tmp_path)
+    try:
+        queries = ReadQueries(room, survey_store=legacy, survey_run_id="run1")
+        before = queries.project("s1")
+        sweep = legacy.add_sweep("run1", "later", 1)
+        later_frame = legacy.add_frame(sweep, stop_index=0, look_deg=0, x_cm=0, y_cm=0, z_cm=0,
+                                      heading_deg=0, position_kind="COMMANDED", artifact_id="later",
+                                      sha256="b" * 64, captured_at="2099-01-01T00:00:00+00:00")
+        after = queries.project("s1")
+        assert before.sources == after.sources
+        assert queries.relevant_hash(CandidateKind.READ_COUNTS, before) == queries.relevant_hash(CandidateKind.READ_COUNTS, after)
+        created = legacy.connection.execute("SELECT created_at FROM reports WHERE report_id = ?", (report,)).fetchone()[0]
+        assert all(f.recorded_at == created and f.observed_at == "UNKNOWN" for f in after.sources)
+        assert all(f.evidence_ids == (report,) for f in after.sources)
+        rendered = render_answer(after.sources)
+        assert frame not in rendered and later_frame not in rendered
+        assert created in rendered and "report recorded at" in rendered
+        assert "2099-01-01" not in rendered
     finally:
         legacy.connection.close()
 
@@ -152,3 +183,21 @@ def test_snapshot_replay_and_audit_events_do_not_change_read_hash(room):
         assert ReadQueries(with_reopened).project("s1") == latest
     finally:
         with_reopened.close()
+
+
+@pytest.mark.parametrize("confirmed,uncertain", [(2, 0), (1, 2)])
+def test_legacy_single_view_lower_bound_includes_confirmed_and_uncertain(room, tmp_path, confirmed, uncertain):
+    legacy, _, _ = survey(tmp_path)
+    try:
+        legacy.add_report("run1", "saved result", [{"class": "person", "confirmed": confirmed,
+                                                   "uncertain": uncertain, "method": "SINGLE_VIEW_LOWER_BOUND"}])
+        queries = ReadQueries(room, survey_store=legacy, survey_run_id="run1")
+        fact, = queries.read(CandidateKind.READ_COUNTS, queries.project("s1"))
+        text = render_answer((fact,))
+        assert f"at least {confirmed + uncertain}" in text
+        assert "single-view lower bound" in text
+        assert dict(fact.values)["confirmed"] == confirmed
+        assert dict(fact.values)["uncertain"] == uncertain
+        assert fact.uncertainty in text
+    finally:
+        legacy.connection.close()

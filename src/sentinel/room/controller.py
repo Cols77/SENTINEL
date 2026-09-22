@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import math
 from typing import Callable, TYPE_CHECKING
 import uuid
@@ -12,7 +12,7 @@ from sentinel.judgment import ChoiceJudge
 
 from .candidates import build_candidates
 from .models import CandidateKind, RoomCandidate, TerminalState
-from .queries import READ_KINDS, ReadFact, ReadQueries, ReadSnapshot, relevant_hash, render_answer
+from .queries import READ_KINDS, ReadFact, ReadQueries, ReadSnapshot, ToolOutcome, relevant_hash, render_answer
 from .store import RoomStore, VersionConflict
 
 if TYPE_CHECKING:
@@ -46,11 +46,18 @@ class RoomController:
     def _append(self, session_id, version, correlation, entries, causation=None):
         return self.store.append_events(session_id=session_id, expected_version=version, events=tuple(
             {"event_type": kind, "payload": data, "correlation_id": correlation,
-             "causation_id": causation, "idempotency_key": f"{correlation}:{kind}"}
-            for kind, data in entries
+             "causation_id": causation, "idempotency_key": f"{correlation}:{index}:{kind}"}
+            for index, (kind, data) in enumerate(entries)
         ))
 
     def _outcome(self, snapshot, candidate_id, kind, digest, code, *, facts=(), terminal=None, refusal=None, answer=None):
+        # Every refusal path, including stale decisions before dispatch, shares
+        # the persisted progress rule. Audit-only version changes are not new
+        # relevant evidence and cannot create an unbounded invalid-choice loop.
+        if refusal is not None and any(o.candidate_id == candidate_id and o.relevant_state_sha256 == digest
+                                       and o.refusal_code == refusal for o in snapshot.outcomes):
+            code = "NO_PROGRESS"
+            terminal = TerminalState.PROVIDER_FAILURE if refusal == "PROVIDER_ERROR" else TerminalState.ESCALATED
         result = {"candidate_id": candidate_id, "kind": kind, "snapshot_version": snapshot.state_version,
                   "relevant_state_sha256": digest, "code": code, "refusal_code": refusal,
                   "facts": [asdict(f) for f in facts], "terminal_state": terminal}
@@ -80,6 +87,38 @@ class RoomController:
         if snapshot.terminal_state:
             return TurnOutcome("TERMINAL", False, (), snapshot.terminal_state)
         correlation = str(uuid.uuid4())
+        try:
+            snapshot, source_events = self._audit_source_failures(snapshot, correlation)
+        except VersionConflict:
+            payload = self._outcome(snapshot, "JEV", "JEV", relevant_hash(CandidateKind.ESCALATE, snapshot),
+                                    "STALE_DECISION", refusal="STALE_DECISION")
+            return self._record(snapshot, correlation, payload)
+        outcome = self._decide(snapshot, correlation)
+        return replace(outcome, event_ids=tuple(e.event_id for e in source_events) + outcome.event_ids)
+
+    def _audit_source_failures(self, snapshot, correlation):
+        entries = []
+        for failure in snapshot.source_failures:
+            digest = relevant_hash(failure.kind, snapshot)
+            if any(o.candidate_id == failure.kind and o.relevant_state_sha256 == digest
+                   and o.refusal_code == "SOURCE_FAILURE" for o in snapshot.outcomes):
+                continue
+            payload = self._outcome(snapshot, failure.kind.value, failure.kind, digest,
+                                    "SOURCE_FAILURE", refusal="SOURCE_FAILURE")
+            payload["error_category"] = failure.error_category
+            entries.append(("ROOM_TOOL_OUTCOME", payload))
+        if not entries:
+            return snapshot, ()
+        events = self._append(snapshot.session_id, snapshot.state_version, correlation + ":sources", entries)
+        outcomes = tuple(ToolOutcome(e.payload["candidate_id"], e.payload["kind"],
+                                     e.payload["relevant_state_sha256"], "SOURCE_FAILURE",
+                                     "SOURCE_FAILURE", event_id=e.event_id) for e in events)
+        return replace(snapshot, state_version=events[-1].state_version,
+                       outcomes=snapshot.outcomes + outcomes,
+                       tool_outcome_revision=snapshot.tool_outcome_revision + len(events)), events
+
+    def _decide(self, snapshot, correlation):
+        session_id = snapshot.session_id
         if snapshot.compile_rejected or snapshot.ledger is None:
             payload = self._outcome(snapshot, "CLARIFY", "CLARIFY", relevant_hash(CandidateKind.CLARIFY, snapshot),
                                     "CLARIFICATION_REQUIRED", terminal=TerminalState.BLOCKED)
@@ -122,11 +161,7 @@ class RoomController:
             return self._record(snapshot, correlation, payload, attempt=attempt)
         if assessment.outcome != "ACCEPTED" or provider_error:
             code = "PROVIDER_ERROR" if provider_error else assessment.outcome
-            repeated = any(o.candidate_id == candidate_id and o.relevant_state_sha256 == digest and o.refusal_code == code
-                           for o in snapshot.outcomes)
-            terminal = (TerminalState.PROVIDER_FAILURE if provider_error else TerminalState.ESCALATED) if repeated else None
-            payload = self._outcome(snapshot, candidate_id, kind, digest, "NO_PROGRESS" if repeated else code,
-                                    refusal=code, terminal=terminal)
+            payload = self._outcome(snapshot, candidate_id, kind, digest, code, refusal=code)
             return self._record(snapshot, correlation, payload, attempt=attempt)
         assert selected is not None
         try:

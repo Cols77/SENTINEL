@@ -20,11 +20,20 @@ def can_answer(snapshot: ReadSnapshot) -> bool:
     for objective in snapshot.ledger.objectives:
         if objective.kind in (GoalKind.FOLLOW, GoalKind.LAND_NEAR) or objective.relation or objective.qualifier:
             return False
-        if objective.terminal_condition not in ("REPORTED", "OBSERVED") or objective.spatial_scope not in ("ROOM", "CURRENT_VIEW"):
+        if objective.terminal_condition not in ("REPORTED", "OBSERVED"):
             return False
         expected = {GoalKind.ANSWER_STATE: CandidateKind.READ_DRONE, GoalKind.COUNT: CandidateKind.READ_COUNTS,
                     GoalKind.FIND_OBSERVE: CandidateKind.READ_OBSERVATIONS}[objective.kind]
-        facts = [f for f in snapshot.facts if f.kind == expected]
+        # Plan 01 has historical session/run evidence, with no provenance that
+        # binds it to a current camera view or a requested subregion. Descriptive
+        # scope text cannot upgrade those facts into current-view observations.
+        scope_kinds = {
+            ("ROOM", CandidateKind.READ_DRONE): "AIRCRAFT_STATE",
+            ("ROOM", CandidateKind.READ_COUNTS): "LEGACY_SURVEY_RUN",
+            ("ROOM", CandidateKind.READ_OBSERVATIONS): "HISTORICAL_OBSERVATION",
+        }
+        scope_kind = scope_kinds.get((objective.spatial_scope, expected))
+        facts = [f for f in snapshot.facts if f.kind == expected and f.scope_kind == scope_kind]
         if not facts:
             return False
         classes = {dict(f.values).get("class", dict(f.values).get("class_name")) for f in facts}

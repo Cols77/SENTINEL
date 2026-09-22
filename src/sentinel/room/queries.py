@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
-from typing import TYPE_CHECKING
+from typing import Literal, TYPE_CHECKING
 
 from .goals import EntityRef, GoalLedger, GoalObjective
 from .models import CandidateKind, GoalKind, GoalStatus, RoomSnapshot, TerminalState
@@ -34,6 +34,8 @@ class ReadFact:
     scope: str
     uncertainty: str
     evidence_ids: tuple[str, ...]
+    recorded_at: str | None = None
+    scope_kind: Literal["UNKNOWN", "AIRCRAFT_STATE", "HISTORICAL_OBSERVATION", "LEGACY_SURVEY_RUN"] = "UNKNOWN"
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,12 @@ class ToolOutcome:
 
 
 @dataclass(frozen=True)
+class SourceFailure:
+    kind: CandidateKind
+    error_category: str
+
+
+@dataclass(frozen=True)
 class ReadSnapshot(RoomSnapshot):
     request_text: str
     ledger: GoalLedger | None
@@ -57,18 +65,24 @@ class ReadSnapshot(RoomSnapshot):
     outcomes: tuple[ToolOutcome, ...]
     terminal_state: TerminalState | None
     compile_rejected: bool
+    source_failures: tuple[SourceFailure, ...] = ()
 
 
-def _fact(kind, values, observed_at, scope, uncertainty, evidence_ids) -> ReadFact:
+def _fact(kind, values, observed_at, scope, uncertainty, evidence_ids, *, recorded_at=None) -> ReadFact:
+    scope_kind = {CandidateKind.READ_DRONE: "AIRCRAFT_STATE",
+                  CandidateKind.READ_OBSERVATIONS: "HISTORICAL_OBSERVATION",
+                  CandidateKind.READ_COUNTS: "LEGACY_SURVEY_RUN"}[kind]
     body = dict(kind=kind, values=tuple(sorted(values.items())), observed_at=observed_at,
-                scope=scope, uncertainty=uncertainty, evidence_ids=tuple(evidence_ids))
+                scope=scope, uncertainty=uncertainty, evidence_ids=tuple(evidence_ids), recorded_at=recorded_at,
+                scope_kind=scope_kind)
     return ReadFact(f"fact:{_sha(body)}", **body)
 
 
 def _restore_fact(body: dict) -> ReadFact:
     return ReadFact(body["fact_id"], CandidateKind(body["kind"]),
                     tuple(tuple(pair) for pair in body["values"]), body["observed_at"],
-                    body["scope"], body["uncertainty"], tuple(body["evidence_ids"]))
+                    body["scope"], body["uncertainty"], tuple(body["evidence_ids"]), body.get("recorded_at"),
+                    body.get("scope_kind", "UNKNOWN"))
 
 
 def _ledger(body: dict) -> GoalLedger:
@@ -85,11 +99,14 @@ def _ledger(body: dict) -> GoalLedger:
 def relevant_hash(kind: CandidateKind, snapshot: ReadSnapshot) -> str:
     """Audit versions and refusals are intentionally absent from relevant state."""
     sources = snapshot.sources
+    failures = snapshot.source_failures
     if kind in READ_KINDS:
         sources = tuple(f for f in sources if f.kind == kind)
+        failures = tuple(f for f in failures if f.kind == kind)
     return _sha({"kind": kind, "goal_revision": snapshot.goal_revision,
                  "ledger": asdict(snapshot.ledger) if snapshot.ledger else None,
                  "sources": [asdict(f) for f in sources],
+                 "source_failures": [asdict(f) for f in failures],
                  "facts": [] if kind in READ_KINDS else [asdict(f) for f in snapshot.facts]})
 
 
@@ -113,6 +130,7 @@ class ReadQueries:
     def _capture(self, session_id: str):
         # One read transaction pins room events and ingestion tables even when
         # another RoomStore connection appends concurrently.
+        failures = []
         with self.store._lock:
             self.store._require_open()
             connection = self.store.connection
@@ -123,15 +141,19 @@ class ReadQueries:
                 if session is None:
                     raise KeyError(session_id)
                 events = self.store.events(session_id)
-                observations = connection.execute(
-                    "SELECT o.observation_id, o.frame_id, o.captured_at, r.result_id, "
-                    "d.detection_id, d.class_name, d.confidence_band, d.raw_score, d.score_kind "
-                    "FROM room_observations o JOIN room_perception_results r "
-                    "ON r.session_id = o.session_id AND r.observation_id = o.observation_id "
-                    "JOIN room_detection_evidence d ON d.result_id = r.result_id "
-                    "WHERE o.session_id = ? AND r.status = 'SUCCEEDED' AND r.identity_status = 'VERIFIED' "
-                    "ORDER BY o.captured_at, o.observation_id, d.detection_id", (session_id,),
-                ).fetchall()
+                try:
+                    observations = connection.execute(
+                        "SELECT o.observation_id, o.frame_id, o.captured_at, r.result_id, "
+                        "d.detection_id, d.class_name, d.confidence_band, d.raw_score, d.score_kind "
+                        "FROM room_observations o JOIN room_perception_results r "
+                        "ON r.session_id = o.session_id AND r.observation_id = o.observation_id "
+                        "JOIN room_detection_evidence d ON d.result_id = r.result_id "
+                        "WHERE o.session_id = ? AND r.status = 'SUCCEEDED' AND r.identity_status = 'VERIFIED' "
+                        "ORDER BY o.captured_at, o.observation_id, d.detection_id", (session_id,),
+                    ).fetchall()
+                except Exception as exc:
+                    observations = ()
+                    failures.append(SourceFailure(CandidateKind.READ_OBSERVATIONS, type(exc).__name__))
                 connection.commit()
             except Exception:
                 connection.rollback()
@@ -139,62 +161,68 @@ class ReadQueries:
         facts = []
         drones = [e for e in events if e.event_type == "DRONE_STATE_RECORDED"]
         if drones:
-            event = drones[-1]
-            data = event.payload
-            values = data.get("state", {})
-            allowed = {"battery_percent", "flight_state", "x_cm", "y_cm", "z_cm", "heading_deg"}
-            values = {key: value for key, value in values.items() if key in allowed}
-            if values and all(data.get(key) for key in ("observed_at", "scope", "uncertainty")):
-                facts.append(_fact(CandidateKind.READ_DRONE, values, data["observed_at"], data["scope"],
-                                   data["uncertainty"], (event.event_id,)))
+            try:
+                event = drones[-1]
+                data = event.payload
+                values = data.get("state", {})
+                allowed = {"battery_percent", "flight_state", "x_cm", "y_cm", "z_cm", "heading_deg"}
+                values = {key: value for key, value in values.items() if key in allowed}
+                if values and all(data.get(key) for key in ("observed_at", "scope", "uncertainty")):
+                    facts.append(_fact(CandidateKind.READ_DRONE, values, data["observed_at"], data["scope"],
+                                       data["uncertainty"], (event.event_id,)))
+            except Exception as exc:
+                failures.append(SourceFailure(CandidateKind.READ_DRONE, type(exc).__name__))
         for row in observations:
             facts.append(_fact(CandidateKind.READ_OBSERVATIONS,
                                {key: row[key] for key in ("class_name", "confidence_band", "raw_score", "score_kind")},
                                row["captured_at"], f"observation:{row['observation_id']}/frame:{row['frame_id']}",
                                "historical detection; confidence band is not a probability; current presence unknown",
                                (row["observation_id"], row["frame_id"], row["detection_id"], row["result_id"])))
-        return dict(session), events, tuple(facts)
+        return dict(session), events, tuple(facts), tuple(failures)
 
     def _counts(self) -> tuple[ReadFact, ...]:
         if self.survey_store is None:
             return ()
         connection = self.survey_store.connection
-        # SurveyStore owns writes and uses a separate connection. Pin its report
-        # and frame provenance together without mutating the legacy schema.
-        connection.execute("BEGIN")
-        try:
-            report = connection.execute(
-                "SELECT * FROM reports WHERE run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
-                (self.survey_run_id,),
-            ).fetchone()
-            frames = connection.execute(
-                "SELECT f.frame_id, f.captured_at FROM frames f JOIN sweeps s ON s.sweep_id = f.sweep_id "
-                "WHERE s.run_id = ? ORDER BY f.captured_at, f.frame_id", (self.survey_run_id,),
-            ).fetchall()
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        if report is None or not frames or any(not row["captured_at"] for row in frames):
+        # Legacy reports contain no frame association. Current run frames may
+        # have been added after this report; neither their IDs nor capture times
+        # can be attributed to its counts. The report's own creation time is
+        # provenance, explicitly distinct from unknown observation time.
+        report = connection.execute(
+            "SELECT * FROM reports WHERE run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (self.survey_run_id,),
+        ).fetchone()
+        if report is None:
             return ()
-        times = sorted({row["captured_at"] for row in frames})
-        observed = times[0] if len(times) == 1 else f"{times[0]} through {times[-1]}"
-        refs = (report["report_id"], *(row["frame_id"] for row in frames))
+        refs = (report["report_id"],)
         facts = []
-        for entry in json.loads(report["class_counts_json"]):
+        entries = json.loads(report["class_counts_json"])
+        if not isinstance(entries, list):
+            raise ValueError("legacy counts must be a list")
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("class"), str):
+                raise ValueError("legacy count entry is malformed")
             if entry.get("method") not in ("SINGLE_VIEW_LOWER_BOUND", "MERGED_MULTI_VIEW", "NOT_OBSERVABLE"):
-                continue
+                raise ValueError("legacy count method is unsupported")
             if any(type(entry.get(key)) is not int or entry[key] < 0 for key in ("confirmed", "uncertain")):
-                continue
+                raise ValueError("legacy count values are malformed")
             facts.append(_fact(CandidateKind.READ_COUNTS,
                                {key: entry[key] for key in ("class", "confirmed", "uncertain", "method")},
-                               observed, f"survey_run:{self.survey_run_id}; recorded frames only",
-                               f"{entry['method']}; legacy report; full-room coverage and current presence unknown", refs))
+                               "UNKNOWN", f"survey_run:{self.survey_run_id}; report frame provenance unknown",
+                               f"{entry['method']}; legacy report; observation time, frame provenance, full-room coverage and current presence unknown",
+                               refs, recorded_at=report["created_at"]))
         return tuple(facts)
 
+    def _sources(self, session_id: str):
+        session, events, sources, failures = self._capture(session_id)
+        try:
+            sources += self._counts()
+        except Exception as exc:
+            failures += (SourceFailure(CandidateKind.READ_COUNTS, type(exc).__name__),)
+        return session, events, sources, failures
+
     def project(self, session_id: str) -> ReadSnapshot:
-        session, events, sources = self._capture(session_id)
-        sources += self._counts()
+        session, events, sources, failures = self._sources(session_id)
         ledger = None
         goal_revision = 0
         rejected = False
@@ -212,7 +240,8 @@ class ReadQueries:
                     TerminalState(data["terminal_state"]) if data.get("terminal_state") else None,
                     event.event_id,
                 ))
-        drone_events = [e for e in events if e.event_type == "DRONE_STATE_RECORDED"]
+        drone_events = [e for e in events if e.event_type == "DRONE_STATE_RECORDED"
+                        and isinstance(e.payload.get("state"), dict)]
         snapshot = ReadSnapshot(
             session_id=session_id, state_version=session["state_version"], goal_revision=goal_revision,
             pose_revision=sum(any(k in e.payload.get("state", {}) for k in ("x_cm", "y_cm", "z_cm", "heading_deg")) for e in drone_events),
@@ -221,7 +250,7 @@ class ReadQueries:
             target_revision=0, landing_zone_revision=0, tool_outcome_revision=len(outcomes),
             request_text=session["request_text"], ledger=ledger, sources=sources, facts=(),
             outcomes=tuple(outcomes), terminal_state=next((o.terminal_state for o in reversed(outcomes) if o.terminal_state), None),
-            compile_rejected=rejected,
+            compile_rejected=rejected, source_failures=failures,
         )
         facts = {}
         for outcome in outcomes:
@@ -237,8 +266,8 @@ class ReadQueries:
         return tuple(f for f in snapshot.sources if f.kind == kind)
 
     def evidence_is_current(self, snapshot: ReadSnapshot, kind: CandidateKind) -> bool:
-        _, _, sources = self._capture(snapshot.session_id)
-        current = replace(snapshot, sources=sources + self._counts())
+        _, _, sources, failures = self._sources(snapshot.session_id)
+        current = replace(snapshot, sources=sources, source_failures=failures)
         return relevant_hash(kind, current) == relevant_hash(kind, snapshot)
 
 
@@ -254,11 +283,15 @@ def render_answer(facts: tuple[ReadFact, ...]) -> str:
             if method == "NOT_OBSERVABLE":
                 body = f"{name}: not observable"
             elif method == "SINGLE_VIEW_LOWER_BOUND":
-                body = f"{name}: {values['uncertain']} observed, single-view lower bound"
+                lower_bound = values["confirmed"] + values["uncertain"]
+                body = f"{name}: at least {lower_bound} observed, single-view lower bound"
             else:
                 body = f"{name}: {values['confirmed']} confirmed; {values['uncertain']} uncertain"
         else:
             body = "; ".join(f"{key}={value}" for key, value in fact.values)
-        lines.append(f"{body}. Observed at {fact.observed_at}; scope: {fact.scope}; uncertainty: {fact.uncertainty}. "
+        timing = "observation time unknown" if fact.observed_at == "UNKNOWN" else f"Observed at {fact.observed_at}"
+        if fact.recorded_at is not None:
+            timing += f"; report recorded at {fact.recorded_at}"
+        lines.append(f"{body}. {timing}; scope: {fact.scope}; uncertainty: {fact.uncertainty}. "
                      f"[fact={fact.fact_id}; evidence={', '.join(fact.evidence_ids)}]")
     return "\n".join(lines)

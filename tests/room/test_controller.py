@@ -303,3 +303,131 @@ def test_source_revalidation_failure_is_a_typed_tool_outcome(room):
     assert len(result.event_ids) == 2
     assert controller.run_until_terminal("s1") == TerminalState.BLOCKED
     assert judge.calls[1][0]["outcomes"][-1]["code"] == "TOOL_FAILURE"
+
+
+@pytest.mark.parametrize("kind,read", [(GoalKind.COUNT, "READ_COUNTS"),
+                                      (GoalKind.FIND_OBSERVE, "READ_OBSERVATIONS")])
+def test_current_view_cannot_be_completed_from_all_run_or_historical_evidence(room, tmp_path, kind, read):
+    goal(room, kind, scope="CURRENT_VIEW")
+    legacy = None
+    kwargs = {}
+    if kind == GoalKind.COUNT:
+        legacy, _, _ = survey(tmp_path)
+        kwargs = {"survey_store": legacy, "survey_run_id": "run1"}
+    else:
+        version = room.session_version("s1")
+        ingest_result(room, sample(tmp_path, snapshot=version), current_snapshot_version=version)
+    try:
+        judge = Judge(read, "CLARIFY")
+        controller = RoomController(room, judge, **kwargs)
+        assert controller.step("s1").accepted
+        assert controller.run_until_terminal("s1") == TerminalState.BLOCKED
+        assert judge.calls[1][0]["facts"]
+        assert "ANSWER" not in judge.calls[1][1]
+        assert not any(e.payload.get("code") == "ANSWERED" for e in room.events("s1"))
+    finally:
+        if legacy:
+            legacy.connection.close()
+
+
+@pytest.mark.parametrize("failure", ["malformed_json", "malformed_entry", "malformed_count", "closed_source"])
+def test_optional_source_projection_failure_is_audited_without_losing_drone_facts(room, tmp_path, failure):
+    goal(room)
+    drone(room)
+    legacy, _, report = survey(tmp_path)
+    if failure != "closed_source":
+        malformed = {"malformed_json": "{", "malformed_entry": "[null]",
+                     "malformed_count": '[{"class":"person","confirmed":-2,"uncertain":0,"method":"SINGLE_VIEW_LOWER_BOUND"}]'}[failure]
+        with legacy.connection:
+            legacy.connection.execute("UPDATE reports SET class_counts_json = ? WHERE report_id = ?", (malformed, report))
+    else:
+        legacy.connection.close()
+    try:
+        judge = Judge("READ_DRONE", "ANSWER")
+        controller = RoomController(room, judge, survey_store=legacy, survey_run_id="run1")
+        assert controller.run_until_terminal("s1") == TerminalState.COMPLETED
+        failures = [e for e in room.events("s1") if e.payload.get("code") == "SOURCE_FAILURE"]
+        assert len(failures) == 1
+        assert failures[0].payload["kind"] == "READ_COUNTS"
+        assert failures[0].payload["refusal_code"] == "SOURCE_FAILURE"
+        assert judge.calls[0][0]["outcomes"][-1]["code"] == "SOURCE_FAILURE"
+        assert "READ_COUNTS" not in judge.calls[0][1]
+        assert "73" in room.events("s1")[-1].payload["answer"]
+    finally:
+        if failure != "closed_source":
+            legacy.connection.close()
+
+
+@pytest.mark.parametrize("malformed_state", [["invalid state"], None, 7])
+def test_malformed_drone_source_and_unavailable_count_source_can_clarify(room, tmp_path, malformed_state):
+    goal(room)
+    append(room, "DRONE_STATE_RECORDED", {"state": malformed_state, "observed_at": "now"})
+    legacy, _, _ = survey(tmp_path)
+    legacy.connection.close()
+    judge = Judge("CLARIFY")
+    controller = RoomController(room, judge, survey_store=legacy, survey_run_id="run1")
+    assert controller.run_until_terminal("s1") == TerminalState.BLOCKED
+    failures = [o for o in judge.calls[0][0]["outcomes"] if o["code"] == "SOURCE_FAILURE"]
+    assert {o["kind"] for o in failures} == {"READ_DRONE", "READ_COUNTS"}
+    assert len([e for e in room.events("s1") if e.payload.get("code") == "SOURCE_FAILURE"]) == 2
+
+
+def test_repaired_optional_source_changes_hash_and_becomes_readable_again(room, tmp_path):
+    goal(room, GoalKind.COUNT)
+    legacy, _, report = survey(tmp_path)
+    original = legacy.connection.execute("SELECT class_counts_json FROM reports WHERE report_id = ?", (report,)).fetchone()[0]
+    with legacy.connection:
+        legacy.connection.execute("UPDATE reports SET class_counts_json = ? WHERE report_id = ?", ("null", report))
+    try:
+        judge = Judge("READ_DRONE", "READ_COUNTS", "ANSWER")
+        controller = RoomController(room, judge, survey_store=legacy, survey_run_id="run1")
+        controller.step("s1")
+        assert "READ_COUNTS" not in judge.calls[0][1]
+        with legacy.connection:
+            legacy.connection.execute("UPDATE reports SET class_counts_json = ? WHERE report_id = ?", (original, report))
+        assert controller.run_until_terminal("s1") == TerminalState.COMPLETED
+        assert "READ_COUNTS" in judge.calls[1][1]
+    finally:
+        legacy.connection.close()
+
+
+def test_unavailable_observation_table_preserves_drone_read_and_audits_failure(room):
+    import sqlite3
+    goal(room)
+    drone(room)
+    def authorize(action, table, column, database, trigger):
+        if action == sqlite3.SQLITE_READ and table == "room_detection_evidence":
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+    room.connection.set_authorizer(authorize)
+    judge = Judge("READ_DRONE", "ANSWER")
+    try:
+        assert RoomController(room, judge).run_until_terminal("s1") == TerminalState.COMPLETED
+        failure, = [o for o in judge.calls[0][0]["outcomes"] if o["code"] == "SOURCE_FAILURE"]
+        assert failure["kind"] == "READ_OBSERVATIONS"
+        assert "READ_OBSERVATIONS" not in judge.calls[0][1]
+    finally:
+        room.connection.set_authorizer(None)
+
+
+@pytest.mark.parametrize("labels", [("ILLEGAL", "ILLEGAL"), ("ILLEGAL_ONE", "ILLEGAL_TWO")])
+def test_stale_illegal_choices_with_only_unrelated_events_terminate_on_repeated_refusal(room, labels):
+    goal(room)
+    def choose(label):
+        def concurrent(state, criteria):
+            append(room, "UNRELATED_AUDIT_EVENT", {"message": "no evidence changed"})
+            return {"value": label, "probabilities": {label: .99}}
+        return concurrent
+    judge = Judge(*(choose(label) for label in labels))
+    controller = RoomController(room, judge)
+    first = controller.step("s1")
+    second = controller.step("s1")
+    assert not first.accepted and first.terminal_state is None
+    assert not second.accepted and second.terminal_state == TerminalState.ESCALATED
+    assert len(judge.calls) == 2
+    refusals = [e.payload for e in room.events("s1") if e.event_type == "ROOM_TOOL_OUTCOME"]
+    assert [o["code"] for o in refusals] == ["STALE_DECISION", "NO_PROGRESS"]
+    assert len({o["relevant_state_sha256"] for o in refusals}) == 1
+    assert all(o["candidate_id"] == "JEV" and o["refusal_code"] == "STALE_DECISION" for o in refusals)
+    assert controller.run_until_terminal("s1") == TerminalState.ESCALATED
+    assert len(judge.calls) == 2
