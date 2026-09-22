@@ -802,6 +802,9 @@ class CubeMissionRunner(FlightTestRunner):
                      "arrival_error_cm": entry.get("arrival_error_cm"),
                      "tolerance_cm": entry.get("tolerance_cm", TOLERANCE_CM),
                      "tolerance_verdict": entry.get("tolerance", "UNKNOWN") or "UNKNOWN",
+                     "tag_height_cm": entry.get("tag_height_cm"),
+                     "height_cm": entry.get("height_cm"),
+                     "vertical_mismatch_cm": entry.get("vertical_mismatch_cm"),
                      "return_error_cm": entry.get("return_error_cm")}))
 
     def _fly_sequence(self) -> None:

@@ -9,3 +9,9 @@ test('strict public contract rejects unknown and cross-run fields',()=>{
   const s=structuredClone(fixture);mutate(s);assert.throws(()=>validateMission(s));
  }
 });
+
+test('strict public contract rejects a frame when the route has no referenced stop',()=>{
+ const s=structuredClone(fixture);
+ s.evidence.frames.push({id:'f-missing',stop_id:'missing-stop',captured_at:null,commanded_pose:null,measured_pose:null,analysis:'FAILED',detection_status:'FAILED',detection_latency_ms:null,detection_error:'gap',detection_count:null,evidence:'MISSING',gap_reason:'gap',failure:'gap',merge_eligible:false,artifact_id:null,sha256:null,width:null,height:null,source_kind:'SIMULATED'});
+ assert.throws(()=>validateMission(s));
+});

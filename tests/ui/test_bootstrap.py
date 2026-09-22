@@ -17,7 +17,7 @@ def live_config(tmp_path, monkeypatch):
     store=SurveyStore.open(tmp_path/'survey.sqlite')
     record_consent(store,'lab','2026-09-21','operator');store.connection.close()
     return bootstrap.SessionConfig(data_dir=tmp_path,mode='LIVE',confirm=True,
-        site_path=Path('docs/wp5-flight1-site.json'),tag_map_path=Path('calibration/tag-map-calibrated.json'),
+        site_path=Path('docs/wp5-flight1-site.json'),tag_map_path=Path('docs/wp5-flight3-map.json'),
         pose_db=tmp_path/'pose.sqlite',detector_name='gemini',provider_profile=profile_path,
         authorise_paid_calls=True,
         location='lab',consent_date='2026-09-21',local_ip='192.168.10.2',surface_z_cm=50,start_x_cm=250,start_y_cm=190)
@@ -50,6 +50,7 @@ def test_live_composition_no_flight_and_restart_requires_recovery(live_config,mo
         assert snapshot['source']['kind']=='LIVE'
         assert 'test-secret' not in json.dumps(snapshot)
         assert service.adapters.flight.__class__.__name__=='LiveFlight'
+        assert service.adapters.flight.coverage is not None
         assert service.safety.sender is not None
         assert not service.worker.active
         assert all('takeoff' not in c.commands for c in clients)
@@ -108,3 +109,8 @@ def test_rehearsal_restart_cannot_acknowledge_an_orphaned_offer(tmp_path):
         assert restarted.read_snapshot('mission')['run']['status']=='ABORTED'
         assert restarted.approval.current('mission') is None
     finally:restarted.close()
+def test_live_coverage_mismatch_is_startup_error_before_flight(live_config, monkeypatch):
+    from sentinel.ui import live
+    monkeypatch.setattr(live, 'check_tag_map_matches_site', lambda *args: (_ for _ in ()).throw(ValueError('mismatch')))
+    with pytest.raises(bootstrap.StartupError, match='INVALID_LIVE_SITE_OR_COVERAGE'):
+        live.validate_config(live_config)

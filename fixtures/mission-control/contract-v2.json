@@ -108,5 +108,10 @@
   "events": {
     "watermark": 0
   },
-  "legal_actions": []
+  "legal_actions": [],
+  "decision": {
+    "mode": "F",
+    "source": "RULES",
+    "escalation_reason": null
+  }
 }

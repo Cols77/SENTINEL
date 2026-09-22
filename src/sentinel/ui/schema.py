@@ -22,13 +22,14 @@ STOP = obj(
     return_leg=B, arrival_error_cm=nullable(U), tolerance_cm=nullable(U),
     tolerance_verdict=enum('INSIDE','OUTER','OUTSIDE','UNKNOWN'))
 ROUTE_STOP = obj(
-    stop_id=ID, x=N, y=N,
+    stop_id=ID, x=N, y=N, status=enum('PLANNED','ACTIVE','COMPLETED','FAILED','ABORTED','UNKNOWN'),
     coverage=enum('OK','MARGINAL','BLIND'), coverage_reason=S,
     predicted_tag_count=nullable(I), predicted_fix_error_cm=nullable(U),
     leg_speed_cm_s=nullable(U), trim_budget=I, trim_progress=I,
     return_leg=B, arrival_error_cm=nullable(U), tolerance_cm=nullable(U),
     tolerance_verdict=enum('INSIDE','OUTER','OUTSIDE','UNKNOWN'))
-PROPOSER = obj(mode=enum('F','E','J'), source=S, escalation_reason=nullable(S))
+PROVENANCE = obj(mode=enum('F','E','J'), source=enum('RULES','JUDGE','AGENT'), escalation_reason=nullable(S))
+PROPOSER = PROVENANCE
 PROPOSAL = obj(id=ID, sha256=ID, option_id=ID, stops=arr(STOP), range_m=U, altitude_m=U, extent_m=U, duration_s=U, resolvable_classes=arr(ID), proposer=PROPOSER, justification=S, escalation_reason=nullable(S), guardrail_disagreements=arr(S), target_object_ids=arr(ID), eligibility=obj(consent=nullable(B),envelope=nullable(B),preflight=nullable(B),current=B), disabled_reasons=arr(S), run_id=ID, decision_version=I, correlation_id=ID)
 FRAME = obj(
     id=ID, stop_id=ID, captured_at=nullable(S), commanded_pose=nullable(POSE),
@@ -48,6 +49,7 @@ POSE_EVIDENCE = obj(run_id=ID,report_id=ID,artifact_id=ID,sha256=ID,captured_at=
 REPORT_POSE = obj(run_id=ID,report_id=ID,observed_at=S,source_kind=enum('SIMULATED','REPLAYED','LIVE'),point=obj(x=N,y=N),heading_deg=N,altitude_m=nullable(N),method=S,tag_observations=arr(obj(tag_id=I,zone_id=ID,distance_m=U,reprojection_error_px=U)),reprojection_error_px=U)
 SCHEMA = obj(
  schema_version={'const':3},
+ decision=PROVENANCE,
  session=obj(id=ID,mode=enum('REHEARSAL','LIVE'),startup_summary=obj(site_id=nullable(ID),pose_mode=enum('off','passive','reanchor'),detector_name=S)),
  run=obj(id=ID,request_text=S,status=enum('ACTIVE','COMPLETE','ABORTED','RECOVERY_REQUIRED'),phase=enum('REQUEST','PROPOSAL','APPROVAL','FLIGHT','ANALYSIS','REVIEW','REPORT'),version=I,decision_version=I,updated_at=S),
  source=obj(mode=enum('REHEARSAL','LIVE'),kind=enum('SIMULATED','REPLAYED','LIVE'),freshness=enum('FRESH','STALE')),

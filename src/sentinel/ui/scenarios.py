@@ -29,6 +29,7 @@ class ScenarioAdapters:
     pose_feed: object = None
     location: str | None = None
     consent_date: str | None = None
+    provenance_mode: str = 'F'
 
 class ScenarioFlight:
     def __init__(self, frames, artifacts):
@@ -57,7 +58,8 @@ class ScenarioFlight:
                              predicted_tag_count=1,predicted_fix_error_cm=0.0,
                              leg_speed_cm_s=20,trim_budget=0,trim_progress=0,
                              return_leg=False,arrival_error_cm=0.0,tolerance_cm=15.0,
-                             tolerance_verdict='INSIDE')
+                             tolerance_verdict='INSIDE', tag_height_cm=None,
+                             height_cm=frame.z_cm, vertical_mismatch_cm=None)
                 notify(self.observer, StopProgressEvent(run_id=self.run_id, stop_index=frame.stop_index,
                                                         stop=f"{option.option_id}_{frame.stop_index}",
                                                         option_id=option.option_id,

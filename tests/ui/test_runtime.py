@@ -5,7 +5,7 @@ from sentinel.ui.approval import ApprovalBroker
 from sentinel.ui.store import UIStore
 from sentinel.ui.safety import SafetyRegistry
 from sentinel.ui.mission_worker import MissionWorker
-from sentinel.mission_observer import AbortEvent, PublicEscalationEvent
+from sentinel.mission_observer import AbortEvent, PublicEscalationEvent, StopProgressEvent
 
 
 def test_clean_run_waits_for_operator_then_counts_real_artifacts(tmp_path):
@@ -59,3 +59,19 @@ def test_runtime_journals_explicit_abort_and_escalation_events(tmp_path):
     observer.observe(AbortEvent(run_id='r', stage='FLIGHT', reason='controlled landing'))
     events=store.read_events('r', 0, 10)
     assert [event['type'] for event in events] == ['ESCALATION', 'RUN_ABORTED']
+
+
+def test_runtime_retains_allowlisted_vertical_facts_and_durable_escalation(tmp_path):
+    store=UIStore.open(tmp_path/'ui.sqlite');store.ensure_run('s','r','REHEARSAL')
+    adapters=build_rehearsal_adapters('fixtures/mission-control/clean-computer.json',tmp_path/'images')
+    runtime=SurveyRuntime(tmp_path/'survey.sqlite',store,adapters,ApprovalBroker(store),SafetyRegistry())
+    observer=RuntimeMissionObserver(runtime,'r')
+    observer.observe(StopProgressEvent(run_id='r', stop='GRID_0', stop_index=0, option_id='GRID', status='ACTIVE', payload={
+        'tag_height_cm': 132.0, 'height_cm': 130.0, 'vertical_mismatch_cm': 2.0,
+        'private_path':'must not persist'}))
+    observer.observe(PublicEscalationEvent(run_id='r', point='PROPOSAL', reason='judge unavailable'))
+    state=runtime.state['r']
+    assert state['stops']['GRID:0']['tag_height_cm'] == 132.0
+    assert 'private_path' not in state['stops']['GRID:0']
+    assert state['decision']['source'] == 'RULES'
+    assert state['decision']['escalation_reason'] == 'judge unavailable'

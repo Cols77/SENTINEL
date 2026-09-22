@@ -98,6 +98,13 @@ class SurveyRuntime:
                         'tolerance', 'tolerance_verdict', 'return_error_cm'):
                 if key in source:
                     payload['stop'][key] = source[key]
+            for key in ('tag_height_cm', 'height_cm', 'vertical_mismatch_cm'):
+                if key in source:
+                    payload['stop'][key] = source[key]
+            payload['status'] = {'ARRIVED':'ACTIVE','PASS':'COMPLETED',
+                                 'FLOWN':'COMPLETED','FAILED':'FAILED',
+                                 'ABORTED':'ABORTED','ABORTED_EN_ROUTE':'ABORTED'}.get(
+                                     event.status, event.status or 'UNKNOWN')
         elif isinstance(event, FrameCapturedEvent):
             payload['refs'] = [event.artifact_id] if event.artifact_id else []
         elif isinstance(event, DetectorResultEvent):
@@ -112,6 +119,8 @@ class SurveyRuntime:
             if isinstance(event, StopProgressEvent):
                 state['stop']=payload['stop']
                 state.setdefault('stops', {})[f"{payload['stop']['option_id']}:{payload['stop']['stop_index']}"] = payload['stop']
+                if any(payload['stop'].get(k) is not None for k in ('tag_height_cm','height_cm','vertical_mismatch_cm')):
+                    state['vertical'] = {k: payload['stop'].get(k) for k in ('tag_height_cm','height_cm','vertical_mismatch_cm')}
             elif isinstance(event, FrameCapturedEvent) and event.frame_id:
                 state.setdefault('frame_telemetry', {}).setdefault(event.frame_id, {}).update(status='CAPTURED')
             elif isinstance(event, DetectorResultEvent) and event.frame_id:
@@ -121,6 +130,8 @@ class SurveyRuntime:
                                  ('DETECTING' if status == 'DETECTING' else
                                   ('CAPTURED' if status == 'CAPTURED' else 'FAILED')))
                 telemetry.update(status=public_status, latency_ms=event.latency_ms, error=event.error, count=len(event.detections))
+            elif isinstance(event, PublicEscalationEvent):
+                state['decision'] = dict(state.get('decision', self._decision_defaults()), escalation_reason=event.reason)
             self.store.append_event(run_id,event_type,payload)
 
     @staticmethod
@@ -142,7 +153,7 @@ class SurveyRuntime:
         if self.registry.emergency.is_set():
             raise EmergencyAborted('SESSION_EMERGENCY')
         with self.lock:
-            self.state[run_id]=dict(request_text=request['request_text'],phase='PROPOSAL',updated_at=now())
+            self.state[run_id]=dict(request_text=request['request_text'],phase='PROPOSAL',updated_at=now(),decision=self._decision_defaults())
         store=SurveyStore.open(self.survey_db)
         flight=self.adapters.flight
         observer = RuntimeMissionObserver(self, run_id)
@@ -186,6 +197,12 @@ class SurveyRuntime:
                     conn.execute('UPDATE ui_runs SET status=?,decision_version=decision_version+1 WHERE run_id=?', ('COMPLETE' if status=='REPORTED' else 'ABORTED',run_id))
                 self.store.append_event(run_id,'RUN_TERMINAL',{'summary':status})
         return outcome
+
+    def _decision_defaults(self):
+        mode = getattr(self.adapters, 'provenance_mode', 'F')
+        if mode not in {'F','E','J'}:
+            raise ValueError('invalid configured provenance mode')
+        return {'mode': mode, 'source': {'F':'RULES','E':'AGENT','J':'JUDGE'}[mode], 'escalation_reason': None}
 
     def facts(self, run_id):
         store=SurveyStore.open(self.survey_db)

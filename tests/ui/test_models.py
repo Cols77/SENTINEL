@@ -26,7 +26,7 @@ def test_schema_v3_snapshot_exposes_operational_stop_and_detection_facts():
 
     # A populated stop must carry explicit coverage and arrival metadata rather
     # than leaving the browser to infer completion from animation.
-    from sentinel.ui.projection import stop_view
+    from sentinel.ui.projection import stop_view, vertical_consistency_view
     class Option:
         option_id = 'OPT'
         range_cm = viewed_width_cm = estimated_seconds = 100
@@ -39,6 +39,11 @@ def test_schema_v3_snapshot_exposes_operational_stop_and_detection_facts():
                 'trim_progress', 'return_leg', 'arrival_error_cm',
                 'tolerance_cm', 'tolerance_verdict'):
         assert key in row
+    assert stop_view(Option(), 0, operational={'status':'FAILED'})['status'] == 'FAILED'
+    assert vertical_consistency_view(None)['status'] == 'UNAVAILABLE'
+    assert vertical_consistency_view({'tag_height_cm':100,'height_cm':100,'vertical_mismatch_cm':10})['status'] == 'CONSISTENT'
+    assert vertical_consistency_view({'tag_height_cm':100,'height_cm':100,'vertical_mismatch_cm':20})['status'] == 'MARGINAL'
+    assert vertical_consistency_view({'tag_height_cm':100,'height_cm':100,'vertical_mismatch_cm':30})['status'] == 'INCONSISTENT'
 
 
 def test_schema_v3_rejects_cross_run_and_unresolved_operational_references():
@@ -51,8 +56,16 @@ def test_schema_v3_rejects_cross_run_and_unresolved_operational_references():
         'gap_reason': 'provider unavailable', 'failure': None,
         'merge_eligible': False, 'artifact_id': None, 'sha256': None,
         'width': None, 'height': None, 'source_kind': 'SIMULATED'})
-    assert validate_snapshot(snapshot) == snapshot
+    with pytest.raises(ValueError):
+        validate_snapshot(snapshot)
     snapshot['evidence']['frames'][0]['run_id'] = 'other'
+    with pytest.raises(ValueError):
+        validate_snapshot(snapshot)
+
+
+def test_provenance_source_is_closed():
+    snapshot = empty_snapshot('s', 'r', 'REHEARSAL')
+    snapshot['decision']['source'] = 'PRIVATE_PROVIDER'
     with pytest.raises(ValueError):
         validate_snapshot(snapshot)
 

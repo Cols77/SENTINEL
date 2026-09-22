@@ -31,7 +31,7 @@ const stops = () =>
     duration_s: 6,
     resolvable_classes: ["computer", "person"],
   }));
-const proposer = { mode: "F", source: "Fixture rules proposer" };
+const proposer = { mode: "F", source: "RULES" };
 function proposal(id = "p1", range = 2) {
   return {
     id,

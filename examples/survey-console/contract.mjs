@@ -122,7 +122,7 @@ const stop = record({
   duration_s: positive,
   resolvable_classes: classes,
 });
-const proposer = record({ mode: member(["F", "E", "J"]), source: str });
+const proposer = record({ mode: member(["F", "E", "J"]), source: member(["RULES", "JUDGE", "AGENT"]) });
 const eligibility = record({
   consent: nullable(bool),
   envelope: nullable(bool),

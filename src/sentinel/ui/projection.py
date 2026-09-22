@@ -12,8 +12,10 @@ def stop_view(option, index, status='PLANNED', operational=None, return_leg=Fals
     never turn elapsed animation time into a completion claim.
     """
     row = operational or {}
+    stop_status={'ARRIVED':'ACTIVE','OPEN_LOOP':'ACTIVE','LOCALISED':'ACTIVE',
+                 'DONE':'COMPLETED','FLOWN':'COMPLETED','ABORTED_EN_ROUTE':'ABORTED'}
     return dict(
-        id=f'{option.option_id}:{index}', status=status,
+        id=f'{option.option_id}:{index}', status=stop_status.get(row.get('status', status), row.get('status', status)),
         range_m=option.range_cm/100, altitude_m=option.z_cm/100,
         extent_m=option.viewed_width_cm/100,
         duration_s=option.estimated_seconds/len(option.stops),
@@ -31,6 +33,16 @@ def stop_view(option, index, status='PLANNED', operational=None, return_leg=Fals
         tolerance_verdict=row.get('tolerance_verdict', row.get('tolerance', 'UNKNOWN') or 'UNKNOWN'),
     )
 
+def vertical_consistency_view(row):
+    if not row or any(row.get(k) is None for k in ('tag_height_cm','height_cm','vertical_mismatch_cm')):
+        return dict(status='UNAVAILABLE', measured_m=None, expected_m=None, error_m=None,
+                    reason='No vertical reference observation')
+    error=abs(row['vertical_mismatch_cm'])
+    status='CONSISTENT' if error <= 10 else ('MARGINAL' if error <= 25 else 'INCONSISTENT')
+    return dict(status=status, measured_m=row['tag_height_cm']/100,
+                expected_m=row['height_cm']/100, error_m=row['vertical_mismatch_cm']/100,
+                reason='Latest stop vertical check')
+
 class ProjectionService:
     def __init__(self, service):
         self.service=service
@@ -45,6 +57,7 @@ class ProjectionService:
             offer=svc.approval.current(run_id)
             s=empty_snapshot(svc.session_id,run_id,svc.config.mode)
             s['run'].update(request_text=state.get('request_text',facts['run']['request_text'] if facts['run'] else ''),status=row['status'],phase='APPROVAL' if offer else state.get('phase','REQUEST'),decision_version=row['decision_version'],updated_at=state.get('updated_at','1970-01-01T00:00:00+00:00'))
+            s['decision'] = deepcopy(state.get('decision', svc.runtime._decision_defaults()))
             s['source']['kind']=svc.adapters.source_kind
             s['session']['startup_summary'].update(site_id=svc.config.site_path.stem if svc.config.site_path else None,pose_mode=svc.config.pose_mode,detector_name=svc.config.detector_name)
             s['chat']['messages']=svc.store.messages(run_id)
@@ -59,22 +72,18 @@ class ProjectionService:
             last=facts['sweeps'][-1] if facts['sweeps'] else None
             option=chosen or (options[last['option_id']] if last else svc.adapters.options[0])
             if offer:
-                policy_name = type(svc.adapters.policy).__name__.lower()
-                proposer_mode = offer['candidate'].get('proposer')
-                if proposer_mode not in {'F', 'E', 'J'}:
-                    proposer_mode = 'J' if 'jev' in policy_name else ('E' if 'llm' in policy_name or 'agent' in policy_name else 'F')
-                if proposer_mode not in {'F', 'E', 'J'}:
-                    proposer_mode = 'F'
-                proposer_source = {'F': 'RULES', 'J': 'JUDGE', 'E': 'AGENT'}[proposer_mode]
+                proposer_mode = s['decision']['mode']
+                proposer_source = s['decision']['source']
                 escalation_reason = offer['candidate'].get('escalation_reason')
                 s['proposal']=dict(id=offer['id'],sha256=offer['sha256'],option_id=option.option_id,stops=[stop_view(option,i) for i in range(len(option.stops))],range_m=option.range_cm/100,altitude_m=option.z_cm/100,extent_m=option.viewed_width_cm/100,duration_s=option.estimated_seconds,resolvable_classes=list(option.resolvable_classes),proposer=dict(mode=proposer_mode,source=proposer_source,escalation_reason=escalation_reason),justification=offer['candidate'].get('description',''),escalation_reason=escalation_reason,guardrail_disagreements=[],target_object_ids=offer['candidate'].get('arguments',{}).get('addresses',[]),eligibility=dict(consent=True,envelope=True,preflight=True,current=True),disabled_reasons=[],run_id=run_id,decision_version=offer['decision_version'],correlation_id=offer['correlation_id'])
             operational = state.get('stops', {})
-            route=[dict(stop_id=f'{option.option_id}:{i}',x=x,y=y,**{k:v for k,v in stop_view(option,i,operational=operational.get(f'{option.option_id}:{i}')) .items() if k not in {'id','status','range_m','altitude_m','extent_m','duration_s','resolvable_classes'}}) for i,(x,y) in enumerate(option.stops)]
+            route=[dict(stop_id=f'{option.option_id}:{i}',x=x,y=y,**{k:v for k,v in stop_view(option,i,operational=operational.get(f'{option.option_id}:{i}')) .items() if k not in {'id','range_m','altitude_m','extent_m','duration_s','resolvable_classes'}}) for i,(x,y) in enumerate(option.stops)]
             xs=[x for o in options.values() for x,y in o.stops];ys=[y for o in options.values() for x,y in o.stops]
             return_error = next((row.get('return_error_cm') for row in operational.values() if row.get('return_leg')), None)
             s['mission'].update(route=route,envelope=dict(min_x=min(xs),max_x=max(xs),min_y=min(ys),max_y=max(ys)),flights=dict(used=facts['results']['flights_used'],max=2),return_to_start=any(row.get('return_leg') for row in operational.values()),return_error_cm=return_error)
             if last:
                 s['mission']['sweep']=dict(id=last['sweep_id'],option_id=last['option_id'],status='COMPLETE' if last['status']=='FLOWN' else 'ACTIVE',merged=last['status']=='FLOWN',flights_used_before=max(0,len(facts['sweeps'])-1),stops=[stop_view(option,i,'COMPLETED' if last['status']=='FLOWN' else 'UNKNOWN',operational=operational.get(f"{option.option_id}:{i}")) for i in range(len(option.stops))])
+            s['localization']['vertical_consistency']=vertical_consistency_view(state.get('vertical'))
             if state.get('stop'):
                 stop=state['stop'];s['mission']['active_stop_id']=f"{stop['option_id']}:{stop['stop_index']}"
                 s['mission']['commanded_position']=dict(x=stop['x_cm'],y=stop['y_cm'])

@@ -45,13 +45,16 @@ def validate_config(config):
         if address.version!=4 or address.is_unspecified or address.is_loopback:raise ValueError()
         ipaddress.IPv4Address(config.tello_ip)
         date.fromisoformat(config.consent_date)
-        site=load_site(config.site_path);load_tag_map(str(config.tag_map_path))
+        site=load_site(config.site_path)
+        tag_map=load_tag_map(str(config.tag_map_path))
+        check_tag_map_matches_site(tag_map, site, tolerance_cm=5.0)
+        CoverageModel(site, tag_map.doc['camera_calibration'])
         env=envelope_from_site(site,300)
         generate_options(env,TELLO_MEASURED)
         if config.start_x_cm is not None and not (env.min_x_cm<=config.start_x_cm<=env.max_x_cm and env.min_y_cm<=config.start_y_cm<=env.max_y_cm):
             raise ValueError('start outside envelope')
         if config.surface_z_cm>=env.min_z_cm:raise ValueError('surface must be below survey')
-    except Exception as exc:raise StartupError('INVALID_LIVE_SITE_OR_GEOMETRY') from exc
+    except Exception as exc:raise StartupError('INVALID_LIVE_SITE_OR_COVERAGE') from exc
     prefix=config.detector_name.upper()
     if not os.environ.get(prefix+'_API_KEY') or not os.environ.get(prefix+'_MODEL'):
         raise StartupError('LIVE_PROVIDER_ENV_REQUIRED')
@@ -244,15 +247,12 @@ def compose(config):
     except Exception as exc:raise StartupError('LIVE_PREFLIGHT_FAILED') from exc
     finally:
         if client is not None:client.close()
-    # Coverage is an operational guard, not a second startup transport.  A
-    # site/tag-map mismatch disables the predictor (and remains visible as a
-    # public MARGINAL/unavailable fact) while preserving the existing startup
-    # error ordering for emergency and preflight failures.
+    # Coverage is an operational guard and must be admitted before any flight.
     try:
         coverage = CoverageModel.from_files(site, config.tag_map_path)
-        check_tag_map_matches_site(tag_map, site)
-    except Exception:
-        coverage = None
+        check_tag_map_matches_site(tag_map, site, tolerance_cm=5.0)
+    except Exception as exc:
+        raise StartupError('LIVE_COVERAGE_REQUIRED') from exc
     from sentinel.survey.providers.gemini import GeminiDetector
     from sentinel.survey.providers.moondream import MoondreamDetector
     cls={'gemini':GeminiDetector,'moondream':MoondreamDetector}[config.detector_name]

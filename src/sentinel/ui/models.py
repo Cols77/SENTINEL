@@ -52,13 +52,13 @@ def validate_snapshot(value):
         if value['mission']['active_stop_id'] and value['mission']['active_stop_id'] not in route_ids:
             raise ValueError('unresolved active stop')
         for frame in evidence['frames']:
-            if route and frame['stop_id'] not in route_ids:
+            if frame['stop_id'] not in route_ids:
                 raise ValueError('unresolved stop')
         if value['proposal']:
             proposal_ids = {row['id'] for row in value['proposal']['stops']}
             if len(proposal_ids) != len(value['proposal']['stops']):
                 raise ValueError('duplicate proposal stop identity')
-            if route and not proposal_ids <= route_ids:
+            if not proposal_ids <= route_ids:
                 raise ValueError('unresolved proposal stop')
         return value
     except Exception as exc:
@@ -72,6 +72,7 @@ def empty_snapshot(session_id, run_id, mode):
         source=dict(mode=mode,kind='SIMULATED' if mode=='REHEARSAL' else 'LIVE',freshness='FRESH'),
         safety={key:dict(available=False,status='UNAVAILABLE',reason='No active runner',command_id=None) for key in ('land','emergency')},
         chat=dict(messages=[],pending_command_id=None),proposal=None,
+        decision=dict(mode='F',source='RULES',escalation_reason=None),
         mission=dict(flights=dict(used=0,max=2),sweep=None,envelope=None,route=[],active_stop_id=None,commanded_position=None,return_to_start=False,return_error_cm=None),
         localization=dict(status='UNAVAILABLE',age_ms=None,stale_after_ms=2000,latest_report=None,recent_stream=dict(frames_seen=0,reports_emitted=0,no_tag_frames=0,gated_frames=0,timeouts=0),containment='UNAVAILABLE',vertical_consistency=dict(status='UNAVAILABLE',measured_m=None,expected_m=None,error_m=None,reason='No pose observation'),pose_evidence=None,map_position=None),
         evidence=dict(frames=[],sightings=[],objects=[],analysis=dict(analysed=0,total=0,dropped_labels=[],unknown_labels=[]),provider=dict(name='scripted',model='scenario',source_kind='SIMULATED'),failures=[]),
