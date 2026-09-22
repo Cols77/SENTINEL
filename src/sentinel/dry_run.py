@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Iterable
 
 from .client import EmergencyAborted
 from .envelope import FlightEnvelope
@@ -21,7 +22,11 @@ class DryRunClient:
 
     backend_name = "dry-run"
 
-    def __init__(self) -> None:
+    def __init__(self, *, battery_sequence: Iterable[int] | None = None,
+                 flight_time_sequence: Iterable[int] | None = None,
+                 time_sequence: Iterable[int] | None = None) -> None:
+        if flight_time_sequence is not None and time_sequence is not None:
+            raise ValueError("provide flight_time_sequence or time_sequence, not both")
         self._connected = False
         self._closed = False
         self._video_active = False
@@ -32,6 +37,44 @@ class DryRunClient:
         self._height = 0
         self._speed = 10
         self._video_record_path: Path | None = None
+        self._battery_sequence = self._telemetry_sequence(
+            battery_sequence, default=100, field="battery_sequence", maximum=100,
+        )
+        self._flight_time_sequence = self._telemetry_sequence(
+            flight_time_sequence if flight_time_sequence is not None else time_sequence,
+            default=0, field="flight_time_sequence", maximum=None,
+        )
+        self._battery_index = 0
+        self._flight_time_index = 0
+
+    @staticmethod
+    def _telemetry_sequence(values: Iterable[int] | None, *, default: int, field: str,
+                            maximum: int | None) -> tuple[int, ...]:
+        if values is None:
+            return (default,)
+        sequence = tuple(values)
+        if not sequence:
+            raise ValueError(f"{field} must not be empty")
+        if any(type(value) is not int or value < 0 or (maximum is not None and value > maximum)
+               for value in sequence):
+            range_text = f"0-{maximum}" if maximum is not None else "nonnegative integers"
+            raise ValueError(f"{field} must contain {range_text}")
+        return sequence
+
+    @staticmethod
+    def _next_sequence_value(sequence: tuple[int, ...], index: int) -> tuple[int, int]:
+        value = sequence[min(index, len(sequence) - 1)]
+        return value, index + 1
+
+    def _next_battery(self) -> int:
+        value, self._battery_index = self._next_sequence_value(self._battery_sequence, self._battery_index)
+        return value
+
+    def _next_flight_time(self) -> int:
+        value, self._flight_time_index = self._next_sequence_value(
+            self._flight_time_sequence, self._flight_time_index,
+        )
+        return value
 
     @property
     def command_history(self) -> tuple[CommandRecord, ...]:
@@ -73,15 +116,15 @@ class DryRunClient:
     def telemetry(self) -> Telemetry:
         self._send("telemetry")
         return Telemetry(
-            battery_percent=100,
+            battery_percent=self._next_battery(),
             height_cm=200,
-            flight_time_s=0,
+            flight_time_s=self._next_flight_time(),
             temperature_c=22,
         )
 
     def battery(self) -> int:
         self._ensure_ready()
-        return 100
+        return self._next_battery()
 
     def height_cm(self) -> int:
         self._ensure_ready()
