@@ -1,4 +1,5 @@
 import json
+import math
 import time
 from datetime import datetime, timezone
 
@@ -592,8 +593,8 @@ def test_trim_rounds_outside_one_to_ten_are_refused(rounds):
         Mission(None, None, (Waypoint("WP1", 270, 300, 100),), max_trim_rounds=rounds)
 
 
-@pytest.mark.parametrize("speed", [10, 50])
-def test_leg_speeds_outside_twenty_to_forty_are_refused(speed):
+@pytest.mark.parametrize("speed", [10, 60])
+def test_leg_speeds_outside_twenty_to_fifty_are_refused(speed):
     with pytest.raises(ValueError, match="leg_speed_cm_s"):
         Mission(None, None, (Waypoint("WP1", 270, 300, 100),), leg_speed_cm_s=speed)
 
@@ -627,3 +628,136 @@ def test_load_mission_defaults_keep_the_old_behaviour(tmp_path):
                                 "waypoints": [{"name": "A", "x_cm": 250, "y_cm": 250, "z_cm": 100}]}))
     mission = load_mission(path)
     assert (mission.max_trim_rounds, mission.leg_speed_cm_s) == (2, 20)
+
+
+# -- speed against inset, tag coverage, return to takeoff, vertical check (2026-09-22) ------------
+
+class _Coverage:
+    """Stands in for cube.coverage.CoverageModel: a verdict per (x, y)."""
+
+    def __init__(self, levels):
+        self.levels = levels
+
+    def verdict(self, x_cm, y_cm, z_cm):
+        from sentinel.cube.coverage import Coverage
+        level = self.levels.get((x_cm, y_cm), "OK")
+        return Coverage(level, 0 if level == "BLIND" else 2, 0 if level == "BLIND" else 1, None)
+
+
+def _site(inset_m):
+    return parse_site({**SITE_DOC, "commanded": {**SITE_DOC["commanded"], "inset_m": inset_m}})
+
+
+def _plan(tmp_path, mission, *, site=SITE, coverage=None, land_during_move=False, pose_mode="reanchor"):
+    events = []
+    runner = CubeMissionRunner(DryRunClient(), "dry-run", mission=mission, site=site,
+                               pose_mode=pose_mode, mission_log=tmp_path / "m.jsonl",
+                               burst_fn=lambda: [], sleep_fn=lambda s: None, coverage=coverage,
+                               land_during_move=land_during_move,
+                               progress=lambda event, message: events.append((event, message)))
+    return runner, events
+
+
+def test_legs_at_fifty_need_a_forty_cm_inset(tmp_path):
+    fast = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), leg_speed_cm_s=50)
+    with pytest.raises(PlanError, match="50 cm/s need the commanded area 40 cm"):
+        _plan(tmp_path, fast, site=_site(0.3))
+    _plan(tmp_path, fast, site=_site(0.4))
+    _plan(tmp_path, Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), leg_speed_cm_s=40),
+          site=_site(0.3))
+
+
+def test_land_during_move_is_refused_where_the_watchdog_would_trip_inside_the_commanded_area(tmp_path):
+    at_forty = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), leg_speed_cm_s=40)
+    with pytest.raises(PlanError, match="land_during_move"):
+        _plan(tmp_path, at_forty, land_during_move=True)
+    _plan(tmp_path, Mission(270, 250, (Waypoint("WP1", 270, 300, 100),)), land_during_move=True)
+
+
+def test_a_stop_the_tags_cannot_be_seen_from_is_refused_unless_flown_open_loop(tmp_path):
+    blind = _Coverage({(270, 300): "BLIND"})
+    with pytest.raises(PlanError, match="WP1: the tags can be lost"):
+        _plan(tmp_path, Mission(270, 250, (Waypoint("WP1", 270, 300, 100),)), coverage=blind)
+    _plan(tmp_path, Mission(270, 250, (Waypoint("WP1", 270, 300, 100, localise=False),)),
+          coverage=blind)
+    _plan(tmp_path, Mission(270, 250, (Waypoint("WP1", 270, 300, 100),)), coverage=blind,
+          pose_mode="off")
+
+
+def test_a_marginal_stop_flies_with_an_alert(tmp_path):
+    _, events = _plan(tmp_path, Mission(270, 250, (Waypoint("WP1", 270, 300, 100),)),
+                      coverage=_Coverage({(270, 300): "MARGINAL"}))
+    assert any(e == "alert" and "WP1: tag coverage is marginal" in m for e, m in events)
+
+
+def test_return_to_start_flies_back_to_the_measured_takeoff_point(tmp_path):
+    mission = Mission(None, None, (Waypoint("WP1", 270, 300, 100),), return_to_start=True)
+    bursts = [[_report(250, 240)] * 10, [_report(270, 300)] * 10, [_report(252, 243)] * 10]
+    runner, client = _runner(tmp_path, "reanchor", bursts, mission=mission)
+    assert runner.run(confirm=True).status == "PASS"
+    start, wp1, back = _log(tmp_path)
+    assert back["waypoint"] == "RETURN" and back["commanded_cm"] == [250, 240, 100]
+    assert back["status"] == "LOCALISED" and back["return_error_cm"] == pytest.approx(3.6, abs=0.1)
+    moves = [c for c in client.commands if c.split()[0] in {"forward", "back", "left", "right"}]
+    assert moves[-2:] == ["left 20", "back 60"]
+
+
+def test_return_to_a_takeoff_point_outside_the_commanded_area_goes_to_the_nearest_one(tmp_path):
+    mission = Mission(None, None, (Waypoint("WP1", 270, 300, 100),), return_to_start=True)
+    bursts = [[_report(250, 215)] * 10, [_report(270, 300)] * 10, [_report(250, 230)] * 10]
+    events = []
+    runner, _ = _runner(tmp_path, "reanchor", bursts, mission=mission)
+    runner.progress = lambda event, message: events.append((event, message))
+    assert runner.run(confirm=True).status == "PASS"
+    assert _log(tmp_path)[-1]["commanded_cm"] == [250, 230, 100]     # SITE commands y >= 230
+    assert any("RETURN: takeoff point" in m for _, m in events)
+
+
+def test_return_counts_toward_the_stop_limit():
+    with pytest.raises(ValueError, match="at most 8 stops"):
+        Mission(None, None, tuple(Waypoint(f"W{i}", 250, 250, 100) for i in range(8)),
+                return_to_start=True)
+
+
+def test_load_mission_reads_return_to_start(tmp_path):
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps({"schema_version": "cube-mission-v1", "return_to_start": True,
+                                "waypoints": [{"name": "A", "x_cm": 250, "y_cm": 250, "z_cm": 100}]}))
+    assert load_mission(path).return_to_start is True
+
+
+class _TagMap:
+    room_scale_m_per_unit = 0.1
+
+    def tag(self, tag_id):
+        from types import SimpleNamespace
+        return SimpleNamespace(x_units=25.0, y_units=40.0, z_units=0.55)
+
+
+def _ranged(x_cm, y_cm, slant_m):
+    return DronePoseReport(
+        report_id="p", run_id="r", observed_at=datetime.now(timezone.utc),
+        source_kind="SIMULATED", point=(x_cm / 10.0, y_cm / 10.0), heading_deg=90.0,
+        altitude_m=None, method="APRILTAG_36H11_PNP",
+        tag_observations=(TagObservation(0, "STAND_0", slant_m, 0.5),), reprojection_error_px=0.5)
+
+
+def test_tag_implied_height_is_the_vertical_leg_of_the_range_triangle():
+    from sentinel.cube.mission import tag_implied_height_cm
+    # 160 cm in front of a tag at 55 cm, 30 cm above it: slant = hypot(160, 30)
+    reports = [_ranged(250, 240, 1.6279)] * 5
+    assert tag_implied_height_cm(reports, _TagMap(), (250.0, 240.0)) == pytest.approx(85.0, abs=0.5)
+    assert tag_implied_height_cm(reports, None, (250.0, 240.0)) is None
+
+
+def test_a_takeoff_height_the_tags_disagree_with_raises_an_alert(tmp_path):
+    runner, events = _plan(tmp_path, Mission(270, 250, (Waypoint("WP1", 270, 300, 100),)))
+    runner.tag_map = _TagMap()
+    entry = {"height_cm": 100}
+    # tags say 55 + 40 = 95 cm... with the site's takeoff height 0 that agrees with 100
+    runner._check_vertical("WP1", [_ranged(250, 240, math.hypot(1.6, 0.40))] * 5, (250.0, 240.0), entry)
+    assert entry["vertical_mismatch_cm"] == pytest.approx(-5.0, abs=0.5) and not events
+    # tags say 55 + 75 = 130 cm against 100: the site's vertical model is 30 cm out
+    runner._check_vertical("WP1", [_ranged(250, 240, math.hypot(1.6, 0.75))] * 5, (250.0, 240.0), entry)
+    assert entry["tag_height_cm"] == pytest.approx(130.0, abs=0.5)
+    assert any(e == "alert" and "altitude bias or tag heights are wrong" in m for e, m in events)

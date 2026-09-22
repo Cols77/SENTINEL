@@ -18,10 +18,11 @@ FRAME_W, FRAME_H, BORDER_PX = 960, 720, 15
 MAX_OBLIQUITY_DEG = 65.0
 
 
-def _camera(pos, yaw_err_deg: float = 0.0):
-    """(R_cam_room, tvec) for a camera at ``pos`` facing +y, pitched down."""
+def _camera(pos, yaw_err_deg: float = 0.0, pitch_err_deg: float = 0.0):
+    """(R_cam_room, tvec) for a camera at ``pos`` facing +y, pitched down
+    (``pitch_err_deg`` > 0 looks further down, as a drone tilting forward does)."""
     a = math.radians(90.0 + yaw_err_deg)
-    pitch = math.radians(CAMERA_PITCH_DOWN_DEG)
+    pitch = math.radians(CAMERA_PITCH_DOWN_DEG + pitch_err_deg)
     fwd = np.array([math.cos(a), math.sin(a), 0.0]) * math.cos(pitch) \
         + np.array([0.0, 0.0, -1.0]) * math.sin(pitch)
     right = np.cross(fwd, [0.0, 0.0, 1.0])

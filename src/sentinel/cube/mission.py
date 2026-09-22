@@ -30,7 +30,8 @@ from sentinel.pose.localise import LocalisationFix, localise
 from sentinel.pose.replay import FrameRecorder
 from sentinel.pose.scoring import heading_delta_deg
 from sentinel.pose.stream import _to_bgr, run_pose_stream
-from sentinel.pose.watchdog import POLL_INTERVAL_S, PoseWatchdog, trip_margin_cm
+from sentinel.pose.watchdog import (POLL_INTERVAL_S, PoseWatchdog, post_land_travel_cm,
+                                    trip_margin_cm)
 from sentinel.runner import FlightTestRunner
 
 POSE_MODES = ("off", "passive", "reanchor")
@@ -46,8 +47,18 @@ MAX_TRIM_ROUNDS = 2
 #: A mission may ask for more trim rounds per stop (the convergence test), never more than this.
 TRIM_ROUNDS_LIMIT = 10
 #: A mission may fly its legs faster than COMMAND_SPEED_CM_S; trims always go back to it.
-#: Capped at 40: B1 measured 35 cm of travel after `land` at speed 50, more than the 30 cm inset.
-LEG_SPEED_LIMIT_CM_S = 40
+#: 50 cm/s needs a 40 cm inset: B1 measured 35 cm of travel after `land` at 50 (see
+#: ``required_inset_cm``). Faster than 50 has no measurement at all.
+LEG_SPEED_LIMIT_CM_S = 50
+#: Legs up to this speed fly with the historical 30 cm inset without further checks.
+INSET_FREE_SPEED_CM_S = 40
+#: Margin on top of the measured travel after `land`.
+LAND_TRAVEL_MARGIN_CM = 5
+#: Tag-implied height against `height?` + the site's height offset: beyond this, the site's
+#: vertical model (takeoff height, altitude bias or tag heights) is wrong for this room.
+VERTICAL_MISMATCH_CM = 25.0
+#: The extra stop a ``return_to_start`` mission ends with.
+RETURN_NAME = "RETURN"
 YAW_TRIM_THRESHOLD_DEG = 10.0
 PLAUSIBILITY_CM = 60.0
 TOLERANCE_CM = 15.0
@@ -105,8 +116,13 @@ class Mission:
     waypoints: tuple[Waypoint, ...]
     max_trim_rounds: int = MAX_TRIM_ROUNDS
     leg_speed_cm_s: int = int(COMMAND_SPEED_CM_S)
+    #: After the last waypoint, fly back to where the drone took off (the measured START fix or
+    #: the start pad) as one more stop, RETURN, localised and trimmed like any other.
+    return_to_start: bool = False
 
     def __post_init__(self) -> None:
+        if len(self.waypoints) + int(self.return_to_start) > MAX_WAYPOINTS:
+            raise ValueError(f"a mission has at most {MAX_WAYPOINTS} stops, RETURN included")
         if not 1 <= self.max_trim_rounds <= TRIM_ROUNDS_LIMIT:
             raise ValueError(f"max_trim_rounds must be 1-{TRIM_ROUNDS_LIMIT}, got {self.max_trim_rounds}")
         if not COMMAND_SPEED_CM_S <= self.leg_speed_cm_s <= LEG_SPEED_LIMIT_CM_S:
@@ -125,11 +141,45 @@ def load_mission(path) -> Mission:
     if not 1 <= len(waypoints) <= MAX_WAYPOINTS:
         raise ValueError(f"a mission has 1-{MAX_WAYPOINTS} waypoints, got {len(waypoints)}")
     tuning = {"max_trim_rounds": int(doc.get("max_trim_rounds", MAX_TRIM_ROUNDS)),
-              "leg_speed_cm_s": int(doc.get("leg_speed_cm_s", COMMAND_SPEED_CM_S))}
+              "leg_speed_cm_s": int(doc.get("leg_speed_cm_s", COMMAND_SPEED_CM_S)),
+              "return_to_start": bool(doc.get("return_to_start", False))}
     start = doc.get("start")
     if start is None:
         return Mission(None, None, waypoints, **tuning)
     return Mission(int(start["x_cm"]), int(start["y_cm"]), waypoints, **tuning)
+
+
+def required_inset_cm(leg_speed_cm_s: float) -> float:
+    """How far inside the cube the commanded area must end for a leg at this speed: the travel
+    after `land` (measured at 20 and 50 cm/s) plus a margin. Legs up to 40 cm/s keep the
+    historical 30 cm inset they were flown with."""
+    if leg_speed_cm_s <= INSET_FREE_SPEED_CM_S:
+        return 0.0
+    return post_land_travel_cm(leg_speed_cm_s) + LAND_TRAVEL_MARGIN_CM
+
+
+def tag_implied_height_cm(reports, tag_map, fix_cm) -> float | None:
+    """Drone height above the floor implied by the tag distances of a burst, from the horizontal
+    fix and each tag's mapped height. Coarse: the vertical is a small leg of a long triangle, so a
+    1 cm range error moves it ~4 cm. The median over the burst is used; good to ~10 cm."""
+    if tag_map is None or fix_cm is None:
+        return None
+    heights = []
+    for report in reports:
+        for obs in report.tag_observations:
+            try:
+                tag = tag_map.tag(obs.tag_id)
+            except (KeyError, ValueError):
+                continue
+            scale_cm = tag_map.room_scale_m_per_unit * 100.0
+            horizontal = math.dist(fix_cm, (tag.x_units * scale_cm, tag.y_units * scale_cm))
+            slant = obs.distance_m * 100.0
+            if slant > horizontal:
+                heights.append(tag.z_units * 100.0 + math.sqrt(slant ** 2 - horizontal ** 2))
+    if not heights:
+        return None
+    heights.sort()
+    return round(heights[len(heights) // 2], 1)
 
 
 def tolerance_verdict(arrival_error_cm: float) -> str:
@@ -173,7 +223,8 @@ class CubeMissionRunner(FlightTestRunner):
                  sleep_fn: Callable[[float], None] = time.sleep,
                  watchdog_fix_fn: Callable[[], tuple[float, float] | None] | None = None,
                  land_during_move: bool = False,
-                 watchdog_poll_interval_s: float = POLL_INTERVAL_S, **runner_kwargs) -> None:
+                 watchdog_poll_interval_s: float = POLL_INTERVAL_S,
+                 coverage=None, **runner_kwargs) -> None:
         if pose_mode not in POSE_MODES:
             raise ValueError(f"pose_mode must be one of {POSE_MODES}, got {pose_mode!r}")
         if pose_mode != "off" and burst_fn is None and (tag_map is None or conn is None):
@@ -188,6 +239,9 @@ class CubeMissionRunner(FlightTestRunner):
         self.burst_fn = burst_fn if burst_fn is not None else self._live_burst
         self.sleep_fn = sleep_fn
         self.footprint = site.footprint()
+        #: cube.coverage.CoverageModel: refuses stops the camera cannot localise from (None: unchecked)
+        self.coverage = coverage
+        self._start_fix_cm: tuple[float, float] | None = None
         self._look_offset = 0
         self._implausible_streak = 0
         # FlightTestRunner._preflight sets and reads back COMMAND_SPEED_CM_S.
@@ -219,6 +273,15 @@ class CubeMissionRunner(FlightTestRunner):
     def _validate_mission(self) -> None:
         env = self.envelope
         in_xy = lambda x, y: env.min_x_cm <= x <= env.max_x_cm and env.min_y_cm <= y <= env.max_y_cm
+        inset_cm = self.site.inset_m * 100.0
+        speed = self.mission.leg_speed_cm_s
+        if inset_cm < required_inset_cm(speed):
+            raise PlanError(f"legs at {speed} cm/s need the commanded area {required_inset_cm(speed):.0f} cm "
+                            f"inside the cube (travel after `land`); this site insets {inset_cm:.0f} cm")
+        if self.land_during_move and trip_margin_cm(speed) > inset_cm:
+            raise PlanError(f"land_during_move at {speed} cm/s trips {trip_margin_cm(speed):.0f} cm inside "
+                            f"the cube edge, beyond the {inset_cm:.0f} cm inset: the watchdog would "
+                            "land the drone at stops the mission is allowed to fly to")
         if self.mission.start_x_cm is None or self.mission.start_y_cm is None:
             if self.pose_mode == "off":
                 raise PlanError("a mission without a start pad needs a pose mode: with pose off "
@@ -230,6 +293,13 @@ class CubeMissionRunner(FlightTestRunner):
                 raise PlanError(f"waypoint {wp.name} is outside the commanded bounds")
             if any(abs(look) > MAX_LOOK_DEG for look in wp.looks_deg):
                 raise PlanError(f"waypoint {wp.name} has a look offset beyond {MAX_LOOK_DEG} degrees")
+            if self.coverage is not None and self.pose_mode != "off" and wp.localise:
+                seen = self.coverage.verdict(wp.x_cm, wp.y_cm, wp.z_cm)
+                if seen.level == "BLIND":
+                    raise PlanError(f"waypoint {wp.name}: the tags can be lost from there ({seen.describe()}); "
+                                    "move it, or mark it \"localise\": false to fly it open loop")
+                if seen.level == "MARGINAL":
+                    self._emit("alert", f"{wp.name}: tag coverage is marginal ({seen.describe()})")
             if self.pose_mode == "reanchor":
                 margin = min(wp.x_cm - env.min_x_cm, env.max_x_cm - wp.x_cm,
                             wp.y_cm - env.min_y_cm, env.max_y_cm - wp.y_cm)
@@ -443,7 +513,8 @@ class CubeMissionRunner(FlightTestRunner):
         rounds = 0
         while True:
             self.sleep_fn(SETTLE_S)
-            result = localise(self.burst_fn())
+            reports = self.burst_fn()
+            result = localise(reports)
             if not isinstance(result, LocalisationFix):
                 if entry["status"] == "OPEN_LOOP":
                     entry["status"] = "UNLOCALISED"
@@ -469,6 +540,7 @@ class CubeMissionRunner(FlightTestRunner):
             if rounds == 0 and entry.get("open_loop_fix_cm") is None:
                 entry["open_loop_fix_cm"] = entry["fix_cm"]
                 entry["open_loop_error_cm"] = entry["arrival_error_cm"]
+                self._check_vertical(wp.name, reports, fix, entry)
             entry.setdefault("trim_errors_cm", []).append(entry["arrival_error_cm"])
             if containment is Containment.OUTSIDE:
                 entry["status"] = "LOCALISED"
@@ -534,6 +606,7 @@ class CubeMissionRunner(FlightTestRunner):
                 raise ContainmentAbort(f"containment: start position {entry['fix_cm']} cm "
                                        "is outside the cube")
             self.envelope.position = Position(round(fix[0]), round(fix[1]), height_cm)
+            self._start_fix_cm = fix
             if abs(heading_error) > YAW_TRIM_THRESHOLD_DEG:
                 if self.pose_mode == "reanchor":
                     self._rotate("cw" if heading_error > 0 else "ccw", round(abs(heading_error)))
@@ -543,6 +616,35 @@ class CubeMissionRunner(FlightTestRunner):
                                         "passive mode will not correct it")
         finally:
             self._append_log(entry)
+
+    def _check_vertical(self, name: str, reports, fix, entry: dict) -> None:
+        """Log the tag-implied height beside `height?` + takeoff height; alert when they disagree.
+        At a new venue a wrong takeoff height or tag height shows here on the first fix, before a
+        stop the coverage guard passed turns out blind."""
+        implied = tag_implied_height_cm(reports, self.tag_map, fix)
+        entry["tag_height_cm"] = implied
+        if implied is None or entry.get("height_cm") is None:
+            return
+        expected = entry["height_cm"] + self.site.height_offset_cm
+        entry["vertical_mismatch_cm"] = round(implied - expected, 1)
+        if abs(implied - expected) > VERTICAL_MISMATCH_CM:
+            self._emit("alert", f"{name}: the tags put the drone at {implied:.0f} cm, `height?` plus the "
+                                f"site's {self.site.height_offset_cm:.0f} cm offset says {expected:.0f} cm: the "
+                                "site's takeoff height, altitude bias or tag heights are wrong, and so "
+                                "is its tag coverage")
+
+    def _return_waypoint(self) -> Waypoint:
+        """RETURN: where the drone took off, at the last waypoint's altitude. A takeoff point outside
+        the commanded area (allowed: takeoff only has to be inside the cube) is replaced by the
+        nearest commanded point."""
+        env = self.envelope
+        x, y = self._start_fix_cm
+        target = (min(max(round(x), env.min_x_cm), env.max_x_cm),
+                  min(max(round(y), env.min_y_cm), env.max_y_cm))
+        if math.dist(target, (x, y)) > 1:
+            self._emit("alert", f"RETURN: takeoff point ({x:.0f}, {y:.0f}) is outside the commanded area; "
+                                f"returning to the nearest commanded point {target}")
+        return Waypoint(RETURN_NAME, target[0], target[1], self.mission.waypoints[-1].z_cm)
 
     def _accept_arrival(self, wp: Waypoint, entry: dict) -> None:
         """No trim is left to send: land if the drone is still beyond the outer circle."""
@@ -583,7 +685,11 @@ class CubeMissionRunner(FlightTestRunner):
             self._localise_start(height)
         else:
             self.envelope.position = Position(self.mission.start_x_cm, self.mission.start_y_cm, height)
-        for wp in self.mission.waypoints:
+            self._start_fix_cm = (float(self.mission.start_x_cm), float(self.mission.start_y_cm))
+        stops = list(self.mission.waypoints)
+        if self.mission.return_to_start:
+            stops.append(self._return_waypoint())
+        for wp in stops:
             # F1: the entry is created BEFORE _go_to and always appended
             # (try/finally). An abort raised while still travelling to this
             # waypoint (the in-move watchdog, an envelope violation, ...)
@@ -612,6 +718,8 @@ class CubeMissionRunner(FlightTestRunner):
                 entry["battery_pct"] = self._battery_pct()
                 if self.pose_mode != "off" and wp.localise:
                     self._localise(wp, entry)
+                if wp.name == RETURN_NAME and entry["fix_cm"] is not None:
+                    entry["return_error_cm"] = round(math.dist(entry["fix_cm"], self._start_fix_cm), 1)
                 self._look(wp, entry)
             finally:
                 if entry["status"] == "EN_ROUTE":

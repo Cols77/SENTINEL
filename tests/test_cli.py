@@ -409,13 +409,29 @@ def test_cube_run_passive_dry_run_is_honestly_unlocalised(tmp_path, monkeypatch)
 
     monkeypatch.setattr("sentinel.cube.mission.SETTLE_S", 0.0)
     site, mission = _cube_files(tmp_path)
+    tag_map = tmp_path / "map.json"
+    assert main(["cube-site-map", "--site", str(site), "--calibration-from",
+                 "calibration/tag-map-calibrated.json", "--out", str(tag_map)]) == 0
     log = tmp_path / "mission.jsonl"
     code = main(["cube-run", "--dry-run", "--site", str(site), "--mission", str(mission),
-                 "--pose", "passive", "--tag-map", "calibration/tag-map-calibrated.json",
+                 "--pose", "passive", "--tag-map", str(tag_map),
                  "--db", str(tmp_path / "pose.db"), "--mission-log", str(log),
                  "--log", str(tmp_path / "run.jsonl")])
     assert code == 0
     assert [json.loads(line)["status"] for line in log.read_text().splitlines()] == ["UNLOCALISED"]
+
+
+def test_cube_run_refuses_a_tag_map_of_another_room(tmp_path, capsys):
+    """The coverage guard predicts from the site file and localisation solves against the tag
+    map: a flight where they describe different tags is refused before takeoff."""
+    from sentinel.cli import main
+
+    site, mission = _cube_files(tmp_path)
+    code = main(["cube-run", "--dry-run", "--site", str(site), "--mission", str(mission),
+                 "--pose", "passive", "--tag-map", "calibration/tag-map-calibrated.json",
+                 "--db", str(tmp_path / "pose.db"), "--mission-log", str(tmp_path / "m.jsonl"),
+                 "--log", str(tmp_path / "run.jsonl")])
+    assert code == 1 and "differ from the site file" in capsys.readouterr().out
 
 
 def test_cube_run_reanchor_requires_the_amendment_flag(tmp_path, capsys):
