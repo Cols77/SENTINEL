@@ -1,0 +1,16 @@
+{
+  "schema_version": "cube-mission-v1",
+  "_comment": "2026-09-22 boundary stress: the edges of the region where the two tags gave reliable fixes (x 220-300, y 200-290, i.e. 110-200 cm from the door) and a little beyond it: R_EDGE +50 cm right (worked once at +60), L_EDGE -40 cm left (worked at -30, failed at -50), DEEP 210 cm from the door (worked to 200). Legs at 40 cm/s, up to 3 trims per stop. An unlocalised stop continues open loop; every stop is inside the commanded area. Fly with docs/wp5-flight2-site.json.",
+  "max_trim_rounds": 3,
+  "leg_speed_cm_s": 40,
+  "waypoints": [
+    {"name": "R_EDGE", "x_cm": 300, "y_cm": 250, "z_cm": 100},
+    {"name": "R_FAR", "x_cm": 300, "y_cm": 205, "z_cm": 100},
+    {"name": "DEEP", "x_cm": 250, "y_cm": 190, "z_cm": 100},
+    {"name": "L_FAR", "x_cm": 215, "y_cm": 205, "z_cm": 100},
+    {"name": "L_EDGE", "x_cm": 210, "y_cm": 250, "z_cm": 100},
+    {"name": "L_NEAR", "x_cm": 215, "y_cm": 270, "z_cm": 100},
+    {"name": "R_NEAR", "x_cm": 300, "y_cm": 270, "z_cm": 100},
+    {"name": "HOME", "x_cm": 250, "y_cm": 250, "z_cm": 100}
+  ]
+}

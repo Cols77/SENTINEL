@@ -1,0 +1,12 @@
+{
+  "schema_version": "cube-mission-v1",
+  "_comment": "2026-09-22 convergence test: up to 10 trim rounds per stop, legs at 40 cm/s (trims at 20). Same stops as wp5-trial-loop.json, all inside the region where the two tags gave reliable fixes (x 220-300, y 200-290). No start: measured from the tags after takeoff. Fly with docs/wp5-flight2-site.json.",
+  "max_trim_rounds": 10,
+  "leg_speed_cm_s": 40,
+  "waypoints": [
+    {"name": "RIGHT_NEAR", "x_cm": 280, "y_cm": 250, "z_cm": 100},
+    {"name": "RIGHT_FAR", "x_cm": 280, "y_cm": 215, "z_cm": 100},
+    {"name": "LEFT_FAR", "x_cm": 220, "y_cm": 215, "z_cm": 100},
+    {"name": "HOME", "x_cm": 250, "y_cm": 250, "z_cm": 100}
+  ]
+}

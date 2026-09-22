@@ -43,6 +43,11 @@ MIN_MOVE_CM = 20
 #: move. B1 measured 16 cm/s of real cruise at this setting.
 COMMAND_SPEED_CM_S = 20.0
 MAX_TRIM_ROUNDS = 2
+#: A mission may ask for more trim rounds per stop (the convergence test), never more than this.
+TRIM_ROUNDS_LIMIT = 10
+#: A mission may fly its legs faster than COMMAND_SPEED_CM_S; trims always go back to it.
+#: Capped at 40: B1 measured 35 cm of travel after `land` at speed 50, more than the 30 cm inset.
+LEG_SPEED_LIMIT_CM_S = 40
 YAW_TRIM_THRESHOLD_DEG = 10.0
 PLAUSIBILITY_CM = 60.0
 TOLERANCE_CM = 15.0
@@ -98,6 +103,15 @@ class Mission:
     start_x_cm: int | None
     start_y_cm: int | None
     waypoints: tuple[Waypoint, ...]
+    max_trim_rounds: int = MAX_TRIM_ROUNDS
+    leg_speed_cm_s: int = int(COMMAND_SPEED_CM_S)
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.max_trim_rounds <= TRIM_ROUNDS_LIMIT:
+            raise ValueError(f"max_trim_rounds must be 1-{TRIM_ROUNDS_LIMIT}, got {self.max_trim_rounds}")
+        if not COMMAND_SPEED_CM_S <= self.leg_speed_cm_s <= LEG_SPEED_LIMIT_CM_S:
+            raise ValueError(f"leg_speed_cm_s must be {COMMAND_SPEED_CM_S:.0f}-{LEG_SPEED_LIMIT_CM_S}, "
+                             f"got {self.leg_speed_cm_s}")
 
 
 def load_mission(path) -> Mission:
@@ -110,10 +124,12 @@ def load_mission(path) -> Mission:
         for w in doc["waypoints"])
     if not 1 <= len(waypoints) <= MAX_WAYPOINTS:
         raise ValueError(f"a mission has 1-{MAX_WAYPOINTS} waypoints, got {len(waypoints)}")
+    tuning = {"max_trim_rounds": int(doc.get("max_trim_rounds", MAX_TRIM_ROUNDS)),
+              "leg_speed_cm_s": int(doc.get("leg_speed_cm_s", COMMAND_SPEED_CM_S))}
     start = doc.get("start")
     if start is None:
-        return Mission(None, None, waypoints)
-    return Mission(int(start["x_cm"]), int(start["y_cm"]), waypoints)
+        return Mission(None, None, waypoints, **tuning)
+    return Mission(int(start["x_cm"]), int(start["y_cm"]), waypoints, **tuning)
 
 
 def tolerance_verdict(arrival_error_cm: float) -> str:
@@ -174,6 +190,8 @@ class CubeMissionRunner(FlightTestRunner):
         self.footprint = site.footprint()
         self._look_offset = 0
         self._implausible_streak = 0
+        # FlightTestRunner._preflight sets and reads back COMMAND_SPEED_CM_S.
+        self._speed_cm_s = int(COMMAND_SPEED_CM_S)
         # A4/W08-b: sending `land` from the watchdog thread mid-move. Bench
         # test B1 has shown the Tello honours it, but only 2 of its 9 runs
         # are flown (docs/wp5-rehearsal-manifest.md). Until all 9 pass this
@@ -228,6 +246,15 @@ class CubeMissionRunner(FlightTestRunner):
         if not self._is_ok(response):
             raise RuntimeError(f"rotation {direction} {degrees} failed: {response}")
 
+    def _set_speed(self, cm_per_s: int) -> None:
+        if cm_per_s == self._speed_cm_s:
+            return
+        self._emit("flight", f"setting speed {cm_per_s} cm/s")
+        response = self._call(lambda: self.client.set_speed(cm_per_s))
+        if not self._is_ok(response):
+            raise RuntimeError(f"speed {cm_per_s} failed: {response}")
+        self._speed_cm_s = cm_per_s
+
     def _look_to(self, offset_deg: int) -> None:
         delta = offset_deg - self._look_offset
         if delta:
@@ -260,6 +287,7 @@ class CubeMissionRunner(FlightTestRunner):
         if self._look_offset != 0:
             raise RuntimeError("translation requires the drone to face +y")
         target = {"x_cm": wp.x_cm, "y_cm": wp.y_cm, "z_cm": wp.z_cm}
+        self._set_speed(self.mission.leg_speed_cm_s)
         self._watchdog_last_fix_cm = None
         self._watchdog_land_error = None
         self._watchdog_fix_errors = 0
@@ -332,7 +360,7 @@ class CubeMissionRunner(FlightTestRunner):
         watchdog = PoseWatchdog(
             self._watchdog_fix_fn, self.footprint,
             poll_interval_s=self._watchdog_poll_interval_s,
-            margin_cm=trip_margin_cm(COMMAND_SPEED_CM_S) if immediate else 0.0,
+            margin_cm=trip_margin_cm(self._speed_cm_s) if immediate else 0.0,
             on_trip=self._send_land_during_move if immediate else None)
         watchdog.start()
         move_error: Exception | None = None
@@ -441,6 +469,7 @@ class CubeMissionRunner(FlightTestRunner):
             if rounds == 0 and entry.get("open_loop_fix_cm") is None:
                 entry["open_loop_fix_cm"] = entry["fix_cm"]
                 entry["open_loop_error_cm"] = entry["arrival_error_cm"]
+            entry.setdefault("trim_errors_cm", []).append(entry["arrival_error_cm"])
             if containment is Containment.OUTSIDE:
                 entry["status"] = "LOCALISED"
                 raise ContainmentAbort(f"containment: measured position {entry['fix_cm']} cm "
@@ -464,8 +493,9 @@ class CubeMissionRunner(FlightTestRunner):
                 self._rotate("cw" if heading_error > 0 else "ccw", round(abs(heading_error)))
             # Inside the tolerance circle, a 20 cm minimum move can only make things worse
             # (2026-09-21 enlarged trial: 12 cm became 25.7 cm after two trims).
-            if not trims or rounds >= MAX_TRIM_ROUNDS or entry["tolerance"] == "INSIDE":
+            if not trims or rounds >= self.mission.max_trim_rounds or entry["tolerance"] == "INSIDE":
                 return self._accept_arrival(wp, entry)
+            self._set_speed(int(COMMAND_SPEED_CM_S))   # trims are short and want precision
             sent = [self._step(direction, distance, optional=True) for direction, distance in trims]
             if not any(sent):
                 return self._accept_arrival(wp, entry)
@@ -569,7 +599,8 @@ class CubeMissionRunner(FlightTestRunner):
                      "trim_rounds_sent": 0, "looks_deg": list(wp.looks_deg),
                      "watchdog_land_error": None, "watchdog_fix_errors": 0, "height_cm": None,
                      "open_loop_fix_cm": None, "open_loop_error_cm": None, "localise_s": None,
-                     "battery_pct": None}
+                     "battery_pct": None, "leg_speed_cm_s": self.mission.leg_speed_cm_s,
+                     "trim_errors_cm": []}
             try:
                 self._go_to(wp)
                 entry["status"] = "OPEN_LOOP"
