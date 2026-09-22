@@ -1,0 +1,264 @@
+"""Deterministic, historical reads from room evidence and legacy survey reports.
+
+These adapters never construct a drone, camera, detector or provider. A fact's
+identity covers its values and provenance; reads and answers retain that identity.
+"""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, replace
+import hashlib
+import json
+from typing import TYPE_CHECKING
+
+from .goals import EntityRef, GoalLedger, GoalObjective
+from .models import CandidateKind, GoalKind, GoalStatus, RoomSnapshot, TerminalState
+from .store import RoomStore
+
+if TYPE_CHECKING:
+    from sentinel.survey.store import SurveyStore
+
+READ_KINDS = (CandidateKind.READ_DRONE, CandidateKind.READ_OBSERVATIONS, CandidateKind.READ_COUNTS)
+
+
+def _sha(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False).encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class ReadFact:
+    fact_id: str
+    kind: CandidateKind
+    values: tuple[tuple[str, str | int | float | None], ...]
+    observed_at: str
+    scope: str
+    uncertainty: str
+    evidence_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ToolOutcome:
+    candidate_id: str
+    kind: str
+    relevant_state_sha256: str
+    code: str
+    refusal_code: str | None = None
+    facts: tuple[ReadFact, ...] = ()
+    terminal_state: TerminalState | None = None
+    event_id: str = ""
+
+
+@dataclass(frozen=True)
+class ReadSnapshot(RoomSnapshot):
+    request_text: str
+    ledger: GoalLedger | None
+    sources: tuple[ReadFact, ...]
+    facts: tuple[ReadFact, ...]
+    outcomes: tuple[ToolOutcome, ...]
+    terminal_state: TerminalState | None
+    compile_rejected: bool
+
+
+def _fact(kind, values, observed_at, scope, uncertainty, evidence_ids) -> ReadFact:
+    body = dict(kind=kind, values=tuple(sorted(values.items())), observed_at=observed_at,
+                scope=scope, uncertainty=uncertainty, evidence_ids=tuple(evidence_ids))
+    return ReadFact(f"fact:{_sha(body)}", **body)
+
+
+def _restore_fact(body: dict) -> ReadFact:
+    return ReadFact(body["fact_id"], CandidateKind(body["kind"]),
+                    tuple(tuple(pair) for pair in body["values"]), body["observed_at"],
+                    body["scope"], body["uncertainty"], tuple(body["evidence_ids"]))
+
+
+def _ledger(body: dict) -> GoalLedger:
+    objectives = []
+    for raw in body["objectives"]:
+        item = dict(raw)
+        item["kind"] = GoalKind(item["kind"])
+        for field in ("subject_ref", "target_ref"):
+            item[field] = EntityRef(**item[field]) if item.get(field) else None
+        objectives.append(GoalObjective(**item))
+    return GoalLedger(body["request_text"], tuple(objectives), GoalStatus(body["status"]))
+
+
+def relevant_hash(kind: CandidateKind, snapshot: ReadSnapshot) -> str:
+    """Audit versions and refusals are intentionally absent from relevant state."""
+    sources = snapshot.sources
+    if kind in READ_KINDS:
+        sources = tuple(f for f in sources if f.kind == kind)
+    return _sha({"kind": kind, "goal_revision": snapshot.goal_revision,
+                 "ledger": asdict(snapshot.ledger) if snapshot.ledger else None,
+                 "sources": [asdict(f) for f in sources],
+                 "facts": [] if kind in READ_KINDS else [asdict(f) for f in snapshot.facts]})
+
+
+class ReadQueries:
+    """Read adapters for an explicit room session and optional legacy survey run.
+
+    Only saved report class_counts are adapted: recomputing from object rows
+    would lose single-view person counting and observability semantics.
+    """
+
+    def __init__(self, store: RoomStore, *, survey_store: SurveyStore | None = None,
+                 survey_run_id: str | None = None):
+        if (survey_store is None) != (survey_run_id is None):
+            raise ValueError("survey_store and survey_run_id must be supplied together")
+        self.store = store
+        self.survey_store = survey_store
+        self.survey_run_id = survey_run_id
+
+    relevant_hash = staticmethod(relevant_hash)
+
+    def _capture(self, session_id: str):
+        # One read transaction pins room events and ingestion tables even when
+        # another RoomStore connection appends concurrently.
+        with self.store._lock:
+            self.store._require_open()
+            connection = self.store.connection
+            connection.execute("BEGIN")
+            try:
+                session = connection.execute("SELECT * FROM room_sessions WHERE session_id = ?",
+                                             (session_id,)).fetchone()
+                if session is None:
+                    raise KeyError(session_id)
+                events = self.store.events(session_id)
+                observations = connection.execute(
+                    "SELECT o.observation_id, o.frame_id, o.captured_at, r.result_id, "
+                    "d.detection_id, d.class_name, d.confidence_band, d.raw_score, d.score_kind "
+                    "FROM room_observations o JOIN room_perception_results r "
+                    "ON r.session_id = o.session_id AND r.observation_id = o.observation_id "
+                    "JOIN room_detection_evidence d ON d.result_id = r.result_id "
+                    "WHERE o.session_id = ? AND r.status = 'SUCCEEDED' AND r.identity_status = 'VERIFIED' "
+                    "ORDER BY o.captured_at, o.observation_id, d.detection_id", (session_id,),
+                ).fetchall()
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        facts = []
+        drones = [e for e in events if e.event_type == "DRONE_STATE_RECORDED"]
+        if drones:
+            event = drones[-1]
+            data = event.payload
+            values = data.get("state", {})
+            allowed = {"battery_percent", "flight_state", "x_cm", "y_cm", "z_cm", "heading_deg"}
+            values = {key: value for key, value in values.items() if key in allowed}
+            if values and all(data.get(key) for key in ("observed_at", "scope", "uncertainty")):
+                facts.append(_fact(CandidateKind.READ_DRONE, values, data["observed_at"], data["scope"],
+                                   data["uncertainty"], (event.event_id,)))
+        for row in observations:
+            facts.append(_fact(CandidateKind.READ_OBSERVATIONS,
+                               {key: row[key] for key in ("class_name", "confidence_band", "raw_score", "score_kind")},
+                               row["captured_at"], f"observation:{row['observation_id']}/frame:{row['frame_id']}",
+                               "historical detection; confidence band is not a probability; current presence unknown",
+                               (row["observation_id"], row["frame_id"], row["detection_id"], row["result_id"])))
+        return dict(session), events, tuple(facts)
+
+    def _counts(self) -> tuple[ReadFact, ...]:
+        if self.survey_store is None:
+            return ()
+        connection = self.survey_store.connection
+        # SurveyStore owns writes and uses a separate connection. Pin its report
+        # and frame provenance together without mutating the legacy schema.
+        connection.execute("BEGIN")
+        try:
+            report = connection.execute(
+                "SELECT * FROM reports WHERE run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (self.survey_run_id,),
+            ).fetchone()
+            frames = connection.execute(
+                "SELECT f.frame_id, f.captured_at FROM frames f JOIN sweeps s ON s.sweep_id = f.sweep_id "
+                "WHERE s.run_id = ? ORDER BY f.captured_at, f.frame_id", (self.survey_run_id,),
+            ).fetchall()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        if report is None or not frames or any(not row["captured_at"] for row in frames):
+            return ()
+        times = sorted({row["captured_at"] for row in frames})
+        observed = times[0] if len(times) == 1 else f"{times[0]} through {times[-1]}"
+        refs = (report["report_id"], *(row["frame_id"] for row in frames))
+        facts = []
+        for entry in json.loads(report["class_counts_json"]):
+            if entry.get("method") not in ("SINGLE_VIEW_LOWER_BOUND", "MERGED_MULTI_VIEW", "NOT_OBSERVABLE"):
+                continue
+            if any(type(entry.get(key)) is not int or entry[key] < 0 for key in ("confirmed", "uncertain")):
+                continue
+            facts.append(_fact(CandidateKind.READ_COUNTS,
+                               {key: entry[key] for key in ("class", "confirmed", "uncertain", "method")},
+                               observed, f"survey_run:{self.survey_run_id}; recorded frames only",
+                               f"{entry['method']}; legacy report; full-room coverage and current presence unknown", refs))
+        return tuple(facts)
+
+    def project(self, session_id: str) -> ReadSnapshot:
+        session, events, sources = self._capture(session_id)
+        sources += self._counts()
+        ledger = None
+        goal_revision = 0
+        rejected = False
+        outcomes = []
+        for event in events:
+            data = event.payload
+            if event.event_type == "GOAL_LEDGER_ACCEPTED":
+                ledger, goal_revision, rejected = _ledger(data["ledger"]), data["goal_revision"], False
+            elif event.event_type == "GOAL_COMPILE_REJECTED":
+                rejected = True
+            elif event.event_type == "ROOM_TOOL_OUTCOME":
+                outcomes.append(ToolOutcome(
+                    data["candidate_id"], data["kind"], data["relevant_state_sha256"], data["code"],
+                    data.get("refusal_code"), tuple(_restore_fact(f) for f in data.get("facts", [])),
+                    TerminalState(data["terminal_state"]) if data.get("terminal_state") else None,
+                    event.event_id,
+                ))
+        drone_events = [e for e in events if e.event_type == "DRONE_STATE_RECORDED"]
+        snapshot = ReadSnapshot(
+            session_id=session_id, state_version=session["state_version"], goal_revision=goal_revision,
+            pose_revision=sum(any(k in e.payload.get("state", {}) for k in ("x_cm", "y_cm", "z_cm", "heading_deg")) for e in drone_events),
+            energy_revision=sum("battery_percent" in e.payload.get("state", {}) for e in drone_events),
+            home_revision=0, coverage_revision=0, static_evidence_revision=len(sources),
+            target_revision=0, landing_zone_revision=0, tool_outcome_revision=len(outcomes),
+            request_text=session["request_text"], ledger=ledger, sources=sources, facts=(),
+            outcomes=tuple(outcomes), terminal_state=next((o.terminal_state for o in reversed(outcomes) if o.terminal_state), None),
+            compile_rejected=rejected,
+        )
+        facts = {}
+        for outcome in outcomes:
+            if outcome.kind in READ_KINDS and outcome.code == "READ_SUCCEEDED" and outcome.relevant_state_sha256 == relevant_hash(CandidateKind(outcome.kind), snapshot):
+                for fact in outcome.facts:
+                    if fact in sources:
+                        facts[fact.fact_id] = fact
+        return replace(snapshot, facts=tuple(facts.values()))
+
+    def read(self, kind: CandidateKind, snapshot: ReadSnapshot) -> tuple[ReadFact, ...]:
+        if kind not in READ_KINDS:
+            raise ValueError("read handler requires a read candidate")
+        return tuple(f for f in snapshot.sources if f.kind == kind)
+
+    def evidence_is_current(self, snapshot: ReadSnapshot, kind: CandidateKind) -> bool:
+        _, _, sources = self._capture(snapshot.session_id)
+        current = replace(snapshot, sources=sources + self._counts())
+        return relevant_hash(kind, current) == relevant_hash(kind, snapshot)
+
+
+def render_answer(facts: tuple[ReadFact, ...]) -> str:
+    """Only typed persisted values enter factual answer templates."""
+    if not facts:
+        raise ValueError("an answer requires facts")
+    lines = []
+    for fact in facts:
+        values = dict(fact.values)
+        if fact.kind == CandidateKind.READ_COUNTS:
+            name, method = values["class"], values["method"]
+            if method == "NOT_OBSERVABLE":
+                body = f"{name}: not observable"
+            elif method == "SINGLE_VIEW_LOWER_BOUND":
+                body = f"{name}: {values['uncertain']} observed, single-view lower bound"
+            else:
+                body = f"{name}: {values['confirmed']} confirmed; {values['uncertain']} uncertain"
+        else:
+            body = "; ".join(f"{key}={value}" for key, value in fact.values)
+        lines.append(f"{body}. Observed at {fact.observed_at}; scope: {fact.scope}; uncertainty: {fact.uncertainty}. "
+                     f"[fact={fact.fact_id}; evidence={', '.join(fact.evidence_ids)}]")
+    return "\n".join(lines)
