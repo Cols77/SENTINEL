@@ -45,6 +45,12 @@ def vertical_consistency_view(row):
 def sweep_status_view(status):
     return 'COMPLETE' if status == 'FLOWN' else ('ABORTED' if status == 'ABORTED' else 'ACTIVE')
 
+def active_stop_id(stop):
+    """Return the route identity, including explicit return-leg identity."""
+    if stop.get('stop_index') is not None:
+        return f"{stop.get('option_id')}:{stop['stop_index']}"
+    return stop.get('stop_id') or ('RETURN' if stop.get('return_leg') else stop.get('option_id'))
+
 class ProjectionService:
     def __init__(self, service):
         self.service=service
@@ -110,7 +116,7 @@ class ProjectionService:
                 if s['mission']['sweep']:
                     s['mission']['sweep']['stops'].append(dict(id='RETURN',status=rv['status'],range_m=option.range_cm/100,altitude_m=option.z_cm/100,extent_m=option.viewed_width_cm/100,duration_s=option.estimated_seconds,resolvable_classes=list(option.resolvable_classes),coverage=rv['coverage'],coverage_reason=rv['coverage_reason'],predicted_tag_count=rv['predicted_tag_count'],predicted_fix_error_cm=rv['predicted_fix_error_cm'],leg_speed_cm_s=rv['leg_speed_cm_s'],trim_budget=rv['trim_budget'],trim_progress=rv['trim_progress'],return_leg=True,arrival_error_cm=rv['arrival_error_cm'],tolerance_cm=rv['tolerance_cm'],tolerance_verdict=rv['tolerance_verdict']))
             if state.get('stop'):
-                stop=state['stop'];s['mission']['active_stop_id']=stop['option_id'] if stop['stop_index'] is None else f"{stop['option_id']}:{stop['stop_index']}"
+                stop=state['stop'];s['mission']['active_stop_id']=active_stop_id(stop)
                 s['mission']['commanded_position']=dict(x=stop['x_cm'],y=stop['y_cm'])
             frame_meta={}
             sweeps={r['sweep_id']:r for r in facts['sweeps']}

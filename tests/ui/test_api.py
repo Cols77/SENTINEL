@@ -25,3 +25,29 @@ def test_host_projection_and_capability_boundaries(tmp_path):
             assert client.get(f'/api/v1/runs/{run}/evidence/unknown').status_code==404
     finally:
         service.close()
+
+
+def test_projection_uses_return_route_id_for_none_stop_index(tmp_path):
+    config=SessionConfig(data_dir=tmp_path,scenario_path=Path('fixtures/mission-control/clean-computer.json'))
+    service=build_service(config)
+    try:
+        run=config.run_id
+        return_stop={
+            'stop_id':'RETURN', 'option_id':'RETURN_OPTION', 'stop_index':None,
+            'x_cm':0.0, 'y_cm':0.0, 'return_leg':True, 'status':'ACTIVE',
+            'coverage':'OK', 'coverage_reason':'return leg',
+            'predicted_tag_count':1, 'predicted_fix_error_cm':0.0,
+            'leg_speed_cm_s':20.0, 'trim_budget':0, 'trim_progress':0,
+            'arrival_error_cm':0.0, 'tolerance_cm':15.0,
+            'tolerance_verdict':'INSIDE',
+        }
+        service.runtime.state[run]={
+            'request_text':'return to start', 'phase':'FLIGHT',
+            'updated_at':'2026-09-22T00:00:00+00:00',
+            'stop':return_stop, 'stops':{'RETURN':return_stop},
+        }
+        snapshot=service.read_snapshot(run)
+        assert snapshot['mission']['active_stop_id']=='RETURN'
+        assert validate_snapshot(snapshot)==snapshot
+    finally:
+        service.close()

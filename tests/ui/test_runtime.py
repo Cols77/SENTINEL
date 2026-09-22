@@ -81,3 +81,14 @@ def test_runtime_retains_allowlisted_vertical_facts_and_durable_escalation(tmp_p
     assert 'private_path' not in state['stops']['GRID:0']
     assert state['decision']['source'] == 'RULES'
     assert state['decision']['escalation_reason'] == 'judge unavailable'
+
+
+def test_runtime_keys_none_index_return_facts_by_route_stop_id(tmp_path):
+    store=UIStore.open(tmp_path/'ui.sqlite');store.ensure_run('s','r','REHEARSAL')
+    adapters=build_rehearsal_adapters('fixtures/mission-control/clean-computer.json',tmp_path/'images')
+    runtime=SurveyRuntime(tmp_path/'survey.sqlite',store,adapters,ApprovalBroker(store),SafetyRegistry())
+    observer=RuntimeMissionObserver(runtime,'r')
+    observer.observe(StopProgressEvent(run_id='r', stop='RETURN', stop_index=None, option_id='RETURN_OPTION', status='ACTIVE', payload={
+        'return_leg': True, 'coverage': 'OK', 'x_cm': 0.0, 'y_cm': 0.0}))
+    assert 'RETURN' in runtime.state['r']['stops']
+    assert 'RETURN_OPTION' not in runtime.state['r']['stops']

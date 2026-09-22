@@ -106,6 +106,12 @@ class SurveyRuntime:
                                  'ABORTED':'ABORTED','ABORTED_EN_ROUTE':'ABORTED'}.get(
                                      event.status, event.status or 'UNKNOWN')
             payload['stop']['status'] = payload['status']
+            if source.get('stop_id'):
+                payload['stop']['stop_id'] = source['stop_id']
+            elif source.get('return_leg') or event.stop == 'RETURN':
+                payload['stop']['stop_id'] = 'RETURN'
+            elif payload['stop']['stop_index'] is None and event.stop:
+                payload['stop']['stop_id'] = event.stop
         elif isinstance(event, FrameCapturedEvent):
             payload['refs'] = [event.artifact_id] if event.artifact_id else []
         elif isinstance(event, DetectorResultEvent):
@@ -119,7 +125,7 @@ class SurveyRuntime:
             state['phase']=phase; state['updated_at']=now()
             if isinstance(event, StopProgressEvent):
                 stop = payload['stop']
-                key = stop['option_id'] if stop['stop_index'] is None else f"{stop['option_id']}:{stop['stop_index']}"
+                key = (stop.get('stop_id') or stop['option_id']) if stop['stop_index'] is None else f"{stop['option_id']}:{stop['stop_index']}"
                 previous = state.setdefault('stops', {}).get(key, {})
                 merged = dict(previous)
                 merged.update({k: v for k, v in stop.items() if v is not None})
