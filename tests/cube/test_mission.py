@@ -703,6 +703,27 @@ def test_leg_speeds_outside_twenty_to_fifty_are_refused(speed):
         Mission(None, None, (Waypoint("WP1", 270, 300, 100),), leg_speed_cm_s=speed)
 
 
+@pytest.mark.parametrize("speed", [True, 20.0, 20.9])
+def test_mission_rejects_non_exact_leg_speeds_before_client_effects(speed):
+    client = DryRunClient()
+
+    with pytest.raises(ValueError, match="leg_speed_cm_s"):
+        Mission(None, None, (Waypoint("WP1", 270, 300, 100),), leg_speed_cm_s=speed)
+
+    assert client.commands == ()
+    assert "takeoff" not in client.commands
+
+
+@pytest.mark.parametrize("speed", [True, 20.0, 20.9])
+def test_load_mission_keeps_non_exact_leg_speeds_for_early_validation(tmp_path, speed):
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps({"schema_version": "cube-mission-v1", "leg_speed_cm_s": speed,
+                                "waypoints": [{"name": "A", "x_cm": 250, "y_cm": 250, "z_cm": 100}]}))
+
+    with pytest.raises(ValueError, match="leg_speed_cm_s"):
+        load_mission(path)
+
+
 def test_legs_fly_at_the_mission_speed_and_trims_go_back_to_twenty(tmp_path):
     mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100), Waypoint("WP2", 150, 300, 100)),
                       leg_speed_cm_s=40)

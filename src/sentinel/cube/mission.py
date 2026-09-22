@@ -144,7 +144,8 @@ class Mission:
             raise ValueError(f"a mission has at most {MAX_WAYPOINTS} stops, RETURN included")
         if not 1 <= self.max_trim_rounds <= TRIM_ROUNDS_LIMIT:
             raise ValueError(f"max_trim_rounds must be 1-{TRIM_ROUNDS_LIMIT}, got {self.max_trim_rounds}")
-        if not COMMAND_SPEED_CM_S <= self.leg_speed_cm_s <= LEG_SPEED_LIMIT_CM_S:
+        if (type(self.leg_speed_cm_s) is not int
+                or not COMMAND_SPEED_CM_S <= self.leg_speed_cm_s <= LEG_SPEED_LIMIT_CM_S):
             raise ValueError(f"leg_speed_cm_s must be {COMMAND_SPEED_CM_S:.0f}-{LEG_SPEED_LIMIT_CM_S}, "
                              f"got {self.leg_speed_cm_s}")
 
@@ -160,7 +161,7 @@ def load_mission(path) -> Mission:
     if not 1 <= len(waypoints) <= MAX_WAYPOINTS:
         raise ValueError(f"a mission has 1-{MAX_WAYPOINTS} waypoints, got {len(waypoints)}")
     tuning = {"max_trim_rounds": int(doc.get("max_trim_rounds", MAX_TRIM_ROUNDS)),
-              "leg_speed_cm_s": int(doc.get("leg_speed_cm_s", COMMAND_SPEED_CM_S)),
+              "leg_speed_cm_s": doc.get("leg_speed_cm_s", int(COMMAND_SPEED_CM_S)),
               "return_to_start": bool(doc.get("return_to_start", False))}
     start = doc.get("start")
     if start is None:
