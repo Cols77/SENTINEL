@@ -61,6 +61,19 @@ def test_axis_move_rule():
     assert [axis_move(d) for d in (0, 10, -10, 11, -14, 20, -135.4)] == [0, 0, 0, 20, 20, 20, 135]
 
 
+def test_legacy_waypoints_are_dispatched_from_shared_checkpoint_plans(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),))
+    runner, _ = _runner(tmp_path, "off", [], mission=mission)
+    dispatched = []
+    execute = runner.execute_command
+    runner.execute_command = lambda command: (dispatched.append(command), execute(command))[1]
+
+    assert runner.run(confirm=True).status == "PASS"
+    (plan,) = runner.checkpoint_plans
+    assert plan.checkpoint_id == "WP1"
+    assert tuple(dispatched) == plan.commands
+
+
 def test_off_mode_navigates_open_loop_with_height_and_looks(tmp_path):
     runner, client = _runner(tmp_path, "off", [])
     assert runner.run(confirm=True).status == "PASS"
@@ -402,6 +415,19 @@ def test_reanchor_recovers_an_axis_left_outside_the_bounds_before_the_other_axis
     report = runner.run(confirm=True)
     assert report.status == "PASS", report.error
     assert [e["status"] for e in _log(tmp_path)] == ["LOCALISED", "LOCALISED"]
+
+
+def test_reanchor_plans_an_outside_axis_recovery_before_its_regular_move(tmp_path):
+    """The recovery must lead the plan even when that same axis has a normal
+    target delta.  Otherwise the x command is rejected while y is stale."""
+    mission = Mission(270, 235, (
+        Waypoint("WP1", 270, 235, 100), Waypoint("WP2", 220, 250, 100)))
+    bursts = [[_report(270, 226)] * 10, [_report(220, 250)] * 10]
+    runner, client = _runner(tmp_path, "reanchor", bursts, mission=mission)
+
+    assert runner.run(confirm=True).status == "PASS"
+    moves = [command for command in client.commands if command.split()[0] in {"forward", "back", "left", "right"}]
+    assert moves[-2:] == ["forward 24", "left 50"]
 
 
 def test_reanchor_recovers_both_axes_left_outside_the_bounds_at_once(tmp_path):
