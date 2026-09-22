@@ -518,7 +518,10 @@ class CubeMissionRunner(FlightTestRunner):
         entry, waypoint = self._active_checkpoint_entry, self._active_waypoint
         if command.kind == "SET_SPEED":
             self._checkpoint_effects.append((command.kind, "speed"))
-            self._set_speed(int(arguments["speed_cm_s"]))
+            speed_cm_s = arguments["speed_cm_s"]
+            if type(speed_cm_s) is not int:
+                raise ValueError("planned speed_cm_s must be an integer")
+            self._set_speed(speed_cm_s)
         elif command.kind == "READ_TELEMETRY":
             if arguments["phase"] == "vertical":
                 self._checkpoint_effects.append((command.kind, "vertical_height"))

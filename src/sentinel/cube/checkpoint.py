@@ -129,6 +129,10 @@ class CommandLimits:
     trim_speed_cm_s: int = 20
     trim_yaw_limit_deg: int = 180
 
+    def __post_init__(self) -> None:
+        if type(self.trim_speed_cm_s) is not int or self.trim_speed_cm_s <= 0:
+            raise ValueError("trim_speed_cm_s must be a positive integer")
+
 
 def _arguments(**values: ArgumentValue) -> tuple[tuple[str, ArgumentValue], ...]:
     """Copy and canonicalize user-facing arguments before they enter a plan."""
@@ -159,7 +163,7 @@ def plan_checkpoint(*, checkpoint_id: str, start: Position, target: Position,
                     limits: CommandLimits, policy: CheckpointPolicy | None = None) -> CheckpointPlan:
     """Build the one immutable command sequence shared by runtime and forecasts."""
 
-    if isinstance(speed_cm_s, bool) or speed_cm_s <= 0:
+    if type(speed_cm_s) is not int or speed_cm_s <= 0:
         raise ValueError("speed_cm_s must be a positive integer")
     if capture_count < 0:
         raise ValueError("capture_count must not be negative")

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import pytest
 
 from sentinel.contracts.pose import DronePoseReport, TagObservation
+from sentinel.cube.checkpoint import PlannedCommand
 from sentinel.cube.mission import (
     CubeMissionRunner, Mission, PlanError, Waypoint, axis_move, load_mission,
 )
@@ -102,6 +103,16 @@ def test_runner_derives_checkpoint_motion_bounds_from_the_client_transport_polic
     (plan,) = runner.checkpoint_plans
     assert next(command.upper_bound_s for command in plan.commands if command.kind == "MOVE") == 30
     assert next(command.upper_bound_s for command in plan.commands if command.kind == "SET_SPEED") == 90
+
+
+def test_checkpoint_sink_does_not_lossily_truncate_a_planned_speed(tmp_path):
+    runner, client = _runner(tmp_path, "off", [])
+    command = PlannedCommand("SET_SPEED", (("speed_cm_s", 20.9),), 0.0, False)
+
+    with pytest.raises(ValueError, match="planned speed_cm_s must be an integer"):
+        runner.execute_command(command)
+
+    assert all(not item.startswith("speed ") for item in client.commands)
 
 
 def test_vertical_checkpoint_move_dispatches_its_planned_height_query(tmp_path):

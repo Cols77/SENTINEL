@@ -6,7 +6,7 @@ import pytest
 
 from sentinel.cube.checkpoint import CheckpointPolicy, CommandLimits, PlannedCommand, plan_checkpoint
 from sentinel.models import Position
-from sentinel.motion_bounds import TransportLimits
+from sentinel.motion_bounds import TransportLimits, move_reply_upper_bound_s
 
 
 def test_checkpoint_plans_canonical_axis_moves_and_bounds():
@@ -118,6 +118,39 @@ def test_checkpoint_preserves_sdk_default_timeout_floor_for_speed_and_vertical_q
         if command.kind == "READ_TELEMETRY" and dict(command.arguments).get("phase") == "vertical"
     )
     assert vertical_read.upper_bound_s == 7
+
+
+@pytest.mark.parametrize("speed_cm_s", [True, 20.0, 20.9])
+def test_checkpoint_rejects_boolean_and_fractional_speed_values(speed_cm_s):
+    with pytest.raises(ValueError, match="speed_cm_s must be a positive integer"):
+        plan_checkpoint(
+            checkpoint_id="invalid-speed", start=Position(), target=Position(240, 0, 0),
+            start_heading_deg=90, terminal_heading_deg=90, speed_cm_s=speed_cm_s,
+            looks_deg=(), capture_count=0, limits=CommandLimits(),
+        )
+
+
+def test_checkpoint_uses_exact_integer_speed_for_a_240_cm_move_bound():
+    plan = plan_checkpoint(
+        checkpoint_id="long-leg", start=Position(), target=Position(240, 0, 0),
+        start_heading_deg=90, terminal_heading_deg=90, speed_cm_s=20,
+        looks_deg=(), capture_count=0, limits=CommandLimits(),
+    )
+
+    planned_speed = dict(next(command.arguments for command in plan.commands if command.kind == "SET_SPEED"))["speed_cm_s"]
+    move = next(command for command in plan.commands if command.kind == "MOVE")
+    assert type(planned_speed) is int
+    assert move.upper_bound_s == 30
+    assert move.upper_bound_s == move_reply_upper_bound_s(
+        distance_cm=dict(move.arguments)["distance_cm"], speed_cm_s=planned_speed,
+        base_timeout_s=CommandLimits().transport_limits.reply_timeout_s,
+    )
+
+
+@pytest.mark.parametrize("speed_cm_s", [True, 20.0, 20.9])
+def test_command_limits_rejects_non_exact_trim_speeds(speed_cm_s):
+    with pytest.raises(ValueError, match="trim_speed_cm_s must be a positive integer"):
+        CommandLimits(trim_speed_cm_s=speed_cm_s)
 
 
 def test_checkpoint_enforces_dead_band_settle_speed_and_canonical_terminal_heading():
