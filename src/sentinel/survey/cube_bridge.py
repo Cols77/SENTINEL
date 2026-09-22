@@ -137,6 +137,10 @@ class CubeFlight:
         if takeoff_z_cm is None:
             takeoff_z_cm = getattr(site, "takeoff_z_cm", None) or 0.0
         self.takeoff_z_cm = float(takeoff_z_cm)
+        # The cube Site also carries `altitude_bias_cm`: how much higher the drone hovers
+        # than height? + takeoff says, as the tags see it (flight3 = 20, pending the tape).
+        # Separate from the takeoff height; the frame height is the sum of all three.
+        self.altitude_bias_cm = float(getattr(site, "altitude_bias_cm", None) or 0.0)
         self.sr063_amended = sr063_amended
         self.tag_map, self.conn = tag_map, conn
         self.burst_fn, self.sleep_fn = burst_fn, sleep_fn
@@ -186,7 +190,8 @@ class CubeFlight:
         else:
             x_cm, y_cm = entry["commanded_cm"][0], entry["commanded_cm"][1]
             heading_deg = survey_heading_deg(FACING_DEG)
-        z_cm = entry["height_cm"] + self.takeoff_z_cm   # site frame, not takeoff-relative
+        # site frame, not takeoff-relative
+        z_cm = entry["height_cm"] + self.takeoff_z_cm + self.altitude_bias_cm
         image_path, sha256 = frame["path"], frame["sha256"]
         if image_path is None:
             # A dry run records no image (the runner saves frames only in real mode).

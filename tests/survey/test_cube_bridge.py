@@ -179,6 +179,22 @@ def test_takeoff_height_comes_from_the_site_when_not_given(tmp_path):
         surface_z_cm=0.0, sleep_fn=lambda seconds: None)
     assert flight.takeoff_z_cm == 25.0
 
+
+def test_the_sites_altitude_bias_adds_to_the_frame_height(tmp_path):
+    """The drone hovers higher than height? says (tag-measured); the survey uses the real height."""
+    class BiasedSite:
+        altitude_bias_cm = 20.0
+        def __getattr__(self, name):
+            return getattr(FLY_SITE, name)
+    option = SweepOption("ONE_STOP", "one stop", ((150, 300),), 120, (0,), 100, 22, (), 300)
+    flight = CubeFlight(
+        client=DryRunClient(), site=BiasedSite(), mode="dry-run", pose_mode="off",
+        run_id="RUN1", mission_log=tmp_path / "mission.jsonl", start_x_cm=150, start_y_cm=250,
+        surface_z_cm=0.0, takeoff_z_cm=0.0, sleep_fn=lambda seconds: None)
+    frame = flight.fly(option)[0]
+    assert frame.z_cm == 140
+    assert frame.delta_z_cm == pytest.approx(140.0)
+
 def test_two_stops_in_one_option_each_produce_their_own_frame(tmp_path):
     fixes = iter([[_report(150, 300)] * 10, [_report(200, 350)] * 10])
     flight = _flight(tmp_path, pose_mode="passive", burst_fn=lambda: next(fixes))
