@@ -17,7 +17,23 @@ from .models import CapabilityProfile
 _SCHEMA = Path(__file__).with_name("sql") / "schema.sql"
 _MIGRATION_002 = Path(__file__).with_name("sql") / "migration_002_event_insert_guard.sql"
 _MIGRATIONS = ((1, _SCHEMA), (2, _MIGRATION_002))
-_FORBIDDEN_PAYLOAD_KEYS = {"authorization", "authorizationheader", "credential", "credentials"}
+# Keys are case-folded and reduced to alphanumeric characters before this exact
+# comparison.  This catches spelling variants such as ``API-Key`` and
+# ``access_token`` without rejecting descriptive metadata (for example,
+# ``authorization_digest`` or ``password_policy``).
+_FORBIDDEN_PAYLOAD_KEYS = frozenset({
+    "accesstoken",
+    "apikey",
+    "authorization",
+    "authorizationheader",
+    "bearertoken",
+    "clientsecret",
+    "credential",
+    "credentials",
+    "password",
+    "refreshtoken",
+    "xapikey",
+})
 
 
 class RoomStoreError(RuntimeError):
@@ -214,13 +230,17 @@ def _reject_forbidden_payload(value: object) -> None:
         raise ForbiddenPayload("event payloads cannot include raw bytes")
     if isinstance(value, Mapping):
         for key, child in value.items():
-            normalized = str(key).lower().replace("_", "").replace("-", "")
-            if normalized in _FORBIDDEN_PAYLOAD_KEYS or normalized.startswith("authorization"):
+            normalized = _normalize_payload_key(key)
+            if normalized in _FORBIDDEN_PAYLOAD_KEYS:
                 raise ForbiddenPayload(f"event payload key {key!r} is forbidden")
             _reject_forbidden_payload(child)
     elif isinstance(value, (tuple, list, set, frozenset)):
         for child in value:
             _reject_forbidden_payload(child)
+
+
+def _normalize_payload_key(key: object) -> str:
+    return "".join(character for character in str(key).casefold() if character.isalnum())
 
 
 def _event_sha256(

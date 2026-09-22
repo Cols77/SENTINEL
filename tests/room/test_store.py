@@ -76,6 +76,13 @@ def test_event_rows_are_immutable_and_keys_are_pinned_in_sql(tmp_path):
 @pytest.mark.parametrize("payload", [
     {"authorization": "Bearer secret"},
     {"nested": {"credentials": "secret"}},
+    {"nested": {"API-Key": "secret"}},
+    {"nested": [{"password": "secret"}]},
+    {"nested": _PayloadEnvelope({"access_token": "secret"})},
+    {"nested": {"envelope": _PayloadEnvelope([{"refresh-token": "secret"}])}},
+    {"nested": [{"client_secret": "secret"}]},
+    {"nested": _PayloadEnvelope({"Bearer Token": "secret"})},
+    {"nested": {"Authorization-Header": "Bearer secret"}},
     {"frame": b"raw image bytes"},
     {"nested": [_PayloadEnvelope({"authorization_header": "Bearer secret"})]},
     {"nested": {"envelope": _PayloadEnvelope([b"raw image bytes"])}},
@@ -86,6 +93,16 @@ def test_payload_boundary_rejects_secrets_and_raw_bytes_without_partial_append(t
         _append(store, payload=payload)
     assert store.events("session-1") == ()
     assert store.session_version("session-1") == 0
+
+
+def test_payload_boundary_keeps_safe_descriptive_fields(tmp_path):
+    store = _store(tmp_path)
+    event = _append(store, payload={
+        "api_key_description": "key rotation is managed elsewhere",
+        "authorization_digest": "a" * 64,
+        "password_policy": "minimum length 16",
+    })
+    assert event.state_version == 1
 
 
 def test_session_update_failure_after_insert_rolls_back_the_event_and_allows_next_append(tmp_path):
