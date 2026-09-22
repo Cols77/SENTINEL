@@ -103,7 +103,8 @@ class CubeFlight:
     def __init__(self, *, client, site: Site, mode: str, pose_mode: str,
                  run_id: str, mission_log, capture_dir=None,
                  start_x_cm: int | None = None, start_y_cm: int | None = None,
-                 surface_z_cm: float, sr063_amended: bool = False,
+                 surface_z_cm: float, takeoff_z_cm: float | None = None,
+                 sr063_amended: bool = False,
                  tag_map=None, conn=None, burst_fn: Callable[[], list] | None = None,
                  sleep_fn: Callable[[float], None] = time.sleep,
                  minimum_battery: int = 40, confirm: bool = True,
@@ -129,6 +130,13 @@ class CubeFlight:
         self.capture_dir = capture_dir
         self.start_x_cm, self.start_y_cm = start_x_cm, start_y_cm
         self.surface_z_cm = surface_z_cm
+        # `height?` is height above the TAKEOFF point, not above the site's z = 0.
+        # A takeoff from a raised pad put every range ~30 % short on 2026-09-22
+        # (WP5 session's tag-implied heights). The site file may carry it
+        # (`takeoff_z_cm`, WP5 side); an explicit value overrides it.
+        if takeoff_z_cm is None:
+            takeoff_z_cm = getattr(site, "takeoff_z_cm", None) or 0.0
+        self.takeoff_z_cm = float(takeoff_z_cm)
         self.sr063_amended = sr063_amended
         self.tag_map, self.conn = tag_map, conn
         self.burst_fn, self.sleep_fn = burst_fn, sleep_fn
@@ -178,7 +186,7 @@ class CubeFlight:
         else:
             x_cm, y_cm = entry["commanded_cm"][0], entry["commanded_cm"][1]
             heading_deg = survey_heading_deg(FACING_DEG)
-        z_cm = entry["height_cm"]
+        z_cm = entry["height_cm"] + self.takeoff_z_cm   # site frame, not takeoff-relative
         image_path, sha256 = frame["path"], frame["sha256"]
         if image_path is None:
             # A dry run records no image (the runner saves frames only in real mode).

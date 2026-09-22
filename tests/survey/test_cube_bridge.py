@@ -156,6 +156,29 @@ def test_delta_z_cm_is_height_minus_surface(tmp_path):
     assert frame.delta_z_cm == pytest.approx(120 - 17.5)
 
 
+def test_takeoff_surface_height_is_added_to_the_takeoff_relative_altimeter(tmp_path):
+    """height? counts from the takeoff point; a pad 40 cm up puts the camera 40 cm higher."""
+    option = SweepOption("ONE_STOP", "one stop", ((150, 300),), 120, (0,), 100, 22, (), 300)
+    flight = CubeFlight(
+        client=DryRunClient(), site=FLY_SITE, mode="dry-run", pose_mode="off",
+        run_id="RUN1", mission_log=tmp_path / "mission.jsonl", start_x_cm=150, start_y_cm=250,
+        surface_z_cm=17.5, takeoff_z_cm=40.0, sleep_fn=lambda seconds: None)
+    frame = flight.fly(option)[0]
+    assert frame.z_cm == 160
+    assert frame.delta_z_cm == pytest.approx(160 - 17.5)
+
+
+def test_takeoff_height_comes_from_the_site_when_not_given(tmp_path):
+    class RaisedSite:
+        takeoff_z_cm = 25.0
+        def __getattr__(self, name):
+            return getattr(FLY_SITE, name)
+    flight = CubeFlight(
+        client=DryRunClient(), site=RaisedSite(), mode="dry-run", pose_mode="off",
+        run_id="RUN1", mission_log=tmp_path / "mission.jsonl", start_x_cm=150, start_y_cm=250,
+        surface_z_cm=0.0, sleep_fn=lambda seconds: None)
+    assert flight.takeoff_z_cm == 25.0
+
 def test_two_stops_in_one_option_each_produce_their_own_frame(tmp_path):
     fixes = iter([[_report(150, 300)] * 10, [_report(200, 350)] * 10])
     flight = _flight(tmp_path, pose_mode="passive", burst_fn=lambda: next(fixes))
