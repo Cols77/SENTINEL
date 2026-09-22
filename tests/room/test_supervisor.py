@@ -2,6 +2,8 @@
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from threading import Event
+from types import SimpleNamespace
+import sqlite3
 
 import pytest
 
@@ -848,3 +850,129 @@ def test_explicit_controller_queries_keep_the_callers_clock_binding(safety):
                                 flight_executor=Executor(store, clock))
     assert controller.queries is queries
     assert queries.clock is explicit_clock and queries.clock_domain_id == "caller-clock"
+
+
+def inject_concurrent_append(store, monkeypatch, event_type):
+    original = store.append_events
+    injected = []
+
+    def append(**kwargs):
+        if kwargs["events"][0]["event_type"] == event_type:
+            key = f"concurrent:{len(injected)}"
+            injected.append(key)
+            original(session_id="session", expected_version=store.session_version("session"),
+                events=({"event_type": "CONCURRENT", "payload": {}, "correlation_id": key,
+                         "causation_id": None, "idempotency_key": key},))
+        return original(**kwargs)
+
+    monkeypatch.setattr(store, "append_events", append)
+    return injected
+
+
+@pytest.mark.parametrize("operation", ["lost", "refresh_failure", "recovery_stop"])
+def test_concurrent_event_cannot_cancel_mandatory_safety_effect(safety, monkeypatch, operation):
+    supervisor, store, clock, samples, _, emergencies = safety
+    if operation == "lost":
+        samples["pose"] = replace(samples["pose"], state=LocalizationState.LOST)
+    elif operation == "recovery_stop":
+        samples["pose"] = replace(samples["pose"], state=LocalizationState.RECOVERY_REQUIRED)
+        supervisor.mapped_heading_tag_ids = ((90, (1, 2)),)
+        supervisor.recovery = SimpleNamespace(tracker=supervisor.tracker,
+            next_action=lambda *args: SimpleNamespace(kind="EMERGENCY", reason="RECOVERY_EXHAUSTED"))
+    outcome = supervisor.assess(request(safety), supervisor.site)
+    assessed_version = outcome.request.snapshot_version
+    injected = inject_concurrent_append(store, monkeypatch, "SAFETY_ASSESSED")
+    executor = Executor(store, clock)
+    result = supervisor.refresh_failure(executor) if operation == "refresh_failure" else supervisor.dispatch(outcome, executor)
+    assert result.state == "EMERGENCY_ABORTED" and emergencies == [True]
+    assert executor.calls == [] and injected
+    audits = [e for e in store.events("session") if e.event_type == "SAFETY_ASSESSED"]
+    assert audits[0].payload["assessed_snapshot_version"] == assessed_version
+    assert all(e.payload["append_version"] == e.state_version - 1 for e in audits)
+    assert store.events("session")[-1].event_type == "DRONE_STATE_RECORDED"
+
+
+def test_measured_completion_survives_concurrent_append(safety, monkeypatch):
+    supervisor, store, clock, samples, *_ = safety
+    injected = inject_concurrent_append(store, monkeypatch, "CHECKPOINT_COMPLETED")
+    plan = checkpoint(samples["pose"], command())
+    result = supervisor.dispatch(supervisor.assess(request(safety, plan), supervisor.site), Executor(store, clock))
+    assert result.status == "COMPLETED" and injected
+    assert [e.event_type for e in store.events("session")][-3:] == [
+        "CONCURRENT", "CHECKPOINT_COMPLETED", "DRONE_STATE_RECORDED"]
+
+
+@pytest.mark.parametrize("operation", ["return", "refresh_failure", "completion"])
+def test_permanent_audit_failure_uses_emergency_and_latches_local_terminal(safety, monkeypatch, operation):
+    supervisor, store, clock, samples, *_ = safety
+    if operation == "return":
+        samples["energy"] = EnergySample(22, clock())
+    plan = checkpoint(samples["pose"], command(seconds=100) if operation == "return" else command(), command())
+    outcome = supervisor.assess(request(safety, plan), supervisor.site)
+    original = store.append_events
+
+    def fail(**kwargs):
+        if operation != "completion" or kwargs["events"][0]["event_type"] == "CHECKPOINT_COMPLETED":
+            raise sqlite3.OperationalError("disk I/O error")
+        return original(**kwargs)
+
+    monkeypatch.setattr(store, "append_events", fail)
+    emergency_calls = []
+
+    def emergency(executor):
+        emergency_calls.append(True)
+        executor.state = ExecutorState.TERMINAL
+        return TerminalOutcome("EMERGENCY_ABORTED", "AUDIT_PERSISTENCE_FAILED", None, None, clock())
+
+    supervisor.emergency = emergency
+    executor = Executor(store, clock)
+    result = supervisor.refresh_failure(executor) if operation == "refresh_failure" else supervisor.dispatch(outcome, executor)
+    assert result.state == "EMERGENCY_ABORTED" and emergency_calls == [True]
+    assert executor.calls == (["CAPTURE"] if operation == "completion" else [])
+    assert supervisor.last_terminal_outcome == result
+    assert supervisor.last_persistence_error
+    with pytest.raises(RuntimeError, match="terminal"):
+        supervisor.prepare(snapshot_version=store.session_version("session"))
+    assert not any(e.event_type == "DRONE_STATE_RECORDED" for e in store.events("session"))
+    # A later writable ledger does not renew permission to issue emergency.
+    monkeypatch.setattr(store, "append_events", original)
+    assert supervisor.refresh_failure(executor) == result
+    assert emergency_calls == [True]
+
+
+def test_mandatory_audit_retry_keeps_original_identity_after_unrelated_append(safety):
+    supervisor, store, _, samples, *_ = safety
+    samples["pose"] = replace(samples["pose"], state=LocalizationState.LOST)
+    outcome = supervisor.assess(request(safety), supervisor.site)
+    first = supervisor._audit(outcome)
+    store.append_event(session_id="session", expected_version=store.session_version("session"),
+        event_type="CONCURRENT", payload={}, correlation_id="other", causation_id=None, idempotency_key="other")
+    assert supervisor._audit(outcome) == first
+    assert len([e for e in store.events("session") if e.event_type == "SAFETY_ASSESSED"]) == 1
+
+
+def test_optional_audit_conflict_cannot_authorize_stale_movement(safety, monkeypatch):
+    supervisor, store, clock, samples, *_ = safety
+    inject_concurrent_append(store, monkeypatch, "SAFETY_ASSESSED")
+    plan = checkpoint(samples["pose"], command("MOVE", direction="right", distance_cm=20))
+    executor = Executor(store, clock)
+    with pytest.raises(VersionConflict):
+        supervisor.dispatch(supervisor.assess(request(safety, plan), supervisor.site), executor)
+    assert executor.calls == []
+
+
+def test_terminal_completion_storage_failure_does_not_repeat_landing(safety, monkeypatch):
+    supervisor, store, clock, samples, _, emergencies = safety
+    original = store.append_events
+
+    def fail(**kwargs):
+        if kwargs["events"][0]["event_type"] == "CHECKPOINT_COMPLETED":
+            raise sqlite3.OperationalError("disk I/O error")
+        return original(**kwargs)
+
+    monkeypatch.setattr(store, "append_events", fail)
+    plan = checkpoint(samples["pose"], command("LAND"))
+    executor = Executor(store, clock)
+    result = supervisor.dispatch(supervisor.assess(request(safety, plan), supervisor.site), executor)
+    assert result.state == "LANDED" and executor.calls == ["LAND"] and emergencies == []
+    assert supervisor.last_terminal_outcome == result and supervisor.last_persistence_error

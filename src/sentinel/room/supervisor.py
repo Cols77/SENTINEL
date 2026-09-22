@@ -15,7 +15,6 @@ import math
 from threading import Event, RLock, Thread
 import time
 from typing import Callable, Literal
-import uuid
 
 from sentinel.cube.checkpoint import CheckpointPlan, CommandLimits, PlannedCommand, plan_checkpoint
 from sentinel.cube.energy import EnergyEstimate, EnergySample, ExecutionMode, ReserveDecision, ReserveGuard
@@ -76,6 +75,10 @@ class SupervisorOutcome:
     contingency_id: str | None = None
 
 
+class _AuditPersistenceFailure(RuntimeError):
+    """The durable safety boundary is unavailable; only emergency may run."""
+
+
 class SafetySupervisor:
     def __init__(self, *, store: RoomStore, session_id: str, site: RoomSite,
                  tracker: LocalizationTracker, reserve: ReserveGuard, limits: CommandLimits,
@@ -101,6 +104,9 @@ class SafetySupervisor:
         self.recovery, self.mapped_heading_tag_ids = recovery, mapped_heading_tag_ids
         self._last_clock = None
         self._terminal = False
+        self.last_terminal_outcome = None
+        self.last_persistence_error = None
+        self.last_preempted_version = 0
         self.last_preemption = None
         # A restart cannot erase a durable return/terminal latch or import old
         # clearances: it has a new clock domain and must obtain new assurances.
@@ -454,13 +460,26 @@ class SafetySupervisor:
     def refresh_failure(self, executor):
         """Fail closed when no sample exists; absent measurements stay null."""
         with self._dispatch_lock:
-            version = self.store.session_version(self.session_id)
-            correlation = str(uuid.uuid4())
-            event = self.store.append_event(session_id=self.session_id, expected_version=version,
-                event_type="SAFETY_ASSESSED", payload={"transition": "LAND_CONTINGENCY",
-                    "reason": "TELEMETRY_UNAVAILABLE", "invalidates_snapshot": True,
-                    "energy_sample": None, "pose_forecast": None, "energy": None},
-                correlation_id=correlation, causation_id=None, idempotency_key=correlation)
+            if self._terminal and self.last_terminal_outcome is not None:
+                return self.last_terminal_outcome
+            try:
+                return self._refresh_failure(executor)
+            except _AuditPersistenceFailure as exc:
+                return self._persistence_emergency(executor, exc)
+
+    def _refresh_failure(self, executor):
+        with self._dispatch_lock:
+            try:
+                version = self.store.session_version(self.session_id)
+                self.last_preempted_version = version
+                correlation = f"refresh-failure:{self.session_id}:{version}"
+                event = self.store.append_event_current(session_id=self.session_id, assessed_snapshot_version=version,
+                    event_type="SAFETY_ASSESSED", payload={"transition": "LAND_CONTINGENCY",
+                        "reason": "TELEMETRY_UNAVAILABLE", "invalidates_snapshot": True,
+                        "energy_sample": None, "pose_forecast": None, "energy": None},
+                    correlation_id=correlation, causation_id=None, idempotency_key=correlation)
+            except Exception as exc:
+                raise _AuditPersistenceFailure(str(exc)) from exc
             self._returning = self._terminal = True
             self.last_preemption = None
             self.last_preempted_version = version
@@ -468,9 +487,10 @@ class SafetySupervisor:
             state = {"battery_percent": None, "pose_source": "UNAVAILABLE", "pose_quality": "UNAVAILABLE",
                      "flight_state": executor.state.value, "airborne": None, "terminal_state": result.state,
                      "action_progress": result.state, "completion_known": result.completed_at is not None}
-            self.store.append_checkpoint_completion(self.session_id, result=result, state=state,
+            self._persist_completion(result=result, state=state,
                 pose_measured_at=None, energy_measured_at=None, clock_domain_id=self.clock_domain_id,
-                sample_max_age_s=self.reserve.profile.sample_max_age_s, fresh=False, causation_id=event.event_id)
+                sample_max_age_s=self.reserve.profile.sample_max_age_s, fresh=False, causation_id=event.event_id,
+                assessed_snapshot_version=version)
             return result
 
     def run_wait(self, operation, *, snapshot_version, timeout_s, executor):
@@ -528,15 +548,59 @@ class SafetySupervisor:
         return waited
 
     def _audit(self, outcome):
-        correlation = str(uuid.uuid4())
-        event = self.store.append_event(session_id=self.session_id,
-            expected_version=outcome.request.snapshot_version, event_type="SAFETY_ASSESSED",
-            payload=asdict(outcome), correlation_id=correlation, causation_id=None,
-            idempotency_key=correlation)
+        payload = asdict(outcome)
+        correlation = f"safety:{_sha(payload)}"
+        mandatory = outcome.transition != "CONTINUE"
+        try:
+            append = self.store.append_event_current if mandatory else self.store.append_event
+            version = ({"assessed_snapshot_version": outcome.request.snapshot_version} if mandatory
+                       else {"expected_version": outcome.request.snapshot_version})
+            event = append(session_id=self.session_id, **version, event_type="SAFETY_ASSESSED",
+                payload=payload, correlation_id=correlation, causation_id=None, idempotency_key=correlation)
+        except VersionConflict as exc:
+            if not mandatory:
+                raise
+            raise _AuditPersistenceFailure(str(exc)) from exc
+        except Exception as exc:
+            raise _AuditPersistenceFailure(str(exc)) from exc
         if outcome.transition in {"RETURN_NOW", "LAND_CONTINGENCY"}:
             self._returning = True
             self.reserve.latch_return(outcome.energy)
         return event
+
+    def _persist_completion(self, **values):
+        if isinstance(values["result"], TerminalOutcome):
+            self.last_terminal_outcome = values["result"]
+        try:
+            return self.store.append_checkpoint_completion(self.session_id, **values)
+        except Exception as exc:
+            raise _AuditPersistenceFailure(str(exc)) from exc
+
+    def _persistence_emergency(self, executor, error, admitted=None):
+        """Keep a local terminal result when the ledger cannot record safety.
+
+        Never execute return motion without its audit. The already configured
+        emergency path owns any SDK uncertainty; no persistence success is
+        inferred from this local fallback.
+        """
+        self.last_persistence_error = str(error)
+        self._returning = self._terminal = True
+        if admitted is not None:
+            self.last_preempted_version = admitted.request.snapshot_version
+        if self.last_terminal_outcome is None:
+            try:
+                self.last_terminal_outcome = self.emergency(executor)
+            except Exception as exc:
+                self.last_persistence_error += f"; emergency failed: {exc}"
+                self.last_terminal_outcome = TerminalOutcome(
+                    "EMERGENCY_ABORTED", "AUDIT_PERSISTENCE_FAILED", None, None, None)
+        result = self.last_terminal_outcome
+        if admitted is not None:
+            try:
+                self._record_completion(result, admitted, None, executor)
+            except _AuditPersistenceFailure:
+                pass  # Local terminal state remains authoritative for this runtime.
+        return result
 
     def _record_completion(self, result, admitted, event, executor):
         try:
@@ -570,10 +634,11 @@ class SafetySupervisor:
             "terminal_state": result.state if terminal else "ABORTED" if unavailable else None,
             "action_progress": result.state if terminal else result.status,
             "completion_known": result.completed_at is not None if terminal else result.completion_known}
-        self.store.append_checkpoint_completion(self.session_id, result=result, state=state,
+        self._persist_completion(result=result, state=state,
             pose_measured_at=pose.measured_at, energy_measured_at=sample.measured_at_s,
             clock_domain_id=self.clock_domain_id, sample_max_age_s=self.reserve.profile.sample_max_age_s,
-            fresh=fresh, causation_id=event.event_id)
+            fresh=fresh, causation_id=event.event_id if event is not None else None,
+            assessed_snapshot_version=admitted.request.snapshot_version)
 
     def _recover(self, current, executor):
         """Use the cube recovery policy; publish only a timely validated burst."""
@@ -592,8 +657,7 @@ class SafetySupervisor:
 
         def stop(reason):
             terminal = replace(current, transition="LAND_CONTINGENCY", reason=reason,
-                               invalidates_snapshot=True, contingency_id=None,
-                               request=replace(current.request, snapshot_version=self.store.session_version(self.session_id)))
+                               invalidates_snapshot=True, contingency_id=None)
             event = self._audit(terminal)
             result = self.emergency(executor)
             self._record_completion(result, terminal, event, executor)
@@ -660,6 +724,13 @@ class SafetySupervisor:
         return result
 
     def dispatch(self, outcome: SupervisorOutcome, executor) -> CheckpointOutcome | TerminalOutcome:
+        with self._dispatch_lock:
+            try:
+                return self._dispatch(outcome, executor)
+            except _AuditPersistenceFailure as exc:
+                return self._persistence_emergency(executor, exc, outcome)
+
+    def _dispatch(self, outcome: SupervisorOutcome, executor) -> CheckpointOutcome | TerminalOutcome:
         """Revalidate fresh input, persist preemption, then use the executor lock.
 
         A command completing with SDK uncertainty is returned unchanged. No
@@ -676,8 +747,7 @@ class SafetySupervisor:
             if outcome.transition in {"RETURN_NOW", "LAND_CONTINGENCY"}:
                 # A newer pose/sample can strengthen a mandatory preemption,
                 # but cannot erase an already selected return obligation.
-                self._audit(replace(outcome, request=replace(outcome.request,
-                    snapshot_version=self.store.session_version(self.session_id))))
+                self._audit(outcome)
             current = self.prepare(snapshot_version=self.store.session_version(self.session_id),
                 checkpoint=outcome.request.checkpoint, provider_wait_s=outcome.request.provider_wait_s, fallback=outcome)
             if outcome.transition == "RETURN_NOW" and current.transition == "CONTINUE":

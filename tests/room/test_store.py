@@ -29,6 +29,59 @@ def _append(store, *, expected_version=0, key="key-1", payload=None):
     )
 
 
+def test_append_current_keeps_assessment_version_and_recovers_stable_retry(tmp_path):
+    store = _store(tmp_path)
+    _append(store)
+    values = dict(session_id="session-1", assessed_snapshot_version=0,
+        event_type="SAFETY_ASSESSED", payload={"transition": "LAND_CONTINGENCY"},
+        correlation_id="safety", causation_id=None, idempotency_key="safety")
+    first = store.append_event_current(**values)
+    assert first.payload["assessed_snapshot_version"] == 0
+    assert first.payload["append_version"] == 1
+    _append(store, expected_version=2, key="unrelated")
+    assert store.append_event_current(**values) == first
+    assert store.session_version("session-1") == 3
+    with pytest.raises(IdempotencyConflict):
+        store.append_event_current(**{**values, "payload": {"transition": "RETURN_NOW"}})
+
+
+def test_ordinary_append_cannot_omit_snapshot_authorization(tmp_path):
+    store = _store(tmp_path)
+    with pytest.raises(VersionConflict):
+        _append(store, expected_version=None)
+    assert store.events("session-1") == ()
+
+
+def test_append_current_serializes_repeated_independent_writers_and_retries(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    store = _store(tmp_path)
+    second = RoomStore.open(tmp_path / "room.sqlite3")
+    barrier = threading.Barrier(2)
+
+    def writer(connection, prefix):
+        barrier.wait()
+        for index in range(8):
+            key = f"{prefix}:{index}"
+            values = dict(session_id="session-1", assessed_snapshot_version=0,
+                event_type="SAFETY_ASSESSED", payload={"writer": prefix, "index": index},
+                correlation_id=key, causation_id=None, idempotency_key=key)
+            event = connection.append_event_current(**values)
+            assert connection.append_event_current(**values) == event
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending = [pool.submit(writer, connection, prefix) for connection, prefix in ((store, "a"), (second, "b"))]
+            for future in pending:
+                future.result(timeout=10)
+        events = store.events("session-1")
+        assert len(events) == store.session_version("session-1") == 16
+        assert all(e.payload["append_version"] == e.state_version - 1 for e in events)
+        assert all(e.payload["assessed_snapshot_version"] == 0 for e in events)
+    finally:
+        second.close()
+        store.close()
+
+
 def test_contingency_assurances_are_append_only_session_bound_and_idempotent(tmp_path):
     from dataclasses import replace
     from tests.cube.test_recovery import assurance

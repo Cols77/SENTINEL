@@ -165,7 +165,7 @@ class RoomStore:
 
     def append_events(
         self, *, session_id: str, expected_version: int,
-        events: Sequence[Mapping[str, object]],
+        events: Sequence[Mapping[str, object]], _at_current: bool = False,
     ) -> tuple[StoredEvent, ...]:
         """Append a complete ordered batch, or recover its complete prior delivery.
 
@@ -173,6 +173,7 @@ class RoomStore:
         membership. Prefixes, suffixes and concatenated adjacent batches are
         conflicts. No metadata, version or event survives a failed append.
         """
+        at_current = _at_current
         prepared = []
         keys = set()
         for event in events:
@@ -200,6 +201,13 @@ class RoomStore:
                         (session_id, event["idempotency_key"]),
                     ).fetchone()
                     if existing is not None:
+                        if at_current:
+                            # Replay uses the original append boundary, never
+                            # a newer unrelated writer's version, in its digest.
+                            payload = {**event["payload"], "append_version": existing["state_version"] - 1}
+                            digest = _event_sha256(session_id=session_id, event_type=event["event_type"],
+                                payload_json=_canonical_payload(payload), correlation_id=event["correlation_id"],
+                                causation_id=event["causation_id"])
                         if existing["event_sha256"] != digest:
                             raise IdempotencyConflict("idempotency key has different event content")
                         recovered.append(_stored_event(existing))
@@ -214,6 +222,15 @@ class RoomStore:
                 ).fetchone()
                 if session is None:
                     raise KeyError(f"unknown room session {session_id!r}")
+                if at_current:
+                    expected_version = int(session["state_version"])
+                    versioned = []
+                    for index, (event, _, _) in enumerate(prepared):
+                        payload_json = _canonical_payload({**event["payload"], "append_version": expected_version + index})
+                        digest = _event_sha256(session_id=session_id, event_type=event["event_type"],
+                            payload_json=payload_json, correlation_id=event["correlation_id"], causation_id=event["causation_id"])
+                        versioned.append((event, payload_json, digest))
+                    prepared = versioned
                 if int(session["state_version"]) != expected_version:
                     raise VersionConflict(
                         f"session {session_id!r} expected version {expected_version}, "
@@ -257,6 +274,32 @@ class RoomStore:
                 self.connection.rollback()
                 raise
 
+    def append_event_current(self, *, session_id, assessed_snapshot_version, event_type,
+                             payload, correlation_id, causation_id, idempotency_key):
+        return self.append_events_current(session_id=session_id,
+            assessed_snapshot_version=assessed_snapshot_version,
+            events=({"event_type": event_type, "payload": payload, "correlation_id": correlation_id,
+                     "causation_id": causation_id, "idempotency_key": idempotency_key},))[0]
+
+    def append_events_current(self, *, session_id, assessed_snapshot_version, events):
+        """Append safety obligations or measured facts at the locked current version.
+
+        This is not authorization for an optional physical decision. Its input
+        assessment version remains visible; append_version is the version before
+        each insertion. BEGIN IMMEDIATE protects the read and the whole batch.
+        A stable key and identical input recover the original digest on retry.
+        """
+        if assessed_snapshot_version is not None and (
+                type(assessed_snapshot_version) is not int or assessed_snapshot_version < 0):
+            raise ValueError("invalid assessed snapshot version")
+        stamped = []
+        for event in events:
+            if "append_version" in event["payload"] or "assessed_snapshot_version" in event["payload"]:
+                raise ValueError("append metadata is owned by the store")
+            stamped.append({**event, "payload": {**event["payload"],
+                "assessed_snapshot_version": assessed_snapshot_version}})
+        return self.append_events(session_id=session_id, expected_version=0, events=tuple(stamped), _at_current=True)
+
     def events(self, session_id: str, *, after_sequence: int = 0) -> tuple[StoredEvent, ...]:
         with self._lock:
             self._require_open()
@@ -282,7 +325,8 @@ class RoomStore:
             idempotency_key=f"contingency:{assurance.assurance_id}:{assurance.state}")
 
     def append_checkpoint_completion(self, session_id, *, result, state, pose_measured_at,
-            energy_measured_at, clock_domain_id, sample_max_age_s, fresh, causation_id):
+            energy_measured_at, clock_domain_id, sample_max_age_s, fresh, causation_id,
+            assessed_snapshot_version=None):
         """Atomically append completion and its timed, explicitly sourced measurement."""
         correlation = str(uuid.uuid4())
         payload = {"state": state, "observed_at": _utc_now(), "scope": f"aircraft:{session_id}",
@@ -290,12 +334,11 @@ class RoomStore:
                    "clock_domain_id": clock_domain_id, "pose_measured_at": pose_measured_at,
                    "energy_measured_at": energy_measured_at, "sample_max_age_s": sample_max_age_s,
                    "refresh_succeeded": fresh}
-        with self._lock:
-            return self.append_events(session_id=session_id, expected_version=self.session_version(session_id),
-                events=tuple({"event_type": kind, "payload": data, "correlation_id": correlation,
-                              "causation_id": causation_id, "idempotency_key": f"{correlation}:{kind}"}
-                             for kind, data in (("CHECKPOINT_COMPLETED", asdict(result)),
-                                                ("DRONE_STATE_RECORDED", payload))))
+        return self.append_events_current(session_id=session_id, assessed_snapshot_version=assessed_snapshot_version,
+            events=tuple({"event_type": kind, "payload": data, "correlation_id": correlation,
+                          "causation_id": causation_id, "idempotency_key": f"{correlation}:{kind}"}
+                         for kind, data in (("CHECKPOINT_COMPLETED", asdict(result)),
+                                            ("DRONE_STATE_RECORDED", payload))))
 
     def contingency_assurances(self, session_id: str, *, clock_domain_id: str) -> tuple:
         """Return append-only evidence; reopening a store never renews a deadline."""
