@@ -170,6 +170,20 @@ def test_motor_time_regression_is_immediately_invalid_even_within_quantization_e
     assert estimate.decision is ReserveDecision.LAND_CONTINGENCY
 
 
+def test_motor_time_regression_after_an_epoch_advance_fails_closed() -> None:
+    guard = _guard(now=0.5)
+    first = _sample(80, 0, motor_time_s=10)
+    advanced = _sample(80, 0.25, motor_time_s=11)
+    regressed = _sample(80, 0.5, motor_time_s=10)
+
+    guard.observe(first, advanced)
+    guard.observe(advanced, regressed)
+
+    estimate = guard.assess(current=regressed, next_plan=None, recovery_plan=None,
+                            provider_wait_s=0, termination_plan=_plan("home", 1))
+    assert estimate.decision is ReserveDecision.LAND_CONTINGENCY
+
+
 def test_repeated_subsecond_motor_stalls_accumulate_past_the_quantization_envelope() -> None:
     guard = _guard(now=2)
     previous = _sample(80, 0, motor_time_s=10)

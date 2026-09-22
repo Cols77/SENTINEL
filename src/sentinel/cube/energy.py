@@ -241,10 +241,14 @@ class ReserveGuard:
                 return
             measured_at = _exact_decimal(current.measured_at_s, "measured_at_s")
             motor_time = _exact_decimal(current.motor_time_s, "motor_time_s")
+            previous_motor_time = _exact_decimal(previous.motor_time_s, "motor_time_s")
+            if motor_time < previous_motor_time:
+                self._telemetry_invalid = True
+                return
             if self._motor_epoch is None:
                 self._motor_epoch = (
                     _exact_decimal(previous.measured_at_s, "measured_at_s"),
-                    _exact_decimal(previous.motor_time_s, "motor_time_s"),
+                    previous_motor_time,
                     previous.motor_time_source,
                 )
             epoch_at, epoch_motor_time, epoch_source = self._motor_epoch
