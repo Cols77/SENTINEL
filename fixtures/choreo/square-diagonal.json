@@ -1,0 +1,29 @@
+{
+  "_comment": "Replay fixture for scripts/choreo_run.py. The prompt is the one the choreography test uses; the response is a HAND-WRITTEN stand-in in chat/completions shape (no model produced it yet). Replace 'responses' with the first live reply that passes the checks, and set 'source' accordingly.",
+  "source": "hand-written stand-in, 2026-09-22",
+  "site": "docs/wp5-flight3-site.json",
+  "prompt": "Fly a 1 m square clockwise in the middle of the area, starting at its far-left corner, close the square, then cross its diagonal, then come back to where you took off.",
+  "responses": [
+    {
+      "model": "hand-written",
+      "choices": [
+        {
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_0",
+                "type": "function",
+                "function": {
+                  "name": "fly_choreography",
+                  "arguments": "{\"waypoints\": [{\"name\": \"SQ_FL\", \"x_cm\": 200, \"y_cm\": 140, \"z_cm\": 90}, {\"name\": \"SQ_NL\", \"x_cm\": 200, \"y_cm\": 240, \"z_cm\": 90}, {\"name\": \"SQ_NR\", \"x_cm\": 300, \"y_cm\": 240, \"z_cm\": 90}, {\"name\": \"SQ_FR\", \"x_cm\": 300, \"y_cm\": 140, \"z_cm\": 90}, {\"name\": \"SQ_FL2\", \"x_cm\": 200, \"y_cm\": 140, \"z_cm\": 90}, {\"name\": \"DIAG\", \"x_cm\": 300, \"y_cm\": 240, \"z_cm\": 90}], \"reason\": \"A 1 m square flown clockwise from the far-left corner, closed, then the diagonal to the opposite corner; every stop is in a covered cell.\"}"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

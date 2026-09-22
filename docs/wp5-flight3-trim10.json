@@ -1,0 +1,13 @@
+{
+  "schema_version": "cube-mission-v1",
+  "_comment": "2026-09-22 convergence test in the flight3 cube: up to 10 trims per stop (each at 20 cm/s), legs at 50 cm/s, back to the takeoff point. Stops are in cells the tag-coverage guard rates OK. Fly with docs/wp5-flight3-site.json.",
+  "max_trim_rounds": 10,
+  "leg_speed_cm_s": 50,
+  "return_to_start": true,
+  "waypoints": [
+    {"name": "RIGHT", "x_cm": 280, "y_cm": 200, "z_cm": 90},
+    {"name": "FAR_R", "x_cm": 280, "y_cm": 155, "z_cm": 90},
+    {"name": "FAR_L", "x_cm": 220, "y_cm": 155, "z_cm": 90},
+    {"name": "HOME", "x_cm": 250, "y_cm": 200, "z_cm": 90}
+  ]
+}
