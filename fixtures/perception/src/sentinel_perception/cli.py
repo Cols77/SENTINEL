@@ -16,9 +16,11 @@ from pathlib import Path
 
 
 from .choreography import check_choreography, loop_closure, segment
-from .evidence import EvidenceWriter
+from .evidence import EvidenceWriter, run_stream_path
 from .selection import SELECTION_VERSION, flag_relative_texture, keyframes, select
 from .video import probe, read_frames
+from .config import DEFAULT
+from .quality import profile
 
 
 def cmd_probe(args) -> int:
@@ -74,7 +76,7 @@ def cmd_select(args) -> int:
     outdir = Path(args.outdir)
     frames_dir = outdir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
-    ev = EvidenceWriter(outdir / "perception.jsonl")
+    ev = EvidenceWriter(run_stream_path(outdir, "select"))
 
     info = probe(args.video)
     print(f"decoding {info.path} ...")
@@ -163,7 +165,7 @@ def cmd_detect(args) -> int:
 
     manifest = load_manifest()
     spec = manifest["detector_openvocab"]
-    ev = EvidenceWriter(outdir / "perception.jsonl", run_id=args.run_id)
+    ev = EvidenceWriter(run_stream_path(outdir, "detect"), run_id=args.run_id)
     queries = args.queries
 
     print(f"model   : {spec['id']} @{spec['sha'][:8]}")
@@ -235,10 +237,13 @@ def cmd_depth(args) -> int:
     from .models import load_manifest, stage
 
     outdir = Path(args.outdir)
-    stream = outdir / "perception.jsonl"
-    if not stream.exists():
-        print("no perception.jsonl -- run `select` then `detect` first")
+    # Read detections from the newest detect run; write depth as its own run.
+    # Appending into detect's stream would mix two runs in one file.
+    detect_streams = sorted(outdir.glob("detect_*.jsonl"))
+    if not detect_streams:
+        print("no detect stream -- run `select` then `detect` first")
         return 1
+    stream = detect_streams[-1]        # timestamped names sort chronologically
 
     # Rebuild detections from the event stream rather than re-running the
     # detector. The stream is the record, anything derived from it stays
@@ -264,7 +269,7 @@ def cmd_depth(args) -> int:
     intr = Intrinsics.from_fov(cfg.camera.width, cfg.camera.height,
                                cfg.camera.hfov_deg, cfg.camera.vfov_deg)
     spec = load_manifest()["depth_metric"]
-    ev = EvidenceWriter(stream, run_id=records[0]["run_id"])
+    ev = EvidenceWriter(run_stream_path(outdir, "depth"))
 
     print(f"model      : {spec['id']} @{spec['sha'][:8]}")
     print(f"intrinsics : fx={intr.fx} fy={intr.fy} ({intr.source})")
@@ -317,40 +322,64 @@ def cmd_depth(args) -> int:
     return 0
 
 def cmd_analyse(args) -> int:
-    import json
+    import shutil
     import time
 
-    from .choreography import check_choreography, loop_closure, segment
     from .detection import (GroundingDinoDetector, clean, deduplicate,
                             detect_multipass)
     from .models import load_manifest, stage
     from .render import draw
     from .scene import (SCENE_VERSION, aggregate, bearing_deg, dedupe_loop_closure,
                         describe, narrate)
-    from .selection import flag_relative_texture, keyframes, select
     from .tracking import SectorTracker, merge_tracks
-    from .video import iter_frames, probe, read_frames
+    from .video import iter_frames
 
     cfg = DEFAULT
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    ev = EvidenceWriter(outdir / "analysis.jsonl")
+
+    # One run, one stream.
+    stream = run_stream_path(outdir, "analysis")
+    ev = EvidenceWriter(stream)
 
     info = probe(args.video)
-    print(f"video : {info.width}x{info.height} @{info.fps:.0f}fps\n"
-          f"pass 1: quality profile and choreography ...")
+    print(f"run   : {ev.run_id}")
+    print(f"video : {info.width}x{info.height} @{info.fps:.0f}fps")
 
+    ev.emit("run_started", "LIVE", {
+        "source": str(args.video),
+        "video": info.to_dict(),
+        "config": cfg.to_dict(),
+        "scene_version": SCENE_VERSION,
+        "args": {
+            "queries": args.queries, "stride": args.stride,
+            "group_size": args.group_size, "box_threshold": args.box_threshold,
+            "text_threshold": args.text_threshold, "confirm": args.confirm,
+            "min_observations": args.min_observations,
+            "merge_iou": args.merge_iou, "keep_stuff": args.keep_stuff,
+        },
+    })
+
+    # ---- pass 1: quality profile and choreography -------------------------
+    print("pass 1: quality profile and choreography ...")
     qualities = profile(args.video, cfg.quality, info.fps)
     phases = segment(qualities, cfg.choreography, info.fps)
     check = check_choreography(phases, cfg.choreography)
     dwells = [p for p in phases if p.kind == "DWELL"]
 
     selected = select(qualities, phases, cfg.choreography, alternates=0)
-    flag_relative_texture(selected, cfg.quality)
+    texture = flag_relative_texture(selected, cfg.quality)
     keys = [s for s in keyframes(selected) if s.usable]
     key_idx = {s.frame_index for s in keys}
 
-    # frame -> (phase, sector)
+    ev.emit("scan_segmented", "INFERRED", {
+        "phases": [p.to_dict() for p in phases],
+        "check": check,
+        "texture": texture,
+        "keyframes": [s.to_dict() for s in selected],
+    })
+
+    # frame -> (phase kind, sector or None)
     frame_phase: dict[int, tuple[str, int | None]] = {}
     si = 0
     for p in phases:
@@ -365,11 +394,18 @@ def cmd_analyse(args) -> int:
         loop = loop_closure(imgs[keys[0].frame_index], imgs[keys[-1].frame_index])
     yaw_ok = bool(loop is not None and loop >= cfg.choreography.loop_closure_min)
 
+    if loop is not None:
+        ev.emit("loop_closure_checked", "INFERRED", {
+            "similarity": loop,
+            "minimum": cfg.choreography.loop_closure_min,
+            "yaw_verified": yaw_ok,
+        })
+
     print(f"        {check['verdict']}, {len(dwells)} sectors"
           + (f", loop closure {loop:.3f}" if loop is not None else ""))
 
     # ---- pass 2: detect on a stride through the dwells --------------------
-    # Rotation frames are motion-blurred by construction, detecting there
+    # Rotation frames are motion-blurred by construction; detecting there
     # produces smeared boxes that pollute the track set and the counts.
     targets = sorted(f for f, (kind, _) in frame_phase.items()
                      if kind == "DWELL" and (f % args.stride == 0 or f in key_idx))
@@ -381,7 +417,6 @@ def cmd_analyse(args) -> int:
               for i in range(0, len(args.queries), args.group_size)]
 
     tracker = SectorTracker()
-    per_frame: dict[int, list] = {}
     last_sector = None
     t0 = time.time()
 
@@ -390,7 +425,7 @@ def cmd_analyse(args) -> int:
                                     box_threshold=args.box_threshold,
                                     text_threshold=args.text_threshold)
         images = read_frames(args.video, set(targets))
-        tmp = outdir / "_tmp.png"
+        tmp = outdir / f"_tmp_{ev.run_id}.png"
 
         for n, f in enumerate(targets):
             kind, sector = frame_phase[f]
@@ -401,36 +436,66 @@ def cmd_analyse(args) -> int:
             cv2.imwrite(str(tmp), images[f])
             raw = []
             for res in detect_multipass(det, tmp, groups, f, sector):
+                # Every inference call is recorded, errors included.
+                ev.emit("detector_called", "LIVE", {
+                    "frame": f, "sector": sector, "result": res.to_dict(),
+                })
                 if not res.error:
                     raw.extend(res.detections)
 
-            kept, _ = clean(raw, info.width, info.height, args.queries,
-                            drop_stuff=not args.keep_stuff)
+            kept, rejected = clean(raw, info.width, info.height, args.queries,
+                                   drop_stuff=not args.keep_stuff)
             kept = deduplicate(kept)
-            dicts = [d.to_dict() for d in kept]
-            per_frame[f] = dicts
-            tracker.update(dicts, f, sector)
+            tracker.update([d.to_dict() for d in kept], f, sector)
+
+            if rejected:
+                ev.emit("detections_filtered", "INFERRED", {
+                    "frame": f, "sector": sector,
+                    "n_raw": len(raw), "n_kept": len(kept),
+                    "rejected": rejected,
+                })
 
             if n % 10 == 0:
                 print(f"        {n:4d}/{len(targets)}  frame {f:4d}  "
                       f"sector {sector}  {len(kept)} kept")
         tmp.unlink(missing_ok=True)
 
-    print(f"        {time.time() - t0:.0f}s, {len(tracker.tracks)} raw tracks")
+    elapsed = time.time() - t0
+    print(f"        {elapsed:.0f}s, {len(tracker.tracks)} raw tracks")
 
     # ---- aggregate --------------------------------------------------------
+    # Order matters: min_observations drops flicker so noise cannot seed a
+    # merge, merge_tracks collapses duplicates WITHIN a sector and must run
+    # before describe(), which reads track.best, dedupe_loop_closure runs last
+    # and handles one object observed twice ACROSS sectors.
     tracks = [t for t in tracker.tracks if t.n_obs >= args.min_observations]
+    after_min_obs = len(tracks)
+
+    tracks = merge_tracks(tracks, iou_thresh=args.merge_iou)
+    print(f"        tracks: {len(tracker.tracks)} raw -> {after_min_obs} "
+          f"after min-obs -> {len(tracks)} after merge")
+
+    ev.emit("tracks_merged", "INFERRED", {
+        "raw": len(tracker.tracks),
+        "after_min_observations": after_min_obs,
+        "after_merge": len(tracks),
+        "min_observations": args.min_observations,
+        "merge_iou": args.merge_iou,
+    })
+
     objects = [describe(t, info.width, info.height, cfg.choreography.turn_deg,
                         cfg.camera.hfov_deg, cfg.camera.vfov_deg, info.fps, yaw_ok)
                for t in tracks]
+
     dedup = dedupe_loop_closure(objects, len(dwells), cfg.choreography.turn_deg, yaw_ok)
+    ev.emit("loop_dedup_applied", "INFERRED", dedup)
+
     objects.sort(key=lambda o: (-o["peak_score"], o["sector"]))
     scene = aggregate(objects, len(dwells), args.confirm, cfg.choreography.turn_deg,
                       dedup.get("merged_sector"))
 
     # ---- pass 3: render ---------------------------------------------------
-    print(f"pass 3: rendering ...")
-    track_by_id = {t.track_id: t for t in tracks}
+    print("pass 3: rendering ...")
     out_path = outdir / "annotated.mp4"
     writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"),
                              info.fps, (info.width, info.height))
@@ -445,8 +510,9 @@ def cmd_analyse(args) -> int:
                 box, observed = t.box_at(f)
                 if box is None:
                     continue
+                # Stop drawing once the last observation is well behind us.
                 if f - t.observations[-1][0] > args.stride * 2:
-                    continue                      # stale, stop drawing
+                    continue
                 cx = (box[0] + box[2]) / 2 / info.width
                 boxes.append((t.query, t.peak_score, box,
                               bearing_deg(cx, sector, cfg.choreography.turn_deg,
@@ -460,6 +526,7 @@ def cmd_analyse(args) -> int:
     # ---- outputs ----------------------------------------------------------
     summary = {
         "run_id": ev.run_id,
+        "event_stream": str(stream),
         "source": str(args.video),
         "scene_version": SCENE_VERSION,
         "provenance": "LIVE",
@@ -471,14 +538,20 @@ def cmd_analyse(args) -> int:
             "text_threshold": args.text_threshold,
             "confirm_threshold": args.confirm,
             "frames_processed": len(targets), "stride": args.stride,
-            "tracks_raw": len(tracker.tracks), "tracks_kept": len(tracks),
+            "inference_seconds": round(elapsed, 1),
+            "tracks_raw": len(tracker.tracks),
+            "tracks_after_min_obs": after_min_obs,
+            "tracks_kept": len(tracks),
             "min_observations": args.min_observations,
+            "merge_iou": args.merge_iou,
+            "keep_stuff": args.keep_stuff,
         },
         "camera": {"hfov_deg": cfg.camera.hfov_deg, "vfov_deg": cfg.camera.vfov_deg},
         "scan": {
             "sectors": len(dwells), "rotations": check["rotations"],
             "choreography": check["verdict"],
             "loop_closure": loop, "yaw_verified": yaw_ok,
+            "texture": texture,
             "dedup": dedup,
             "note": ("bearings assume the commanded yaw executed; "
                      "loop closure is the independent check"),
@@ -490,12 +563,36 @@ def cmd_analyse(args) -> int:
     ev.emit("analysis_complete", "LIVE", summary)
     (outdir / "scene.json").write_text(json.dumps(summary, indent=2, default=str))
 
+    # Stable path to the newest run. A copy, not a symlink. Windows needs Developer Mode or admin for symlinks.
+    shutil.copy2(stream, outdir / "analysis_latest.jsonl")
+
     print(f"\n{summary['narrative']}\n")
     print(f"video : {out_path}")
     print(f"stats : {outdir / 'scene.json'}")
-    print(f"events: {outdir / 'analysis.jsonl'}")
+    print(f"events: {stream}")
     return 0
 
+
+def cmd_live(args) -> int:
+    from .detection import GroundingDinoDetector
+    from .live import run_live
+    from .models import load_manifest
+    from .source import PacedFileSource, StreamSource
+
+    if args.video:
+        source = PacedFileSource(args.video)
+    else:
+        source = StreamSource(args.url, record_to=args.record)
+
+    # Deliberately NOT inside models.stage(): the model stays resident for the whole session. 
+    # Sequential loading is for batch runs, a live session uses one model continuously.
+    spec = load_manifest()["detector_openvocab"]
+    det = GroundingDinoDetector(spec["id"], spec["sha"],
+                                box_threshold=args.box_threshold,
+                                text_threshold=args.text_threshold)
+    run_live(source, det, args.queries, group_size=args.group_size,
+             keep_stuff=args.keep_stuff, port=args.port)
+    return 0
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="sentinel-perception")
@@ -554,6 +651,20 @@ def main(argv=None) -> int:
     p6.add_argument("--merge-iou", type=float, default=0.45,
                     help="IoU above which two tracks in a sector are one object")
     p6.set_defaults(func=cmd_analyse)
+
+    p7 = sub.add_parser("live", help="read-only live operator view")
+    src = p7.add_mutually_exclusive_group(required=True)
+    src.add_argument("--video", help="replay a recording at real-time pace")
+    src.add_argument("--url", help="stream URL, e.g. udp://0.0.0.0:11111")
+    p7.add_argument("--record", default=None,
+                    help="record the stream here; this file is the evidence input")
+    p7.add_argument("--queries", nargs="+", default=["rock", "boulder", "person"])
+    p7.add_argument("--group-size", type=int, default=3)
+    p7.add_argument("--box-threshold", type=float, default=0.15)
+    p7.add_argument("--text-threshold", type=float, default=0.25)
+    p7.add_argument("--keep-stuff", action="store_true")
+    p7.add_argument("--port", type=int, default=8080)
+    p7.set_defaults(func=cmd_live)
 
 
     args = ap.parse_args(argv)

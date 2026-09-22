@@ -114,3 +114,37 @@ def loop_closure(first_bgr: np.ndarray, last_bgr: np.ndarray) -> float:
     a, b = prep(first_bgr), prep(last_bgr)
     denom = float(np.linalg.norm(a) * np.linalg.norm(b))
     return 0.0 if denom == 0 else float(np.clip((a * b).sum() / denom, 0.0, 1.0))
+
+class OnlinePhaseDetector:
+    """Causal ROTATE/DWELL detection for a live stream.
+    """
+
+    def __init__(self, enter_rotate: float = 2.0, exit_rotate: float = 1.0,
+                 min_frames: int = 8, decay: float = 0.999):
+        self.enter = enter_rotate
+        self.exit = exit_rotate
+        self.min_frames = min_frames
+        self.decay = decay
+        self.phase = "DWELL"
+        self.sector = 0
+        self.rotations = 0
+        self._since = 0
+        self._hi = 1.0
+
+    def update(self, motion: float) -> tuple[str, int | None, bool]:
+        """Feed one frame's motion. Returns (phase, sector, changed)."""
+        self._hi = max(self._hi * self.decay, motion)
+        enter = max(self.enter, self._hi * 0.25)
+        self._since += 1
+        changed = False
+
+        if (self.phase == "DWELL" and motion > enter
+                and self._since >= self.min_frames):
+            self.phase, self._since, changed = "ROTATE", 0, True
+        elif (self.phase == "ROTATE" and motion < self.exit
+                and self._since >= self.min_frames):
+            self.phase, self._since, changed = "DWELL", 0, True
+            self.rotations += 1
+            self.sector += 1
+
+        return self.phase, (self.sector if self.phase == "DWELL" else None), changed

@@ -8,6 +8,11 @@ from dataclasses import dataclass, asdict, field
 
 CONFIG_VERSION = "cfg/2026-09-16.1"
 
+STUFF_QUERIES = {
+    "scree", "loose scree", "gravel", "snow", "vegetation", "grass",
+    "brick paving", "paving", "soil", "sand", "rubble", "debris field",
+}
+
 
 @dataclass(frozen=True)
 class QualityConfig:

@@ -84,6 +84,10 @@ def dedupe_loop_closure(objects: list[dict], n_sectors: int, turn_deg: float,
             o["duplicate_of"] = best["track_id"]
             o["duplicate_bearing_delta_deg"] = round(best_d, 1)
             best.setdefault("corroborated_by", []).append(o["track_id"])
+            if o["peak_score"] > best["peak_score"]:
+                best.setdefault("peak_score_first_pass", best["peak_score"])
+                best["peak_score"] = o["peak_score"]
+                best["peak_score_from_track"] = o["track_id"]
             merged += 1
 
     return {"applied": True, "merged": merged, "merged_sector": last,
