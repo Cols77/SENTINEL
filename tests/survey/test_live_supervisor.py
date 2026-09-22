@@ -3,7 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from sentinel.survey.flight import FlightFrame
-from sentinel.survey.live_detect import DetectionCache, LiveDetectionSupervisor
+from sentinel.survey.live_detect import DetectionCache, LiveDetectionSupervisor, detect_frame
 from sentinel.survey.loop import run_survey
 from sentinel.survey.proposer import RuleProposer
 from sentinel.survey.store import SurveyStore
@@ -171,6 +171,29 @@ def test_cache_rejects_missing_or_extra_detection_fields_without_sightings(tmp_p
         cache = DetectionCache("r", [{**base, "detections": [detection]}],
                                sweep_id="s", strict=True)
         assert cache.for_frame(frame).status == "ANALYSIS_GAP_INVALID_RESULT"
+
+
+def test_cache_rejects_malformed_tile_provenance_and_latency(tmp_path):
+    frame = _frame(tmp_path / "f.png")
+    base = {"run_id": "r", "sweep_id": "s", "path": frame.image_path,
+            "sha256": frame.sha256, "status": "OK", "detections": [_detection()],
+            "dropped": []}
+    for raw, detect_s in (({"tile_only": "not-a-list"}, 0.1),
+                          ({"tile_only": [{"index": 0}]}, 0.1),
+                          ({}, "nan"), ({}, float("inf"))):
+        cache = DetectionCache("r", [{**base, "raw": raw, "detect_s": detect_s}],
+                               sweep_id="s", strict=True)
+        assert cache.for_frame(frame).status == "ANALYSIS_GAP_INVALID_RESULT"
+
+
+def test_detect_frame_rejects_detection_band_length_mismatch():
+    from sentinel.survey.detector import DetectionBatch
+    class Mismatched:
+        def detect(self, path, classes):
+            return DetectionBatch((_detection(),), "OK", bands=())
+    row = detect_frame(Mismatched(), {"path": "frame.png", "stop": "S"})
+    assert row["status"] == "DETECTOR_ERROR"
+    assert row["detections"] == [] and "bands" in row["error"]
 def test_live_cache_is_the_only_ingestion_source_and_publishes_latency_states(tmp_path):
     class Flight:
         def __init__(self):
@@ -241,3 +264,22 @@ def test_invalid_cached_result_is_an_analysis_gap_with_zero_sightings(tmp_path):
     assert outcome["status"] == "REPORTED"
     assert store.unanalysed_count("r") == 1
     assert store.sightings("r") == []
+
+
+def test_live_flight_close_retries_all_pending_supervisors(tmp_path):
+    from sentinel.ui.live import LiveFlight
+    class Supervisor:
+        def __init__(self, pending):
+            self.pending = pending
+            self.calls = 0
+        def close(self):
+            self.calls += 1
+            self.pending = False
+            return True
+    first, second = Supervisor(True), Supervisor(False)
+    flight = LiveFlight.__new__(LiveFlight)
+    flight._supervisors = [first, second]
+    flight._supervisor = second
+    flight.close()
+    assert first.calls == second.calls == 1
+    assert flight._supervisors == []

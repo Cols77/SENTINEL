@@ -175,6 +175,20 @@ class DetectionCache:
                 if raw_document is not None and not isinstance(raw_document, dict):
                     return self._gap("ANALYSIS_GAP_INVALID_RESULT", "raw must be an object", classes)
                 raw = dict(raw_document or {})
+                for latency in (row.get("detect_s"), raw.get("detect_s")):
+                    if latency is not None and (not _number(latency) or latency < 0):
+                        return self._gap("ANALYSIS_GAP_INVALID_RESULT", "detect_s is invalid", classes)
+                tile_only = raw.get("tile_only")
+                if tile_only is not None:
+                    if not isinstance(tile_only, list) or any(
+                            not isinstance(item, dict)
+                            or not isinstance(item.get("index"), int)
+                            or isinstance(item.get("index"), bool)
+                            or item.get("index") < 0
+                            or not isinstance(item.get("tile"), str)
+                            for item in tile_only):
+                        return self._gap("ANALYSIS_GAP_INVALID_RESULT",
+                                         "raw.tile_only is invalid", classes)
                 raw.setdefault("detect_s", row.get("detect_s"))
                 if row.get("error"):
                     raw.setdefault("error", row["error"])
@@ -348,14 +362,19 @@ class LiveDetectionSupervisor:
     def close(self) -> None:
         """Retry ownership of an unconfirmed cleanup without blocking forever."""
         if not self._cleanup_pending or self.process is None:
-            return
+            return True
         try:
             terminated = self.tree_terminator(self.process, self.drain_timeout_s)
             self.process.wait(timeout=self.drain_timeout_s)
             if terminated and self.process.poll() is not None:
                 self._cleanup_pending = False
         except Exception:
-            return
+            return False
+        return not self._cleanup_pending
+
+    @property
+    def cleanup_pending(self) -> bool:
+        return self._cleanup_pending
 
     def detection_for(self, frame, classes: tuple[str, ...] = LIVE_CLASSES):
         return self.finish().for_frame(frame, classes)
@@ -408,6 +427,8 @@ def detect_frame(detector, record: dict, classes: tuple[str, ...] = LIVE_CLASSES
     started = time.monotonic()
     try:
         batch = detector.detect(record["path"], classes)
+        if len(batch.detections) != len(batch.bands):
+            raise ValueError("detection and bands lengths differ")
         from_crop = {entry["index"]: entry["tile"]
                      for entry in (batch.raw or {}).get("tile_only", [])}
         row.update(status=batch.status,

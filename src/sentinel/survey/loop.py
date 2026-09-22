@@ -59,6 +59,7 @@ provider used a label the class map does not know" rather than guessing.
 from __future__ import annotations
 
 import json
+import math
 import time
 from typing import Any
 
@@ -66,6 +67,7 @@ from .candidates import (ESCALATE_LABEL, MAX_FLIGHTS, REPORT_LABEL, propose_cand
                          review_candidates)
 from .consent import ConsentMissing, consent_policy
 from .context import SurveyContext
+from .detector import DetectionBatch
 from .merge import merge_sightings
 from .observability import SYNTHETIC_LEVEL, CameraModel
 from .proposer import chosen_label
@@ -175,9 +177,20 @@ def _fly_and_ingest(store, run_id, option, flight, detector,
                 run_id=run_id, frame_id=frame_id, status="ERROR",
                 latency_ms=(time.perf_counter() - started) * 1000, error=str(exc)))
             raise
-        cached_latency = (batch.raw or {}).get("detect_s") if callable(getattr(flight, "detection_for", None)) else None
-        latency_ms = (float(cached_latency) * 1000.0
-                      if cached_latency is not None else (time.perf_counter() - started) * 1000)
+        using_cache = callable(getattr(flight, "detection_for", None))
+        cached_latency = (batch.raw or {}).get("detect_s") if using_cache else None
+        if using_cache and cached_latency is not None:
+            if isinstance(cached_latency, (int, float)) and not isinstance(cached_latency, bool) \
+                    and math.isfinite(cached_latency) and cached_latency >= 0:
+                latency_ms = float(cached_latency) * 1000.0
+            else:
+                batch = DetectionBatch((), "ANALYSIS_GAP_INVALID_RESULT", raw={
+                    "error": "detect_s is invalid"})
+                latency_ms = None
+        elif using_cache:
+            latency_ms = None
+        else:
+            latency_ms = (time.perf_counter() - started) * 1000
         notify(observer, DetectorResultEvent(
             run_id=run_id, frame_id=frame_id, status=batch.status,
             detections=tuple(batch.detections),
