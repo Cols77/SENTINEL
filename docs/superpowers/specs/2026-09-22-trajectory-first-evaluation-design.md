@@ -1,8 +1,8 @@
 # Trajectory-first inspection evaluation design
 
-**Status:** approved for specification; implementation requires a separate plan  
-**Target branch:** `integration/survey-demo`  
-**Date:** 2026-09-22  
+**Status:** approved for specification; implementation requires a separate plan
+**Target branch:** `integration/survey-demo`
+**Date:** 2026-09-22
 **Base reviewed:** `63ed991` on `integration/survey-demo` (`66ee3a5` is an ancestor)
 
 ## Decision
