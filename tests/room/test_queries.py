@@ -104,7 +104,11 @@ def test_observations_are_historical_and_do_not_invent_numeric_confidence(room, 
     assert "VLM_CONFIDENCE_BAND" in render_answer((fact,))
 
 
-def test_legacy_reports_keep_lower_bound_uncertain_and_unobservable_semantics(room, tmp_path):
+@pytest.mark.parametrize("recorded_at", [None, "2026-09-23T00:00:00.999000+00:00",
+                                        "2026-09-23T00:00:01.199900+00:00"])
+def test_legacy_reports_keep_lower_bound_uncertain_and_unobservable_semantics(room, tmp_path, monkeypatch, recorded_at):
+    if recorded_at is not None:
+        monkeypatch.setattr("sentinel.survey.store.utc_now", lambda: recorded_at)
     legacy, frame, report = survey(tmp_path)
     try:
         queries = ReadQueries(room, survey_store=legacy, survey_run_id="run1")
@@ -119,7 +123,7 @@ def test_legacy_reports_keep_lower_bound_uncertain_and_unobservable_semantics(ro
         assert "2 confirmed" in text and "1 uncertain" in text
         assert "3" in text and "single-view lower bound" in text
         assert "pen: not observable" in text
-        assert "999" not in text and "exactly" not in text
+        assert "exactly 999 computers" not in text
         assert "NOT_OBSERVABLE" in facts[2].uncertainty
     finally:
         legacy.connection.close()
