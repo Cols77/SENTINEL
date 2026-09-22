@@ -9,7 +9,7 @@ from sentinel.cube.step_executor import ExecutorState, HomeState, StepExecutor
 from sentinel.cube.supervised_wait import SupervisedWait
 from sentinel.dry_run import DryRunClient
 from sentinel.envelope import FlightEnvelope
-from sentinel.models import Position
+from sentinel.models import Position, Telemetry
 from sentinel.runner import FlightTestRunner
 
 
@@ -556,3 +556,162 @@ def test_failed_land_node_has_a_failed_command_record():
     assert result.command_states[0].status == "FAILED"
     assert result.command_states[0].error_category == "LANDING_FAILED"
     assert client.close_count == 1
+
+
+def wait_for_state(run, state):
+    deadline = time.monotonic() + 1
+    while run.state is not state and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert run.state is state
+
+
+def test_injected_sink_cannot_bypass_land_latch_or_send_following_move():
+    dispatched = []
+    run, client, _ = executor()
+
+    def sink(node, cancellation):
+        dispatched.append(node.kind)
+        if node.kind == "LAND":
+            run.runner._call(client.land)
+        elif node.kind == "MOVE":
+            run.runner.move_checked("forward", 20)
+        return CommandOutcome()
+
+    run.command_sink = sink
+    run.start(HOME)
+    outcome = run.execute(plan(command("LAND"), command()))
+    assert outcome.status == "PREEMPTED"
+    assert outcome.command_states[0].status == "COMPLETED"
+    assert run.state is ExecutorState.TERMINAL and "MOVE" not in dispatched
+    run.close()
+    assert client.commands.count("land") == 1
+    assert "forward 20" not in client.commands
+
+
+def test_blocked_capture_result_is_discarded_after_concurrent_land():
+    entered, release = Event(), Event()
+
+    def capture(node, cancellation):
+        entered.set()
+        assert release.wait(2)
+        return "late-observation"
+
+    run, client, _ = executor(command_sink=capture)
+    run.start(HOME)
+    worker, outcomes = threaded(lambda: run.execute(plan(command("CAPTURE", bound=2))))
+    assert entered.wait(1)
+    landing, terminals = threaded(run.land)
+    try:
+        wait_for_state(run, ExecutorState.TERMINAL)
+    finally:
+        release.set()
+    worker.join(1)
+    landing.join(1)
+    assert outcomes[0].status == "PREEMPTED" and outcomes[0].completion_known
+    assert outcomes[0].observation_ids == ()
+    assert outcomes[0].command_states[0].status == "PREEMPTED"
+    assert terminals[0].state == "LANDED"
+    run.close()
+    assert client.commands.count("land") == 1
+
+
+def test_localise_result_is_discarded_after_return_home_preempts_it():
+    entered, release = Event(), Event()
+    late_pose = Position(40, 40, 220)
+
+    def localise(node, cancellation):
+        entered.set()
+        assert release.wait(2)
+        return late_pose
+
+    run, client, measured = executor(command_sink=localise)
+    run.start(HOME)
+    worker, outcomes = threaded(lambda: run.execute(plan(command("LOCALISE", bound=2))))
+    assert entered.wait(1)
+    returning, returns = threaded(lambda: run.return_home(plan()))
+    try:
+        wait_for_state(run, ExecutorState.RETURNING)
+    finally:
+        release.set()
+    worker.join(1)
+    returning.join(1)
+    assert outcomes[0].status == "PREEMPTED" and outcomes[0].completion_known
+    assert outcomes[0].pose == measured.pose
+    assert run.runner.envelope.position == measured.pose
+    assert returns[0].status == "COMPLETED"
+    run.close()
+
+
+@pytest.mark.parametrize("kind,value", [
+    ("CAPTURE", "late-observation"),
+    ("LOCALISE", Position(40, 40, 220)),
+    ("READ_TELEMETRY", Telemetry(80, 220)),
+])
+def test_completed_provider_result_cannot_publish_after_emergency_wins_race(kind, value):
+    run, client, measured = executor(command_sink=lambda node, cancellation: value)
+    run.start(HOME)
+    wait = run._wait.run
+
+    def preempt_after_worker_completed(*args):
+        result = wait(*args)
+        assert result.status == "COMPLETED"
+        run.runner.trigger_emergency()
+        return result
+
+    run._wait.run = preempt_after_worker_completed
+    outcome = run.execute(plan(command(kind)))
+    assert outcome.status == "PREEMPTED" and outcome.completion_known
+    assert outcome.command_states[0].status == "PREEMPTED"
+    assert outcome.observation_ids == () and outcome.telemetry is None
+    assert outcome.pose == run.runner.envelope.position == measured.pose
+    run.close()
+
+
+def test_native_movement_reply_cannot_mutate_pose_after_landing_preempts_it():
+    entered, release = Event(), Event()
+
+    class Blocking(Client):
+        def move(self, direction, distance_cm):
+            entered.set()
+            assert release.wait(2)
+            return super().move(direction, distance_cm)
+
+    run, client, measured = executor(client=Blocking())
+    run.start(HOME)
+    worker, outcomes = threaded(lambda: run.execute(plan(command(bound=2))))
+    assert entered.wait(1)
+    landing, _ = threaded(run.land)
+    try:
+        wait_for_state(run, ExecutorState.TERMINAL)
+    finally:
+        release.set()
+    worker.join(1)
+    landing.join(1)
+    assert outcomes[0].status == "PREEMPTED"
+    assert outcomes[0].pose == run.runner.envelope.position == measured.pose
+    run.close()
+
+
+def test_preempted_provider_deadline_cannot_cancel_the_return_that_replaced_it():
+    entered, release = Event(), Event()
+
+    def provider(node, cancellation):
+        entered.set()
+        release.wait(2)
+        return Position(40, 40, 220)
+
+    run, client, measured = executor(command_sink=provider)
+    run.start(HOME)
+    worker, outcomes = threaded(lambda: run.execute(plan(command("LOCALISE", bound=0.1))))
+    assert entered.wait(1)
+    returning, returns = threaded(lambda: run.return_home(plan()))
+    try:
+        wait_for_state(run, ExecutorState.RETURNING)
+        worker.join(1)
+        returning.join(1)
+        assert outcomes[0].status == "PREEMPTED" and not outcomes[0].completion_known
+        assert run.state is ExecutorState.RETURNING and returns[0].status == "COMPLETED"
+        assert run.runner.envelope.position == measured.pose and "land" not in client.commands
+    finally:
+        release.set()
+        run.close()

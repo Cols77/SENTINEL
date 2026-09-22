@@ -17,7 +17,7 @@ from typing import Callable
 
 from sentinel.client import EmergencyAborted
 from sentinel.cube.checkpoint import CheckpointPlan, CommandOutcome, HomeDefinition, PlannedCommand
-from sentinel.cube.supervised_wait import SupervisedWait
+from sentinel.cube.supervised_wait import SupervisedWait, WaitOutcome
 from sentinel.models import Position, Telemetry
 
 
@@ -98,6 +98,7 @@ class StepExecutor:
         self._terminal_action_lock = RLock()
         self._context = local()
         self._state = ExecutorState.NEW
+        self._generation = 0
         self.home: HomeState | None = None
         self._home_definition: HomeDefinition | None = None
         self._may_be_airborne = False
@@ -115,6 +116,12 @@ class StepExecutor:
     def state(self) -> ExecutorState:
         with self._state_lock:
             return self._state
+
+    def _transition_locked(self, state: ExecutorState, *, invalidate: bool = False) -> None:
+        """Change lifecycle and invalidate pending publications under _state_lock."""
+        if self._state is not state or invalidate:
+            self._generation += 1
+            self._state = state
 
     @contextmanager
     def client_call(self):
@@ -135,7 +142,7 @@ class StepExecutor:
         """Latch the existing operator emergency path without taking the SDK lock."""
         with self._state_lock:
             if self._state is not ExecutorState.CLOSED:
-                self._state = ExecutorState.TERMINAL
+                self._transition_locked(ExecutorState.TERMINAL, invalidate=True)
                 self._terminal_reason = "OPERATOR_EMERGENCY"
 
     def start(self, home_definition: HomeDefinition) -> HomeState:
@@ -180,7 +187,7 @@ class StepExecutor:
                 with self._state_lock:
                     if self._state is not ExecutorState.NEW:
                         raise RuntimeError("executor became terminal during start")
-                    self._state = ExecutorState.AIRBORNE
+                    self._transition_locked(ExecutorState.AIRBORNE)
             except BaseException:
                 self._cleanup()
                 raise
@@ -209,7 +216,7 @@ class StepExecutor:
         with self._state_lock:
             if self._state not in {ExecutorState.AIRBORNE, ExecutorState.RETURNING}:
                 raise RuntimeError("return_home requires AIRBORNE or RETURNING")
-            self._state = ExecutorState.RETURNING
+            self._transition_locked(ExecutorState.RETURNING, invalidate=True)
         return self._execute(plan, ExecutorState.RETURNING)
 
     def execute_legacy(self, plan: CheckpointPlan, sink: Callable[[PlannedCommand], object]) -> None:
@@ -217,8 +224,9 @@ class StepExecutor:
         self._execute(plan, ExecutorState.AIRBORNE, legacy_sink=sink)
 
     def _outcome(self, status, states, observations=(), *, known=True):
-        return CheckpointOutcome(status, tuple(states), tuple(observations), self._telemetry,
-                                 self.runner.envelope.position, known)
+        with self._state_lock:
+            return CheckpointOutcome(status, tuple(states), tuple(observations), self._telemetry,
+                                     self.runner.envelope.position, known)
 
     def _execute(self, plan, required_state, *, legacy_sink=None):
         # Reject terminal work before waiting behind a pending SDK command's
@@ -238,8 +246,10 @@ class StepExecutor:
                     self._cleanup()
                     return self._outcome("DEADLINE_EXCEEDED", states)
                 for command in plan.commands:
-                    if self.state is not required_state:
-                        return self._outcome("PREEMPTED", states, observations)
+                    with self._state_lock:
+                        if self._state is not required_state:
+                            return self._outcome("PREEMPTED", states, observations)
+                        publication = [self._generation, required_state]
                     started = self.clock()
                     if self.deadline is not None and started + command.upper_bound_s > self.deadline:
                         states.append(CommandState(command, "NOT_STARTED", started, None,
@@ -247,78 +257,120 @@ class StepExecutor:
                         self._terminal_reason = "DEADLINE_EXCEEDED"
                         self._cleanup()
                         return self._outcome("DEADLINE_EXCEEDED", states, observations)
-                    if legacy_sink is not None:
-                        with self.client_call():
-                            legacy_sink(command)
-                        states.append(CommandState(command, "COMPLETED", started, self.clock()))
-                        continue
-                    if command.upper_bound_s == 0 and command.kind in {"WATCHDOG", "TRIM_ALLOWANCE"}:
-                        states.append(CommandState(command, "COMPLETED", started, started))
-                        continue
                     deadline = started + command.upper_bound_s
                     if self.deadline is not None:
                         deadline = min(deadline, self.deadline)
+                    deadline_owned = Event()
 
-                    def operation(cancellation):
+                    def operation(cancellation, command=command, publication=publication):
                         # A blocked perception/provider must not retain the SDK
                         # movement lock. Its result is published only by run().
-                        context = self.client_call() if not command.interruptible else nullcontext()
+                        context = (self.client_call() if not command.interruptible or command.kind == "LAND"
+                                   else nullcontext())
                         with context:
-                            if cancellation.is_set() or self.state is not required_state:
-                                return None
-                            return self._dispatch(command, cancellation)
+                            return self._dispatch_current(command, cancellation, publication)
+
+                    def on_deadline(publication=publication, owned=deadline_owned):
+                        with self._state_lock:
+                            # An obsolete wait cannot terminate the return or
+                            # terminal action that already superseded it.
+                            if self._current_locked(publication):
+                                owned.set()
+                                self._deadline_expired()
 
                     # A native SETTLE *is* a timed delay: its own timer ends it
                     # successfully. The session deadline still preempts it.
                     settle_timer = (command.kind == "SETTLE" and self.command_sink is None
                                     and (self.deadline is None or deadline < self.deadline))
-                    result = self._wait.run(
-                        operation, deadline, (lambda: None) if settle_timer else self._deadline_expired,
+                    if legacy_sink is not None:
+                        with self.client_call():
+                            value = self._dispatch_current(command, Event(), publication, legacy_sink)
+                        result = WaitOutcome("COMPLETED", value, started, self.clock(), True)
+                    elif command.upper_bound_s == 0 and command.kind in {"WATCHDOG", "TRIM_ALLOWANCE"}:
+                        result = WaitOutcome("COMPLETED", None, started, started, True)
+                    else:
+                        result = self._wait.run(
+                            operation, deadline, (lambda: None) if settle_timer else on_deadline,
+                        )
+                    outcome, cleanup = self._publish_result(
+                        command, result, publication, states, observations, started,
+                        settle_timer=settle_timer, deadline_owned=deadline_owned.is_set(),
                     )
-                    if settle_timer and result.status == "DEADLINE_EXCEEDED":
-                        states.append(CommandState(command, "COMPLETED", started, result.completed_at))
-                        continue
-                    if result.status != "COMPLETED":
-                        unknown = not command.interruptible and not result.completion_known
-                        status = "COMMAND_COMPLETION_UNKNOWN" if unknown else result.status
-                        states.append(CommandState(command, status, started,
-                                                   None if unknown else result.completed_at,
-                                                   result.error_category or "DEADLINE_EXCEEDED"))
-                        if result.status == "FAILED":
-                            self._cleanup()
-                        return self._outcome(status, states, observations, known=not unknown)
-                    if isinstance(result.value, CommandOutcome) and not result.value.completed:
-                        states.append(CommandState(command, "FAILED", started, result.completed_at,
-                                                   "COMMAND_REJECTED"))
-                        self._terminal_reason = "COMMAND_REJECTED"
+                    if cleanup:
                         self._cleanup()
-                        return self._outcome("FAILED", states, observations)
-                    if isinstance(result.value, TerminalOutcome) and result.value.state == "LANDING_FAILED":
-                        states.append(CommandState(command, "FAILED", started, result.completed_at,
-                                                   "LANDING_FAILED"))
-                        self._cleanup()
-                        return self._outcome("FAILED", states, observations)
-                    states.append(CommandState(command, "COMPLETED", started, result.completed_at))
-                    if isinstance(result.value, Telemetry):
-                        self._telemetry = result.value
-                    elif isinstance(result.value, Position):
-                        self.runner.envelope.position = result.value
-                        if self._telemetry is not None:
-                            self._telemetry = replace(self._telemetry, height_cm=result.value.z_cm)
-                    elif command.kind == "CAPTURE" and isinstance(result.value, str):
-                        observations.append(result.value)
+                    if outcome is not None:
+                        return outcome
                 return self._outcome("COMPLETED", states, observations)
             except BaseException:
                 self._cleanup()
                 raise
+
+    def _current_locked(self, publication) -> bool:
+        return self._generation == publication[0] and self._state is publication[1]
+
+    def _dispatch_current(self, command, cancellation, publication, legacy_sink=None):
+        with self._state_lock:
+            if cancellation.is_set() or not self._current_locked(publication):
+                return None
+            if command.kind == "LAND":
+                # LAND is always executor-owned; an injected sink cannot bypass
+                # the terminal latch or create an untracked landing attempt.
+                self._transition_locked(ExecutorState.TERMINAL)
+                publication[:] = [self._generation, ExecutorState.TERMINAL]
+        if command.kind == "LAND":
+            return self._land_locked()
+        if legacy_sink is not None:
+            return legacy_sink(command)
+        return self._dispatch(command, cancellation)
+
+    def _publish_result(self, command, result, publication, states, observations, started, *,
+                        settle_timer: bool, deadline_owned: bool):
+        # This lock covers validation AND publication, so a terminal/return
+        # latch cannot slip between the check and a pose/telemetry/result write.
+        with self._state_lock:
+            if not self._current_locked(publication) and not deadline_owned:
+                states.append(CommandState(command, "PREEMPTED", started,
+                                           result.completed_at if result.completion_known else None,
+                                           "LIFECYCLE_PREEMPTED"))
+                return self._outcome("PREEMPTED", states, observations,
+                                     known=result.completion_known), False
+            if settle_timer and result.status == "DEADLINE_EXCEEDED":
+                states.append(CommandState(command, "COMPLETED", started, result.completed_at))
+                return None, False
+            if result.status != "COMPLETED":
+                unknown = not command.interruptible and not result.completion_known
+                status = "COMMAND_COMPLETION_UNKNOWN" if unknown else result.status
+                states.append(CommandState(command, status, started,
+                                           None if unknown else result.completed_at,
+                                           result.error_category or "DEADLINE_EXCEEDED"))
+                return self._outcome(status, states, observations, known=not unknown), result.status == "FAILED"
+            failure = None
+            if isinstance(result.value, CommandOutcome) and not result.value.completed:
+                failure = "COMMAND_REJECTED"
+            elif isinstance(result.value, TerminalOutcome) and result.value.state == "LANDING_FAILED":
+                failure = "LANDING_FAILED"
+            if failure is not None:
+                states.append(CommandState(command, "FAILED", started, result.completed_at, failure))
+                self._terminal_reason = failure
+                return self._outcome("FAILED", states, observations), True
+            states.append(CommandState(command, "COMPLETED", started, result.completed_at))
+            if isinstance(result.value, Telemetry):
+                self._telemetry = result.value
+            elif isinstance(result.value, Position):
+                self.runner.envelope.position = result.value
+                if self._telemetry is not None:
+                    self._telemetry = replace(self._telemetry, height_cm=result.value.z_cm)
+            elif command.kind == "CAPTURE" and isinstance(result.value, str):
+                observations.append(result.value)
+            return None, False
 
     def _dispatch(self, command: PlannedCommand, cancellation: Event):
         if self.command_sink is not None:
             return self.command_sink(command, cancellation)
         args, call = dict(command.arguments), self.runner._call
         if command.kind == "MOVE":
-            self.runner.move_checked(args["direction"], args["distance_cm"],
-                                     validate_vertical_telemetry=False)
+            return self.runner.move_checked(args["direction"], args["distance_cm"],
+                                            validate_vertical_telemetry=False, commit_position=False)
         elif command.kind == "ROTATE":
             response = call(lambda: self.client.rotate(args["direction"], round(args["degrees"])))
             if not self.runner._is_ok(response):
@@ -340,10 +392,6 @@ class StepExecutor:
             return f"frame-{frame.frame_number}"
         elif command.kind == "SETTLE":
             cancellation.wait(command.upper_bound_s)
-        elif command.kind == "LAND":
-            with self._state_lock:
-                self._state = ExecutorState.TERMINAL
-            return self._land_locked()
         elif command.kind not in {"WATCHDOG", "TRIM_ALLOWANCE"}:
             raise ValueError("command requires an injected execution sink")
 
@@ -351,7 +399,7 @@ class StepExecutor:
         with self._state_lock:
             if self._state is ExecutorState.CLOSED:
                 return
-            self._state = ExecutorState.TERMINAL
+            self._transition_locked(ExecutorState.TERMINAL, invalidate=True)
             self._terminal_reason = "DEADLINE_EXCEEDED"
             if self._cleanup_started:
                 return
@@ -366,7 +414,7 @@ class StepExecutor:
             if self._terminal is not None:
                 return self._terminal
             if self._state is not ExecutorState.CLOSED:
-                self._state = ExecutorState.TERMINAL
+                self._transition_locked(ExecutorState.TERMINAL)
         with self._operation_lock:
             result = self._land_locked()
             if result.state == "LANDING_FAILED":
@@ -420,7 +468,7 @@ class StepExecutor:
             if self._terminal is not None:
                 return self._terminal
             with self._state_lock:
-                self._state = ExecutorState.TERMINAL
+                self._transition_locked(ExecutorState.TERMINAL, invalidate=True)
                 self._terminal_reason = "CONTAINMENT_ABORT"
                 self._land_attempted = True
             state = "LANDING_FAILED"
@@ -459,4 +507,4 @@ class StepExecutor:
                     self.client.close()
                 finally:
                     with self._state_lock:
-                        self._state = ExecutorState.CLOSED
+                        self._transition_locked(ExecutorState.CLOSED)

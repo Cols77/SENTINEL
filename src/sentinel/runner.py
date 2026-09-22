@@ -163,7 +163,8 @@ class FlightTestRunner:
             self._capture_records(record_count, self.envelope.position)
 
     def move_checked(self, direction: str, distance_cm: int, *,
-                     validate_vertical_telemetry: bool = True) -> None:
+                     validate_vertical_telemetry: bool = True,
+                     commit_position: bool = True) -> Position:
         """Validate a movement endpoint before invoking the client."""
 
         self._raise_if_emergency()
@@ -178,7 +179,8 @@ class FlightTestRunner:
             raise RuntimeError(
                 f"movement failed: {direction} {distance_cm}: {response}"
             )
-        self.envelope.position = candidate
+        if commit_position:
+            self.envelope.position = candidate
         if validate_vertical_telemetry and direction in {"up", "down"}:
             self._emit("flight", "validating altitude telemetry")
             measured_height = self._require_height(
@@ -189,9 +191,10 @@ class FlightTestRunner:
                     f"measured vertical position is outside the cube: "
                     f"{measured_height} cm"
                 )
-            self.envelope.position = replace(
-                self.envelope.position, z_cm=measured_height
-            )
+            candidate = replace(candidate, z_cm=measured_height)
+            if commit_position:
+                self.envelope.position = candidate
+        return candidate
 
     def _assert_route_unchanged(self) -> None:
         if self.route_snapshot_provider is not None:

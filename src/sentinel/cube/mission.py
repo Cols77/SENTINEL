@@ -604,7 +604,8 @@ class CubeMissionRunner(FlightTestRunner):
                 setattr(env, hi_attr, hi)
 
     def move_checked(self, direction: str, distance_cm: int, *,
-                     validate_vertical_telemetry: bool = True) -> None:
+                     validate_vertical_telemetry: bool = True,
+                     commit_position: bool = True) -> Position:
         """A4/W08-b: while modes passive/reanchor move, a background watchdog
         evaluates containment against an injectable pose-fix source; OUTSIDE
         on consecutive joint fixes ends in the existing controlled landing.
@@ -617,9 +618,9 @@ class CubeMissionRunner(FlightTestRunner):
         not as a movement fault. Without it the trip line is the edge itself
         and the abort waits for the move to return."""
         if self._watchdog_fix_fn is None:
-            super().move_checked(direction, distance_cm,
-                                 validate_vertical_telemetry=validate_vertical_telemetry)
-            return
+            return super().move_checked(direction, distance_cm,
+                                        validate_vertical_telemetry=validate_vertical_telemetry,
+                                        commit_position=commit_position)
         immediate = self.land_during_move
         watchdog = PoseWatchdog(
             self._watchdog_fix_fn, self.footprint,
@@ -629,8 +630,9 @@ class CubeMissionRunner(FlightTestRunner):
         watchdog.start()
         move_error: Exception | None = None
         try:
-            super().move_checked(direction, distance_cm,
-                                 validate_vertical_telemetry=validate_vertical_telemetry)
+            candidate = super().move_checked(direction, distance_cm,
+                                             validate_vertical_telemetry=validate_vertical_telemetry,
+                                             commit_position=commit_position)
         except (EnvelopeViolation, EmergencyAborted):
             raise
         except Exception as exc:  # noqa: BLE001 - DJITelloPy raises its own non-RuntimeError type
@@ -646,6 +648,7 @@ class CubeMissionRunner(FlightTestRunner):
                                    "leave the cube") from move_error
         if move_error is not None:
             raise move_error
+        return candidate
 
     def _live_watchdog_fix(self) -> tuple[float, float] | None:
         """Default in-move fix source (production, mode "real" only): one
