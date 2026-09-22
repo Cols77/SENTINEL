@@ -391,3 +391,25 @@ def test_fly_sequence_is_the_override_point():
     assert calls == ["custom"] and report.status == "PASS"
     commands = [r.command for r in client.records]
     assert "forward 50" not in commands and "land" in commands
+
+
+def test_runner_composes_one_executor_and_rejects_post_terminal_commands():
+    from sentinel.cube.step_executor import ExecutorState, StepExecutor
+
+    client = _FakeClient()
+    runner = FlightTestRunner(client, "dry-run")
+    assert isinstance(runner.step_executor, StepExecutor)
+    assert runner.run(confirm=True).status == "PASS"
+    assert runner.step_executor.state is ExecutorState.CLOSED
+    before = tuple(client.records)
+    with pytest.raises(RuntimeError, match="terminal"):
+        runner._call(lambda: client.move("forward", 20))
+    assert tuple(client.records) == before
+
+
+def test_failed_landing_is_not_retried_by_exception_cleanup():
+    client = _FakeClient()
+    client.land = lambda: client._record("land", "error")
+    report = FlightTestRunner(client, "dry-run").run(confirm=True)
+    assert report.status == "FAIL"
+    assert [r.command for r in client.records].count("land") == 1

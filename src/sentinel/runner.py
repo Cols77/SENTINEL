@@ -58,6 +58,17 @@ class FlightTestRunner:
         self.emergency_event = Event()
         self._emergency_error: Exception | None = None
         self._emergency_lock = RLock()
+        self._step_executor = None
+
+    @property
+    def step_executor(self):
+        """One lifecycle shared with a configured connected-session executor."""
+        with self._emergency_lock:
+            if self._step_executor is None:
+                from .cube.step_executor import StepExecutor
+
+                StepExecutor(self)
+            return self._step_executor
 
     def _emit(self, event: str, message: str) -> None:
         if self.progress is not None:
@@ -98,6 +109,12 @@ class FlightTestRunner:
         action: Callable[[], Result],
         position: Position | None = None,
     ) -> Result:
+        with self.step_executor.client_call():
+            return self._call_locked(action, position)
+
+    def _call_locked(
+        self, action: Callable[[], Result], position: Position | None = None,
+    ) -> Result:
         self._raise_if_emergency()
         if self.route_snapshot_provider is not None:
             self._assert_route_unchanged()
@@ -137,6 +154,7 @@ class FlightTestRunner:
             if self.emergency_event.is_set():
                 return
             self.emergency_event.set()
+            self.step_executor.note_emergency()
             record_count = len(self._client_records())
             try:
                 self.client.emergency()
@@ -317,13 +335,7 @@ class FlightTestRunner:
         if self.emergency_event.is_set():
             return
         try:
-            response = self._call(self.client.land)
-            if not self._is_ok(response):
-                self.history.append(
-                    replace(self.history[-1], response=str(response))
-                    if self.history
-                    else response
-                )
+            self.step_executor.land()
         except EmergencyAborted:
             # The emergency latch won the race; importantly, no land command
             # was transmitted after the latch was set.
@@ -351,35 +363,18 @@ class FlightTestRunner:
         if not confirm:
             raise RuntimeError("real flight requires explicit confirmation")
 
-        airborne = False
         report: RunReport | None = None
         self.history.clear()
         self.video_frame = None
 
         try:
             self._emit("run_started", "starting preflight")
-            self._preflight()
+            self.step_executor.start_legacy(video_only=self.video_only)
             if self.video_only:
                 self._record_video_only()
                 report = self._make_report("PASS")
                 self._emit("run_complete", "video-only capture passed")
             else:
-                self._emit("preflight", "preflight passed; starting flight sequence")
-
-                # Once the takeoff request is about to be transmitted, an error
-                # can mean the drone is airborne even when no ACK arrived.
-                airborne = True
-                self._assert_route_unchanged()
-                self._emit("flight", "sending takeoff")
-                response = self._call(self.client.takeoff)
-                if not self._is_ok(response):
-                    raise RuntimeError(f"takeoff failed: {response}")
-                if self.emergency_event.is_set() or bool(
-                    getattr(self.client, "emergency_triggered", False)
-                ):
-                    raise EmergencyAborted("emergency stop triggered during takeoff")
-                airborne = True
-
                 self._fly_sequence()
                 self._emit("flight", "sending hover/stop")
                 try:
@@ -395,15 +390,13 @@ class FlightTestRunner:
                 elif not self._is_ok(response):
                     raise RuntimeError(f"hover/stop failed: {response}")
                 self._emit("flight", "sending landing")
-                response = self._call(self.client.land)
-                if not self._is_ok(response):
-                    raise RuntimeError(f"landing failed: {response}")
-                airborne = False
+                outcome = self.step_executor.land()
+                if outcome.state != "LANDED":
+                    raise RuntimeError("landing failed")
                 report = self._make_report("PASS")
                 self._emit("run_complete", "flight sequence passed")
         except KeyboardInterrupt:
-            if airborne:
-                self._attempt_normal_landing()
+            self._attempt_normal_landing()
             report = self._make_report(
                 "FAIL", "operator interrupted; controlled landing attempted"
             )
@@ -425,13 +418,12 @@ class FlightTestRunner:
                 )
                 self._emit("emergency_aborted", report.error or str(exc))
             else:
-                if airborne:
-                    self._attempt_normal_landing()
+                self._attempt_normal_landing()
                 report = self._make_report("FAIL", str(exc))
                 self._emit("run_failed", report.error or str(exc))
         finally:
             try:
-                self.client.close()
+                self.step_executor.close()
             except Exception as exc:  # pragma: no cover - hardware boundary
                 if report is not None and report.status == "PASS":
                     report = self._make_report("FAIL", f"cleanup failed: {exc}")

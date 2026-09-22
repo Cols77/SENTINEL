@@ -321,7 +321,10 @@ def test_a_failed_land_during_move_is_surfaced_in_the_mission_log(tmp_path):
     aborted en route to."""
     client = _SlowMoveClient()
 
+    land_attempts = []
+
     def failing_land():
+        land_attempts.append(True)
         raise RuntimeError("simulated link drop")
 
     client.land = failing_land
@@ -336,6 +339,7 @@ def test_a_failed_land_during_move_is_surfaced_in_the_mission_log(tmp_path):
     assert wp1["status"] == "ABORTED_EN_ROUTE"
     assert wp1["watchdog_land_error"] is not None
     assert "simulated link drop" in wp1["watchdog_land_error"]
+    assert len(land_attempts) == 1
 
 
 class _InterruptibleMoveClient(DryRunClient):
@@ -372,6 +376,7 @@ def test_an_immediate_land_reports_the_containment_abort_not_a_movement_fault(tm
     assert "watchdog" in report.error.lower()
     assert "auto land" not in report.error.lower()
     assert _log(tmp_path)[0]["status"] == "ABORTED_EN_ROUTE"
+    assert "land" not in client.commands  # land_now already owns the terminal attempt
 
 
 def test_an_immediate_land_trips_inside_the_cube_edge_and_a_deferred_one_at_it(tmp_path):
@@ -963,3 +968,18 @@ def test_a_trim_within_the_fix_noise_does_not_stop_trimming(tmp_path):
     assert runner.run(confirm=True).status == "PASS"
     (wp1,) = _log(tmp_path)
     assert wp1["trim_errors_cm"] == [22.0, 22.0, 3.0] and "trims_stopped" not in wp1
+
+
+def test_legacy_mission_dispatches_plans_through_its_shared_executor(tmp_path):
+    runner, client = _runner(tmp_path, "off", [])
+    plans = []
+    execute = runner.step_executor.execute_legacy
+
+    def record(plan, sink):
+        plans.append(plan)
+        return execute(plan, sink)
+
+    runner.step_executor.execute_legacy = record
+    assert runner.run(confirm=True).status == "PASS"
+    assert tuple(plans) == runner.checkpoint_plans
+    assert client.commands.count("takeoff") == client.commands.count("land") == 1

@@ -506,8 +506,7 @@ class CubeMissionRunner(FlightTestRunner):
         self._active_checkpoint_entry = entry
         self._active_waypoint = wp
         try:
-            for command in self._plan_for_waypoint(wp).commands:
-                self.execute_command(command)
+            self.step_executor.execute_legacy(self._plan_for_waypoint(wp), self.execute_command)
         finally:
             self._active_checkpoint_entry = None
             self._active_waypoint = None
@@ -678,7 +677,7 @@ class CubeMissionRunner(FlightTestRunner):
         # land() waits for the command lock the in-flight move holds, so it
         # could only land after the move; land_now() is the lock-free send.
         try:
-            getattr(self.client, "land_now", self.client.land)()
+            self.step_executor.land_during_command(getattr(self.client, "land_now", self.client.land))
         except Exception as exc:  # noqa: BLE001 - must never kill the watchdog thread
             self._watchdog_land_error = exc
 
