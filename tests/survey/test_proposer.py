@@ -62,7 +62,7 @@ def test_the_rule_proposer_takes_the_first_non_escalate_option():
 
 def test_jev_acting_above_the_threshold_and_margin_picks_its_option():
     judge = _Judge("RAIL_HIGH_WIDE", 0.82,
-                   {"RAIL_HIGH_WIDE": 0.82, "RAIL_MID_HEIGHT": 0.10, ESCALATE_LABEL: 0.08})
+                   {"RAIL_HIGH_WIDE": 0.82, "RAIL_MID_HEIGHT": 0.10})
     result = JevProposer(judge, _Sink()).decide(REQUEST, CONTEXT)
     assert chosen_label(result) == "RAIL_HIGH_WIDE"
 
@@ -86,6 +86,48 @@ def test_jev_is_never_offered_escalate_as_a_candidate():
     judge = _Judge("RAIL_MID_HEIGHT", 0.9, {"RAIL_MID_HEIGHT": 0.9, "RAIL_HIGH_WIDE": 0.1})
     JevProposer(judge, _Sink()).decide(REQUEST, CONTEXT)
     assert ESCALATE_LABEL not in judge.calls[0]["criteria"]
+
+
+def test_provider_selected_escalation_remains_an_unknown_survey_choice():
+    sink = _Sink()
+    result = JevProposer(
+        _Judge(ESCALATE_LABEL, 0.9,
+               {"RAIL_MID_HEIGHT": 0.05, "RAIL_HIGH_WIDE": 0.05, ESCALATE_LABEL: 0.90}),
+        sink,
+    ).decide(REQUEST, CONTEXT)
+
+    assert chosen_label(result) == ESCALATE_LABEL
+    assert sink.records[0]["outcome"] == "unknown_label"
+    assert result["tool_calls"][0]["arguments"]["reason"] == "jev: unknown_label"
+
+
+def test_invalid_survey_gate_configuration_escalates_without_calling_the_candidate():
+    sink = _Sink()
+    judge = _Judge("RAIL_HIGH_WIDE", 0.9,
+                   {"RAIL_HIGH_WIDE": 0.8, "RAIL_MID_HEIGHT": 0.1})
+
+    result = JevProposer(judge, sink, act_at="0.6").decide(REQUEST, CONTEXT)
+
+    assert chosen_label(result) == ESCALATE_LABEL
+    assert sink.records[0]["outcome"] == "invalid_answer"
+
+
+def test_duplicate_survey_candidate_labels_fail_closed_before_the_judge_call():
+    duplicate_context = SurveyContext("RUN1", LegalSet(PROPOSE_SWEEP, (
+        Candidate("survey.propose_sweep", {"option_id": "ONE", "reason": ""},
+                  "DUPLICATE", "first duplicate"),
+        Candidate("survey.propose_sweep", {"option_id": "TWO", "reason": ""},
+                  "DUPLICATE", "second duplicate"),
+        Candidate("survey.escalate", {"reason": ""}, ESCALATE_LABEL, "unclear"),
+    )), {})
+    sink = _Sink()
+    judge = _Judge("DUPLICATE", 0.9, {"DUPLICATE": 1.0})
+
+    result = JevProposer(judge, sink).decide(REQUEST, duplicate_context)
+
+    assert chosen_label(result) == ESCALATE_LABEL
+    assert judge.calls == []
+    assert sink.records[0]["outcome"] == "invalid_answer"
 
 
 def test_jev_records_a_derived_justification_because_it_returns_no_rationale():

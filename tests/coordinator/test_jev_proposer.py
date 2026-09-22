@@ -348,6 +348,16 @@ def test_gates_are_frozen_and_have_the_approved_defaults() -> None:
         gates.act_at = 0.1
 
 
+def test_invalid_coordinator_gate_configuration_escalates_without_crashing() -> None:
+    sink = MemoryAuditSink()
+    result = JevProposer(
+        Judge(), sink, gates=JevProposalGates(min_margin="0.15"),
+    ).decide(_request(), _context())
+
+    _assert_escalation(result)
+    assert sink.records[0]["gate_outcome"] == "invalid_answer"
+
+
 @pytest.mark.parametrize("probabilities", [
     {ROUTE: True, FULL: False, ESCALATE_LABEL: 0.0},
     {ROUTE: "0.9", FULL: "0.1", ESCALATE_LABEL: 0.0},

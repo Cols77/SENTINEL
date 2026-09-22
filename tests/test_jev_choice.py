@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict
 import hashlib
 import math
@@ -17,8 +18,8 @@ GATE_KWARGS = {
 }
 
 
-def assess(answer: object) -> ChoiceAssessment:
-    return assess_choice(answer, LABELS, **GATE_KWARGS)
+def assess(answer: object, **gate_overrides: object) -> ChoiceAssessment:
+    return assess_choice(answer, LABELS, **(GATE_KWARGS | gate_overrides))
 
 
 def test_legal_top_ranked_selection_is_accepted_with_canonical_probabilities() -> None:
@@ -163,6 +164,63 @@ def test_low_confidence_precedes_thin_margin() -> None:
     })
 
     assert assessment.outcome == "LOW_CONFIDENCE"
+
+
+@pytest.mark.parametrize(("gate_name", "value"), [
+    ("act_at", math.nan),
+    ("act_at", math.inf),
+    ("act_at", True),
+    ("act_at", -0.1),
+    ("act_at", 1.1),
+    ("act_at", "0.6"),
+    ("min_margin", math.nan),
+    ("min_margin", math.inf),
+    ("min_margin", True),
+    ("min_margin", -0.1),
+    ("min_margin", 1.1),
+    ("min_margin", "0.15"),
+])
+def test_invalid_gate_configuration_fails_closed_without_comparison(
+    gate_name: str, value: object,
+) -> None:
+    assessment = assess({
+        "value": "alpha",
+        "confidence": 0.9,
+        "probabilities": {"alpha": 0.8, "beta": 0.1, "escalate": 0.1},
+    }, **{gate_name: value})
+
+    assert assessment.final_label == "escalate"
+    assert assessment.outcome == "INVALID_CONFIGURATION"
+
+
+class DuplicateProbabilityMapping(Mapping[str, float]):
+    def __getitem__(self, key: str) -> float:
+        return {"alpha": 0.8, "beta": 0.1, "escalate": 0.1}[key]
+
+    def __iter__(self):
+        return iter(("alpha", "beta", "escalate"))
+
+    def __len__(self) -> int:
+        return 3
+
+    def items(self):
+        return iter((("alpha", 0.8), ("alpha", 0.7), ("beta", 0.1), ("escalate", 0.1)))
+
+
+def test_duplicate_legal_or_probability_labels_fail_closed() -> None:
+    duplicate_legal = assess_choice(
+        {"value": "alpha", "confidence": 0.9,
+         "probabilities": {"alpha": 0.8, "beta": 0.1, "escalate": 0.1}},
+        ("alpha", "alpha", "beta", "escalate"), **GATE_KWARGS,
+    )
+    duplicate_probability = assess({
+        "value": "alpha",
+        "confidence": 0.9,
+        "probabilities": DuplicateProbabilityMapping(),
+    })
+
+    assert duplicate_legal.outcome == "INVALID_CONFIGURATION"
+    assert duplicate_probability.outcome == "ILLEGAL_OR_MALFORMED"
 
 
 def test_missing_selected_probability_is_a_deterministic_selection_failure() -> None:

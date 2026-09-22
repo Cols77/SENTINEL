@@ -118,6 +118,9 @@ class JevProposer:
         options = _actionable(context)
         if not options:
             return _escalate(context, "no actionable candidate")
+        labels = tuple(candidate.label for candidate in options)
+        if len(labels) != len(set(labels)):
+            return self._record(context, ESCALATE_LABEL, "invalid_answer", None)
         criteria = {c.label: c.description for c in options}
         state = {"request_text": request.get("request_text", ""), "results": context.results}
         instruction = "Choose the sweep that best answers the operator's request."
@@ -131,7 +134,7 @@ class JevProposer:
             return self._record(context, ESCALATE_LABEL, f"judge_error:{type(exc).__name__}", None)
 
         assessment = assess_choice(
-            answer, (*criteria, ESCALATE_LABEL), escalation_label=ESCALATE_LABEL,
+            answer, criteria, escalation_label=ESCALATE_LABEL,
             act_at=self.act_at, min_margin=self.min_margin,
         )
         return self._record(
@@ -150,6 +153,8 @@ class JevProposer:
             return "thin_margin"
         if assessment.outcome == "MISSING_OR_NON_MAX_SELECTION":
             return "below_act_at"
+        if assessment.outcome == "INVALID_CONFIGURATION":
+            return "invalid_answer"
         if assessment.selected_label not in criteria:
             return "unknown_label"
         return "invalid_answer"

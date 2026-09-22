@@ -29,6 +29,12 @@ def assess_choice(
 ) -> ChoiceAssessment:
     """Assess one provider choice without exposing provider exceptions."""
     labels = _legal_labels(legal_labels)
+    if (
+        labels is None
+        or _finite_probability(act_at) is None
+        or _finite_probability(min_margin) is None
+    ):
+        return _invalid(escalation_label, "INVALID_CONFIGURATION")
     if not _is_mapping(answer):
         return _invalid(escalation_label, "MALFORMED_ANSWER")
 
@@ -125,11 +131,15 @@ def _invalid(
     )
 
 
-def _legal_labels(labels: Collection[str]) -> frozenset[str]:
+def _legal_labels(labels: Collection[str]) -> frozenset[str] | None:
     try:
-        return frozenset(label for label in labels if type(label) is str)
+        values = tuple(labels)
+        if any(type(label) is not str for label in values):
+            return None
+        canonical = frozenset(values)
+        return canonical if len(canonical) == len(values) else None
     except Exception:  # noqa: BLE001 -- caller configuration cannot leak here
-        return frozenset()
+        return None
 
 
 def _canonical_probabilities(
@@ -139,10 +149,14 @@ def _canonical_probabilities(
         return None
     try:
         values = []
+        seen_labels = set()
         for label, raw_probability in raw.items():
             probability = _finite_probability(raw_probability)
             if type(label) is not str or probability is None:
                 return None
+            if label in seen_labels:
+                return None
+            seen_labels.add(label)
             values.append((label, probability))
         return tuple(sorted(values))
     except Exception:  # noqa: BLE001 -- provider-controlled mappings fail closed
