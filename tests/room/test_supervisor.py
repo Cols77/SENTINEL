@@ -12,7 +12,7 @@ from sentinel.cube.step_executor import CheckpointOutcome, ExecutorState, Termin
 from sentinel.models import Position, Telemetry
 from sentinel.room.models import CapabilityGrant, CapabilityProfile, canonical_grant_sha256
 from sentinel.room.queries import ReadQueries
-from sentinel.room.site import ContingencyTrigger, Volume3D
+from sentinel.room.site import ContingencyKind, ContingencyTrigger, Volume3D
 from sentinel.room.store import RoomStore, VersionConflict
 from sentinel.room.supervisor import SafetySupervisor, SupervisorRequest, calibration_hashes
 from tests.cube.test_localization import tracker
@@ -176,8 +176,10 @@ def test_invalid_prerequisites_fail_closed(safety, bad):
 
 def test_swept_path_rejects_hazard_between_safe_endpoints(safety):
     supervisor, _, _, samples, *_ = safety
-    blocked = Volume3D("obstacle", ((120, 0), (130, 0), (130, 200), (120, 200)), (0, 200))
-    supervisor.site = replace(supervisor.site, forbidden_volumes=(blocked,))
+    blocked = Volume3D("obstacle", ((125, 0), (135, 0), (135, 200), (125, 200)), (0, 200))
+    landing = ((75, 75), (124, 75), (124, 125), (75, 125))
+    supervisor.site = replace(supervisor.site, forbidden_volumes=(blocked,), terminal_contingencies=tuple(
+        replace(entry, landing_polygon_xy_cm=landing) for entry in supervisor.site.terminal_contingencies))
     supervisor.validate_bindings = lambda site: None
     plan = checkpoint(samples["pose"], command("MOVE", direction="right", distance_cm=60))
     result = supervisor.assess(request(safety, plan), supervisor.site)
@@ -317,6 +319,108 @@ def test_landing_node_requires_current_declared_clearance(safety):
     executor = Executor(store, clock)
     supervisor.dispatch(supervisor.assess(request(safety, plan), supervisor.site), executor)
     assert executor.calls == [] and emergencies == [True]
+
+
+@pytest.mark.parametrize("outside", ["both", "energy"])
+def test_home_landing_outside_assured_geometry_blocks_start_and_optional_work(safety, outside):
+    supervisor, _, _, samples, *_ = safety
+    narrow = ((0, 0), (50, 0), (50, 50), (0, 50))
+    supervisor.site = replace(supervisor.site, terminal_contingencies=tuple(
+        replace(entry, landing_polygon_xy_cm=narrow)
+        if outside == "both" or entry.trigger == ContingencyTrigger.RETURN_ENERGY_UNAVAILABLE else entry
+        for entry in supervisor.site.terminal_contingencies))
+    supervisor.validate_bindings = lambda site: None
+    # Home is (100, 100): unrelated navigation contingency geometry cannot
+    # authorize the energy-reserved home descent.
+    with pytest.raises(ValueError, match="start blocked"):
+        supervisor.validate_start()
+    outcome = supervisor.assess(request(safety, checkpoint(samples["pose"], command())), supervisor.site)
+    assert outcome.transition != "CONTINUE"
+
+
+def test_optional_work_preserves_home_descent_with_accumulated_uncertainty(safety):
+    supervisor, _, _, samples, *_ = safety
+    narrow = ((0, 0), (125, 0), (125, 200), (0, 200))
+    supervisor.site = replace(supervisor.site, terminal_contingencies=tuple(
+        replace(entry, landing_polygon_xy_cm=narrow) for entry in supervisor.site.terminal_contingencies))
+    supervisor.validate_bindings = lambda site: None
+    assert supervisor.assess(request(safety), supervisor.site).transition == "CONTINUE"
+    plan = checkpoint(samples["pose"], command("SETTLE", seconds=100))
+    outcome = supervisor.assess(request(safety, plan), supervisor.site)
+    assert outcome.transition == "RETURN_NOW"
+    assert outcome.reason == "PROJECTED_TERMINATION_LANDING_INVALID"
+
+
+def test_home_landing_requires_declared_touchdown_height(safety):
+    supervisor, *_ = safety
+    supervisor.site = replace(supervisor.site, terminal_contingencies=tuple(
+        replace(entry, z_band_cm=(50, 200)) for entry in supervisor.site.terminal_contingencies))
+    supervisor.validate_bindings = lambda site: None
+    with pytest.raises(ValueError, match="start blocked"):
+        supervisor.validate_start()
+    assert supervisor.assess(request(safety), supervisor.site).transition != "CONTINUE"
+
+
+def test_unrelated_current_assurance_cannot_replace_expired_home_landing_assurance(safety):
+    supervisor, store, clock, samples, *_ = safety
+    navigation, home = supervisor.site.terminal_contingencies
+    remote = replace(home, contingency_id="remote-energy", max_assurance_age_ms=100000,
+        landing_polygon_xy_cm=((0, 0), (50, 0), (50, 50), (0, 50)))
+    supervisor.site = replace(supervisor.site, terminal_contingencies=(
+        replace(navigation, max_assurance_age_ms=100000), home, remote))
+    supervisor.validate_bindings = lambda site: None
+    store.append_contingency_assurance(assurance(assurance_id="remote", contingency_id="remote-energy",
+        clock_domain_id=supervisor.clock_domain_id), expected_version=store.session_version("session"))
+    clock.now = 16
+    samples["energy"] = EnergySample(80, clock())
+    with pytest.raises(ValueError, match="start blocked"):
+        supervisor.validate_start()
+    assert supervisor.assess(request(safety), supervisor.site).transition != "CONTINUE"
+
+
+def test_home_landing_uses_descent_geometry_even_when_emergency_policy_is_first(safety):
+    supervisor, store, clock, samples, *_ = safety
+    emergency = replace(supervisor.site.terminal_contingencies[1], contingency_id="energy-emergency",
+                        kind=ContingencyKind.EMERGENCY)
+    supervisor.site = replace(supervisor.site,
+        terminal_contingencies=(emergency,) + supervisor.site.terminal_contingencies)
+    supervisor.validate_bindings = lambda site: None
+    store.append_contingency_assurance(assurance(assurance_id="emergency", contingency_id="energy-emergency",
+        clock_domain_id=supervisor.clock_domain_id), expected_version=store.session_version("session"))
+    plan = checkpoint(samples["pose"], command("LAND"))
+    outcome = supervisor.assess(request(safety, plan), supervisor.site)
+    assert outcome.transition == "CONTINUE"
+    assert supervisor.dispatch(outcome, Executor(store, clock)).state == "LANDED"
+
+
+def test_final_home_landing_uses_energy_contingency_not_navigation_policy(safety):
+    supervisor, store, clock, samples, _, emergencies = safety
+    executor = Executor(store, clock)
+    plan = checkpoint(samples["pose"], command("LAND"))
+    outcome = supervisor.assess(request(safety, plan), supervisor.site)
+    assert outcome.transition == "CONTINUE"
+    result = supervisor.dispatch(outcome, executor)
+    assert result.state == "LANDED" and emergencies == []
+    landing = [e for e in store.events("session") if e.event_type == "SAFETY_ASSESSED"][-1]
+    assert landing.payload["contingency_id"] == ContingencyTrigger.RETURN_ENERGY_UNAVAILABLE.value
+
+
+@pytest.mark.parametrize("trigger", list(ContingencyTrigger))
+def test_termination_failure_selects_only_the_matching_contingency(safety, trigger):
+    supervisor, _, clock, samples, *_ = safety
+    if trigger == ContingencyTrigger.RETURN_ENERGY_UNAVAILABLE:
+        samples["energy"] = EnergySample(22, clock())
+        # The route cannot be afforded but a local descent still can.
+        supervisor.reserve = ReserveGuard(replace(supervisor.reserve.profile,
+            percent_per_second_upper=.1), clock)
+    else:
+        samples["pose"] = replace(samples["pose"], position=Position(160, 100, 100))
+        supervisor.site = replace(supervisor.site, corridors=(Volume3D("corridor",
+            ((0, 0), (135, 0), (135, 200), (0, 200)), (0, 200)),))
+    supervisor.validate_bindings = lambda site: None
+    outcome = supervisor.assess(request(safety), supervisor.site)
+    assert outcome.transition == "LAND_CONTINGENCY"
+    assert outcome.contingency_id == trigger.value
 
 
 def test_return_forecast_cannot_cross_localization_bound(safety):

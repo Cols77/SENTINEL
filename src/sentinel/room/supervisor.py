@@ -211,8 +211,8 @@ class SafetySupervisor:
             previous = position
             args = dict(command.arguments)
             if command.kind == "LAND":
-                # Descent is checked separately through the declared terminal
-                # clearance policy immediately before dispatch.
+                # assess checks descent separately after localization/reserve
+                # admission, using the full projected landing footprint.
                 continue
             if command.kind == "TRIM_ALLOWANCE" and args.get("max_rounds", 0):
                 # Trims are conditional commands not exposed by this adapter.
@@ -235,6 +235,44 @@ class SafetySupervisor:
                     return False
         return True
 
+    def _landing_contingency(self, site, pose, *, now, trigger, energy_available,
+                             home=False, require_descent=False):
+        for entry in site.terminal_contingencies:
+            if (home or require_descent) and entry.kind == ContingencyKind.EMERGENCY:
+                # Emergency escalation is not verified landing geometry.
+                continue
+            if home and (entry.z_band_cm[0] != site.home.nominal_pose.z_cm
+                         or not math.isclose(pose.position.x_cm, site.home.nominal_pose.x_cm, abs_tol=1e-6)
+                         or not math.isclose(pose.position.y_cm, site.home.nominal_pose.y_cm, abs_tol=1e-6)):
+                # The policy must describe the actual pad and touchdown level.
+                continue
+            try:
+                admitted = admit_terminal_contingency(site, self._assurances(),
+                    contingency_id=entry.contingency_id, trigger=trigger,
+                    session_id=self.session_id, clock_domain_id=self.clock_domain_id,
+                    now_monotonic_ms=now * 1000, pose=pose, energy_available=energy_available,
+                    drift_profile=self.tracker.profile, clock_guard=copy(self.clock_guard))
+            except (TypeError, ValueError):
+                admitted = None
+            if admitted is not None:
+                return admitted
+        return None
+
+    def _landings_clear(self, pose, plan, site, *, now, assessment_now, energy_available, home=False):
+        prefix = ()
+        for command in plan.commands:
+            prefix += (command,)
+            if command.kind != "LAND":
+                continue
+            landing = self._forecast(pose, self._plan(pose, prefix), now).projected
+            # Include all drift through descent. Assurances must be current at
+            # admission, then refreshed/rechecked before the physical approach.
+            if self._landing_contingency(site, landing, now=assessment_now,
+                    trigger=ContingencyTrigger.RETURN_ENERGY_UNAVAILABLE,
+                    energy_available=energy_available, home=home, require_descent=True) is None:
+                return False
+        return True
+
     def assess(self, request: SupervisorRequest, site: RoomSite) -> SupervisorOutcome:
         """Read-only decision; no telemetry I/O, latch, pose mutation or events."""
         try:
@@ -251,21 +289,11 @@ class SafetySupervisor:
         def result(transition, reason, trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE):
             contingency = None
             if transition == "LAND_CONTINGENCY" and clock_valid:
-                for entry in site.terminal_contingencies:
-                    try:
-                        admitted = admit_terminal_contingency(site, self._assurances(),
-                            contingency_id=entry.contingency_id, trigger=trigger,
-                            session_id=self.session_id, clock_domain_id=self.clock_domain_id,
-                            now_monotonic_ms=now * 1000, pose=request.pose,
-                            energy_available=energy.current_pct >= self.reserve.profile.landing_floor_pct
-                                + math.ceil(self.reserve.conservative_percent_per_second * self.landing_upper_bound_s
-                                            + self.reserve.profile.telemetry_allowance_pct),
-                            drift_profile=self.tracker.profile, clock_guard=copy(self.clock_guard))
-                    except (TypeError, ValueError):
-                        admitted = None
-                    if admitted is not None:
-                        contingency = admitted.contingency_id
-                        break
+                admitted = self._landing_contingency(site, request.pose, now=now, trigger=trigger,
+                    energy_available=energy.current_pct >= self.reserve.profile.landing_floor_pct
+                        + math.ceil(self.reserve.conservative_percent_per_second * self.landing_upper_bound_s
+                                    + self.reserve.profile.telemetry_allowance_pct))
+                contingency = admitted.contingency_id if admitted is not None else None
             return SupervisorOutcome(transition, reason, transition != "CONTINUE", energy, forecast,
                 request, request.energy_sample, hashes, _sha(room_site_document(site)),
                 now if clock_valid else None, termination, contingency)
@@ -303,11 +331,13 @@ class SafetySupervisor:
             # Price/check future route segments at that future pose's time so
             # their envelope includes drift already accumulated by optional work.
             projected_home_clear = True
+            projected_routes = []
             prefix = ()
             for command in plan.commands:
                 prefix += (command,)
                 projected = self._forecast(request.pose, self._plan(request.pose, prefix), now).projected
                 route = self._termination(projected, site)
+                projected_routes.append((projected, route))
                 if not self._path_clear(projected, route, site, corridor=True, now=projected.propagated_at):
                     projected_home_clear = False
                     break
@@ -336,6 +366,11 @@ class SafetySupervisor:
             if recovery_energy.decision == ReserveDecision.CONTINUE:
                 return result("RECOVER", "RETURN_REQUIRES_RECOVERY")
             return result("LAND_CONTINGENCY", "RECOVERY_ENERGY_UNAVAILABLE")
+        # The reserve decision covers the entire termination, including LAND.
+        # A clear route to the pad alone never authorizes its final descent.
+        if not self._landings_clear(request.pose, termination, site, now=now,
+                assessment_now=now, energy_available=True, home=True):
+            return result("LAND_CONTINGENCY", "TERMINATION_LANDING_INVALID")
         if self._returning or guard.return_latched or energy.decision == ReserveDecision.RETURN_NOW:
             return result("RETURN_NOW", "RETURN_LATCHED" if self._returning else "OPTIONAL_WORK_UNAFFORDABLE")
         if not path_clear:
@@ -350,6 +385,13 @@ class SafetySupervisor:
                 forecast = replace(forecast, admitted=True, reasons=())
             else:
                 return result("RECOVER", "LOCALIZATION_RECOVERY_REQUIRED")
+        if not self._landings_clear(request.pose, plan, site, now=now,
+                assessment_now=now, energy_available=True):
+            return result("RETURN_NOW", "OPTIONAL_LANDING_INVALID")
+        for projected, route in projected_routes:
+            if not self._landings_clear(projected, route, site, now=projected.propagated_at,
+                    assessment_now=now, energy_available=True, home=True):
+                return result("RETURN_NOW", "PROJECTED_TERMINATION_LANDING_INVALID")
         return result("CONTINUE", "ADMITTED")
 
     def prepare(self, *, snapshot_version, checkpoint=None, provider_wait_s=0, fallback=None,
@@ -653,18 +695,15 @@ class SafetySupervisor:
                     current = self.prepare(snapshot_version=self.store.session_version(self.session_id), fallback=current)
                     eligible = None
                     if current.reason not in {"SITE_OR_CAPABILITY_INVALID", "TELEMETRY_INVALID", "TELEMETRY_UNAVAILABLE", "LOCALIZATION_LOST"}:
-                        for entry in self.site.terminal_contingencies:
-                            eligible = admit_terminal_contingency(self.site, self._assurances(),
-                                contingency_id=entry.contingency_id, trigger=entry.trigger,
-                                session_id=self.session_id, clock_domain_id=self.clock_domain_id,
-                                now_monotonic_ms=self.clock() * 1000, pose=current.request.pose,
-                                energy_available=current.energy_sample.battery_pct >=
-                                    self.reserve.profile.landing_floor_pct + math.ceil(
-                                        self.reserve.conservative_percent_per_second * self.landing_upper_bound_s
-                                        + self.reserve.profile.telemetry_allowance_pct),
-                                drift_profile=self.tracker.profile, clock_guard=copy(self.clock_guard))
-                            if eligible is not None:
-                                break
+                        landing = self._forecast(current.request.pose,
+                            self._plan(current.request.pose, (cmd,)), self.clock()).projected
+                        eligible = self._landing_contingency(self.site, landing, now=self.clock(),
+                            trigger=ContingencyTrigger.RETURN_ENERGY_UNAVAILABLE,
+                            energy_available=current.energy_sample.battery_pct >=
+                                self.reserve.profile.landing_floor_pct + math.ceil(
+                                    self.reserve.conservative_percent_per_second * self.landing_upper_bound_s
+                                    + self.reserve.profile.telemetry_allowance_pct),
+                            home=plan.checkpoint_id == self.site.home.route_id, require_descent=True)
                     current = replace(current, transition="LAND_CONTINGENCY", invalidates_snapshot=True,
                                       reason="LANDING_APPROACH", contingency_id=eligible.contingency_id if eligible else None)
                 event = self._audit(current)
