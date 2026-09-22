@@ -24,6 +24,14 @@ class ReserveDecision(str, Enum):
     LAND_CONTINGENCY = "LAND_CONTINGENCY"
 
 
+class ExecutionMode(str, Enum):
+    """The only execution contexts that may consume an energy profile."""
+
+    SIMULATION = "SIMULATION"
+    CALIBRATION = "CALIBRATION"
+    REAL = "REAL"
+
+
 # Tello's ``time?`` telemetry is integral seconds.  A read can therefore lead
 # or lag monotonic elapsed time by one reported second at a counter boundary.
 # Comparing against a stream epoch makes that phase envelope cumulative across
@@ -51,6 +59,11 @@ def _exact_decimal(value: object, field: str) -> Decimal:
 
 
 def _finite_nonnegative(value: object, field: str) -> float:
+    # Public profile/sample fields are annotated as floats.  Do not silently
+    # accept a higher-precision Decimal then downcast it: reserve arithmetic
+    # accepts float/int inputs as their decimal spelling at the boundary.
+    if type(value) not in (int, float):
+        raise TypeError(f"{field} must be a finite nonnegative float or integer")
     numeric = _exact_decimal(value, field)
     result = float(numeric)
     if not math.isfinite(result):
@@ -95,17 +108,24 @@ class EnergyProfile:
         if self.execution_scope not in {"SIMULATION_ONLY", "CALIBRATION", "PROMOTED"}:
             raise ValueError("execution_scope is not recognized")
 
-    def validate_for_execution(self, *, mode: str, site_sha256: str, aircraft_id: str) -> None:
+    def validate_for_execution(self, *, mode: ExecutionMode, site_sha256: str, aircraft_id: str) -> None:
         """Require the profile's physical binding before an execution mode uses it."""
 
+        if not isinstance(mode, ExecutionMode):
+            raise ValueError("execution mode must be an ExecutionMode")
         if site_sha256 != self.site_sha256:
             raise ValueError("energy profile site does not match the active site")
         if aircraft_id != self.aircraft_id:
             raise ValueError("energy profile aircraft does not match the active aircraft")
-        if mode == "real" and self.execution_scope != "PROMOTED":
-            raise ValueError("real execution requires a PROMOTED energy profile")
+        required_scope = {
+            ExecutionMode.SIMULATION: "SIMULATION_ONLY",
+            ExecutionMode.CALIBRATION: "CALIBRATION",
+            ExecutionMode.REAL: "PROMOTED",
+        }[mode]
+        if self.execution_scope != required_scope:
+            raise ValueError(f"{mode.value} execution requires a {required_scope} energy profile")
 
-    def allows_execution(self, *, mode: str, site_sha256: str, aircraft_id: str) -> bool:
+    def allows_execution(self, *, mode: ExecutionMode, site_sha256: str, aircraft_id: str) -> bool:
         try:
             self.validate_for_execution(mode=mode, site_sha256=site_sha256, aircraft_id=aircraft_id)
         except (TypeError, ValueError):
@@ -199,6 +219,8 @@ class ReserveGuard:
         self._last_sample_s: float | None = None
         self._telemetry_invalid = False
         self._motor_epoch: tuple[Decimal, Decimal, str] | None = None
+        self._sample_payloads: dict[Decimal, tuple[int, Decimal | None, str | None]] = {}
+        self._minimum_battery_pct: int | None = None
 
     @property
     def conservative_percent_per_second(self) -> float:
@@ -219,11 +241,35 @@ class ReserveGuard:
         self._last_clock_s = now
         return now
 
+    def _bind_sample(self, sample: EnergySample) -> bool:
+        """Bind each measured instant to one immutable telemetry payload.
+
+        Reusing a timestamp with changed battery or motor information is an
+        integrity fault, rather than an opportunity to replace a pessimistic
+        reading.  The session minimum is the only battery value used for
+        future admission until this guard is discarded.
+        """
+
+        measured_at = _exact_decimal(sample.measured_at_s, "measured_at_s")
+        motor_time = (None if sample.motor_time_s is None
+                      else _exact_decimal(sample.motor_time_s, "motor_time_s"))
+        payload = (sample.battery_pct, motor_time, sample.motor_time_source)
+        existing = self._sample_payloads.get(measured_at)
+        if existing is not None and existing != payload:
+            self._telemetry_invalid = True
+            return False
+        self._sample_payloads[measured_at] = payload
+        self._minimum_battery_pct = min(self._minimum_battery_pct, sample.battery_pct) \
+            if self._minimum_battery_pct is not None else sample.battery_pct
+        return True
+
     def observe(self, previous: EnergySample, current: EnergySample) -> None:
         """Raise the learned rate only after internally consistent telemetry."""
 
         if not isinstance(previous, EnergySample) or not isinstance(current, EnergySample):
             self._telemetry_invalid = True
+            return
+        if not self._bind_sample(previous) or not self._bind_sample(current):
             return
         elapsed = _exact_decimal(current.measured_at_s, "measured_at_s") - _exact_decimal(
             previous.measured_at_s, "measured_at_s",
@@ -280,12 +326,12 @@ class ReserveGuard:
         value = self._observed_upper * seconds + Decimal(self.profile.telemetry_allowance_pct)
         return int(value.to_integral_value(rounding=ROUND_CEILING))
 
-    def _estimate(self, *, current: EnergySample, action_cost: int, decision: ReserveDecision,
+    def _estimate(self, *, current_pct: int, action_cost: int, decision: ReserveDecision,
                   next_seconds: Decimal, recovery_seconds: Decimal, provider_wait_s: Decimal,
                   termination_seconds: Decimal) -> EnergyEstimate:
         components = {
             "next_checkpoint_s": float(next_seconds),
-            "percent_per_second_upper": self._observed_upper,
+            "percent_per_second_upper": float(self._observed_upper),
             "provider_wait_s": float(provider_wait_s),
             "recovery_s": float(recovery_seconds),
             "telemetry_allowance_pct": float(self.profile.telemetry_allowance_pct),
@@ -293,8 +339,8 @@ class ReserveGuard:
             "total_worst_case_s": float(next_seconds + recovery_seconds + provider_wait_s + termination_seconds),
         }
         return EnergyEstimate(
-            current_pct=current.battery_pct, action_cost_pct=action_cost,
-            projected_landing_pct=current.battery_pct - action_cost,
+            current_pct=current_pct, action_cost_pct=action_cost,
+            projected_landing_pct=current_pct - action_cost,
             landing_floor_pct=self.profile.landing_floor_pct, decision=decision,
             components=components,
         )
@@ -323,18 +369,20 @@ class ReserveGuard:
         action_seconds = next_seconds + recovery_seconds + provider_wait + termination_seconds
         action_cost = self._cost(action_seconds)
         termination_cost = self._cost(termination_seconds)
-        valid_sample = self._sample_is_current(current, self._now())
-        can_terminate = current.battery_pct - termination_cost >= self.profile.landing_floor_pct
+        bound_sample = self._bind_sample(current)
+        usable_battery = self._minimum_battery_pct if self._minimum_battery_pct is not None else current.battery_pct
+        valid_sample = bound_sample and self._sample_is_current(current, self._now())
+        can_terminate = usable_battery - termination_cost >= self.profile.landing_floor_pct
         if not valid_sample:
             decision = ReserveDecision.LAND_CONTINGENCY
         elif self._return_latched:
             decision = ReserveDecision.RETURN_NOW if can_terminate else ReserveDecision.LAND_CONTINGENCY
-        elif current.battery_pct - action_cost >= self.profile.landing_floor_pct:
+        elif usable_battery - action_cost >= self.profile.landing_floor_pct:
             decision = ReserveDecision.CONTINUE
         else:
             decision = ReserveDecision.RETURN_NOW if can_terminate else ReserveDecision.LAND_CONTINGENCY
         return self._estimate(
-            current=current, action_cost=action_cost, decision=decision,
+            current_pct=usable_battery, action_cost=action_cost, decision=decision,
             next_seconds=next_seconds, recovery_seconds=recovery_seconds,
             provider_wait_s=provider_wait, termination_seconds=termination_seconds,
         )

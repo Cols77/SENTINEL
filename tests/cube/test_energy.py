@@ -9,6 +9,7 @@ from sentinel.cube.energy import (
     EnergyEstimate,
     EnergyProfile,
     EnergySample,
+    ExecutionMode,
     ReserveDecision,
     ReserveGuard,
 )
@@ -62,12 +63,15 @@ def test_reserve_cost_rounds_up_once_and_admits_equality() -> None:
 
 
 def test_return_and_land_contingency_use_the_exact_termination_reserve() -> None:
-    guard = _guard(percent_per_second_upper=0.1, telemetry_allowance_pct=1, landing_floor_pct=20)
     common = dict(next_plan=_plan("next", 30), recovery_plan=None, provider_wait_s=0.0,
                   termination_plan=_plan("home-and-land", 10))
 
-    assert guard.assess(current=_sample(24, 10), **common).decision is ReserveDecision.RETURN_NOW
-    assert guard.assess(current=_sample(21, 10), **common).decision is ReserveDecision.LAND_CONTINGENCY
+    assert _guard(percent_per_second_upper=0.1, telemetry_allowance_pct=1, landing_floor_pct=20).assess(
+        current=_sample(24, 10), **common,
+    ).decision is ReserveDecision.RETURN_NOW
+    assert _guard(percent_per_second_upper=0.1, telemetry_allowance_pct=1, landing_floor_pct=20).assess(
+        current=_sample(21, 10), **common,
+    ).decision is ReserveDecision.LAND_CONTINGENCY
 
 
 def test_components_are_key_sorted_immutable_and_detached_from_source_plan() -> None:
@@ -104,10 +108,10 @@ def test_observed_burn_can_raise_the_calibrated_bound() -> None:
 
 
 def test_motor_time_is_only_a_consistency_check_not_the_burn_denominator() -> None:
-    guard = _guard(percent_per_second_upper=0.01, telemetry_allowance_pct=0, landing_floor_pct=20)
+    guard = _guard(now=11, percent_per_second_upper=0.01, telemetry_allowance_pct=0, landing_floor_pct=20)
 
     guard.observe(_sample(80, 0, motor_time_s=10), _sample(79, 10, motor_time_s=20))
-    estimate = guard.assess(current=_sample(25, 10, motor_time_s=20), next_plan=None,
+    estimate = guard.assess(current=_sample(79, 11, motor_time_s=21), next_plan=None,
                             recovery_plan=None, provider_wait_s=0, termination_plan=_plan("home", 10))
 
     assert guard.conservative_percent_per_second == 0.1
@@ -249,16 +253,42 @@ def test_stale_or_regressing_clock_telemetry_fails_closed() -> None:
 
 
 def test_return_latch_is_irrevocable() -> None:
-    guard = _guard(percent_per_second_upper=0.1, telemetry_allowance_pct=0, landing_floor_pct=20)
+    guard = _guard(now=11, percent_per_second_upper=0.1, telemetry_allowance_pct=0, landing_floor_pct=20)
     kwargs = dict(next_plan=_plan("next", 30), recovery_plan=None, provider_wait_s=0,
                   termination_plan=_plan("home", 10))
     first = guard.assess(current=_sample(23, 10), **kwargs)
     guard.latch_return(first)
 
-    later = guard.assess(current=_sample(100, 10), **kwargs)
+    later = guard.assess(current=_sample(100, 11), **kwargs)
 
     assert first.decision is ReserveDecision.RETURN_NOW
     assert later.decision is ReserveDecision.RETURN_NOW
+
+
+def test_lower_battery_sample_cannot_be_restored_by_a_later_increase_in_the_same_guard() -> None:
+    guard = _guard(now=11, percent_per_second_upper=1.0, telemetry_allowance_pct=0,
+                   landing_floor_pct=20)
+    kwargs = dict(next_plan=None, recovery_plan=None, provider_wait_s=0, termination_plan=_plan("home", 1))
+
+    low = guard.assess(current=_sample(20, 10), **kwargs)
+    raised = guard.assess(current=_sample(100, 11), **kwargs)
+
+    assert low.decision is ReserveDecision.LAND_CONTINGENCY
+    assert raised.current_pct == 20
+    assert raised.decision is ReserveDecision.LAND_CONTINGENCY
+
+
+@pytest.mark.parametrize(("battery_pct", "motor_time_s"), [(79, 10), (80, 11)])
+def test_conflicting_same_timestamp_battery_or_motor_payload_fails_closed(
+    battery_pct: int, motor_time_s: int,
+) -> None:
+    guard = _guard(now=10)
+    kwargs = dict(next_plan=None, recovery_plan=None, provider_wait_s=0, termination_plan=_plan("home", 1))
+
+    guard.assess(current=_sample(80, 10, motor_time_s=10), **kwargs)
+    conflicted_estimate = guard.assess(current=_sample(battery_pct, 10, motor_time_s=motor_time_s), **kwargs)
+
+    assert conflicted_estimate.decision is ReserveDecision.LAND_CONTINGENCY
 
 
 @pytest.mark.parametrize(
@@ -270,6 +300,7 @@ def test_return_latch_is_irrevocable() -> None:
         (lambda: EnergySample(battery_pct=1, measured_at_s=Decimal("NaN")), "measured_at_s"),
         (lambda: _profile(percent_per_second_upper=float("inf")), "percent_per_second_upper"),
         (lambda: _profile(percent_per_second_upper=Decimal("Infinity")), "percent_per_second_upper"),
+        (lambda: _profile(percent_per_second_upper=Decimal("0.100000000000000005")), "percent_per_second_upper"),
         (lambda: _profile(telemetry_allowance_pct=True), "telemetry_allowance_pct"),
     ],
 )
@@ -290,11 +321,32 @@ def test_provider_wait_must_be_a_finite_nonnegative_number() -> None:
 def test_real_execution_requires_a_promoted_matching_profile() -> None:
     profile = _profile(execution_scope="PROMOTED")
 
-    profile.validate_for_execution(mode="real", site_sha256="a" * 64, aircraft_id="TELLO-01")
+    profile.validate_for_execution(mode=ExecutionMode.REAL, site_sha256="a" * 64, aircraft_id="TELLO-01")
     with pytest.raises(ValueError, match="site"):
-        profile.validate_for_execution(mode="real", site_sha256="b" * 64, aircraft_id="TELLO-01")
+        profile.validate_for_execution(mode=ExecutionMode.REAL, site_sha256="b" * 64, aircraft_id="TELLO-01")
     with pytest.raises(ValueError, match="PROMOTED"):
-        _profile().validate_for_execution(mode="real", site_sha256="a" * 64, aircraft_id="TELLO-01")
+        _profile().validate_for_execution(mode=ExecutionMode.REAL, site_sha256="a" * 64, aircraft_id="TELLO-01")
+
+
+@pytest.mark.parametrize("mode", ["real", "REAL", "rea", "simulation"])
+def test_execution_mode_requires_an_explicit_known_enum(mode: str) -> None:
+    with pytest.raises(ValueError, match="ExecutionMode"):
+        _profile(execution_scope="PROMOTED").validate_for_execution(
+            mode=mode, site_sha256="a" * 64, aircraft_id="TELLO-01",
+        )
+
+
+def test_execution_mode_matches_the_profile_scope() -> None:
+    _profile(execution_scope="SIMULATION_ONLY").validate_for_execution(
+        mode=ExecutionMode.SIMULATION, site_sha256="a" * 64, aircraft_id="TELLO-01",
+    )
+    _profile(execution_scope="CALIBRATION").validate_for_execution(
+        mode=ExecutionMode.CALIBRATION, site_sha256="a" * 64, aircraft_id="TELLO-01",
+    )
+    with pytest.raises(ValueError, match="CALIBRATION"):
+        _profile(execution_scope="SIMULATION_ONLY").validate_for_execution(
+            mode=ExecutionMode.CALIBRATION, site_sha256="a" * 64, aircraft_id="TELLO-01",
+        )
 
 
 def test_dry_run_can_replay_scripted_battery_and_motor_time_sequences() -> None:
