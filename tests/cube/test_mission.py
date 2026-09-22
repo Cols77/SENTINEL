@@ -74,6 +74,22 @@ def test_legacy_waypoints_are_dispatched_from_shared_checkpoint_plans(tmp_path):
     assert tuple(dispatched) == plan.commands
 
 
+def test_checkpoint_sink_drives_telemetry_settles_rotations_and_captures(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100, looks_deg=(-45, 45)),))
+    runner, client = _runner(tmp_path, "off", [], mission=mission)
+    sleeps = []
+    runner.sleep_fn = sleeps.append
+
+    assert runner.run(confirm=True).status == "PASS"
+    (plan,) = runner.checkpoint_plans
+    assert [kind for kind, _ in runner.checkpoint_effects] == [command.kind for command in plan.commands]
+    assert [effect for kind, effect in runner.checkpoint_effects if kind == "CAPTURE"] == ["capture", "capture"]
+    assert [effect for kind, effect in runner.checkpoint_effects if kind == "READ_TELEMETRY"] == ["telemetry", "telemetry"]
+    assert all(command.kind != "LOCALISE" for command in plan.commands)
+    assert _log(tmp_path)[0]["battery_pct"] == 100
+    assert sleeps == [command.upper_bound_s for command in plan.commands if command.kind == "SETTLE"]
+
+
 def test_off_mode_navigates_open_loop_with_height_and_looks(tmp_path):
     runner, client = _runner(tmp_path, "off", [])
     assert runner.run(confirm=True).status == "PASS"
@@ -428,6 +444,32 @@ def test_reanchor_plans_an_outside_axis_recovery_before_its_regular_move(tmp_pat
     assert runner.run(confirm=True).status == "PASS"
     moves = [command for command in client.commands if command.split()[0] in {"forward", "back", "left", "right"}]
     assert moves[-2:] == ["forward 24", "left 50"]
+
+
+def test_a_planned_trim_may_be_farther_from_its_target_than_the_plausibility_radius(tmp_path):
+    mission = Mission(65, 250, (Waypoint("WP1", 80, 250, 100),))
+    bursts = [[_report(145, 250)] * 10, [_report(80, 250)] * 10]
+    runner, client = _runner(tmp_path, "reanchor", bursts, mission=mission)
+
+    assert runner.run(confirm=True).status == "PASS"
+    assert [command for command in client.commands if command.startswith(("right", "left"))] == [
+        "right 20", "left 65",
+    ]
+
+
+def test_reanchor_effect_trace_attributes_burst_yaw_and_trim_to_the_checkpoint(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),))
+    bursts = [[_report(250, 282, heading=104)] * 10, [_report(270, 300)] * 10]
+    runner, _ = _runner(tmp_path, "reanchor", bursts, mission=mission)
+
+    assert runner.run(confirm=True).status == "PASS"
+    effects = runner.checkpoint_effects
+    assert ("LOCALISE", "burst") in effects
+    assert ("TRIM_ALLOWANCE", "yaw_trim") in effects
+    assert ("TRIM_ALLOWANCE", "trim_speed") in effects
+    assert ("TRIM_ALLOWANCE", "trim_move") in effects
+    assert ("TRIM_ALLOWANCE", "trim_settle") in effects
+    assert _log(tmp_path)[0]["trim_rounds_sent"] == 1
 
 
 def test_reanchor_recovers_both_axes_left_outside_the_bounds_at_once(tmp_path):

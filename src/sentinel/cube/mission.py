@@ -262,7 +262,6 @@ class CubeMissionRunner(FlightTestRunner):
         self._start_fix_cm: tuple[float, float] | None = None
         #: speed of the last translation if nothing has let the drone settle since, else None
         self._unsettled_speed: int | None = None
-        self._look_offset = 0
         self._implausible_streak = 0
         # FlightTestRunner._preflight sets and reads back COMMAND_SPEED_CM_S.
         self._speed_cm_s = int(COMMAND_SPEED_CM_S)
@@ -278,6 +277,9 @@ class CubeMissionRunner(FlightTestRunner):
         )
         self._checkpoint_plans: list[CheckpointPlan] = []
         self._active_checkpoint_plan: CheckpointPlan | None = None
+        self._active_checkpoint_entry: dict | None = None
+        self._active_waypoint: Waypoint | None = None
+        self._checkpoint_effects: list[tuple[str, str]] = []
         # A4/W08-b: sending `land` from the watchdog thread mid-move. Bench
         # test B1 has shown the Tello honours it, but only 2 of its 9 runs
         # are flown (docs/wp5-rehearsal-manifest.md). Until all 9 pass this
@@ -357,18 +359,9 @@ class CubeMissionRunner(FlightTestRunner):
             raise RuntimeError(f"speed {cm_per_s} failed: {response}")
         self._speed_cm_s = cm_per_s
 
-    def _look_to(self, offset_deg: int) -> None:
-        delta = offset_deg - self._look_offset
-        if delta:
-            self._rotate("ccw" if delta > 0 else "cw", abs(delta))
-        self._look_offset = offset_deg
-
     def _step(self, direction: str, distance_cm: int, *, optional: bool) -> bool:
         """One checked move. An optional step that would leave the bounds is skipped."""
         try:
-            if self._unsettled_speed is not None:
-                self.sleep_fn(SETTLE_AFTER_FAST_MOVE_S if self._unsettled_speed > COMMAND_SPEED_CM_S
-                              else SETTLE_AFTER_SLOW_MOVE_S)
             self.move_checked(direction, distance_cm)
             self._unsettled_speed = self._speed_cm_s
         except EnvelopeViolation:
@@ -395,20 +388,34 @@ class CubeMissionRunner(FlightTestRunner):
 
         return tuple(self._checkpoint_plans)
 
+    @property
+    def checkpoint_effects(self) -> tuple[tuple[str, str], ...]:
+        """Effect trace for the current run, keyed to dispatched plan nodes."""
+
+        return tuple(self._checkpoint_effects)
+
     def _plan_for_waypoint(self, wp: Waypoint) -> CheckpointPlan:
         """Translate a legacy waypoint once, then retain that object for all consumers."""
 
         start = self.envelope.position
+        target = Position(wp.x_cm, wp.y_cm, wp.z_cm)
+        trim_distance_cm = self._trim_distance_limit(start, target)
+        limits = replace(
+            self._checkpoint_limits,
+            localise=self.pose_mode != "off" and wp.localise,
+            trim_rounds=self.mission.max_trim_rounds if self.pose_mode == "reanchor" and wp.localise else 0,
+            trim_distance_cm=trim_distance_cm,
+        )
         plan = plan_checkpoint(
             checkpoint_id=wp.name,
             start=start,
-            target=Position(wp.x_cm, wp.y_cm, wp.z_cm),
+            target=target,
             start_heading_deg=FACING_DEG,
             terminal_heading_deg=FACING_DEG,
             speed_cm_s=self.mission.leg_speed_cm_s,
             looks_deg=wp.looks_deg,
             capture_count=len(wp.looks_deg),
-            limits=self._checkpoint_limits,
+            limits=limits,
         )
         # A reanchored estimate can lie a few centimetres outside a commanded
         # x/y bound.  Such an axis needs a minimum correction even when it is
@@ -431,10 +438,12 @@ class CubeMissionRunner(FlightTestRunner):
                                        ("direction", positive if delta > 0 else negative),
                                        ("distance_cm", max(MIN_MOVE_CM, round(abs(delta)))),
                                        ("optional", "false")))),
-                self._checkpoint_limits.move_s, False,
+                limits.move_s, False,
             ))
             recovery.append(PlannedCommand(
-                "SETTLE", (("after", "move"),), self._checkpoint_limits.slow_settle_s, True,
+                "SETTLE", (("after", "move"),),
+                limits.fast_settle_s if self.mission.leg_speed_cm_s > limits.fast_speed_threshold_cm_s
+                else limits.slow_settle_s, True,
             ))
         if recovery:
             # The normal graph was calculated from the pre-recovery position.
@@ -453,7 +462,8 @@ class CubeMissionRunner(FlightTestRunner):
                 commands_without_recovered_axes.append(command)
             first_motion = next(
                 (index for index, command in enumerate(commands_without_recovered_axes)
-                 if command.kind == "MOVE" or dict(command.arguments).get("phase") == "look"),
+                 if command.kind in ("MOVE", "TRIM_ALLOWANCE", "LOCALISE", "CAPTURE")
+                 or dict(command.arguments).get("phase") == "look"),
                 len(commands_without_recovered_axes),
             )
             commands = (tuple(commands_without_recovered_axes[:first_motion]) + tuple(recovery)
@@ -464,29 +474,77 @@ class CubeMissionRunner(FlightTestRunner):
         self._active_checkpoint_plan = plan
         return plan
 
-    def _go_to(self, wp: Waypoint) -> None:
-        if self._look_offset != 0:
-            raise RuntimeError("translation requires the drone to face +y")
-        for command in self._plan_for_waypoint(wp).commands:
-            self.execute_command(command)
+    def _trim_distance_limit(self, start: Position, target: Position) -> int:
+        """Bound a plausible reanchor's trim from both planned and skipped endpoints."""
+
+        deviations = []
+        for source, destination in ((start.x_cm, target.x_cm), (start.y_cm, target.y_cm)):
+            delta = destination - source
+            if abs(delta) <= DEAD_BAND_CM:
+                endpoint = source
+            else:
+                endpoint = source + (1 if delta > 0 else -1) * max(MIN_MOVE_CM, round(abs(delta)))
+            deviations.append(max(abs(destination - source), abs(destination - endpoint)))
+        return math.ceil(max(deviations, default=0) + PLAUSIBILITY_CM)
+
+    def _go_to(self, wp: Waypoint, entry: dict) -> None:
+        self._active_checkpoint_entry = entry
+        self._active_waypoint = wp
+        try:
+            for command in self._plan_for_waypoint(wp).commands:
+                self.execute_command(command)
+        finally:
+            self._active_checkpoint_entry = None
+            self._active_waypoint = None
 
     def execute_command(self, command: PlannedCommand) -> CommandOutcome:
         """Dispatch a planned command without re-deriving its path or duration."""
 
         arguments = dict(command.arguments)
+        entry, waypoint = self._active_checkpoint_entry, self._active_waypoint
         if command.kind == "SET_SPEED":
+            self._checkpoint_effects.append((command.kind, "speed"))
             self._set_speed(int(arguments["speed_cm_s"]))
+        elif command.kind == "READ_TELEMETRY":
+            self._checkpoint_effects.append((command.kind, "telemetry"))
+            battery = self._battery_pct()
+            if entry is not None and arguments["phase"] == "final":
+                entry["battery_pct"] = battery
+                entry["height_cm"] = self.envelope.position.z_cm
         elif command.kind == "WATCHDOG":
+            self._checkpoint_effects.append((command.kind, "watchdog"))
             self._watchdog_last_fix_cm = None
             self._watchdog_land_error = None
             self._watchdog_fix_errors = 0
         elif command.kind == "MOVE":
+            self._checkpoint_effects.append((command.kind, "move"))
             self._execute_planned_move(arguments)
-        elif command.kind == "ROTATE" and arguments.get("phase") == "admission":
+        elif command.kind == "SETTLE":
+            self._checkpoint_effects.append((command.kind, "settle"))
+            self.sleep_fn(command.upper_bound_s)
+            self._unsettled_speed = None
+        elif command.kind == "ROTATE":
+            self._checkpoint_effects.append((command.kind, "rotation"))
             self._rotate(str(arguments["direction"]), round(float(arguments["degrees"])))
-        # Telemetry, observing, localisation and trim allowance commands are
-        # explicit plan nodes.  Their legacy lifecycle actions remain below,
-        # where they have the current log entry and captured-frame context.
+        elif command.kind == "TRIM_ALLOWANCE":
+            self._checkpoint_effects.append((command.kind, "trim_allowance"))
+            if entry is not None and entry["status"] == "EN_ROUTE":
+                entry["status"] = "OPEN_LOOP"
+                entry["height_cm"] = self.envelope.position.z_cm
+        elif command.kind == "LOCALISE":
+            self._checkpoint_effects.append((command.kind, "localise"))
+            if waypoint is not None and entry is not None:
+                entry["height_cm"] = self.envelope.position.z_cm
+                self._localise(waypoint, entry)
+        elif command.kind == "CAPTURE":
+            self._checkpoint_effects.append((command.kind, "capture"))
+            if waypoint is not None and entry is not None:
+                self._capture(waypoint, entry, int(arguments["look_deg"]))
+        elif command.kind == "LAND":
+            self._checkpoint_effects.append((command.kind, "land"))
+            response = self._call(self.client.land)
+            if not self._is_ok(response):
+                raise RuntimeError(f"land failed: {response}")
         return CommandOutcome()
 
     def _execute_planned_move(self, arguments: dict[str, object]) -> None:
@@ -622,13 +680,23 @@ class CubeMissionRunner(FlightTestRunner):
         allowance = next(
             (dict(command.arguments) for command in plan_commands
              if command.kind == "TRIM_ALLOWANCE"),
-            {"max_rounds": self.mission.max_trim_rounds, "max_distance_cm": int(PLAUSIBILITY_CM)},
+            {"max_rounds": self.mission.max_trim_rounds, "max_distance_cm": int(PLAUSIBILITY_CM),
+             "max_yaw_deg": 180, "move_upper_bound_s": 8.0, "rotate_upper_bound_s": 4.0,
+             "speed_cm_s": int(COMMAND_SPEED_CM_S), "speed_upper_bound_s": 1.0,
+             "settle_s": SETTLE_AFTER_SLOW_MOVE_S},
         )
         max_rounds = int(allowance["max_rounds"])
         max_distance_cm = int(allowance["max_distance_cm"])
+        localise_arguments = next(
+            (dict(command.arguments) for command in plan_commands if command.kind == "LOCALISE"),
+            {"settle_s": SETTLE_S},
+        )
+        localise_settle_s = float(localise_arguments["settle_s"])
         while True:
-            self.sleep_fn(SETTLE_S)
+            self._checkpoint_effects.append(("LOCALISE", "settle"))
+            self.sleep_fn(localise_settle_s)
             self._unsettled_speed = None
+            self._checkpoint_effects.append(("LOCALISE", "burst"))
             reports = self.burst_fn()
             result = localise(reports)
             if not isinstance(result, LocalisationFix):
@@ -678,7 +746,16 @@ class CubeMissionRunner(FlightTestRunner):
                 return
             self.envelope.position = replace(dead, x_cm=round(fix[0]), y_cm=round(fix[1]))
             if rounds == 0 and abs(heading_error) > YAW_TRIM_THRESHOLD_DEG:
-                self._rotate("cw" if heading_error > 0 else "ccw", round(abs(heading_error)))
+                degrees = round(abs(heading_error))
+                if degrees > int(allowance["max_yaw_deg"]):
+                    raise PlanError(f"{wp.name}: yaw trim exceeds the checkpoint allowance")
+                self._checkpoint_effects.append(("TRIM_ALLOWANCE", "yaw_trim"))
+                self.execute_command(PlannedCommand(
+                    "ROTATE", tuple(sorted((("degrees", degrees),
+                                             ("direction", "cw" if heading_error > 0 else "ccw"),
+                                             ("phase", "yaw_trim")))),
+                    float(allowance["rotate_upper_bound_s"]), False,
+                ))
             # Inside the tolerance circle, a 20 cm minimum move can only make things worse
             # (2026-09-21 enlarged trial: 12 cm became 25.7 cm after two trims).
             if not trims or rounds >= max_rounds or entry["tolerance"] == "INSIDE":
@@ -691,10 +768,30 @@ class CubeMissionRunner(FlightTestRunner):
                 self._emit("alert", f"{wp.name}: the last trim made it worse ({errors[-2]} -> "
                                     f"{errors[-1]} cm); no more trims at this stop")
                 return self._accept_arrival(wp, entry)
-            self._set_speed(int(COMMAND_SPEED_CM_S))   # trims are short and want precision
+            self._checkpoint_effects.append(("TRIM_ALLOWANCE", "trim_speed"))
+            self.execute_command(PlannedCommand(
+                "SET_SPEED", (("speed_cm_s", int(allowance["speed_cm_s"])),),
+                float(allowance["speed_upper_bound_s"]), False,
+            ))
             if any(distance > max_distance_cm for _, distance in trims):
                 raise PlanError(f"{wp.name}: trim exceeds the checkpoint allowance of {max_distance_cm} cm")
-            sent = [self._step(direction, distance, optional=True) for direction, distance in trims]
+            axis_by_direction = {"left": "x", "right": "x", "back": "y", "forward": "y"}
+            sent = []
+            for index, (direction, distance) in enumerate(trims):
+                before = self.envelope.position
+                self._checkpoint_effects.append(("TRIM_ALLOWANCE", "trim_move"))
+                self.execute_command(PlannedCommand(
+                    "MOVE", tuple(sorted((("axis", axis_by_direction[direction]), ("direction", direction),
+                                           ("distance_cm", distance), ("optional", "true"),
+                                           ("phase", "trim")))),
+                    float(allowance["move_upper_bound_s"]), False,
+                ))
+                sent.append(self.envelope.position != before)
+                if index < len(trims) - 1:
+                    self._checkpoint_effects.append(("TRIM_ALLOWANCE", "trim_settle"))
+                    self.execute_command(PlannedCommand(
+                        "SETTLE", (("after", "trim_move"),), float(allowance["settle_s"]), True,
+                    ))
             if not any(sent):
                 return self._accept_arrival(wp, entry)
             rounds += 1
@@ -783,32 +880,30 @@ class CubeMissionRunner(FlightTestRunner):
                                 "in the outer tolerance circle")
 
     # -- observation --------------------------------------------------------
-    def _look(self, wp: Waypoint, entry: dict) -> None:
-        entry["frames"] = []
-        for offset in wp.looks_deg:
-            self._look_to(offset)
-            self.sleep_fn(SETTLE_S)
-            frame = self._call(lambda: self.client.read_frame(timeout=10))
-            path, digest = None, None
-            if self.recorder is not None:
-                saved_path = self.recorder.save(frame)
-                path = str(saved_path)
-                digest = hashlib.sha256(saved_path.read_bytes()).hexdigest()
-            record = {"look_deg": offset, "path": path, "sha256": digest,
-                      "captured_at": datetime.now(timezone.utc).isoformat()}
-            if path is not None and self.correlation_context is not None:
-                from dataclasses import asdict
-                from sentinel.room.ingest import capture_request
-                from sentinel.survey.live_detect import LIVE_CLASSES
-                record["perception_request"] = asdict(capture_request(
-                    self.correlation_context, frame_path=path, run_id=self.run_id,
-                    captured_at=record["captured_at"], classes=LIVE_CLASSES,
-                ))
-            entry["frames"].append(record)
-            if path is not None:
-                self._announce_frame(wp.name, record)
-            self._emit("observe", f"{wp.name}: captured at look offset {offset}")
-        self._look_to(0)
+    def _capture(self, wp: Waypoint, entry: dict, offset: int) -> None:
+        """Capture one planned look.  Rotation and settling are separate plan nodes."""
+
+        entry.setdefault("frames", [])
+        frame = self._call(lambda: self.client.read_frame(timeout=10))
+        path, digest = None, None
+        if self.recorder is not None:
+            saved_path = self.recorder.save(frame)
+            path = str(saved_path)
+            digest = hashlib.sha256(saved_path.read_bytes()).hexdigest()
+        record = {"look_deg": offset, "path": path, "sha256": digest,
+                  "captured_at": datetime.now(timezone.utc).isoformat()}
+        if path is not None and self.correlation_context is not None:
+            from dataclasses import asdict
+            from sentinel.room.ingest import capture_request
+            from sentinel.survey.live_detect import LIVE_CLASSES
+            record["perception_request"] = asdict(capture_request(
+                self.correlation_context, frame_path=path, run_id=self.run_id,
+                captured_at=record["captured_at"], classes=LIVE_CLASSES,
+            ))
+        entry["frames"].append(record)
+        if path is not None:
+            self._announce_frame(wp.name, record)
+        self._emit("observe", f"{wp.name}: captured at look offset {offset}")
 
     def _announce_frame(self, stop: str, record: dict) -> None:
         """One line per saved frame in ``frames.jsonl`` beside the frames, written the
@@ -834,6 +929,8 @@ class CubeMissionRunner(FlightTestRunner):
             handle.write(json.dumps(entry) + "\n")
 
     def _fly_sequence(self) -> None:
+        self._checkpoint_plans.clear()
+        self._checkpoint_effects.clear()
         self._enter_altitude_band()
         height = self.envelope.position.z_cm
         if self.mission.start_x_cm is None:
@@ -863,19 +960,9 @@ class CubeMissionRunner(FlightTestRunner):
                      "battery_pct": None, "leg_speed_cm_s": self.mission.leg_speed_cm_s,
                      "trim_errors_cm": []}
             try:
-                self._go_to(wp)
-                entry["status"] = "OPEN_LOOP"
-                # survey bridge (Task 11): the measured altitude telemetry
-                # move_checked already stamped into self.envelope.position,
-                # not the commanded target -- they agree within DEAD_BAND_CM
-                # by construction but are not the same number.
-                entry["height_cm"] = self.envelope.position.z_cm
-                entry["battery_pct"] = self._battery_pct()
-                if self.pose_mode != "off" and wp.localise:
-                    self._localise(wp, entry)
+                self._go_to(wp, entry)
                 if wp.name == RETURN_NAME and entry["fix_cm"] is not None:
                     entry["return_error_cm"] = round(math.dist(entry["fix_cm"], self._start_fix_cm), 1)
-                self._look(wp, entry)
             finally:
                 if entry["status"] == "EN_ROUTE":
                     entry["status"] = "ABORTED_EN_ROUTE"

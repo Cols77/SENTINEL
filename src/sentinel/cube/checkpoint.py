@@ -100,9 +100,14 @@ class CommandLimits:
     move_s: float = 8.0
     rotate_s: float = 4.0
     capture_s: float = 10.0
-    localise_s: float = 12.0
+    #: Stationary settle plus the bounded pose-burst window.
+    localise_s: float = 13.5
+    look_settle_s: float = 1.5
+    localise: bool = True
     trim_rounds: int = 2
-    trim_distance_cm: int = 20
+    trim_distance_cm: int = 80
+    trim_speed_cm_s: int = 20
+    trim_yaw_limit_deg: int = 180
 
 
 def _arguments(**values: ArgumentValue) -> tuple[tuple[str, ArgumentValue], ...]:
@@ -165,29 +170,45 @@ def plan_checkpoint(*, checkpoint_id: str, start: Position, target: Position,
             direction=positive if delta > 0 else negative, distance_cm=distance,
             optional="true" if distance == limits.min_move_cm else "false",
         ))
-    for move in moves:
+    for index, move in enumerate(moves):
         commands.append(move)
+        # A localisation node begins with its own calibrated stationary hover,
+        # so the final leg does not need a duplicate standalone settle.
+        if index < len(moves) - 1 or not limits.localise:
+            commands.append(_command(
+                "SETTLE",
+                limits.fast_settle_s if speed_cm_s > limits.fast_speed_threshold_cm_s else limits.slow_settle_s,
+                True,
+                after="move",
+            ))
+
+    # A trim round can set precision speed, correct X and Y, wait for the
+    # hover/burst, and restore canonical yaw.  Reserve every round even when
+    # the first accepted localisation needs no correction.
+    commands.append(_command(
+        "TRIM_ALLOWANCE",
+        limits.trim_rounds * (limits.set_speed_s + 2 * limits.move_s + limits.localise_s
+                              + limits.look_settle_s + limits.rotate_s),
+        False,
+        max_distance_cm=limits.trim_distance_cm, max_rounds=limits.trim_rounds,
+        max_yaw_deg=limits.trim_yaw_limit_deg, move_upper_bound_s=limits.move_s,
+        rotate_upper_bound_s=limits.rotate_s, speed_cm_s=limits.trim_speed_cm_s,
+        speed_upper_bound_s=limits.set_speed_s, settle_s=limits.slow_settle_s,
+    ))
+    if limits.localise:
         commands.append(_command(
-            "SETTLE",
-            limits.fast_settle_s if speed_cm_s > limits.fast_speed_threshold_cm_s else limits.slow_settle_s,
-            True,
-            after="move",
+            "LOCALISE", limits.localise_s, True, phase="arrival", settle_s=limits.look_settle_s,
         ))
 
     for index in range(capture_count):
         look = looks_deg[index % len(looks_deg)]
         rotation, heading = _rotation(heading, limits.canonical_heading_deg + look, limits, "look")
         commands.extend(rotation)
-        commands.append(_command("SETTLE", limits.slow_settle_s, True, after="look"))
+        commands.append(_command("SETTLE", limits.look_settle_s, True, after="look"))
         commands.append(_command("CAPTURE", limits.capture_s, True, index=index, look_deg=look))
-        commands.append(_command("LOCALISE", limits.localise_s, True, index=index))
 
     rotation, heading = _rotation(heading, terminal_heading_deg, limits, "restore")
     commands.extend(rotation)
-    commands.append(_command(
-        "TRIM_ALLOWANCE", limits.trim_rounds * limits.move_s, False,
-        max_distance_cm=limits.trim_distance_cm, max_rounds=limits.trim_rounds,
-    ))
     commands.append(_command("READ_TELEMETRY", limits.telemetry_s, True, phase="final"))
     frozen_commands = tuple(commands)
     return CheckpointPlan(
