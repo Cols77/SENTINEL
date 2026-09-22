@@ -22,6 +22,7 @@ class SessionConfig:
     location: str | None = None
     consent_date: str | None = None
     confirm: bool = False
+    authorise_paid_calls: bool = False
     artifact_root: Path | None = None
     ui_db: Path | None = None
     survey_db: Path | None = None

@@ -53,13 +53,21 @@ class DetectionCache:
     """Immutable, idempotent view of one follower's JSONL output."""
 
     run_id: str
+    sweep_id: str | None
+    strict: bool
     rows: tuple[dict, ...]
     process_status: str = "OK"
     process_error: str | None = None
 
     def __init__(self, run_id: str, rows: Iterable[dict], process_status: str = "OK",
-                 process_error: str | None = None) -> None:
+                 process_error: str | None = None, *, sweep_id: str | None = None,
+                 strict: bool = False) -> None:
         object.__setattr__(self, "run_id", run_id)
+        object.__setattr__(self, "sweep_id", sweep_id)
+        # Supplying a sweep identity opts into Mission Control's strict
+        # process-boundary contract; standalone callers that omit it keep the
+        # original run/path/hash-compatible behavior.
+        object.__setattr__(self, "strict", strict or sweep_id is not None)
         object.__setattr__(self, "rows", tuple(dict(row) for row in rows))
         object.__setattr__(self, "process_status", process_status)
         object.__setattr__(self, "process_error", process_error)
@@ -81,7 +89,12 @@ class DetectionCache:
             if row_key[0] == key[0]:
                 same_path.append(row)
             if row_key == key:
-                if row.get("run_id") not in (None, self.run_id):
+                if self.strict:
+                    ids_match = (row.get("run_id") == self.run_id and
+                                 row.get("sweep_id") == self.sweep_id)
+                else:
+                    ids_match = row.get("run_id") in (None, self.run_id)
+                if not ids_match:
                     foreign = True
                     continue
                 raw = dict(row.get("raw") or {})
@@ -143,7 +156,8 @@ class LiveDetectionSupervisor:
     def command(self) -> list[str]:
         command = [sys.executable, str(self.script), "--detector", self.detector_name,
                    "--frames-log", str(self.frames_log), "--out", str(self.out_log),
-                   "--done-file", str(self.done_file), "--tiles", self.tiles]
+                   "--done-file", str(self.done_file), "--tiles", self.tiles,
+                   "--run-id", self.run_id, "--sweep-id", self.sweep_id]
         if self.consent_db is not None:
             command += ["--consent-db", str(self.consent_db)]
         if self.location is not None:
@@ -180,17 +194,24 @@ class LiveDetectionSupervisor:
                 self.process_status, self.process_error = "TIMEOUT", str(exc)
                 try:
                     self.process.kill()
-                finally:
-                    try:
-                        self.process.wait()
-                    except Exception:
-                        pass
+                except Exception as kill_error:
+                    self.process_error = f"{self.process_error}; kill: {kill_error}"
+                try:
+                    self.process.wait(timeout=self.drain_timeout_s)
+                except (subprocess.TimeoutExpired, TimeoutError):
+                    self.process_status = "TIMEOUT_UNREAPED"
+                    self.process_error = "follower did not reap after kill"
+                except Exception:
+                    pass
             except Exception as exc:
                 self.process_status = "CRASHED"
                 self.process_error = f"{type(exc).__name__}: {exc}"
                 try:
                     self.process.kill()
-                    self.process.wait()
+                    self.process.wait(timeout=self.drain_timeout_s)
+                except (subprocess.TimeoutExpired, TimeoutError):
+                    self.process_status = "TIMEOUT_UNREAPED"
+                    self.process_error = "follower did not reap after kill"
                 except Exception:
                     pass
         elif self.process is None and self.process_status == "NOT_STARTED":
@@ -206,7 +227,7 @@ class LiveDetectionSupervisor:
                     self.process_status = "MALFORMED_OUTPUT"
                     self.process_error = "invalid JSONL row"
         self._cache = DetectionCache(self.run_id, rows, self.process_status,
-                                     self.process_error)
+                                     self.process_error, sweep_id=self.sweep_id, strict=True)
         return self._cache
 
     def detection_for(self, frame, classes: tuple[str, ...] = LIVE_CLASSES):
@@ -246,10 +267,13 @@ def summarise(stop: str, look_deg, status: str, detections: list[dict],
     return f"[detect] {where}: " + ", ".join(parts)
 
 
-def detect_frame(detector, record: dict, classes: tuple[str, ...] = LIVE_CLASSES) -> dict:
+def detect_frame(detector, record: dict, classes: tuple[str, ...] = LIVE_CLASSES, *,
+                 run_id: str | None = None, sweep_id: str | None = None) -> dict:
     """One frame record from ``frames.jsonl`` -> one result row. Never raises: a
     detector failure is a row with the error named, not a stopped follower."""
-    row = {"run_id": record.get("run_id"), "stop": record.get("stop"),
+    row = {"run_id": run_id if run_id is not None else record.get("run_id"),
+           "sweep_id": sweep_id if sweep_id is not None else record.get("sweep_id"),
+           "stop": record.get("stop"),
            "look_deg": record.get("look_deg"),
            "path": record.get("path"), "sha256": record.get("sha256"),
            "artifact_id": record.get("artifact_id"),
@@ -273,7 +297,8 @@ def detect_frame(detector, record: dict, classes: tuple[str, ...] = LIVE_CLASSES
 def follow(frames_log: Path, out_log: Path, detector, *,
            done: Callable[[], bool], print_fn: Callable[[str], None] = print,
            sleep_fn: Callable[[float], None] = time.sleep, poll_s: float = 0.25,
-           classes: tuple[str, ...] = LIVE_CLASSES) -> int:
+           classes: tuple[str, ...] = LIVE_CLASSES, run_id: str | None = None,
+           sweep_id: str | None = None) -> int:
     """Detect on every line appended to ``frames_log`` until ``done()`` is true and
     every line has been handled. Returns how many frames were detected."""
     handled = 0
@@ -284,7 +309,8 @@ def follow(frames_log: Path, out_log: Path, detector, *,
         # only whole lines: the last one may still be being written
         complete = [line for line in text[:text.rfind("\n") + 1].splitlines() if line.strip()]
         for line in complete[handled:]:
-            row = detect_frame(detector, json.loads(line), classes)
+            row = detect_frame(detector, json.loads(line), classes,
+                               run_id=run_id, sweep_id=sweep_id)
             with out_log.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(row, default=str) + "\n")
             print_fn(summarise(row["stop"], row["look_deg"], row["status"], row["detections"],

@@ -19,6 +19,7 @@ def live_config(tmp_path, monkeypatch):
     return bootstrap.SessionConfig(data_dir=tmp_path,mode='LIVE',confirm=True,
         site_path=Path('docs/wp5-flight1-site.json'),tag_map_path=Path('calibration/tag-map-calibrated.json'),
         pose_db=tmp_path/'pose.sqlite',detector_name='gemini',provider_profile=profile_path,
+        authorise_paid_calls=True,
         location='lab',consent_date='2026-09-21',local_ip='192.168.10.2',surface_z_cm=50,start_x_cm=250,start_y_cm=190)
 
 @pytest.mark.parametrize('field,value', [('confirm',False),('site_path',None),('tag_map_path',None),('pose_db',None),('location',None),('consent_date',None),('detector_name','replay'),('provider_profile',None),('local_ip',None),('surface_z_cm',None)])
@@ -27,6 +28,12 @@ def test_live_failure_never_constructs_rehearsal(live_config,monkeypatch,field,v
     monkeypatch.setattr(bootstrap,'build_rehearsal_adapters',lambda *a:calls.append(a))
     with pytest.raises(bootstrap.StartupError):bootstrap.build_service(replace(live_config,**{field:value}))
     assert calls==[]
+
+def test_live_requires_explicit_paid_call_authorisation_before_preflight(live_config, monkeypatch):
+    from sentinel.ui import live
+    monkeypatch.setattr(live, 'make_client', lambda c: pytest.fail('must refuse before preflight'))
+    with pytest.raises(bootstrap.StartupError, match='PAID_CALL_AUTH'):
+        bootstrap.build_service(replace(live_config, authorise_paid_calls=False))
 
 def test_live_composition_no_flight_and_restart_requires_recovery(live_config,monkeypatch):
     from sentinel.ui import live

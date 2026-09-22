@@ -29,6 +29,7 @@ from .pose_projection import project_pose
 
 def validate_config(config):
     if not config.confirm:raise StartupError('LIVE_CONFIRM_REQUIRED')
+    if not getattr(config, 'authorise_paid_calls', False):raise StartupError('LIVE_PAID_CALL_AUTH_REQUIRED')
     for name in ('site_path','tag_map_path','pose_db','provider_profile','location','consent_date','local_ip'):
         if not getattr(config,name):raise StartupError(f'LIVE_{name.upper()}_REQUIRED')
     if config.detector_name not in {'gemini','moondream'}:raise StartupError('LIVE_PROVIDER_REQUIRED')
@@ -139,7 +140,7 @@ class LiveFlight:
             consent_db=config.survey_db or config.data_dir / 'survey.sqlite',
             location=config.location, date=config.consent_date,
             tiles=getattr(config, 'detect_tiles', 'none'),
-            authorised=getattr(config, 'authorise_paid_calls', True))
+            authorised=getattr(config, 'authorise_paid_calls', False))
 
     def detection_for(self, frame, classes):
         """Read the follower's exact-frame cache; never call the provider."""

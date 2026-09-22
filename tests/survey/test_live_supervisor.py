@@ -2,7 +2,6 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from sentinel.survey.detector import DetectionBatch
 from sentinel.survey.flight import FlightFrame
 from sentinel.survey.live_detect import DetectionCache, LiveDetectionSupervisor
 from sentinel.survey.loop import run_survey
@@ -53,7 +52,8 @@ def test_supervisor_starts_before_flight_and_consumes_exact_cached_batch(tmp_pat
         process = _Process()
         out = Path(command[command.index("--out") + 1])
         out.write_text(json.dumps({
-            "run_id": "r", "path": str(frame_path), "sha256": frame.sha256,
+            "run_id": "r", "sweep_id": command[command.index("--sweep-id") + 1],
+            "path": str(frame_path), "sha256": frame.sha256,
             "status": "OK", "detections": [{"class": "computer", "band": "high"}],
             "dropped": [], "raw": {"provider": "fake"}, "detect_s": 0.012,
         }) + "\n")
@@ -96,9 +96,9 @@ def test_supervisor_timeout_kills_and_reaps_without_failing_the_flight(tmp_path)
     supervisor.start()
     cache = supervisor.finish()
     assert process.killed
-    assert process.wait_calls == [0.01, None]
-    assert cache.process_status == "TIMEOUT"
-    assert cache.for_frame(_frame(tmp_path / "f.png")).status == "ANALYSIS_GAP_PROCESS_TIMEOUT"
+    assert process.wait_calls == [0.01, 0.01]
+    assert cache.process_status == "TIMEOUT_UNREAPED"
+    assert cache.for_frame(_frame(tmp_path / "f.png")).status == "ANALYSIS_GAP_PROCESS_TIMEOUT_UNREAPED"
 
 
 def test_cache_rejects_an_exact_row_from_another_run(tmp_path):
@@ -109,15 +109,34 @@ def test_cache_rejects_an_exact_row_from_another_run(tmp_path):
     assert cache.for_frame(frame).status == "ANALYSIS_GAP_STALE"
 
 
+def test_strict_cache_requires_both_run_and_sweep_ids(tmp_path):
+    frame = _frame(tmp_path / "f.png")
+    row = {"run_id": "r", "path": frame.image_path, "sha256": frame.sha256,
+           "status": "OK", "detections": [], "sweep_id": "wrong"}
+    cache = DetectionCache("r", [row], sweep_id="expected", strict=True)
+    assert cache.for_frame(frame).status == "ANALYSIS_GAP_STALE"
+    row.pop("sweep_id")
+    cache = DetectionCache("r", [row], sweep_id="expected", strict=True)
+    assert cache.for_frame(frame).status == "ANALYSIS_GAP_STALE"
+
+
 def test_live_cache_is_the_only_ingestion_source_and_publishes_latency_states(tmp_path):
     class Flight:
+        def __init__(self):
+            frame = _frame(tmp_path / "f.png")
+            self.cache = DetectionCache("r", [{
+                "run_id": "r", "sweep_id": "s", "path": frame.image_path,
+                "sha256": frame.sha256, "status": "OK",
+                "detections": [{"class": "computer", "band": "high",
+                                "bbox": None, "score_kind": "NONE"}],
+                "bands": ["high"], "raw": {"detect_s": 0.025},
+            }], sweep_id="s", strict=True)
+
         def fly(self, option):
             return [_frame(tmp_path / "f.png")]
 
         def detection_for(self, frame, classes):
-            return DetectionBatch(
-                ({"class": "computer", "bbox": None, "score_kind": "NONE"},), "OK",
-                bands=("high",), raw={"detect_s": 0.025})
+            return self.cache.for_frame(frame, classes)
 
     class ProviderMustNotBeCalled:
         def detect(self, *_args):
@@ -129,6 +148,12 @@ def test_live_cache_is_the_only_ingestion_source_and_publishes_latency_states(tm
             events.append(event)
 
     store = SurveyStore.open(tmp_path / "survey.sqlite")
+    seen = []
+    original_add_sighting = store.add_sighting
+    def add_sighting(frame_id, detection, band, **kwargs):
+        seen.append(detection)
+        return original_add_sighting(frame_id, detection, band, **kwargs)
+    store.add_sighting = add_sighting
     outcome = run_survey(
         store=store, run_id="r", request_text="count computers", options=OPTIONS,
         policy=RuleProposer(), flight=Flight(), detector=ProviderMustNotBeCalled(),
@@ -137,3 +162,4 @@ def test_live_cache_is_the_only_ingestion_source_and_publishes_latency_states(tm
     detector_events = [event for event in events if isinstance(event, DetectorResultEvent)]
     assert [event.status for event in detector_events] == ["DETECTING", "OK"]
     assert detector_events[-1].latency_ms == 25.0
+    assert "band" not in seen[0]

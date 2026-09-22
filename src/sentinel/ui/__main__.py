@@ -20,6 +20,7 @@ def parse_config(argv=None):
     parser.add_argument('--location')
     parser.add_argument('--consent-date')
     parser.add_argument('--confirm',action='store_true')
+    parser.add_argument('--i-authorise-paid-calls',dest='authorise_paid_calls',action='store_true')
     parser.add_argument('--local-ip')
     parser.add_argument('--tello-ip',default='192.168.10.1')
     parser.add_argument('--surface-z-cm',type=float)

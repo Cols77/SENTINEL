@@ -190,7 +190,12 @@ def _fly_and_ingest(store, run_id, option, flight, detector,
         # calls the provider without also being a retain path.
         bands = batch.bands or ("low",) * len(batch.detections)
         for detection, band in zip(batch.detections, bands):
-            store.add_sighting(frame_id, detection, band, raw_response=batch.raw)
+            # The follower serialises its parallel band beside each detection
+            # for display.  ``band`` is a Sighting field, not part of the
+            # schema-v2 Detection document accepted by SurveyStore.
+            clean_detection = {key: value for key, value in detection.items()
+                               if key != "band"}
+            store.add_sighting(frame_id, clean_detection, band, raw_response=batch.raw)
         dropped.extend(batch.dropped)
     if emit:
         emit("ANALYSIS_COMPLETED", {"sweep_id": sweep_id})
