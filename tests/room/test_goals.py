@@ -654,3 +654,95 @@ def test_follow_attached_holding_relation_verifies_existing_actor_before_followi
         ("DONE", *SAFE), ("CONSISTENT", *SAFE),
     ]
     assert_audit(store, judge, ledger)
+
+
+def assert_rejected_prefix(store, judge, ledger, script, count, reason):
+    assert ledger.status == GoalStatus.CLARIFICATION_REQUIRED
+    assert ledger.objectives == ()
+    assert ledger.physical_objectives == ()
+    assert len(judge.calls) == count
+    assert judge.script == script[count:]
+    events = store.events("session-1")
+    assert [event.event_type for event in events] == ["GOAL_CHOICE_ATTEMPT"] * count + ["GOAL_COMPILE_REJECTED"]
+    assert events[-1].payload["reason"] == reason
+    for event, call in zip(events[:-1], judge.calls):
+        assert event.payload["criteria"] == call[2]
+        assert event.payload["state"] == call[1]
+
+
+@pytest.mark.parametrize("predicate", ["that holds a smartphone", "holding a cell phone"])
+def test_high_confidence_none_cannot_drop_explicit_holding_even_with_consistent_script(tmp_path, predicate):
+    request = f"Find a man {predicate} and follow him"
+    script = objective("c1", "FIND_OBSERVE", "person", qualifier="MAN", terminal="OBSERVED")
+    script += objective("c2", "FOLLOW", "person", binding="REF:g1:c1:subject", terminal="FOLLOW_BOUNDED_RETURN")
+    script += FINISH
+    compiler, judge, store = setup(tmp_path, request, script)
+    ledger = compiler.compile("session-1", request, snapshot())
+    assert_rejected_prefix(store, judge, ledger, script, 5, "EXPLICIT_HOLDING_RELATION_DROPPED")
+    assert not any(call[0] == "consistency" for call in judge.calls)
+    assert tuple(judge.calls[-1][2]) == ("NONE", "HOLDS_PHONE", "NEXT_TO_DRONE", *SAFE)
+
+
+@pytest.mark.parametrize("target", ["phone", "computer", "pen"])
+@pytest.mark.parametrize("qualifier,noun", [("MAN", "a man"), ("DESIGNATED", "the designated actor")])
+def test_person_qualifiers_cannot_attach_to_another_supported_class(tmp_path, target, qualifier, noun):
+    request = f"Follow {noun}"
+    script = objective("c1", "FOLLOW", target, qualifier=qualifier, binding="NEW_TARGET",
+                       terminal="FOLLOW_BOUNDED_RETURN") + FINISH
+    compiler, judge, store = setup(tmp_path, request, script)
+    ledger = compiler.compile("session-1", request, snapshot())
+    assert_rejected_prefix(store, judge, ledger, script, 4, "QUALIFIER_CLASS_MISMATCH")
+
+
+def test_person_qualifier_cannot_apply_to_a_mixed_class_group(tmp_path):
+    request = "Find a man and a phone"
+    script = [("next_objective", "NEXT_OBJECTIVE:c1"), ("goal_family", "FIND_OBSERVE"),
+              ("target_classes", "CLASS_GROUP"), ("class_group", "INCLUDE:person"),
+              ("class_group", "INCLUDE:phone"), ("class_group", "GROUP_DONE"), ("qualifier", "MAN")]
+    compiler, judge, store = setup(tmp_path, request, script)
+    ledger = compiler.compile("session-1", request, snapshot())
+    assert_rejected_prefix(store, judge, ledger, script, 7, "QUALIFIER_CLASS_MISMATCH")
+
+
+@pytest.mark.parametrize("noun,qualifier,pronoun,verb", [
+    ("a man", "MAN", "he", "holds"),
+    ("a designated person", "DESIGNATED", "she", "holds"),
+    ("a designated person", "DESIGNATED", "they", "hold"),
+])
+def test_subject_pronoun_relation_refines_the_unique_prior_actor(tmp_path, noun, qualifier, pronoun, verb):
+    request = f"Find {noun}; verify {pronoun} {verb} a phone"
+    script = objective("c1", "FIND_OBSERVE", "person", qualifier=qualifier, terminal="OBSERVED")
+    script += objective("c2", "FIND_OBSERVE", "person", relation="HOLDS_PHONE",
+                        binding="REF:g1:c1:subject", terminal="RELATION_VERIFIED")
+    compiler, judge, store = setup(tmp_path, request, script + FINISH)
+    ledger = compiler.compile("session-1", request, snapshot())
+    found, verified = ledger.objectives
+    assert verified.subject_ref.entity_role == "VERIFIED_DESIGNATED_PERSON"
+    assert verified.subject_ref.relative_to == found.subject_ref.ref_id
+    assert verified.subject_ref.source_objective_id == verified.objective_id
+    assert verified.depends_on_objective_ids == (found.objective_id,)
+    assert verified.qualifier == qualifier.lower()
+    assert verified.target_ref == EntityRef("g1:c2:phone", verified.objective_id, "RELATED_PHONE", None)
+    bindings = [tuple(call[2]) for call in judge.calls if call[0] == "entity_reference"]
+    assert bindings == [("NEW_ENTITY", *SAFE), ("REF:g1:c1:subject", *SAFE)]
+    assert_audit(store, judge, ledger)
+
+
+@pytest.mark.parametrize("pronoun,verb", [("he", "holds"), ("she", "holds"), ("they", "hold")])
+def test_ambiguous_subject_pronoun_requires_clarification_before_new_identity(tmp_path, pronoun, verb):
+    request = f"Find a person; find another person; verify {pronoun} {verb} a phone"
+    script = objective("c1", "FIND_OBSERVE", "person", terminal="OBSERVED")
+    script += objective("c2", "FIND_OBSERVE", "person", terminal="OBSERVED")
+    script += objective("c3", "FIND_OBSERVE", "person", relation="HOLDS_PHONE", terminal="RELATION_VERIFIED")[:-2]
+    compiler, judge, store = setup(tmp_path, request, script)
+    ledger = compiler.compile("session-1", request, snapshot())
+    assert_rejected_prefix(store, judge, ledger, script, len(script), "AMBIGUOUS_ENTITY_REFERENCE")
+
+
+@pytest.mark.parametrize("pronoun,verb", [("he", "holds"), ("she", "holds"), ("they", "hold")])
+def test_subject_pronoun_without_antecedent_cannot_invent_an_actor(tmp_path, pronoun, verb):
+    request = f"Verify {pronoun} {verb} a phone"
+    script = objective("c1", "FIND_OBSERVE", "person", relation="HOLDS_PHONE", terminal="RELATION_VERIFIED")[:-2]
+    compiler, judge, store = setup(tmp_path, request, script)
+    ledger = compiler.compile("session-1", request, snapshot())
+    assert_rejected_prefix(store, judge, ledger, script, len(script), "AMBIGUOUS_ENTITY_REFERENCE")

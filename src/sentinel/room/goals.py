@@ -49,6 +49,14 @@ _CLAUSE_BOUNDARY = re.compile(
     re.IGNORECASE,
 )
 _ALIASES = re.compile(r"\b(?:cell\s+phones?|smartphones?|humans?|people)\b", re.IGNORECASE)
+_HOLDING_PHONE = re.compile(
+    r"\bhold(?:s|ing)?\s+(?:(?:a|an|the|his|her|their)\s+)?phones?\b", re.IGNORECASE,
+)
+_PRONOUN_FORMS = {
+    "he": "him", "him": "him", "she": "her", "her": "her",
+    "they": "them", "them": "them", "it": "it", "you": "you",
+}
+_PRONOUNS = re.compile(r"\b(?:he|him|she|her|they|them|it|you)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -269,6 +277,8 @@ class _Compilation:
                 "DESIGNATED": "A specifically designated actor, never an arbitrary person box.",
             })
             qualifier = None if selected == "NONE" else selected.lower()
+            if qualifier in ("man", "designated") and classes != ("person",):
+                raise _Rejected("QUALIFIER_CLASS_MISMATCH")
             if re.search(r"\bman\b", self.clause.text, re.IGNORECASE) and qualifier != "man":
                 raise _Rejected("EXPLICIT_QUALIFIER_DROPPED")
             selected = self.choose("relation", {
@@ -277,6 +287,8 @@ class _Compilation:
                 "NEXT_TO_DRONE": "Find the nearest phone relative to this explicit drone pose snapshot.",
             })
             relation = None if selected == "NONE" else selected
+            if _HOLDING_PHONE.search(_normalize(self.clause.text)) and relation != "HOLDS_PHONE":
+                raise _Rejected("EXPLICIT_HOLDING_RELATION_DROPPED")
             if re.search(r"\bnext\s+to\s+you\b", self.clause.text, re.IGNORECASE) and relation != "NEXT_TO_DRONE":
                 raise _Rejected("RELATIVE_POSE_ATTACHMENT_DROPPED")
         scope = self.select_scope()
@@ -319,7 +331,7 @@ class _Compilation:
             # a verified designated-man result back to any generic person.
             if target == producer.subject_ref:
                 qualifier = qualifier or producer.qualifier
-        elif re.search(r"\b(?:him|her|it|them)\b", self.clause.text, re.IGNORECASE):
+        elif _reference_pronouns(self.clause.text, relative_drone=relation == "NEXT_TO_DRONE"):
             if relation == "NEXT_TO_DRONE":
                 self.choose("relative_reference", {"CURRENT_DRONE": self.drone.ref_id})
             target, producer = self.bind_target(classes, relative_drone=relation == "NEXT_TO_DRONE")
@@ -424,10 +436,7 @@ class _Compilation:
         self, classes: tuple[str, ...], *, relative_drone: bool = False,
     ) -> tuple[EntityRef | None, GoalObjective | None]:
         assert self.clause is not None
-        target_text = self.clause.text.lower()
-        if relative_drone:
-            target_text = re.sub(r"\bnext\s+to\s+you\b", "", target_text)
-        pronouns = re.findall(r"\b(him|her|it|them|you)\b", target_text)
+        pronouns = _reference_pronouns(self.clause.text, relative_drone=relative_drone)
         all_references = {}
         for goal in self.goals:
             if goal.kind != GoalKind.FIND_OBSERVE:
@@ -498,6 +507,13 @@ def _normalize(text: str) -> str:
         lambda match: "person" if match.group().lower() in ("human", "humans", "people") else "phone",
         text,
     )
+
+
+def _reference_pronouns(text: str, *, relative_drone: bool = False) -> tuple[str, ...]:
+    """Normalize subject/object forms through one dispatch and binding path."""
+    if relative_drone:
+        text = re.sub(r"\bnext\s+to\s+you\b", "", text, flags=re.IGNORECASE)
+    return tuple(_PRONOUN_FORMS[match.group().lower()] for match in _PRONOUNS.finditer(text))
 
 
 def _propose_clauses(request: str) -> tuple[_Clause, ...]:
