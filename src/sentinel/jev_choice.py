@@ -29,7 +29,7 @@ def assess_choice(
 ) -> ChoiceAssessment:
     """Assess one provider choice without exposing provider exceptions."""
     labels = _legal_labels(legal_labels)
-    if not isinstance(answer, Mapping):
+    if not _is_mapping(answer):
         return _invalid(escalation_label, "MALFORMED_ANSWER")
 
     try:
@@ -135,7 +135,7 @@ def _legal_labels(labels: Collection[str]) -> frozenset[str]:
 def _canonical_probabilities(
     raw: object,
 ) -> tuple[tuple[str, float], ...] | None:
-    if not isinstance(raw, Mapping):
+    if not _is_mapping(raw):
         return None
     try:
         values = []
@@ -170,7 +170,8 @@ def _scalar_or_selected_probability(
 
 
 def _finite_probability(value: object) -> float | None:
-    if type(value) not in {int, float}:
+    value_type = type(value)
+    if value_type is not int and value_type is not float:
         return None
     try:
         resolved = float(value)
@@ -179,3 +180,10 @@ def _finite_probability(value: object) -> float | None:
     if not math.isfinite(resolved) or not 0.0 <= resolved <= 1.0:
         return None
     return resolved
+
+
+def _is_mapping(value: object) -> bool:
+    try:
+        return isinstance(value, Mapping)
+    except Exception:  # noqa: BLE001 -- provider class hooks fail closed
+        return False

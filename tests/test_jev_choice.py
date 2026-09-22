@@ -92,6 +92,21 @@ class BadFloat(float):
         raise RuntimeError("provider conversion must not escape")
 
 
+class HostileClassAccess:
+    @property
+    def __class__(self):
+        raise RuntimeError("provider class inspection must not escape")
+
+
+class HostileTypeHash(type):
+    def __hash__(cls):
+        raise RuntimeError("provider type hashing must not escape")
+
+
+class HostileConfidence(metaclass=HostileTypeHash):
+    pass
+
+
 @pytest.mark.parametrize("answer", [
     {
         "value": BadStr("alpha"),
@@ -108,6 +123,26 @@ def test_provider_subclasses_cannot_raise_during_label_or_probability_validation
     assessment = assess(answer)
 
     assert assessment.outcome == "ILLEGAL_OR_MALFORMED"
+
+
+@pytest.mark.parametrize("answer", [
+    pytest.param(HostileClassAccess(), id="answer-class-access"),
+    pytest.param(
+        {"value": "alpha", "confidence": 0.8,
+         "probabilities": HostileClassAccess()},
+        id="probabilities-class-access",
+    ),
+    pytest.param(
+        {"value": "alpha", "confidence": HostileConfidence(),
+         "probabilities": {"alpha": 0.8, "beta": 0.1, "escalate": 0.1}},
+        id="confidence-type-hash",
+    ),
+])
+def test_provider_objects_cannot_escape_type_or_class_validation(answer) -> None:
+    assessment = assess(answer)
+
+    assert assessment.final_label == "escalate"
+    assert assessment.outcome in {"MALFORMED_ANSWER", "ILLEGAL_OR_MALFORMED"}
 
 
 def test_selection_failure_precedes_malformed_scalar_confidence() -> None:
