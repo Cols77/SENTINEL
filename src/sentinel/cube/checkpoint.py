@@ -6,11 +6,16 @@ estimation and execution can consume the exact same command graph.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Mapping, Protocol, TypeAlias
 
 from sentinel.models import Position
-from sentinel.motion_bounds import move_reply_upper_bound_s, rotate_reply_upper_bound_s
+from sentinel.motion_bounds import (
+    TransportLimits,
+    move_reply_upper_bound_s,
+    rotate_reply_upper_bound_s,
+    set_speed_upper_bound_s,
+)
 
 
 CommandKind: TypeAlias = Literal[
@@ -111,10 +116,9 @@ class CommandLimits:
     slow_settle_s: float = 0.7
     fast_settle_s: float = 1.5
     fast_speed_threshold_cm_s: int = 20
-    set_speed_s: float = 1.0
     telemetry_s: float = 1.0
     watchdog_s: float = 0.0
-    motion_base_timeout_s: float = 7.0
+    transport_limits: TransportLimits = field(default_factory=TransportLimits)
     capture_s: float = 10.0
     #: Stationary settle plus the bounded pose-burst window.
     localise_s: float = 13.5
@@ -142,7 +146,9 @@ def _rotation(current_deg: float, target_deg: float, limits: CommandLimits, phas
         return (), target_deg
     direction = "ccw" if delta > 0 else "cw"
     return (_command(
-        "ROTATE", rotate_reply_upper_bound_s(degrees=abs(delta), base_timeout_s=limits.motion_base_timeout_s),
+        "ROTATE", rotate_reply_upper_bound_s(
+            degrees=abs(delta), base_timeout_s=limits.transport_limits.reply_timeout_s,
+        ),
         False, degrees=abs(delta), direction=direction, phase=phase,
     ),), target_deg
 
@@ -166,7 +172,7 @@ def plan_checkpoint(*, checkpoint_id: str, start: Position, target: Position,
     policy = policy or CheckpointPolicy()
 
     commands: list[PlannedCommand] = [
-        _command("SET_SPEED", limits.set_speed_s, False, speed_cm_s=speed_cm_s),
+        _command("SET_SPEED", set_speed_upper_bound_s(limits.transport_limits), False, speed_cm_s=speed_cm_s),
         _command("READ_TELEMETRY", limits.telemetry_s, True, phase="admission"),
         _command("WATCHDOG", limits.watchdog_s, True, phase="admission"),
     ]
@@ -187,13 +193,18 @@ def plan_checkpoint(*, checkpoint_id: str, start: Position, target: Position,
         distance = max(limits.min_move_cm, round(abs(delta)))
         moves.append(_command(
             "MOVE", move_reply_upper_bound_s(
-                distance_cm=distance, speed_cm_s=speed_cm_s, base_timeout_s=limits.motion_base_timeout_s,
+                distance_cm=distance, speed_cm_s=speed_cm_s,
+                base_timeout_s=limits.transport_limits.reply_timeout_s,
             ), False, axis=axis,
             direction=positive if delta > 0 else negative, distance_cm=distance,
             optional="true" if distance == limits.min_move_cm else "false",
         ))
     for index, move in enumerate(moves):
         commands.append(move)
+        if dict(move.arguments)["axis"] == "z":
+            commands.append(_command(
+                "READ_TELEMETRY", limits.transport_limits.read_timeout_s, True, phase="vertical",
+            ))
         # A localisation node begins with its own calibrated stationary hover,
         # so the final leg does not need a duplicate standalone settle.
         if index < len(moves) - 1 or not limits.localise or policy.localise_after_each_capture:
@@ -210,14 +221,14 @@ def plan_checkpoint(*, checkpoint_id: str, start: Position, target: Position,
     commands.append(_command(
         "TRIM_ALLOWANCE",
         limits.trim_rounds * (
-            limits.set_speed_s
+            set_speed_upper_bound_s(limits.transport_limits)
             + 2 * move_reply_upper_bound_s(
                 distance_cm=limits.trim_distance_cm, speed_cm_s=limits.trim_speed_cm_s,
-                base_timeout_s=limits.motion_base_timeout_s,
+                base_timeout_s=limits.transport_limits.reply_timeout_s,
             )
             + limits.localise_s + limits.look_settle_s
             + rotate_reply_upper_bound_s(
-                degrees=limits.trim_yaw_limit_deg, base_timeout_s=limits.motion_base_timeout_s,
+                degrees=limits.trim_yaw_limit_deg, base_timeout_s=limits.transport_limits.reply_timeout_s,
             )
         ),
         False,
@@ -225,12 +236,12 @@ def plan_checkpoint(*, checkpoint_id: str, start: Position, target: Position,
         max_yaw_deg=limits.trim_yaw_limit_deg,
         move_upper_bound_s=move_reply_upper_bound_s(
             distance_cm=limits.trim_distance_cm, speed_cm_s=limits.trim_speed_cm_s,
-            base_timeout_s=limits.motion_base_timeout_s,
+            base_timeout_s=limits.transport_limits.reply_timeout_s,
         ),
         rotate_upper_bound_s=rotate_reply_upper_bound_s(
-            degrees=limits.trim_yaw_limit_deg, base_timeout_s=limits.motion_base_timeout_s,
+            degrees=limits.trim_yaw_limit_deg, base_timeout_s=limits.transport_limits.reply_timeout_s,
         ), speed_cm_s=limits.trim_speed_cm_s,
-        speed_upper_bound_s=limits.set_speed_s, settle_s=limits.slow_settle_s,
+        speed_upper_bound_s=set_speed_upper_bound_s(limits.transport_limits), settle_s=limits.slow_settle_s,
     ))
     for index in range(capture_count):
         look = looks_deg[index % len(looks_deg)]

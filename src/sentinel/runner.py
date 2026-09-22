@@ -144,7 +144,8 @@ class FlightTestRunner:
                 self._emergency_error = exc
             self._capture_records(record_count, self.envelope.position)
 
-    def move_checked(self, direction: str, distance_cm: int) -> None:
+    def move_checked(self, direction: str, distance_cm: int, *,
+                     validate_vertical_telemetry: bool = True) -> None:
         """Validate a movement endpoint before invoking the client."""
 
         self._raise_if_emergency()
@@ -160,7 +161,7 @@ class FlightTestRunner:
                 f"movement failed: {direction} {distance_cm}: {response}"
             )
         self.envelope.position = candidate
-        if direction in {"up", "down"}:
+        if validate_vertical_telemetry and direction in {"up", "down"}:
             self._emit("flight", "validating altitude telemetry")
             measured_height = self._require_height(
                 self._call(self.client.height_cm)

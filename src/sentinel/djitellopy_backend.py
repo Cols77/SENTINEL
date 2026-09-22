@@ -22,6 +22,7 @@ from .client import EmergencyAborted
 from .motion_bounds import (
     MOTION_REPLY_SLACK_S,
     ROTATION_DEG_PER_S,
+    TransportLimits,
     move_reply_upper_bound_s,
     rotate_reply_upper_bound_s,
 )
@@ -218,6 +219,17 @@ class DjitellopyClient:
         """Return the immutable audit stream required by ``DroneClient``."""
 
         return tuple(self.records)
+
+    @property
+    def transport_limits(self) -> TransportLimits:
+        """Timing policy exported to pure planners without exposing DJITelloPy."""
+
+        return TransportLimits(
+            reply_timeout_s=self.timeout,
+            control_attempts=self.retry_count,
+            control_retry_gap_s=0.0,
+            read_timeout_s=self.timeout,
+        )
 
     def _ensure_available(self) -> None:
         if self._emergency_triggered:

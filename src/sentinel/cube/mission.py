@@ -32,7 +32,7 @@ from sentinel.cube.checkpoint import (
 )
 from sentinel.envelope import EnvelopeViolation
 from sentinel.models import Position
-from sentinel.motion_bounds import move_reply_upper_bound_s
+from sentinel.motion_bounds import TransportLimits, move_reply_upper_bound_s
 from sentinel.pose.containment import Containment, check_containment
 from sentinel.pose.detector import NoTagDetected, estimate_pose
 from sentinel.pose.localise import LocalisationFix, localise
@@ -276,6 +276,7 @@ class CubeMissionRunner(FlightTestRunner):
             fast_speed_threshold_cm_s=int(COMMAND_SPEED_CM_S),
             trim_rounds=mission.max_trim_rounds,
             trim_distance_cm=int(PLAUSIBILITY_CM),
+            transport_limits=self._transport_limits_for(client),
         )
         self._checkpoint_plans: list[CheckpointPlan] = []
         self._active_checkpoint_plan: CheckpointPlan | None = None
@@ -304,6 +305,11 @@ class CubeMissionRunner(FlightTestRunner):
             # the watchdog off, same as pose_mode "off".
             self._watchdog_fix_fn = None
         self._validate_mission()
+
+    @staticmethod
+    def _transport_limits_for(client) -> TransportLimits:
+        limits = getattr(client, "transport_limits", None)
+        return limits if isinstance(limits, TransportLimits) else TransportLimits()
 
     # -- planning -----------------------------------------------------------
     def _validate_mission(self) -> None:
@@ -361,10 +367,12 @@ class CubeMissionRunner(FlightTestRunner):
             raise RuntimeError(f"speed {cm_per_s} failed: {response}")
         self._speed_cm_s = cm_per_s
 
-    def _step(self, direction: str, distance_cm: int, *, optional: bool) -> bool:
+    def _step(self, direction: str, distance_cm: int, *, optional: bool,
+              validate_vertical_telemetry: bool = True) -> bool:
         """One checked move. An optional step that would leave the bounds is skipped."""
         try:
-            self.move_checked(direction, distance_cm)
+            self.move_checked(direction, distance_cm,
+                              validate_vertical_telemetry=validate_vertical_telemetry)
             self._unsettled_speed = self._speed_cm_s
         except EnvelopeViolation:
             if not optional:
@@ -443,7 +451,7 @@ class CubeMissionRunner(FlightTestRunner):
                                        ("optional", "false")))),
                 move_reply_upper_bound_s(
                     distance_cm=max(MIN_MOVE_CM, round(abs(delta))), speed_cm_s=self.mission.leg_speed_cm_s,
-                    base_timeout_s=limits.motion_base_timeout_s,
+                    base_timeout_s=limits.transport_limits.reply_timeout_s,
                 ), False,
             ))
             recovery.append(PlannedCommand(
@@ -512,8 +520,17 @@ class CubeMissionRunner(FlightTestRunner):
             self._checkpoint_effects.append((command.kind, "speed"))
             self._set_speed(int(arguments["speed_cm_s"]))
         elif command.kind == "READ_TELEMETRY":
-            self._checkpoint_effects.append((command.kind, "telemetry"))
-            battery = self._battery_pct()
+            if arguments["phase"] == "vertical":
+                self._checkpoint_effects.append((command.kind, "vertical_height"))
+                measured_height = self._require_height(self._call(self.client.height_cm))
+                if not self.envelope.min_z_cm <= measured_height <= self.envelope.max_z_cm:
+                    raise EnvelopeViolation(
+                        f"measured vertical position is outside the cube: {measured_height} cm"
+                    )
+                self.envelope.position = replace(self.envelope.position, z_cm=measured_height)
+            else:
+                self._checkpoint_effects.append((command.kind, "telemetry"))
+                battery = self._battery_pct()
             if entry is not None and arguments["phase"] == "final":
                 entry["battery_pct"] = battery
                 entry["height_cm"] = self.envelope.position.z_cm
@@ -576,13 +593,15 @@ class CubeMissionRunner(FlightTestRunner):
                 setattr(env, lo_attr, min(lo, current))
                 setattr(env, hi_attr, max(hi, current))
         try:
-            self._step(direction, distance, optional=optional)
+            self._step(direction, distance, optional=optional,
+                       validate_vertical_telemetry=axis != "z_cm")
         finally:
             for lo_attr, lo, hi_attr, hi in widened:
                 setattr(env, lo_attr, lo)
                 setattr(env, hi_attr, hi)
 
-    def move_checked(self, direction: str, distance_cm: int) -> None:
+    def move_checked(self, direction: str, distance_cm: int, *,
+                     validate_vertical_telemetry: bool = True) -> None:
         """A4/W08-b: while modes passive/reanchor move, a background watchdog
         evaluates containment against an injectable pose-fix source; OUTSIDE
         on consecutive joint fixes ends in the existing controlled landing.
@@ -595,7 +614,8 @@ class CubeMissionRunner(FlightTestRunner):
         not as a movement fault. Without it the trip line is the edge itself
         and the abort waits for the move to return."""
         if self._watchdog_fix_fn is None:
-            super().move_checked(direction, distance_cm)
+            super().move_checked(direction, distance_cm,
+                                 validate_vertical_telemetry=validate_vertical_telemetry)
             return
         immediate = self.land_during_move
         watchdog = PoseWatchdog(
@@ -606,7 +626,8 @@ class CubeMissionRunner(FlightTestRunner):
         watchdog.start()
         move_error: Exception | None = None
         try:
-            super().move_checked(direction, distance_cm)
+            super().move_checked(direction, distance_cm,
+                                 validate_vertical_telemetry=validate_vertical_telemetry)
         except (EnvelopeViolation, EmergencyAborted):
             raise
         except Exception as exc:  # noqa: BLE001 - DJITelloPy raises its own non-RuntimeError type

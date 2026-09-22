@@ -373,3 +373,11 @@ def test_a_moves_reply_timeout_is_a_whole_number_of_seconds():
     client.move("up", 20)
     client.rotate("cw", 45)
     assert all(type(timeout) is int for _, timeout in client._tello.sends)
+
+
+def test_backend_exports_its_configured_transport_limits_for_planning():
+    client = DjitellopyClient(local_ip="192.168.10.2", timeout=30.0, retry_count=3)
+
+    assert client.transport_limits.reply_timeout_s == 30.0
+    assert client.transport_limits.control_attempts == 3
+    assert client.transport_limits.read_timeout_s == 30.0

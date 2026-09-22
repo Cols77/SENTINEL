@@ -6,6 +6,7 @@ import pytest
 
 from sentinel.cube.checkpoint import CheckpointPolicy, CommandLimits, PlannedCommand, plan_checkpoint
 from sentinel.models import Position
+from sentinel.motion_bounds import TransportLimits
 
 
 def test_checkpoint_plans_canonical_axis_moves_and_bounds():
@@ -79,6 +80,25 @@ def test_checkpoint_motion_nodes_use_the_shared_transport_bounds():
 
     assert next(command.upper_bound_s for command in plan.commands if command.kind == "MOVE") == 18
     assert next(command.upper_bound_s for command in plan.commands if command.kind == "ROTATE") == 12
+
+
+def test_checkpoint_uses_configured_transport_limits_for_speed_and_vertical_telemetry():
+    plan = plan_checkpoint(
+        checkpoint_id="configured", start=Position(0, 0, 100), target=Position(0, 0, 120),
+        start_heading_deg=90, terminal_heading_deg=90, speed_cm_s=20,
+        looks_deg=(), capture_count=0,
+        limits=CommandLimits(transport_limits=TransportLimits(
+            reply_timeout_s=30.0, control_attempts=3, read_timeout_s=30.0,
+        )),
+    )
+
+    speed = next(command for command in plan.commands if command.kind == "SET_SPEED")
+    move, vertical_read = [command for command in plan.commands if command.kind in {"MOVE", "READ_TELEMETRY"}
+                           and (command.kind == "MOVE" or dict(command.arguments).get("phase") == "vertical")]
+    assert speed.upper_bound_s == 90
+    assert move.upper_bound_s == 30
+    assert vertical_read.upper_bound_s == 30
+    assert dict(vertical_read.arguments)["phase"] == "vertical"
 
 
 def test_checkpoint_enforces_dead_band_settle_speed_and_canonical_terminal_heading():

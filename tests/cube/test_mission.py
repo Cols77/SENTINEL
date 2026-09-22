@@ -11,6 +11,7 @@ from sentinel.cube.mission import (
 )
 from sentinel.cube.site import parse_site
 from sentinel.dry_run import DryRunClient
+from sentinel.motion_bounds import TransportLimits
 
 SITE_DOC = {
     "schema_version": "cube-site-v1",
@@ -88,6 +89,30 @@ def test_checkpoint_sink_drives_telemetry_settles_rotations_and_captures(tmp_pat
     assert all(command.kind != "LOCALISE" for command in plan.commands)
     assert _log(tmp_path)[0]["battery_pct"] == 100
     assert sleeps == [command.upper_bound_s for command in plan.commands if command.kind == "SETTLE"]
+
+
+def test_runner_derives_checkpoint_motion_bounds_from_the_client_transport_policy(tmp_path):
+    client = DryRunClient()
+    client.transport_limits = TransportLimits(reply_timeout_s=30.0, control_attempts=3, read_timeout_s=30.0)
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),))
+    runner = CubeMissionRunner(client, "dry-run", mission=mission, site=SITE, pose_mode="off",
+                               mission_log=tmp_path / "mission.jsonl", sleep_fn=lambda seconds: None)
+
+    assert runner.run(confirm=True).status == "PASS"
+    (plan,) = runner.checkpoint_plans
+    assert next(command.upper_bound_s for command in plan.commands if command.kind == "MOVE") == 30
+    assert next(command.upper_bound_s for command in plan.commands if command.kind == "SET_SPEED") == 90
+
+
+def test_vertical_checkpoint_move_dispatches_its_planned_height_query(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 250, 140),))
+    runner, _ = _runner(tmp_path, "off", [], mission=mission)
+
+    assert runner.run(confirm=True).status == "PASS"
+    (plan,) = runner.checkpoint_plans
+    assert any(command.kind == "READ_TELEMETRY" and dict(command.arguments).get("phase") == "vertical"
+               for command in plan.commands)
+    assert ("READ_TELEMETRY", "vertical_height") in runner.checkpoint_effects
 
 
 def test_off_mode_navigates_open_loop_with_height_and_looks(tmp_path):
