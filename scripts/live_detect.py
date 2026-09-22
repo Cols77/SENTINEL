@@ -38,6 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="check the gates and the detector's key/model, send nothing")
     parser.add_argument("--frames-log", type=Path)
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--tiles", choices=("none", "2x2", "3x3"), default="none",
+                        help="also detect on enlarged overlapping crops (sentinel.survey.tiling): "
+                             "finds small objects, costs 1 + rows*cols calls per frame")
     parser.add_argument("--done-file", type=Path,
                         help="the flight is over once this file exists; drain and exit")
     return parser
@@ -51,11 +54,16 @@ def main(argv: list[str] | None = None, *, build_detector=None) -> int:
         check_gates(consent_db=args.consent_db, location=args.location, date=args.date,
                     authorised=args.i_authorise_paid_calls)
         detector = build_detector(args.detector)
+        if args.tiles != "none":
+            from sentinel.survey.tiling import TiledDetector
+            rows, cols = (int(n) for n in args.tiles.split("x"))
+            detector = TiledDetector(detector, rows=rows, cols=cols)
     except (LiveDetectRefused, RuntimeError) as refused:
         print(f"live detection refused: {refused}", flush=True)
         return 2
     if args.check_only:
-        print(f"live detection ready: {args.detector}, consent recorded for "
+        print(f"live detection ready: {args.detector}"
+              f"{'' if args.tiles == 'none' else f' with {args.tiles} crops'}, consent recorded for "
               f"{args.location} on {args.date}", flush=True)
         return 0
     if not (args.frames_log and args.out and args.done_file):

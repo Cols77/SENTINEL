@@ -59,7 +59,9 @@ def summarise(stop: str, look_deg, status: str, detections: list[dict],
         return f"[detect] {where}: {status} (nothing counted from this frame)"
     parts = []
     for name in classes:
-        bands = [d["band"] for d in detections if d["class"] == name]
+        # a find only an enlarged crop made (sentinel.survey.tiling) is marked "crop"
+        bands = [d["band"] + (" crop" if d.get("tile") else "")
+                 for d in detections if d["class"] == name]
         parts.append(f"{len(bands)} {name}" + (f" ({', '.join(bands)})" if bands else ""))
     return f"[detect] {where}: " + ", ".join(parts)
 
@@ -73,8 +75,11 @@ def detect_frame(detector, record: dict, classes: tuple[str, ...] = LIVE_CLASSES
     started = time.monotonic()
     try:
         batch = detector.detect(record["path"], classes)
+        from_crop = {entry["index"]: entry["tile"]
+                     for entry in (batch.raw or {}).get("tile_only", [])}
         row.update(status=batch.status,
-                   detections=[{**d, "band": b} for d, b in zip(batch.detections, batch.bands)],
+                   detections=[{**d, "band": b, **({"tile": from_crop[i]} if i in from_crop else {})}
+                               for i, (d, b) in enumerate(zip(batch.detections, batch.bands))],
                    dropped=list(batch.dropped), raw=batch.raw)
     except Exception as error:  # noqa: BLE001 -- reported, never raised into the loop
         row.update(status="DETECTOR_ERROR", detections=[], dropped=[], raw=None,

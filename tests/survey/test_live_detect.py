@@ -218,3 +218,43 @@ def test_cube_trial_without_detect_is_unchanged(tmp_path, monkeypatch):
                     popen=lambda cmd, **kw: pytest.fail("no follower without --detect"))
     flight = next(cmd for kind, cmd in calls if kind == "call")
     assert "--capture-dir" not in flight
+
+
+def test_tiles_wrap_the_detector_and_reach_the_follower(tmp_path, monkeypatch, capsys):
+    from sentinel.survey.store import SurveyStore
+    from sentinel.survey.consent import record_consent
+    from sentinel.survey.tiling import TiledDetector
+    db = tmp_path / "c.sqlite3"
+    record_consent(SurveyStore.open(db), "home-office", "2026-09-22", "test")
+    built = []
+    code = live_detect_script.main(
+        ["--check-only", "--tiles", "2x2", "--consent-db", str(db), "--location", "home-office",
+         "--date", "2026-09-22", "--i-authorise-paid-calls"],
+        build_detector=lambda name: built.append(name) or object())
+    assert code == 0 and "with 2x2 crops" in capsys.readouterr().out
+
+    monkeypatch.chdir(tmp_path)
+    calls = []
+    cube_trial.main(
+        ["--real", "--confirm", "--detect", "gemini-openrouter", "--detect-tiles", "2x2",
+         "--consent-db", "c.sqlite3", "--location", "home-office", "--date", "2026-09-22",
+         "--i-authorise-paid-calls"],
+        run=lambda cmd, **kw: calls.append(cmd) or 0, call=lambda cmd, **kw: 0,
+        popen=lambda cmd, **kw: calls.append(cmd) or FakeFollower())
+    detect_calls = [cmd for cmd in calls if cube_trial.LIVE_DETECT in cmd]
+    assert len(detect_calls) == 2 and all("--tiles=2x2" in cmd for cmd in detect_calls)
+
+
+def test_a_find_only_a_crop_made_is_marked_in_the_row_and_the_line():
+    from sentinel.survey.detector import DetectionBatch
+    from sentinel.survey.live_detect import detect_frame, summarise
+
+    class Tiled:
+        def detect(self, path, classes):
+            det = {"class": "phone", "bbox": {"x": 1, "y": 1, "width": 9, "height": 9}}
+            return DetectionBatch((det,), "OK", ("medium",),
+                                  raw={"tile_only": [{"index": 0, "tile": "r1c1", "class": "phone"}]})
+
+    row = detect_frame(Tiled(), {"stop": "S", "look_deg": 0, "path": "x.png"})
+    assert row["detections"][0]["tile"] == "r1c1"
+    assert "1 phone (medium crop)" in summarise("S", 0, "OK", row["detections"])

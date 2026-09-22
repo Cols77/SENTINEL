@@ -39,6 +39,8 @@ def main(argv=None, *, run=subprocess.call, call=subprocess.call, popen=subproce
     parser.add_argument("--detect", choices=("none",) + LIVE_DETECTORS, default="none",
                         help="detect on each saved frame during the flight, in a separate "
                              "process (scripts/live_detect.py); paid calls, needs consent")
+    parser.add_argument("--detect-tiles", choices=("none", "2x2", "3x3"), default="none",
+                        help="with --detect: also detect on enlarged crops, for small objects")
     parser.add_argument("--consent-db", default=None)
     parser.add_argument("--location", default=None)
     parser.add_argument("--date", default=None)
@@ -64,7 +66,7 @@ def main(argv=None, *, run=subprocess.call, call=subprocess.call, popen=subproce
 
     follower = None
     if args.detect != "none":
-        gates = [f"--detector={args.detect}"]
+        gates = [f"--detector={args.detect}", f"--tiles={args.detect_tiles}"]
         for flag, value in (("--consent-db", args.consent_db), ("--location", args.location),
                             ("--date", args.date)):
             if value:
