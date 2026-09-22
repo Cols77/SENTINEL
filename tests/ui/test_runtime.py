@@ -1,10 +1,11 @@
 from pathlib import Path
 from sentinel.ui.scenarios import build_rehearsal_adapters
-from sentinel.ui.runtime import SurveyRuntime
+from sentinel.ui.runtime import RuntimeMissionObserver, SurveyRuntime
 from sentinel.ui.approval import ApprovalBroker
 from sentinel.ui.store import UIStore
 from sentinel.ui.safety import SafetyRegistry
 from sentinel.ui.mission_worker import MissionWorker
+from sentinel.mission_observer import AbortEvent, PublicEscalationEvent
 
 
 def test_clean_run_waits_for_operator_then_counts_real_artifacts(tmp_path):
@@ -47,3 +48,14 @@ def test_rejection_never_flies(tmp_path):
         assert adapters.flight.flights==0
     finally:
         broker.cancel('r');worker.close()
+
+
+def test_runtime_journals_explicit_abort_and_escalation_events(tmp_path):
+    store=UIStore.open(tmp_path/'ui.sqlite');store.ensure_run('s','r','REHEARSAL')
+    adapters=build_rehearsal_adapters('fixtures/mission-control/clean-computer.json',tmp_path/'images')
+    runtime=SurveyRuntime(tmp_path/'survey.sqlite',store,adapters,ApprovalBroker(store),SafetyRegistry())
+    observer=RuntimeMissionObserver(runtime, 'r')
+    observer.observe(PublicEscalationEvent(run_id='r', point='REVIEW', reason='operator decision'))
+    observer.observe(AbortEvent(run_id='r', stage='FLIGHT', reason='controlled landing'))
+    events=store.read_events('r', 0, 10)
+    assert [event['type'] for event in events] == ['ESCALATION', 'RUN_ABORTED']

@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from threading import Event, RLock
 from sentinel.client import EmergencyAborted
+from sentinel.mission_observer import RunnerLifecycleEvent
 from .store import canonical
 
 class SafetyRegistry:
@@ -29,6 +30,15 @@ class SafetyRegistry:
     def get(self, run_id):
         with self._lock:
             return self._runners.get(run_id)
+
+    def observe(self, event) -> None:
+        """Consume runner lifecycle telemetry as the safety binding boundary."""
+        if not isinstance(event, RunnerLifecycleEvent) or event.runner is None:
+            return
+        if event.status == 'STARTED':
+            self.bind(event.run_id, event.runner)
+        elif event.status in {'PASS', 'COMPLETE', 'FAILED', 'FAIL', 'EMERGENCY_ABORTED'}:
+            self.unbind(event.run_id, event.runner)
 
     def stop_admission(self):
         """Close admission atomically without suppressing controlled landing."""

@@ -123,24 +123,34 @@ class LiveFlight:
     def __init__(self,config,site,tag_map,pose_feed):
         self.config,self.site,self.tag_map,self.pose_feed=config,site,tag_map,pose_feed
         self.registry=None;self.run_id=config.run_id;self.emit=lambda *args:None
+        self.observer=None
         self.artifacts={};self.start=(config.start_x_cm,config.start_y_cm)
 
     def fly(self,option):
         config=self.config
         client=make_client(config)
         conn=sqlite3.connect(config.pose_db)
-        def register(runner):self.registry.bind(self.run_id,runner)
-        def unregister(runner):self.registry.unbind(self.run_id,runner)
+        def register(runner):
+            if self.observer is None and self.registry:
+                self.registry.bind(self.run_id,runner)
+        def unregister(runner):
+            if self.observer is None and self.registry:
+                self.registry.unbind(self.run_id,runner)
         def stop(entry):
             if entry.get('waypoint','').startswith(option.option_id+'_') and entry.get('status')!='ABORTED_EN_ROUTE':
                 index=int(entry['waypoint'].rsplit('_',1)[1]);x,y=entry['commanded_cm'][:2]
-                self.emit('STOP_ARRIVED',dict(stop_index=index,x_cm=x,y_cm=y,option_id=option.option_id))
+                if self.observer is None:
+                    self.emit('STOP_ARRIVED',dict(stop_index=index,x_cm=x,y_cm=y,option_id=option.option_id))
         bridge=CubeFlight(client=client,site=self.site,mode='real',pose_mode=config.pose_mode,
             run_id=self.run_id,mission_log=config.data_dir/'mission.jsonl',capture_dir=config.artifact_root or config.data_dir/'images',
             start_x_cm=self.start[0],start_y_cm=self.start[1],surface_z_cm=config.surface_z_cm,
             sr063_amended=config.sr063_amended,tag_map=self.tag_map,conn=conn,confirm=True,
-            on_runner=register,on_runner_done=unregister,on_stop=stop,
-            on_pose=self.pose_feed.accept,on_pose_health=self.pose_feed.accept_health)
+            on_runner=None if self.observer is not None else register,
+            on_runner_done=None if self.observer is not None else unregister,
+            on_stop=None if self.observer is not None else stop,
+            on_pose=None if self.observer is not None else self.pose_feed.accept,
+            on_pose_health=None if self.observer is not None else self.pose_feed.accept_health,
+            observer=self.observer)
         try:
             frames=bridge.fly(option)
             self.start=(bridge.start_x_cm,bridge.start_y_cm)

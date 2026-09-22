@@ -54,7 +54,7 @@ class ProjectionService:
                 frame_meta[f['frame_id']]=artifact
                 s['evidence']['frames'].append(dict(id=f['frame_id'],stop_id=f"{sweeps[f['sweep_id']]['option_id']}:{f['stop_index']}",captured_at=f['captured_at'],commanded_pose=pose if f['position_kind']=='COMMANDED' else None,measured_pose=pose if f['position_kind']=='MEASURED' else None,analysis='ANALYSED' if f['analysis_status']=='OK' else ('PENDING' if f['analysis_status']=='PENDING' else 'FAILED'),evidence=status,failure=None if f['analysis_status']=='OK' else f['analysis_status'],merge_eligible=f['analysis_status']=='OK',artifact_id=f['artifact_id'] if artifact else None,sha256=f['sha256'] if artifact else None,width=artifact['width'] if artifact else None,height=artifact['height'] if artifact else None,source_kind=svc.adapters.source_kind))
             for sight in facts['sightings']:
-                box=json.loads(sight['bbox_json']) if sight['bbox_json'] else None
+                box=sight.get('bbox')
                 artifact=frame_meta.get(sight['frame_id'])
                 norm=None
                 if box and artifact:

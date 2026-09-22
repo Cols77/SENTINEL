@@ -33,6 +33,9 @@ from sentinel.pose.stream import _to_bgr, run_pose_stream
 from sentinel.pose.watchdog import (POLL_INTERVAL_S, PoseWatchdog, post_land_travel_cm,
                                     trip_margin_cm)
 from sentinel.runner import FlightTestRunner
+from sentinel.mission_observer import (AbortEvent, FrameCapturedEvent, MissionObserver,
+                                        PoseEstimateEvent, PoseHealthEvent, RunnerLifecycleEvent,
+                                        StopProgressEvent, notify)
 
 POSE_MODES = ("off", "passive", "reanchor")
 MAX_WAYPOINTS = 8
@@ -235,6 +238,7 @@ class CubeMissionRunner(FlightTestRunner):
                  land_during_move: bool = False,
                  watchdog_poll_interval_s: float = POLL_INTERVAL_S,
                  coverage=None, on_stop=None, on_pose=None, on_pose_health=None,
+                 observer: MissionObserver | None = None,
                  **runner_kwargs) -> None:
         if pose_mode not in POSE_MODES:
             raise ValueError(f"pose_mode must be one of {POSE_MODES}, got {pose_mode!r}")
@@ -244,6 +248,7 @@ class CubeMissionRunner(FlightTestRunner):
         runner_kwargs["envelope"] = site.envelope()
         super().__init__(client, mode, minimum_battery, **runner_kwargs)
         self.on_stop,self.on_pose,self.on_pose_health=on_stop,on_pose,on_pose_health
+        self.observer = observer
         self.mission, self.site, self.pose_mode = mission, site, pose_mode
         self.tag_map, self.conn, self.run_id = tag_map, conn, run_id
         self.mission_log = Path(mission_log)
@@ -282,6 +287,27 @@ class CubeMissionRunner(FlightTestRunner):
             # the watchdog off, same as pose_mode "off".
             self._watchdog_fix_fn = None
         self._validate_mission()
+
+    def run(self, *, confirm: bool):
+        """Run with typed lifecycle telemetry layered over the legacy runner."""
+        notify(self.observer, RunnerLifecycleEvent(
+            run_id=self.run_id, stage="MISSION", status="STARTED", runner=self))
+        try:
+            report = super().run(confirm=confirm)
+        except Exception as exc:
+            notify(self.observer, AbortEvent(
+                run_id=self.run_id, stage="MISSION", reason=str(exc)))
+            notify(self.observer, RunnerLifecycleEvent(
+                run_id=self.run_id, stage="MISSION", status="FAILED", message=str(exc),
+                runner=self))
+            raise
+        notify(self.observer, RunnerLifecycleEvent(
+            run_id=self.run_id, stage="MISSION", status=report.status,
+            message=getattr(report, "error", None), runner=self))
+        if report.status not in {"PASS", "COMPLETE"}:
+            notify(self.observer, AbortEvent(
+                run_id=self.run_id, stage="MISSION", reason=getattr(report, "error", None) or report.status))
+        return report
 
     # -- planning -----------------------------------------------------------
     def _validate_mission(self) -> None:
@@ -519,7 +545,28 @@ class CubeMissionRunner(FlightTestRunner):
             _StreamHeld(self.client), self.tag_map, self.conn, run_id=self.run_id,
             max_frames=None, duration_s=BURST_MAX_S, source_kind="LIVE",
             on_frame=lambda _frame: count["n"] < BURST_TARGET_REPORTS, on_report=on_report,
-            on_estimate=self.on_pose,on_health=self.on_pose_health)
+            on_estimate=self._accept_pose,on_health=self._accept_pose_health)
+
+    def _accept_pose(self, estimate) -> None:
+        if self.on_pose:
+            try:
+                self.on_pose(estimate)
+            except Exception:
+                pass
+        notify(self.observer, PoseEstimateEvent(
+            run_id=self.run_id,
+            pose=getattr(estimate, "__dict__", None),
+            evidence=getattr(getattr(estimate, "evidence", None), "__dict__", None),
+            estimate=estimate))
+
+    def _accept_pose_health(self, health) -> None:
+        if self.on_pose_health:
+            try:
+                self.on_pose_health(health)
+            except Exception:
+                pass
+        notify(self.observer, PoseHealthEvent(
+            run_id=self.run_id, health=getattr(health, "__dict__", None), value=health))
 
     def _localise(self, wp: Waypoint, entry: dict) -> None:
         started = time.monotonic()
@@ -702,6 +749,13 @@ class CubeMissionRunner(FlightTestRunner):
             if path is not None:
                 self._announce_frame(wp.name, record)
             self._emit("observe", f"{wp.name}: captured at look offset {offset}")
+            notify(self.observer, FrameCapturedEvent(
+                run_id=self.run_id, image_path=record.get("path"),
+                sha256=record.get("sha256"),
+                pose={"x_cm": (entry.get("fix_cm") or entry.get("commanded_cm"))[0],
+                      "y_cm": (entry.get("fix_cm") or entry.get("commanded_cm"))[1],
+                      "z_cm": entry.get("height_cm"),
+                      "heading_deg": entry.get("heading_deg")}))
         self._look_to(0)
 
     def _announce_frame(self, stop: str, record: dict) -> None:
@@ -720,7 +774,14 @@ class CubeMissionRunner(FlightTestRunner):
         self.mission_log.parent.mkdir(parents=True, exist_ok=True)
         with self.mission_log.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry) + "\n")
-        if self.on_stop:self.on_stop(dict(entry))
+        if self.on_stop:
+            try:
+                self.on_stop(dict(entry))
+            except Exception:
+                pass
+        notify(self.observer, StopProgressEvent(
+            run_id=self.run_id, stop=entry.get("waypoint"), status=entry.get("status"),
+            payload=dict(entry)))
 
     def _fly_sequence(self) -> None:
         self._enter_altitude_band()

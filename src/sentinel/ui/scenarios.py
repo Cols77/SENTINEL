@@ -12,6 +12,7 @@ from sentinel.survey.flight import FlightFrame
 from sentinel.survey.detector import ScriptedDetector
 from sentinel.survey.proposer import RuleProposer
 from sentinel.survey.observability import SYNTHETIC_LEVEL, IMAGE_WIDTH, IMAGE_HEIGHT, PRINCIPAL_X, PRINCIPAL_Y, FOCAL_PX
+from sentinel.mission_observer import (RunnerLifecycleEvent, StopProgressEvent, notify)
 
 @dataclass(frozen=True)
 class ScenarioAdapters:
@@ -34,21 +35,28 @@ class ScenarioFlight:
         self.registry=None
         self.run_id=None
         self.emit=lambda *args:None
+        self.observer=None
 
     def fly(self, option):
         runner=FlightTestRunner(DryRunClient(),'dry-run')
-        if self.registry:
+        if self.registry and self.observer is None:
             self.registry.bind(self.run_id,runner)
+        notify(self.observer, RunnerLifecycleEvent(run_id=self.run_id, stage='MISSION', status='STARTED', runner=runner))
         self.flights+=1
         try:
             result=[]
             for frame in self.frames[option.option_id]:
                 runner.check_interruption()
-                self.emit('STOP_ARRIVED',dict(stop_index=frame.stop_index,x_cm=frame.x_cm,y_cm=frame.y_cm,option_id=option.option_id))
+                payload=dict(stop_index=frame.stop_index,x_cm=frame.x_cm,y_cm=frame.y_cm,option_id=option.option_id)
+                notify(self.observer, StopProgressEvent(run_id=self.run_id, stop_index=frame.stop_index,
+                                                        stop=option.option_id, status='ARRIVED', payload=payload))
+                if self.observer is None:
+                    self.emit('STOP_ARRIVED',payload)
                 result.append(frame)
             return result
         finally:
-            if self.registry:
+            notify(self.observer, RunnerLifecycleEvent(run_id=self.run_id, stage='MISSION', status='PASS', runner=runner))
+            if self.registry and self.observer is None:
                 self.registry.unbind(self.run_id,runner)
 
 
