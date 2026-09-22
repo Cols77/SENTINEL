@@ -105,7 +105,8 @@ class MoondreamDetector:
             if resolved_model is not None and resolved_model != self.model:
                 raise ModelIdentityMismatch(
                     f"moondream: pinned {self.model!r} but the provider resolved "
-                    f"{resolved_model!r}")
+                    f"{resolved_model!r}", provider="moondream",
+                    requested_model=self.model, resolved_model=resolved_model)
 
             objects = raw.get("objects")
             if not isinstance(objects, list):

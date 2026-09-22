@@ -298,8 +298,12 @@ def result_from_dict(document) -> PerceptionResult:
 
 
 def ingest_result(store: RoomStore, result: PerceptionResult, *, current_snapshot_version: int) -> IngestOutcome:
-    """Validate before a transaction; atomically persist or recover one delivery."""
-    validate_result(result)
+    """Recover canonical deliveries without depending on expired frame retention.
+
+    New deliveries still verify external bytes before opening the transaction;
+    the second identity lookup under BEGIN IMMEDIATE handles concurrent writers.
+    """
+    validate_result(result, check_frame=False)
     if not _integer(current_snapshot_version):
         raise InvalidPerception("invalid current snapshot version")
     request = result.request
@@ -315,6 +319,12 @@ def ingest_result(store: RoomStore, result: PerceptionResult, *, current_snapsho
     with store._lock:
         store._require_open()
         connection = store.connection
+        known_delivery = connection.execute(
+            "SELECT 1 FROM room_perception_results WHERE session_id = ? AND observation_id = ?",
+            (request.session_id, request.observation_id),
+        ).fetchone()
+        if known_delivery is None:
+            validate_request(request)
         try:
             connection.execute("BEGIN IMMEDIATE")
             session = connection.execute(

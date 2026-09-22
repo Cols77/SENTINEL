@@ -127,6 +127,7 @@ def _failure_category(error: Exception) -> str:
 
 def _detect_correlated(detector, record, row, classes, *, provider):
     from PIL import Image
+    from .providers import ModelIdentityMismatch
     from sentinel.room.ingest import (
         DetectionEvidence, InvalidPerception, MAX_IDENTITY_LENGTH, PerceptionResult, detection_digest,
         request_from_dict, validate_request, validate_result,
@@ -197,6 +198,22 @@ def _detect_correlated(detector, record, row, classes, *, provider):
             identity_status, datetime.now(timezone.utc).isoformat(), detections, error_category,
         )
         validate_result(result, check_frame=False)
+    except ModelIdentityMismatch as error:
+        reported = (error.provider, error.requested_model, error.resolved_model)
+        if all(value is None for value in reported):
+            # Legacy message-only exceptions contain no trustworthy identity.
+            resolved_model, identity_status, error_category = None, "UNVERIFIED", "IDENTITY_MISMATCH"
+        elif (all(valid_identity(value) for value in reported)
+              and error.requested_model == request.requested_model
+              and error.resolved_model != error.requested_model):
+            provider_name = error.provider
+            resolved_model, identity_status, error_category = error.resolved_model, "MISMATCH", "IDENTITY_MISMATCH"
+        else:
+            resolved_model, identity_status, error_category = None, "UNVERIFIED", "SCHEMA"
+        result = PerceptionResult(
+            request, "FAILED", provider_name, resolved_model, identity_status,
+            datetime.now(timezone.utc).isoformat(), (), error_category,
+        )
     except Exception as error:  # never expose provider text, headers, or credentials
         result = PerceptionResult(
             request, "FAILED", provider_name, None, "UNVERIFIED",

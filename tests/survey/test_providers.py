@@ -115,8 +115,11 @@ def test_a_moondream_response_resolving_to_a_different_model_raises_loudly(frame
     response = FakeResponse(json_data={"model": "moondream-2", "objects": []})
     detector = MoondreamDetector(api_key="k", model="moondream-3", session=FakeSession(response))
 
-    with pytest.raises(ModelIdentityMismatch):
+    with pytest.raises(ModelIdentityMismatch) as mismatch:
         detector.detect(str(frame), ("computer",))
+    assert (mismatch.value.provider, mismatch.value.requested_model, mismatch.value.resolved_model) == (
+        "moondream", "moondream-3", "moondream-2",
+    )
 
 
 def test_a_gemini_response_resolving_to_a_different_model_raises_loudly(frame):
@@ -127,8 +130,11 @@ def test_a_gemini_response_resolving_to_a_different_model_raises_loudly(frame):
     })
     detector = GeminiDetector(api_key="k", model="gemini-2.0-flash", session=FakeSession(response))
 
-    with pytest.raises(ModelIdentityMismatch):
+    with pytest.raises(ModelIdentityMismatch) as mismatch:
         detector.detect(str(frame), ("computer",))
+    assert (mismatch.value.provider, mismatch.value.requested_model, mismatch.value.resolved_model) == (
+        "gemini", "gemini-2.0-flash", "gemini-1.5-flash",
+    )
 
 
 def test_an_oversize_response_is_refused_not_parsed(frame):
@@ -354,9 +360,32 @@ def test_gemini_through_openrouter_refuses_a_different_resolved_model(frame):
     from sentinel.survey.providers.gemini import OpenRouterGeminiDetector
     session = FakeSession(_openrouter_answer('{"objects": []}',
                                              model="google/gemini-2.5-flash-lite"))
-    with pytest.raises(ModelIdentityMismatch):
+    with pytest.raises(ModelIdentityMismatch) as mismatch:
         OpenRouterGeminiDetector(api_key="k", model="google/gemini-2.5-flash",
                                  session=session).detect(str(frame), ("computer",))
+    assert (mismatch.value.provider, mismatch.value.requested_model, mismatch.value.resolved_model) == (
+        "gemini-openrouter", "google/gemini-2.5-flash", "google/gemini-2.5-flash-lite",
+    )
+
+
+@pytest.mark.parametrize("adapter,provider", [(GeminiDetector, "gemini"), (MoondreamDetector, "moondream")])
+def test_actual_adapter_mismatch_reaches_correlated_sidecar(frame, adapter, provider):
+    from dataclasses import asdict
+    from sentinel.room.ingest import capture_request, result_from_dict
+    from sentinel.survey.live_detect import detect_frame
+    request = capture_request(
+        {"session_id": "s1", "action_id": "a1", "snapshot_version": 0,
+         "pose_revision_id": "p1", "requested_model": "pinned-model"},
+        frame_path=frame, run_id="run1", captured_at="2026-09-22T00:00:00+00:00", classes=("computer",),
+    )
+    raw = {"modelVersion": "actual-model", "model": "actual-model", "objects": []}
+    detector = adapter(api_key="secret", model="pinned-model", session=FakeSession(FakeResponse(json_data=raw)))
+    row = detect_frame(detector, {"path": str(frame), "sha256": request.frame_sha256,
+                                  "perception_request": asdict(request)}, classes=("computer",))
+    result = result_from_dict(row["perception_result"])
+    assert result.status == "FAILED" and result.identity_status == "MISMATCH"
+    assert result.provider == provider and result.resolved_model == "actual-model"
+    assert result.error_category == "IDENTITY_MISMATCH"
 
 
 def test_gemini_asks_for_json_mode_on_both_endpoints(frame):

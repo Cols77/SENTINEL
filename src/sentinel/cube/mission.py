@@ -715,6 +715,7 @@ class CubeMissionRunner(FlightTestRunner):
         moment the frame is on disk, so a separate process (scripts/live_detect.py)
         can detect on it while the drone flies on. The mission log is only written
         when a stop ends. A write failure is an alert, never a flight failure."""
+        from sentinel.room.ingest import InvalidPerception
         try:
             log = Path(record["path"]).parent / FRAMES_LOG_NAME
             document = {"stop": stop, "run_id": self.run_id, **record}
@@ -724,7 +725,7 @@ class CubeMissionRunner(FlightTestRunner):
             else:
                 with log.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(document) + "\n")
-        except OSError as error:
+        except (OSError, InvalidPerception) as error:
             self._emit("alert", f"{stop}: frame not announced for live detection ({error})")
 
     def _append_log(self, entry: dict) -> None:

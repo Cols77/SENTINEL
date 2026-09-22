@@ -425,3 +425,51 @@ def test_v4_upgrade_retains_existing_results_evidence_and_foreign_keys(tmp_path,
                        error_category="IDENTITY_MISMATCH")
     assert not ingest_result(upgraded, mismatch, current_snapshot_version=0).authorizes_current_state
     assert upgraded.connection.execute("SELECT MAX(version) FROM room_schema_version").fetchone()[0] == 5
+
+
+def test_exact_replay_after_frame_retention_expires_does_not_read_file(tmp_path):
+    from pathlib import Path
+    store, result = store_for(tmp_path), sample(tmp_path)
+    first = ingest_result(store, result, current_snapshot_version=0)
+    Path(result.request.frame_path).unlink()
+    replay = ingest_result(store, result, current_snapshot_version=0)
+    assert replay.duplicate and replay.result_id == first.result_id
+    assert count(store, "room_detection_evidence") == 1
+    with pytest.raises(IdempotencyConflict):
+        ingest_result(store, replace(result, completed_at="2026-09-22T00:00:02+00:00"),
+                      current_snapshot_version=0)
+
+
+def test_poll_replays_history_without_retained_frame_then_ingests_new_delivery(tmp_path):
+    from pathlib import Path
+    store, result = store_for(tmp_path), sample(tmp_path)
+    inbox = tmp_path / "inbox.jsonl"
+    append_inbox_result(inbox, result)
+    poll_inbox(store, inbox, current_snapshot_version=0)
+    Path(result.request.frame_path).unlink()
+    new_directory = tmp_path / "new"
+    new_directory.mkdir()
+    new_result = sample(new_directory, observation="o2")
+    append_inbox_result(inbox, new_result)
+    outcomes = poll_inbox(store, inbox, current_snapshot_version=0)
+    assert len(outcomes) == 2 and outcomes[0].duplicate and not outcomes[1].duplicate
+    assert count(store, "room_perception_results") == 2
+
+
+def test_new_delivery_rechecks_identity_after_hash_validation_race(tmp_path, monkeypatch):
+    import sentinel.room.ingest as module
+    store, result = store_for(tmp_path), sample(tmp_path)
+    other = RoomStore.open(tmp_path / "room.sqlite3")
+    original_digest, delivered = module.frame_digest, []
+
+    def interleaved_digest(path):
+        assert not store.connection.in_transaction
+        if not delivered:
+            delivered.append(True)
+            ingest_result(other, result, current_snapshot_version=0)
+        return original_digest(path)
+
+    monkeypatch.setattr(module, "frame_digest", interleaved_digest)
+    assert ingest_result(store, result, current_snapshot_version=0).duplicate
+    assert count(store, "room_perception_results") == 1
+    other.close()

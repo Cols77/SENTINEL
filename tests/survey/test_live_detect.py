@@ -415,3 +415,62 @@ def test_detector_raw_score_survives_follower_inbox_ingest_and_consumer(tmp_path
     assert (current[0]["raw_score"], current[0]["score_kind"], current[0]["confidence_band"]) == (
         0.37, "DETECTOR_RAW", "medium",
     )
+
+
+def test_raised_structured_mismatch_preserves_actual_identity_through_follower(tmp_path):
+    from sentinel.survey.providers import ModelIdentityMismatch
+    from sentinel.room.ingest import result_from_dict
+    record = _correlated_record(tmp_path)
+    error = ModelIdentityMismatch("do not serialize this api-key-secret", provider="actual-provider",
+                                  requested_model="pinned-model", resolved_model="actual-model")
+    frames, inbox, output = tmp_path / "frames.jsonl", tmp_path / "inbox.jsonl", tmp_path / "out.jsonl"
+    frames.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    assert follow(frames, output, FakeDetector(error=error), done=lambda: True,
+                  inbox_log=inbox, print_fn=lambda _: None) == 1
+    result = result_from_dict(json.loads(inbox.read_text()))
+    assert (result.status, result.identity_status, result.provider, result.resolved_model) == (
+        "FAILED", "MISMATCH", "actual-provider", "actual-model",
+    )
+    assert result.error_category == "IDENTITY_MISMATCH"
+    assert "api-key-secret" not in inbox.read_text() + output.read_text()
+
+
+def test_legacy_mismatch_exception_remains_a_valid_unverified_failure(tmp_path):
+    from sentinel.survey.providers import ModelIdentityMismatch
+    from sentinel.room.ingest import result_from_dict
+    error = ModelIdentityMismatch("drift")
+    assert str(error) == "drift"
+    result = result_from_dict(detect_frame(FakeDetector(error=error), _correlated_record(tmp_path))["perception_result"])
+    assert result.status == "FAILED" and result.identity_status == "UNVERIFIED"
+    assert result.resolved_model is None and result.error_category == "IDENTITY_MISMATCH"
+
+
+@pytest.mark.parametrize("metadata", [
+    {"provider": "x" * 4097}, {"resolved_model": "x" * 4097},
+    {"requested_model": "another-request"}, {"resolved_model": "pinned-model"},
+])
+def test_malformed_raised_identity_metadata_fails_closed(tmp_path, metadata):
+    from sentinel.survey.providers import ModelIdentityMismatch
+    from sentinel.room.ingest import result_from_dict
+    identity = {"provider": "actual-provider", "requested_model": "pinned-model", "resolved_model": "actual-model"}
+    error = ModelIdentityMismatch(**{**identity, **metadata})
+    result = result_from_dict(detect_frame(FakeDetector(error=error), _correlated_record(tmp_path))["perception_result"])
+    assert result.status == "FAILED" and result.error_category == "SCHEMA"
+    assert result.resolved_model is None and result.identity_status == "UNVERIFIED"
+
+
+def test_partial_frame_announcement_log_alerts_without_failing_the_mission(tmp_path):
+    events = []
+    runner = CubeMissionRunner(
+        DryRunClient(), "dry-run", mission=MISSION, site=SITE, run_id="RUN",
+        mission_log=tmp_path / "mission.jsonl", sleep_fn=lambda _: None,
+        progress=lambda event, message: events.append((event, message)),
+        correlation_context={"session_id": "s1", "action_id": "a1", "snapshot_version": 0,
+                             "pose_revision_id": "pose1", "requested_model": "pinned-model"},
+    )
+    runner.recorder = FakeRecorder(tmp_path / "frames")
+    log = tmp_path / "frames" / FRAMES_LOG_NAME
+    log.write_bytes(b'{"partial":')
+    assert runner.run(confirm=True).status == "PASS"
+    assert log.read_bytes() == b'{"partial":'
+    assert any(event == "alert" and "frame not announced" in message for event, message in events)
