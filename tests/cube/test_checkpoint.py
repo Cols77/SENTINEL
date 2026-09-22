@@ -4,7 +4,7 @@ import hashlib
 
 import pytest
 
-from sentinel.cube.checkpoint import CommandLimits, PlannedCommand, plan_checkpoint
+from sentinel.cube.checkpoint import CheckpointPolicy, CommandLimits, PlannedCommand, plan_checkpoint
 from sentinel.models import Position
 
 
@@ -26,10 +26,9 @@ def test_checkpoint_plans_canonical_axis_moves_and_bounds():
     assert plan.target == Position(11, -12, 109)
     assert [command.kind for command in plan.commands] == [
         "SET_SPEED", "READ_TELEMETRY", "WATCHDOG", "ROTATE",
-        "MOVE", "SETTLE", "MOVE",
-        "TRIM_ALLOWANCE", "LOCALISE",
-        "ROTATE", "SETTLE", "CAPTURE",
-        "ROTATE", "SETTLE", "CAPTURE",
+        "MOVE", "SETTLE", "MOVE", "SETTLE", "TRIM_ALLOWANCE",
+        "ROTATE", "SETTLE", "CAPTURE", "LOCALISE",
+        "ROTATE", "SETTLE", "CAPTURE", "LOCALISE",
         "ROTATE", "READ_TELEMETRY",
     ]
     moves = [command for command in plan.commands if command.kind == "MOVE"]
@@ -39,8 +38,47 @@ def test_checkpoint_plans_canonical_axis_moves_and_bounds():
     ]
     assert sum(command.upper_bound_s for command in plan.commands) == plan.worst_case_s
     allowance = next(command for command in plan.commands if command.kind == "TRIM_ALLOWANCE")
-    assert allowance.upper_bound_s >= 2 * (2 * 8.0 + 1.5 + 13.5 + 4.0)
+    assert allowance.upper_bound_s >= 2 * (2 * 8.0 + 1.5 + 13.5 + 7.0)
     assert dict(next(command for command in plan.commands if command.kind == "LOCALISE").arguments)["settle_s"] == 1.5
+
+
+def test_legacy_checkpoint_policy_keeps_localisation_before_observation_groups():
+    plan = plan_checkpoint(
+        checkpoint_id="legacy", start=Position(0, 0, 100), target=Position(0, 20, 100),
+        start_heading_deg=90, terminal_heading_deg=90, speed_cm_s=20,
+        looks_deg=(45,), capture_count=1, limits=CommandLimits(),
+        policy=CheckpointPolicy.legacy_mission(),
+    )
+
+    assert [command.kind for command in plan.commands] == [
+        "SET_SPEED", "READ_TELEMETRY", "WATCHDOG", "MOVE", "TRIM_ALLOWANCE", "LOCALISE",
+        "ROTATE", "SETTLE", "CAPTURE", "ROTATE", "READ_TELEMETRY",
+    ]
+
+
+def test_legacy_checkpoint_policy_keeps_zero_degree_look_after_localisation():
+    plan = plan_checkpoint(
+        checkpoint_id="legacy-zero", start=Position(0, 0, 100), target=Position(0, 20, 100),
+        start_heading_deg=90, terminal_heading_deg=90, speed_cm_s=20,
+        looks_deg=(0,), capture_count=1, limits=CommandLimits(),
+        policy=CheckpointPolicy.legacy_mission(),
+    )
+
+    assert [command.kind for command in plan.commands] == [
+        "SET_SPEED", "READ_TELEMETRY", "WATCHDOG", "MOVE", "TRIM_ALLOWANCE", "LOCALISE",
+        "SETTLE", "CAPTURE", "READ_TELEMETRY",
+    ]
+
+
+def test_checkpoint_motion_nodes_use_the_shared_transport_bounds():
+    plan = plan_checkpoint(
+        checkpoint_id="bounds", start=Position(0, 0, 100), target=Position(120, 0, 100),
+        start_heading_deg=-90, terminal_heading_deg=90, speed_cm_s=20,
+        looks_deg=(), capture_count=0, limits=CommandLimits(),
+    )
+
+    assert next(command.upper_bound_s for command in plan.commands if command.kind == "MOVE") == 18
+    assert next(command.upper_bound_s for command in plan.commands if command.kind == "ROTATE") == 12
 
 
 def test_checkpoint_enforces_dead_band_settle_speed_and_canonical_terminal_heading():

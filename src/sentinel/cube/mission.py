@@ -24,6 +24,7 @@ from typing import Callable
 from sentinel.client import EmergencyAborted
 from sentinel.cube.checkpoint import (
     CheckpointPlan,
+    CheckpointPolicy,
     CommandLimits,
     CommandOutcome,
     PlannedCommand,
@@ -31,6 +32,7 @@ from sentinel.cube.checkpoint import (
 )
 from sentinel.envelope import EnvelopeViolation
 from sentinel.models import Position
+from sentinel.motion_bounds import move_reply_upper_bound_s
 from sentinel.pose.containment import Containment, check_containment
 from sentinel.pose.detector import NoTagDetected, estimate_pose
 from sentinel.pose.localise import LocalisationFix, localise
@@ -416,6 +418,7 @@ class CubeMissionRunner(FlightTestRunner):
             looks_deg=wp.looks_deg,
             capture_count=len(wp.looks_deg),
             limits=limits,
+            policy=CheckpointPolicy.legacy_mission(),
         )
         # A reanchored estimate can lie a few centimetres outside a commanded
         # x/y bound.  Such an axis needs a minimum correction even when it is
@@ -438,7 +441,10 @@ class CubeMissionRunner(FlightTestRunner):
                                        ("direction", positive if delta > 0 else negative),
                                        ("distance_cm", max(MIN_MOVE_CM, round(abs(delta)))),
                                        ("optional", "false")))),
-                limits.move_s, False,
+                move_reply_upper_bound_s(
+                    distance_cm=max(MIN_MOVE_CM, round(abs(delta))), speed_cm_s=self.mission.leg_speed_cm_s,
+                    base_timeout_s=limits.motion_base_timeout_s,
+                ), False,
             ))
             recovery.append(PlannedCommand(
                 "SETTLE", (("after", "move"),),

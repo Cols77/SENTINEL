@@ -19,6 +19,12 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 from .client import EmergencyAborted
+from .motion_bounds import (
+    MOTION_REPLY_SLACK_S,
+    ROTATION_DEG_PER_S,
+    move_reply_upper_bound_s,
+    rotate_reply_upper_bound_s,
+)
 from .video import VideoReceiver
 
 
@@ -42,12 +48,6 @@ class SocketBinding:
 
 
 _DJITELLOPY_FACTORY_LOCK = threading.Lock()
-#: Added to a motion's expected duration before its reply counts as lost.
-MOTION_REPLY_SLACK_S = 6.0
-#: A deliberately slow figure for sizing a rotation's reply timeout.
-ROTATION_DEG_PER_S = 30.0
-
-
 class _BoundSocket:
     def __init__(
         self,
@@ -482,7 +482,7 @@ class DjitellopyClient:
         self._commanded_speed_cm_s = float(cm_per_second)
         return response
 
-    def _motion_command(self, methods: tuple[str, ...], command: str, travel_s: float,
+    def _motion_command(self, methods: tuple[str, ...], command: str, reply_timeout_s: int,
                         *args: Any) -> str:
         """Send a command that moves the drone exactly once.
 
@@ -503,7 +503,7 @@ class DjitellopyClient:
             if sender is None:
                 return self._command_method(methods, command, *args)
             # DJITelloPy enforces an int timeout (enforce_types); a float raises before sending
-            response = sender(command, timeout=math.ceil(max(self.timeout, travel_s + MOTION_REPLY_SLACK_S)))
+            response = sender(command, timeout=reply_timeout_s)
             normalized = self._record(command, response)
             if "ok" not in normalized.lower():
                 raise DjitellopyBackendError(f"{command} failed: {normalized}")
@@ -542,9 +542,10 @@ class DjitellopyClient:
         return self._record("land (no wait)", "sent")
 
     def move(self, direction: str, distance_cm: int) -> str:
-        # B1: real cruise is about 0.8 of the commanded speed; allow for half.
-        travel_s = distance_cm / max(0.5 * self._commanded_speed_cm_s, 5.0)
-        return self._motion_command(("move",), f"{direction} {distance_cm}", travel_s,
+        return self._motion_command(
+            ("move",), f"{direction} {distance_cm}",
+            move_reply_upper_bound_s(distance_cm=distance_cm, speed_cm_s=self._commanded_speed_cm_s,
+                                     base_timeout_s=self.timeout),
                                     direction, distance_cm)
 
     def rotate(self, direction: str, degrees: int) -> str:
@@ -557,8 +558,10 @@ class DjitellopyClient:
             "ccw": ("rotate_counter_clockwise",),
         }
         candidates = methods[direction]
-        return self._motion_command(candidates, f"{direction} {degrees}",
-                                    degrees / ROTATION_DEG_PER_S, degrees)
+        return self._motion_command(
+            candidates, f"{direction} {degrees}",
+            rotate_reply_upper_bound_s(degrees=degrees, base_timeout_s=self.timeout), degrees,
+        )
 
     def stop(self) -> str:
         return self._command_method(("stop",), "stop")

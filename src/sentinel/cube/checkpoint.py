@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Literal, Mapping, Protocol, TypeAlias
 
 from sentinel.models import Position
+from sentinel.motion_bounds import move_reply_upper_bound_s, rotate_reply_upper_bound_s
 
 
 CommandKind: TypeAlias = Literal[
@@ -85,6 +86,22 @@ class CheckpointCommandSink(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class CheckpointPolicy:
+    """Ordering policy for an immutable command graph.
+
+    The public default is the checkpoint-native look/capture/localise group.
+    The named legacy policy is used only while translating historical
+    ``Mission`` waypoints whose public log order predates this graph.
+    """
+
+    localise_after_each_capture: bool = True
+
+    @classmethod
+    def legacy_mission(cls) -> "CheckpointPolicy":
+        return cls(localise_after_each_capture=False)
+
+
+@dataclass(frozen=True, slots=True)
 class CommandLimits:
     """The calibrated constants used to build a checkpoint command graph."""
 
@@ -97,8 +114,7 @@ class CommandLimits:
     set_speed_s: float = 1.0
     telemetry_s: float = 1.0
     watchdog_s: float = 0.0
-    move_s: float = 8.0
-    rotate_s: float = 4.0
+    motion_base_timeout_s: float = 7.0
     capture_s: float = 10.0
     #: Stationary settle plus the bounded pose-burst window.
     localise_s: float = 13.5
@@ -125,13 +141,16 @@ def _rotation(current_deg: float, target_deg: float, limits: CommandLimits, phas
     if abs(delta) < 1e-9:
         return (), target_deg
     direction = "ccw" if delta > 0 else "cw"
-    return (_command("ROTATE", limits.rotate_s, False, degrees=abs(delta), direction=direction, phase=phase),), target_deg
+    return (_command(
+        "ROTATE", rotate_reply_upper_bound_s(degrees=abs(delta), base_timeout_s=limits.motion_base_timeout_s),
+        False, degrees=abs(delta), direction=direction, phase=phase,
+    ),), target_deg
 
 
 def plan_checkpoint(*, checkpoint_id: str, start: Position, target: Position,
                     start_heading_deg: float, terminal_heading_deg: float,
                     speed_cm_s: int, looks_deg: tuple[int, ...], capture_count: int,
-                    limits: CommandLimits) -> CheckpointPlan:
+                    limits: CommandLimits, policy: CheckpointPolicy | None = None) -> CheckpointPlan:
     """Build the one immutable command sequence shared by runtime and forecasts."""
 
     if isinstance(speed_cm_s, bool) or speed_cm_s <= 0:
@@ -144,6 +163,7 @@ def plan_checkpoint(*, checkpoint_id: str, start: Position, target: Position,
         raise ValueError("captures require at least one requested look")
     if limits.trim_rounds < 0:
         raise ValueError("trim_rounds must not be negative")
+    policy = policy or CheckpointPolicy()
 
     commands: list[PlannedCommand] = [
         _command("SET_SPEED", limits.set_speed_s, False, speed_cm_s=speed_cm_s),
@@ -166,7 +186,9 @@ def plan_checkpoint(*, checkpoint_id: str, start: Position, target: Position,
             continue
         distance = max(limits.min_move_cm, round(abs(delta)))
         moves.append(_command(
-            "MOVE", limits.move_s, False, axis=axis,
+            "MOVE", move_reply_upper_bound_s(
+                distance_cm=distance, speed_cm_s=speed_cm_s, base_timeout_s=limits.motion_base_timeout_s,
+            ), False, axis=axis,
             direction=positive if delta > 0 else negative, distance_cm=distance,
             optional="true" if distance == limits.min_move_cm else "false",
         ))
@@ -174,7 +196,7 @@ def plan_checkpoint(*, checkpoint_id: str, start: Position, target: Position,
         commands.append(move)
         # A localisation node begins with its own calibrated stationary hover,
         # so the final leg does not need a duplicate standalone settle.
-        if index < len(moves) - 1 or not limits.localise:
+        if index < len(moves) - 1 or not limits.localise or policy.localise_after_each_capture:
             commands.append(_command(
                 "SETTLE",
                 limits.fast_settle_s if speed_cm_s > limits.fast_speed_threshold_cm_s else limits.slow_settle_s,
@@ -187,25 +209,48 @@ def plan_checkpoint(*, checkpoint_id: str, start: Position, target: Position,
     # the first accepted localisation needs no correction.
     commands.append(_command(
         "TRIM_ALLOWANCE",
-        limits.trim_rounds * (limits.set_speed_s + 2 * limits.move_s + limits.localise_s
-                              + limits.look_settle_s + limits.rotate_s),
+        limits.trim_rounds * (
+            limits.set_speed_s
+            + 2 * move_reply_upper_bound_s(
+                distance_cm=limits.trim_distance_cm, speed_cm_s=limits.trim_speed_cm_s,
+                base_timeout_s=limits.motion_base_timeout_s,
+            )
+            + limits.localise_s + limits.look_settle_s
+            + rotate_reply_upper_bound_s(
+                degrees=limits.trim_yaw_limit_deg, base_timeout_s=limits.motion_base_timeout_s,
+            )
+        ),
         False,
         max_distance_cm=limits.trim_distance_cm, max_rounds=limits.trim_rounds,
-        max_yaw_deg=limits.trim_yaw_limit_deg, move_upper_bound_s=limits.move_s,
-        rotate_upper_bound_s=limits.rotate_s, speed_cm_s=limits.trim_speed_cm_s,
+        max_yaw_deg=limits.trim_yaw_limit_deg,
+        move_upper_bound_s=move_reply_upper_bound_s(
+            distance_cm=limits.trim_distance_cm, speed_cm_s=limits.trim_speed_cm_s,
+            base_timeout_s=limits.motion_base_timeout_s,
+        ),
+        rotate_upper_bound_s=rotate_reply_upper_bound_s(
+            degrees=limits.trim_yaw_limit_deg, base_timeout_s=limits.motion_base_timeout_s,
+        ), speed_cm_s=limits.trim_speed_cm_s,
         speed_upper_bound_s=limits.set_speed_s, settle_s=limits.slow_settle_s,
     ))
-    if limits.localise:
-        commands.append(_command(
-            "LOCALISE", limits.localise_s, True, phase="arrival", settle_s=limits.look_settle_s,
-        ))
-
     for index in range(capture_count):
         look = looks_deg[index % len(looks_deg)]
         rotation, heading = _rotation(heading, limits.canonical_heading_deg + look, limits, "look")
         commands.extend(rotation)
         commands.append(_command("SETTLE", limits.look_settle_s, True, after="look"))
         commands.append(_command("CAPTURE", limits.capture_s, True, index=index, look_deg=look))
+        if limits.localise and policy.localise_after_each_capture:
+            commands.append(_command(
+                "LOCALISE", limits.localise_s, True, phase="capture", settle_s=limits.look_settle_s,
+            ))
+
+    if limits.localise and not policy.localise_after_each_capture:
+        # Compatibility ordering for legacy mission logs: arrival is measured
+        # and trimmed before the camera is pointed at observation looks.
+        insertion = next(index for index, command in enumerate(commands)
+                         if command.kind == "TRIM_ALLOWANCE") + 1
+        commands.insert(insertion, _command(
+            "LOCALISE", limits.localise_s, True, phase="arrival", settle_s=limits.look_settle_s,
+        ))
 
     rotation, heading = _rotation(heading, terminal_heading_deg, limits, "restore")
     commands.extend(rotation)
