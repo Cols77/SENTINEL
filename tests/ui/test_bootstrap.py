@@ -7,6 +7,27 @@ from sentinel.ui.models import validate_snapshot
 from sentinel.survey.store import SurveyStore
 from sentinel.survey.consent import record_consent
 
+
+def test_bare_live_readiness_is_ordered_actionable_and_secret_free(monkeypatch):
+    from sentinel.ui.readiness import evaluate_live_readiness
+
+    monkeypatch.setenv('GEMINI_API_KEY', 'sentinel-secret-api-value')
+    monkeypatch.setenv('GEMINI_MODEL', 'sentinel-secret-model-value')
+    readiness = evaluate_live_readiness(bootstrap.SessionConfig(mode='LIVE'))
+
+    assert readiness.state == 'NOT_READY'
+    assert [check.capability for check in readiness.checks] == [
+        'planning', 'flight', 'detection', 'emergency']
+    assert all(not check.ready and check.reason_code and check.remediation
+               for check in readiness.checks)
+    public = json.dumps(readiness.public())
+    for required_name in ('--site', '--tag-map', '--pose-db', '--start-x-cm',
+                          '--start-y-cm', '--surface-z-cm', '--confirm',
+                          '--local-ip', 'GEMINI_API_KEY', 'GEMINI_MODEL'):
+        assert required_name in public
+    assert 'sentinel-secret-api-value' not in public
+    assert 'sentinel-secret-model-value' not in public
+
 @pytest.fixture
 def live_config(tmp_path, monkeypatch):
     monkeypatch.setenv('GEMINI_API_KEY','test-secret-never-public')

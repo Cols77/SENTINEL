@@ -3,6 +3,18 @@ import pytest
 from sentinel.ui.models import empty_snapshot, validate_snapshot
 
 
+def test_live_readiness_public_shape_contains_only_allowlisted_fields():
+    from sentinel.ui.bootstrap import SessionConfig
+    from sentinel.ui.readiness import evaluate_live_readiness
+
+    public = evaluate_live_readiness(SessionConfig(mode='LIVE')).public()
+    assert set(public) == {'state', 'checks', 'command_template'}
+    assert all(set(check) == {'capability', 'ready', 'reason_code', 'remediation'}
+               for check in public['checks'])
+    assert [check['capability'] for check in public['checks']] == [
+        'planning', 'flight', 'detection', 'emergency']
+
+
 def test_snapshot_rejects_private_unknown_and_cross_run_facts():
     snapshot = empty_snapshot('s', 'r', 'REHEARSAL')
     assert validate_snapshot(snapshot) == snapshot
