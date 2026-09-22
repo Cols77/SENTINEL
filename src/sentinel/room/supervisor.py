@@ -105,6 +105,9 @@ class SafetySupervisor:
         # A restart cannot erase a durable return/terminal latch or import old
         # clearances: it has a new clock domain and must obtain new assurances.
         events = store.events(session_id)
+        self._terminal = any(e.event_type == "DRONE_STATE_RECORDED" and (
+            e.payload.get("state", {}).get("terminal_state")
+            or e.payload.get("state", {}).get("flight_state") in {"TERMINAL", "CLOSED"}) for e in events)
         self._returning = any(e.event_type == "SAFETY_ASSESSED" and
                              e.payload.get("transition") in {"RETURN_NOW", "LAND_CONTINGENCY"} for e in events)
 
@@ -191,12 +194,12 @@ class SafetySupervisor:
         tracker._health = pose
         return tracker.forecast(plan, now)
 
-    def _path_clear(self, pose, plan, site, *, corridor=False):
+    def _path_clear(self, pose, plan, site, *, corridor=False, now=None):
         profile = self.tracker.profile
         if profile is None:
             return False
         position, heading = pose.position, pose.heading_deg
-        forecast = self._forecast(pose, plan, self.clock())
+        forecast = self._forecast(pose, plan, self.clock() if now is None else now)
         radius = profile.rotation_radius_cm + max(pose.xy_uncertainty_cm,
                                                   forecast.projected.xy_uncertainty_cm)
         height = profile.max_height_error_cm
@@ -267,6 +270,8 @@ class SafetySupervisor:
                 request, request.energy_sample, hashes, _sha(room_site_document(site)),
                 now if clock_valid else None, termination, contingency)
 
+        if self._terminal:
+            return result("LAND_CONTINGENCY", "SESSION_TERMINAL")
         try:
             if not clock_valid:
                 raise ValueError("invalid session clock")
@@ -294,6 +299,18 @@ class SafetySupervisor:
             termination_price = max((termination, projected_termination), key=lambda p: p.worst_case_s)
             path_clear = self._path_clear(request.pose, plan, site)
             home_clear = self._path_clear(request.pose, termination, site, corridor=True)
+            # Each command boundary must retain a usable declared home route.
+            # Price/check future route segments at that future pose's time so
+            # their envelope includes drift already accumulated by optional work.
+            projected_home_clear = True
+            prefix = ()
+            for command in plan.commands:
+                prefix += (command,)
+                projected = self._forecast(request.pose, self._plan(request.pose, prefix), now).projected
+                route = self._termination(projected, site)
+                if not self._path_clear(projected, route, site, corridor=True, now=projected.propagated_at):
+                    projected_home_clear = False
+                    break
             home_forecast = self._forecast(request.pose, termination, now)
             full_forecast = self._forecast(request.pose,
                 self._plan(request.pose, plan.commands + projected_termination.commands), now)
@@ -323,6 +340,8 @@ class SafetySupervisor:
             return result("RETURN_NOW", "RETURN_LATCHED" if self._returning else "OPTIONAL_WORK_UNAFFORDABLE")
         if not path_clear:
             return result("RETURN_NOW", "OPTIONAL_PATH_INVALID")
+        if not projected_home_clear:
+            return result("RETURN_NOW", "PROJECTED_TERMINATION_PATH_INVALID")
         if set(full_forecast.reasons) - refresh_reasons:
             forecast = replace(forecast, admitted=False,
                 reasons=tuple(sorted(set(forecast.reasons) | set(full_forecast.reasons))))
@@ -337,6 +356,8 @@ class SafetySupervisor:
                 remaining_commands=None):
         """Effectful telemetry refresh and stream/clock observation before admission."""
         with self._lock:
+            if self._terminal:
+                raise RuntimeError("supervisor is terminal")
             try:
                 now = self.clock()
             except Exception:
@@ -395,6 +416,8 @@ class SafetySupervisor:
         A late result is discarded. Safety dispatch happens on the caller after
         cancellation, never inside the bounded watchdog callback.
         """
+        if self._terminal:
+            raise RuntimeError("supervisor is terminal")
         try:
             initial = self.prepare(snapshot_version=snapshot_version, provider_wait_s=timeout_s)
         except Exception:
@@ -469,7 +492,10 @@ class SafetySupervisor:
             pose_age = max(0, now - pose.measured_at) if math.isfinite(now) else None
         except Exception:
             pose_age = None
-        fresh = fresh and pose_age is not None
+        # Closed/terminal execution without a TerminalOutcome proves that work
+        # stopped, not that the aircraft landed or that telemetry is usable.
+        unavailable = self._terminal and not terminal
+        fresh = fresh and pose_age is not None and not unavailable
         state = {"battery_percent": sample.battery_pct, **asdict(pose.position),
             "heading_deg": pose.heading_deg, "pose_source": pose.source,
             "pose_quality": "MEASURED" if pose.source == "mapped_joint_tags" else "PROPAGATED",
@@ -477,7 +503,7 @@ class SafetySupervisor:
             "localization_state": pose.state.value, "flight_state": executor.state.value,
             "airborne": (False if terminal and result.state in {"LANDED", "NOT_AIRBORNE"}
                          else None if self._terminal else True),
-            "terminal_state": result.state if terminal else None,
+            "terminal_state": result.state if terminal else "ABORTED" if unavailable else None,
             "action_progress": result.state if terminal else result.status,
             "completion_known": result.completed_at is not None if terminal else result.completion_known}
         self.store.append_checkpoint_completion(self.session_id, result=result, state=state,

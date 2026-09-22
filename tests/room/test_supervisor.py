@@ -201,7 +201,7 @@ def test_each_command_refreshes_and_completion_is_append_only_measured_evidence(
     state = dict(next(f for f in snapshot.sources if f.kind == "READ_DRONE").values)
     assert state["x_cm"] == 100 and state["pose_source"] == "mapped_joint_tags"
     assert state["localization_state"] == "ANCHORED"
-    assert state["state_freshness"] == "CURRENT"
+    assert state["state_freshness"] == "FRESH"
     clock.now += 4
     stale = queries.project("session")
     assert dict(next(f for f in stale.sources if f.kind == "READ_DRONE").values)["state_freshness"] == "STALE"
@@ -554,3 +554,97 @@ def test_failed_refresh_after_provider_completion_discards_provider_result(safet
     result = supervisor.run_wait(provider, snapshot_version=store.session_version("session"),
                                  timeout_s=1, executor=Executor(store, clock))
     assert result.status == "PREEMPTED" and result.value is None and emergencies == [True]
+
+
+@pytest.mark.parametrize("return_to_start", [False, True])
+def test_optional_movement_cannot_leave_the_declared_return_corridor(safety, return_to_start):
+    supervisor, store, clock, samples, *_ = safety
+    corridor = Volume3D("corridor", ((0, 0), (135, 0), (135, 200), (0, 200)), (0, 200))
+    supervisor.site = replace(supervisor.site, corridors=(corridor,))
+    supervisor.validate_bindings = lambda site: None  # isolate geometry from the altered fixture artifact
+    commands = (command("MOVE", direction="right", distance_cm=60),)
+    if return_to_start:
+        commands += (command("MOVE", direction="left", distance_cm=60),)
+    plan = checkpoint(samples["pose"], *commands)
+    outcome = supervisor.assess(request(safety, plan), supervisor.site)
+    assert outcome.transition == "RETURN_NOW"
+    assert outcome.reason == "PROJECTED_TERMINATION_PATH_INVALID"
+    executor = Executor(store, clock)
+    supervisor.dispatch(outcome, executor)
+    assert "MOVE" not in executor.calls
+
+
+def test_projected_return_path_includes_uncertainty_accumulated_during_optional_work(safety):
+    supervisor, _, _, samples, *_ = safety
+    corridor = Volume3D("corridor", ((0, 0), (125, 0), (125, 200), (0, 200)), (0, 200))
+    supervisor.site = replace(supervisor.site, corridors=(corridor,))
+    supervisor.validate_bindings = lambda site: None
+    assert supervisor.assess(request(safety), supervisor.site).transition == "CONTINUE"
+    plan = checkpoint(samples["pose"], command("SETTLE", seconds=100))
+    outcome = supervisor.assess(request(safety, plan), supervisor.site)
+    assert outcome.transition == "RETURN_NOW"
+    assert outcome.reason == "PROJECTED_TERMINATION_PATH_INVALID"
+
+
+@pytest.mark.parametrize("status", ["FAILED", "DEADLINE_EXCEEDED", "PREEMPTED"])
+def test_closed_executor_failure_is_persisted_terminal_without_claiming_landing(safety, status):
+    from sentinel.room.controller import RoomController
+    from sentinel.room.models import TerminalState
+    supervisor, store, clock, samples, refreshes, _ = safety
+
+    class ClosedExecutor(Executor):
+        def execute(self, plan):
+            super().execute(plan)
+            self.state = ExecutorState.CLOSED
+            return CheckpointOutcome(status, (), (), None, None, True)
+
+    class Judge:
+        def choice(self, *args, **kwargs):
+            pytest.fail("closed executor must never return control to Jev")
+
+    executor = ClosedExecutor(store, clock)
+    plan = checkpoint(samples["pose"], command())
+    supervisor.dispatch(supervisor.assess(request(safety, plan), supervisor.site), executor)
+    state = store.events("session")[-1].payload["state"]
+    assert state["terminal_state"] == "ABORTED"
+    assert state["airborne"] is None
+    assert state["action_progress"] == status
+    queries = ReadQueries(store, clock=clock, clock_domain_id=supervisor.clock_domain_id)
+    snapshot = queries.project("session")
+    assert snapshot.terminal_state == TerminalState.ABORTED
+    assert dict(next(f for f in snapshot.sources if f.kind == "READ_DRONE").values)["state_freshness"] == "STALE"
+    refresh_count = len(refreshes)
+    with pytest.raises(RuntimeError, match="terminal"):
+        supervisor.prepare(snapshot_version=snapshot.state_version)
+    assert len(refreshes) == refresh_count
+    assert supervisor.assess(request(safety), supervisor.site).transition != "CONTINUE"
+    events = store.events("session")
+    controller = RoomController(store, Judge(), supervisor=supervisor, flight_executor=executor)
+    assert controller.step("session").terminal_state == TerminalState.ABORTED
+    assert store.events("session") == events
+
+
+def test_default_controller_queries_use_supervisor_clock_for_fresh_measured_state(safety):
+    from sentinel.room.controller import RoomController
+    supervisor, store, clock, samples, *_ = safety
+    samples["pose"] = replace(samples["pose"], measured_at=clock() - .5)
+    executor = Executor(store, clock)
+    controller = RoomController(store, object(), supervisor=supervisor, flight_executor=executor)
+    plan = checkpoint(samples["pose"], command())
+    supervisor.dispatch(supervisor.assess(request(safety, plan), supervisor.site), executor)
+    state = dict(next(f for f in controller.queries.project("session").sources if f.kind == "READ_DRONE").values)
+    assert state["state_freshness"] == "FRESH"
+    assert state["pose_age_s"] == .5
+    assert controller.queries.clock is clock
+    assert controller.queries.clock_domain_id == supervisor.clock_domain_id
+
+
+def test_explicit_controller_queries_keep_the_callers_clock_binding(safety):
+    from sentinel.room.controller import RoomController
+    supervisor, store, clock, *_ = safety
+    explicit_clock = lambda: 9000
+    queries = ReadQueries(store, clock=explicit_clock, clock_domain_id="caller-clock")
+    controller = RoomController(store, object(), queries=queries, supervisor=supervisor,
+                                flight_executor=Executor(store, clock))
+    assert controller.queries is queries
+    assert queries.clock is explicit_clock and queries.clock_domain_id == "caller-clock"

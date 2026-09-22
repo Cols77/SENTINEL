@@ -41,7 +41,10 @@ class RoomController:
             if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
                 raise ValueError("choice thresholds must be finite probabilities")
         self.store, self.judge = store, judge
-        self.queries = queries or ReadQueries(store, survey_store=survey_store, survey_run_id=survey_run_id)
+        query_clock = ({"clock": supervisor.clock, "clock_domain_id": supervisor.clock_domain_id}
+                       if supervisor is not None else {})
+        self.queries = queries if queries is not None else ReadQueries(
+            store, survey_store=survey_store, survey_run_id=survey_run_id, **query_clock)
         self.act_at, self.min_margin = act_at, min_margin
         self.candidate_builder, self.executor = candidate_builder, executor
         self.ingest_pending = ingest_pending

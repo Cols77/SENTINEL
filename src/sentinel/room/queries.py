@@ -176,7 +176,7 @@ class ReadQueries:
                     current = (data["clock_domain_id"] == self.clock_domain_id and data["refresh_succeeded"]
                         and all(0 <= now - data[key] <= data["sample_max_age_s"]
                                 for key in ("pose_measured_at", "energy_measured_at")))
-                    values["state_freshness"] = "CURRENT" if current else "STALE"
+                    values["state_freshness"] = "FRESH" if current else "STALE"
                 if values and all(data.get(key) for key in ("observed_at", "scope", "uncertainty")):
                     facts.append(_fact(CandidateKind.READ_DRONE, values, data["observed_at"], data["scope"],
                                        data["uncertainty"], (event.event_id,)))
@@ -258,7 +258,8 @@ class ReadQueries:
             if measured.get("terminal_state"):
                 flight_terminal = (TerminalState.SAFE_LANDED if measured["terminal_state"] == "LANDED"
                                    else TerminalState.ABORTED)
-            elif measured.get("action_progress") == "COMMAND_COMPLETION_UNKNOWN":
+            elif (measured.get("action_progress") == "COMMAND_COMPLETION_UNKNOWN"
+                  or measured.get("flight_state") in {"TERMINAL", "CLOSED"}):
                 flight_terminal = TerminalState.ABORTED
         snapshot = ReadSnapshot(
             session_id=session_id, state_version=session["state_version"], goal_revision=goal_revision,
