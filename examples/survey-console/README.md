@@ -67,3 +67,6 @@ node scripts/ui_assets/verify_survey_console.cjs http://127.0.0.1:8770
 That surface is labelled FIXTURE DEMO and cannot dispatch a flight. Its reviewer controls exercise snapshots, uncertain/lower-bound counts, evidence races, and approval state transitions. It does not prove runtime integration. The legacy asset-kit study remains `/assets/sentinel-ui/console.html`.
 
 See [the contract](contract.md), [approved design](../../docs/superpowers/specs/2026-09-21-sentinel-mission-control-design.md), and [execution handoff](../../docs/handoffs/2026-09-21-mission-control.md).
+### Browser voice input
+
+When the browser exposes `SpeechRecognition`, the mission composer provides an explicit hold-to-talk control. Recognition is English using the browser's English regional tag where available. The browser speech service may process audio remotely; Sentinel does not upload or store audio and never listens passively. Only the exact spoken phrase `Sentinel, land now` enters the visible three-second controlled-Land countdown. Other voice phrases use the bounded chat path, including a safe refusal for unsupported safety and flight requests. Text remains available when speech recognition is unsupported or permission is denied.
