@@ -87,17 +87,40 @@ class SurveyRuntime:
                 'x_cm': event.x_cm,
                 'y_cm': event.y_cm,
             }
+            # Keep only the public operational stop facts.  The cube entry
+            # contains paths, client details and private diagnostics that must
+            # never reach the UI journal.
+            source = event.payload or {}
+            for key in ('coverage', 'coverage_reason', 'predicted_tag_count',
+                        'predicted_fix_error_cm', 'leg_speed_cm_s',
+                        'trim_budget', 'trim_progress', 'trim_rounds_sent',
+                        'return_leg', 'arrival_error_cm', 'tolerance_cm',
+                        'tolerance', 'tolerance_verdict', 'return_error_cm'):
+                if key in source:
+                    payload['stop'][key] = source[key]
         elif isinstance(event, FrameCapturedEvent):
             payload['refs'] = [event.artifact_id] if event.artifact_id else []
         elif isinstance(event, DetectorResultEvent):
-            payload.update(status=event.status, latency_ms=event.latency_ms, error=event.error)
+            payload.update(status=event.status, latency_ms=event.latency_ms, error=event.error,
+                           count=len(event.detections))
         elif isinstance(event, (AbortEvent, PublicEscalationEvent)):
             payload.update(reason=getattr(event, 'reason', ''), point=getattr(event, 'point', ''),
                            stage=getattr(event, 'stage', ''))
         with self.lock:
             state=self.state.setdefault(run_id,{})
             state['phase']=phase; state['updated_at']=now()
-            if isinstance(event, StopProgressEvent): state['stop']=payload['stop']
+            if isinstance(event, StopProgressEvent):
+                state['stop']=payload['stop']
+                state.setdefault('stops', {})[f"{payload['stop']['option_id']}:{payload['stop']['stop_index']}"] = payload['stop']
+            elif isinstance(event, FrameCapturedEvent) and event.frame_id:
+                state.setdefault('frame_telemetry', {}).setdefault(event.frame_id, {}).update(status='CAPTURED')
+            elif isinstance(event, DetectorResultEvent) and event.frame_id:
+                telemetry = state.setdefault('frame_telemetry', {}).setdefault(event.frame_id, {})
+                status = event.status
+                public_status = ('ANALYSED' if status == 'OK' else
+                                 ('DETECTING' if status == 'DETECTING' else
+                                  ('CAPTURED' if status == 'CAPTURED' else 'FAILED')))
+                telemetry.update(status=public_status, latency_ms=event.latency_ms, error=event.error, count=len(event.detections))
             self.store.append_event(run_id,event_type,payload)
 
     @staticmethod
@@ -172,7 +195,7 @@ class SurveyRuntime:
                 return dict(run=None, sweeps=[], frames=[], sightings=[], objects=[],
                             counts={}, report=None,
                             results=get_results(store, run_id, self.adapters.options))
-            # Browser schema v2 still consumes derived decision facts. The
+            # Browser schema v3 still consumes derived decision facts. The
             # backend read model remains the sole source for stored entities;
             # this compatibility view contains only computed review values.
             facts['results'] = get_results(store, run_id, self.adapters.options)

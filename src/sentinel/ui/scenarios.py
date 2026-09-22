@@ -52,7 +52,12 @@ class ScenarioFlight:
             result=[]
             for frame in self.frames[option.option_id]:
                 runner.check_interruption()
-                payload=dict(stop_index=frame.stop_index,x_cm=frame.x_cm,y_cm=frame.y_cm,option_id=option.option_id)
+                payload=dict(stop_index=frame.stop_index,x_cm=frame.x_cm,y_cm=frame.y_cm,option_id=option.option_id,
+                             coverage='OK',coverage_reason='Deterministic rehearsal coverage',
+                             predicted_tag_count=1,predicted_fix_error_cm=0.0,
+                             leg_speed_cm_s=20,trim_budget=0,trim_progress=0,
+                             return_leg=False,arrival_error_cm=0.0,tolerance_cm=15.0,
+                             tolerance_verdict='INSIDE')
                 notify(self.observer, StopProgressEvent(run_id=self.run_id, stop_index=frame.stop_index,
                                                         stop=f"{option.option_id}_{frame.stop_index}",
                                                         option_id=option.option_id,

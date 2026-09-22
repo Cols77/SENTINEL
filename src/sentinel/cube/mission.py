@@ -790,7 +790,19 @@ class CubeMissionRunner(FlightTestRunner):
             x_cm=(measured or commanded)[0], y_cm=(measured or commanded)[1],
             payload={"option_id": parts[0] if len(parts) == 2 and parts[1].isdigit() else waypoint,
                      "stop_index": int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else None,
-                     "x_cm": (measured or commanded)[0], "y_cm": (measured or commanded)[1]}))
+                     "x_cm": (measured or commanded)[0], "y_cm": (measured or commanded)[1],
+                     "coverage": entry.get("coverage", "MARGINAL"),
+                     "coverage_reason": entry.get("coverage_reason", "Coverage prediction unavailable"),
+                     "predicted_tag_count": entry.get("predicted_tag_count"),
+                     "predicted_fix_error_cm": entry.get("predicted_fix_error_cm"),
+                     "leg_speed_cm_s": entry.get("leg_speed_cm_s"),
+                     "trim_budget": entry.get("trim_budget", self.mission.max_trim_rounds),
+                     "trim_progress": entry.get("trim_progress", entry.get("trim_rounds_sent", 0)),
+                     "return_leg": entry.get("return_leg", False),
+                     "arrival_error_cm": entry.get("arrival_error_cm"),
+                     "tolerance_cm": entry.get("tolerance_cm", TOLERANCE_CM),
+                     "tolerance_verdict": entry.get("tolerance", "UNKNOWN") or "UNKNOWN",
+                     "return_error_cm": entry.get("return_error_cm")}))
 
     def _fly_sequence(self) -> None:
         self._enter_altitude_band()
@@ -811,6 +823,7 @@ class CubeMissionRunner(FlightTestRunner):
             # heading to; "EN_ROUTE" is a sentinel this method never persists
             # as-is -- _go_to succeeding replaces it with "OPEN_LOOP" below,
             # and anything _localise reaches replaces it again.
+            predicted = self.coverage.verdict(wp.x_cm, wp.y_cm, wp.z_cm) if self.coverage is not None else None
             entry = {"waypoint": wp.name, "commanded_cm": [wp.x_cm, wp.y_cm, wp.z_cm],
                      "pose_mode": self.pose_mode, "status": "EN_ROUTE", "fix_cm": None,
                      "heading_deg": None, "heading_error_deg": None, "n": 0,
@@ -820,6 +833,14 @@ class CubeMissionRunner(FlightTestRunner):
                      "watchdog_land_error": None, "watchdog_fix_errors": 0, "height_cm": None,
                      "open_loop_fix_cm": None, "open_loop_error_cm": None, "localise_s": None,
                      "battery_pct": None, "leg_speed_cm_s": self.mission.leg_speed_cm_s,
+                     "trim_budget": self.mission.max_trim_rounds,
+                     "trim_progress": 0,
+                     "return_leg": wp.name == RETURN_NAME,
+                     "tolerance_cm": TOLERANCE_CM,
+                     "coverage": predicted.level if predicted is not None else "MARGINAL",
+                     "coverage_reason": predicted.describe() if predicted is not None else "Coverage prediction unavailable",
+                     "predicted_tag_count": predicted.nominal_tags if predicted is not None else None,
+                     "predicted_fix_error_cm": predicted.p95_cm if predicted is not None else None,
                      "trim_errors_cm": []}
             try:
                 self._go_to(wp)
@@ -847,4 +868,5 @@ class CubeMissionRunner(FlightTestRunner):
                     if self._watchdog_land_error is not None:
                         entry["watchdog_land_error"] = str(self._watchdog_land_error)
                 entry["watchdog_fix_errors"] = self._watchdog_fix_errors
+                entry["trim_progress"] = entry.get("trim_rounds_sent", 0)
                 self._append_log(entry)

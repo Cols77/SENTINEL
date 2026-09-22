@@ -4,9 +4,32 @@ import json
 from .models import empty_snapshot, validate_snapshot
 
 
-def stop_view(option,index,status='PLANNED'):
-    return dict(id=f'{option.option_id}:{index}',status=status,range_m=option.range_cm/100,
-        altitude_m=option.z_cm/100,extent_m=option.viewed_width_cm/100,duration_s=option.estimated_seconds/len(option.stops),resolvable_classes=list(option.resolvable_classes))
+def stop_view(option, index, status='PLANNED', operational=None, return_leg=False):
+    """Project one route stop with explicit operational truth.
+
+    ``operational`` is an allowlisted Cube stop-log row.  Missing provider or
+    coverage data remains explicit (MARGINAL/unknown values); the browser must
+    never turn elapsed animation time into a completion claim.
+    """
+    row = operational or {}
+    return dict(
+        id=f'{option.option_id}:{index}', status=status,
+        range_m=option.range_cm/100, altitude_m=option.z_cm/100,
+        extent_m=option.viewed_width_cm/100,
+        duration_s=option.estimated_seconds/len(option.stops),
+        resolvable_classes=list(option.resolvable_classes),
+        coverage=row.get('coverage', 'MARGINAL'),
+        coverage_reason=row.get('coverage_reason', 'Coverage prediction unavailable'),
+        predicted_tag_count=row.get('predicted_tag_count'),
+        predicted_fix_error_cm=row.get('predicted_fix_error_cm'),
+        leg_speed_cm_s=row.get('leg_speed_cm_s', 20),
+        trim_budget=row.get('trim_budget', 3),
+        trim_progress=row.get('trim_progress', row.get('trim_rounds_sent', 0)),
+        return_leg=bool(row.get('return_leg', return_leg)),
+        arrival_error_cm=row.get('arrival_error_cm'),
+        tolerance_cm=row.get('tolerance_cm', 15),
+        tolerance_verdict=row.get('tolerance_verdict', row.get('tolerance', 'UNKNOWN') or 'UNKNOWN'),
+    )
 
 class ProjectionService:
     def __init__(self, service):
@@ -36,12 +59,22 @@ class ProjectionService:
             last=facts['sweeps'][-1] if facts['sweeps'] else None
             option=chosen or (options[last['option_id']] if last else svc.adapters.options[0])
             if offer:
-                s['proposal']=dict(id=offer['id'],sha256=offer['sha256'],option_id=option.option_id,stops=[stop_view(option,i) for i in range(len(option.stops))],range_m=option.range_cm/100,altitude_m=option.z_cm/100,extent_m=option.viewed_width_cm/100,duration_s=option.estimated_seconds,resolvable_classes=list(option.resolvable_classes),proposer=dict(mode='F',source=svc.adapters.source_kind),justification=offer['candidate'].get('description',''),guardrail_disagreements=[],target_object_ids=offer['candidate'].get('arguments',{}).get('addresses',[]),eligibility=dict(consent=True,envelope=True,preflight=True,current=True),disabled_reasons=[],run_id=run_id,decision_version=offer['decision_version'],correlation_id=offer['correlation_id'])
-            route=[dict(stop_id=f'{option.option_id}:{i}',x=x,y=y) for i,(x,y) in enumerate(option.stops)]
+                policy_name = type(svc.adapters.policy).__name__.lower()
+                proposer_mode = offer['candidate'].get('proposer')
+                if proposer_mode not in {'F', 'E', 'J'}:
+                    proposer_mode = 'J' if 'jev' in policy_name else ('E' if 'llm' in policy_name or 'agent' in policy_name else 'F')
+                if proposer_mode not in {'F', 'E', 'J'}:
+                    proposer_mode = 'F'
+                proposer_source = {'F': 'RULES', 'J': 'JUDGE', 'E': 'AGENT'}[proposer_mode]
+                escalation_reason = offer['candidate'].get('escalation_reason')
+                s['proposal']=dict(id=offer['id'],sha256=offer['sha256'],option_id=option.option_id,stops=[stop_view(option,i) for i in range(len(option.stops))],range_m=option.range_cm/100,altitude_m=option.z_cm/100,extent_m=option.viewed_width_cm/100,duration_s=option.estimated_seconds,resolvable_classes=list(option.resolvable_classes),proposer=dict(mode=proposer_mode,source=proposer_source,escalation_reason=escalation_reason),justification=offer['candidate'].get('description',''),escalation_reason=escalation_reason,guardrail_disagreements=[],target_object_ids=offer['candidate'].get('arguments',{}).get('addresses',[]),eligibility=dict(consent=True,envelope=True,preflight=True,current=True),disabled_reasons=[],run_id=run_id,decision_version=offer['decision_version'],correlation_id=offer['correlation_id'])
+            operational = state.get('stops', {})
+            route=[dict(stop_id=f'{option.option_id}:{i}',x=x,y=y,**{k:v for k,v in stop_view(option,i,operational=operational.get(f'{option.option_id}:{i}')) .items() if k not in {'id','status','range_m','altitude_m','extent_m','duration_s','resolvable_classes'}}) for i,(x,y) in enumerate(option.stops)]
             xs=[x for o in options.values() for x,y in o.stops];ys=[y for o in options.values() for x,y in o.stops]
-            s['mission'].update(route=route,envelope=dict(min_x=min(xs),max_x=max(xs),min_y=min(ys),max_y=max(ys)),flights=dict(used=facts['results']['flights_used'],max=2))
+            return_error = next((row.get('return_error_cm') for row in operational.values() if row.get('return_leg')), None)
+            s['mission'].update(route=route,envelope=dict(min_x=min(xs),max_x=max(xs),min_y=min(ys),max_y=max(ys)),flights=dict(used=facts['results']['flights_used'],max=2),return_to_start=any(row.get('return_leg') for row in operational.values()),return_error_cm=return_error)
             if last:
-                s['mission']['sweep']=dict(id=last['sweep_id'],option_id=last['option_id'],status='COMPLETE' if last['status']=='FLOWN' else 'ACTIVE',merged=last['status']=='FLOWN',flights_used_before=max(0,len(facts['sweeps'])-1),stops=[stop_view(option,i,'COMPLETED' if last['status']=='FLOWN' else 'UNKNOWN') for i in range(len(option.stops))])
+                s['mission']['sweep']=dict(id=last['sweep_id'],option_id=last['option_id'],status='COMPLETE' if last['status']=='FLOWN' else 'ACTIVE',merged=last['status']=='FLOWN',flights_used_before=max(0,len(facts['sweeps'])-1),stops=[stop_view(option,i,'COMPLETED' if last['status']=='FLOWN' else 'UNKNOWN',operational=operational.get(f"{option.option_id}:{i}")) for i in range(len(option.stops))])
             if state.get('stop'):
                 stop=state['stop'];s['mission']['active_stop_id']=f"{stop['option_id']}:{stop['stop_index']}"
                 s['mission']['commanded_position']=dict(x=stop['x_cm'],y=stop['y_cm'])
@@ -52,7 +85,10 @@ class ProjectionService:
                 status=svc.evidence_status.get(f['artifact_id'],'AVAILABLE' if artifact else 'MISSING')
                 pose=dict(x_m=f['x_cm']/100,y_m=f['y_cm']/100,z_m=f['z_cm']/100,yaw_deg=f['heading_deg'])
                 frame_meta[f['frame_id']]=artifact
-                s['evidence']['frames'].append(dict(id=f['frame_id'],stop_id=f"{sweeps[f['sweep_id']]['option_id']}:{f['stop_index']}",captured_at=f['captured_at'],commanded_pose=pose if f['position_kind']=='COMMANDED' else None,measured_pose=pose if f['position_kind']=='MEASURED' else None,analysis='ANALYSED' if f['analysis_status']=='OK' else ('PENDING' if f['analysis_status']=='PENDING' else 'FAILED'),evidence=status,failure=None if f['analysis_status']=='OK' else f['analysis_status'],merge_eligible=f['analysis_status']=='OK',artifact_id=f['artifact_id'] if artifact else None,sha256=f['sha256'] if artifact else None,width=artifact['width'] if artifact else None,height=artifact['height'] if artifact else None,source_kind=svc.adapters.source_kind))
+                telemetry = state.get('frame_telemetry', {}).get(f['frame_id'], {})
+                analysis = 'ANALYSED' if f['analysis_status']=='OK' else ('PENDING' if f['analysis_status']=='PENDING' else 'FAILED')
+                detection_status = telemetry.get('status') or ('ANALYSED' if analysis == 'ANALYSED' else ('DETECTING' if analysis == 'PENDING' else 'FAILED'))
+                s['evidence']['frames'].append(dict(id=f['frame_id'],stop_id=f"{sweeps[f['sweep_id']]['option_id']}:{f['stop_index']}",captured_at=f['captured_at'],commanded_pose=pose if f['position_kind']=='COMMANDED' else None,measured_pose=pose if f['position_kind']=='MEASURED' else None,analysis=analysis,detection_status=detection_status,detection_latency_ms=telemetry.get('latency_ms'),detection_error=telemetry.get('error'),detection_count=telemetry.get('count'),evidence=status,gap_reason=telemetry.get('error') or (None if analysis=='ANALYSED' else f['analysis_status']),failure=None if f['analysis_status']=='OK' else f['analysis_status'],merge_eligible=f['analysis_status']=='OK',artifact_id=f['artifact_id'] if artifact else None,sha256=f['sha256'] if artifact else None,width=artifact['width'] if artifact else None,height=artifact['height'] if artifact else None,source_kind=svc.adapters.source_kind))
             for sight in facts['sightings']:
                 box=sight.get('bbox')
                 artifact=frame_meta.get(sight['frame_id'])

@@ -6,6 +6,7 @@ pose stream: no hardware, no network."""
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -146,6 +147,27 @@ def test_the_tolerance_verdict_is_carried_onto_the_frame(tmp_path):
                      burst_fn=lambda: [_report(150, 320)] * 10)   # 20 cm short: OUTER, not INSIDE
     frame = flight.fly(option)[0]
     assert frame.tolerance == "OUTER"
+
+
+def test_cube_bridge_passes_coverage_guard_and_publishes_public_stop_facts(tmp_path):
+    calls = []
+    class Guard:
+        def verdict(self, x_cm, y_cm, z_cm):
+            calls.append((x_cm, y_cm, z_cm))
+            return SimpleNamespace(level='MARGINAL', nominal_tags=1, p95_cm=22.0,
+                                   describe=lambda: 'MARGINAL: one tag')
+    option = SweepOption("ONE_STOP", "one stop", ((150, 300),), 120, (0,), 100, 22, (), 300)
+    flight = CubeFlight(client=DryRunClient(), site=FLY_SITE, mode='dry-run', pose_mode='passive',
+                        run_id='RUN1', mission_log=tmp_path / 'mission.jsonl', start_x_cm=150,
+                        start_y_cm=250, surface_z_cm=0, burst_fn=lambda: [],
+                        sleep_fn=lambda seconds: None, coverage=Guard())
+    frames = flight.fly(option)
+    assert frames and calls and calls[-1] == (150, 300, 120)
+    log = json.loads((tmp_path / 'mission.jsonl').read_text().splitlines()[0])
+    assert log['coverage'] == 'MARGINAL'
+    assert log['coverage_reason'] == 'MARGINAL: one tag'
+    assert log['predicted_tag_count'] == 1
+    assert log['predicted_fix_error_cm'] == 22.0
 
 
 def test_delta_z_cm_is_height_minus_surface(tmp_path):

@@ -4,7 +4,7 @@ Implemented on `codex/survey-console-fixtures` for PR #8, building on the PR #7 
 
 ## Delivered
 
-- Local NiceGUI/FastAPI host, vanilla browser UI, closed shared v2 snapshot schema, allowlisted projection and binary evidence capabilities.
+- Local NiceGUI/FastAPI host, vanilla browser UI, closed shared v3 snapshot schema, allowlisted projection and binary evidence capabilities.
 - One durable mission thread, bounded computer-count/status intent, explicit inline approval/rejection, payload-bound idempotency and lost-response reconciliation. Display aging does not invalidate approval.
 - One guarded mission worker using the real `run_survey` loop, legal candidate policy, merge and report validator in both modes. Rehearsal supplies synthetic boundaries rather than precomputed result snapshots.
 - Clean-computer, uncertain follow-up and missing-analysis input scenarios; explicit source/provenance and unavailable/partial facts.

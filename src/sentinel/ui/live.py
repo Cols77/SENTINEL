@@ -18,6 +18,7 @@ from sentinel.pose.persistence import ensure_schema
 from sentinel.runner import FlightTestRunner
 from sentinel.survey.consent import consent_policy
 from sentinel.survey.cube_bridge import CubeFlight, envelope_from_site
+from sentinel.cube.coverage import CoverageModel, check_tag_map_matches_site
 from sentinel.survey.live_detect import DetectionCache, LiveDetectionSupervisor
 from sentinel.survey.options import generate_options
 from sentinel.survey.proposer import RuleProposer
@@ -122,9 +123,10 @@ class LivePoseFeed:
 
 
 class LiveFlight:
-    def __init__(self,config,site,tag_map,pose_feed,supervisor_factory=None):
+    def __init__(self,config,site,tag_map,pose_feed,supervisor_factory=None,coverage=None):
         self.config,self.site,self.tag_map,self.pose_feed=config,site,tag_map,pose_feed
         self.supervisor_factory=supervisor_factory
+        self.coverage=coverage
         self.registry=None;self.run_id=config.run_id;self.emit=lambda *args:None
         self.observer=None
         self.artifacts={};self.start=(config.start_x_cm,config.start_y_cm)
@@ -187,7 +189,7 @@ class LiveFlight:
                 on_stop=None if self.observer is not None else stop,
                 on_pose=None if self.observer is not None else self.pose_feed.accept,
                 on_pose_health=None if self.observer is not None else self.pose_feed.accept_health,
-                observer=self.observer)
+                observer=self.observer,coverage=self.coverage)
             frames=bridge.fly(option)
             self.start=(bridge.start_x_cm,bridge.start_y_cm)
             for f in frames:
@@ -242,6 +244,15 @@ def compose(config):
     except Exception as exc:raise StartupError('LIVE_PREFLIGHT_FAILED') from exc
     finally:
         if client is not None:client.close()
+    # Coverage is an operational guard, not a second startup transport.  A
+    # site/tag-map mismatch disables the predictor (and remains visible as a
+    # public MARGINAL/unavailable fact) while preserving the existing startup
+    # error ordering for emergency and preflight failures.
+    try:
+        coverage = CoverageModel.from_files(site, config.tag_map_path)
+        check_tag_map_matches_site(tag_map, site)
+    except Exception:
+        coverage = None
     from sentinel.survey.providers.gemini import GeminiDetector
     from sentinel.survey.providers.moondream import MoondreamDetector
     cls={'gemini':GeminiDetector,'moondream':MoondreamDetector}[config.detector_name]
@@ -249,4 +260,4 @@ def compose(config):
     detector=cls(api_key=os.environ[prefix+'_API_KEY'],model=os.environ[prefix+'_MODEL'],session=HttpSession())
     feed=LivePoseFeed(config.data_dir/'pose-images',site)
     return ScenarioAdapters(generate_options(envelope_from_site(site,300),TELLO_MEASURED),RuleProposer(),
-        LiveFlight(config,site,tag_map,feed),detector,report_writer,TELLO_MEASURED,'LIVE',sender,feed,config.location,config.consent_date)
+        LiveFlight(config,site,tag_map,feed,coverage=coverage),detector,report_writer,TELLO_MEASURED,'LIVE',sender,feed,config.location,config.consent_date)

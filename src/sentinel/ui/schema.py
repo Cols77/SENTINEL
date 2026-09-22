@@ -13,10 +13,31 @@ def obj(**fields): return {'type': 'object', 'properties': fields, 'required': l
 
 POSE = obj(x_m=N, y_m=N, z_m=N, yaw_deg=N)
 POINT = obj(x=N, y=N)
-STOP = obj(id=ID, status=enum('PLANNED','ACTIVE','COMPLETED','FAILED','ABORTED','UNKNOWN'), range_m=U, altitude_m=U, extent_m=U, duration_s=U, resolvable_classes=arr(ID))
-PROPOSER = obj(mode=enum('F','E','J'), source=S)
-PROPOSAL = obj(id=ID, sha256=ID, option_id=ID, stops=arr(STOP), range_m=U, altitude_m=U, extent_m=U, duration_s=U, resolvable_classes=arr(ID), proposer=PROPOSER, justification=S, guardrail_disagreements=arr(S), target_object_ids=arr(ID), eligibility=obj(consent=nullable(B),envelope=nullable(B),preflight=nullable(B),current=B), disabled_reasons=arr(S), run_id=ID, decision_version=I, correlation_id=ID)
-FRAME = obj(id=ID, stop_id=ID, captured_at=nullable(S), commanded_pose=nullable(POSE), measured_pose=nullable(POSE), analysis=enum('PENDING','ANALYSED','FAILED','NOT_RETAINED'), evidence=enum('AVAILABLE','MISSING','FORBIDDEN','REVOKED'), failure=nullable(S), merge_eligible=B, artifact_id=nullable(ID),sha256=nullable(ID),width=nullable(I),height=nullable(I),source_kind=enum('SIMULATED','REPLAYED','LIVE'))
+STOP = obj(
+    id=ID, status=enum('PLANNED','ACTIVE','COMPLETED','FAILED','ABORTED','UNKNOWN'),
+    range_m=U, altitude_m=U, extent_m=U, duration_s=U, resolvable_classes=arr(ID),
+    coverage=enum('OK','MARGINAL','BLIND'), coverage_reason=S,
+    predicted_tag_count=nullable(I), predicted_fix_error_cm=nullable(U),
+    leg_speed_cm_s=nullable(U), trim_budget=I, trim_progress=I,
+    return_leg=B, arrival_error_cm=nullable(U), tolerance_cm=nullable(U),
+    tolerance_verdict=enum('INSIDE','OUTER','OUTSIDE','UNKNOWN'))
+ROUTE_STOP = obj(
+    stop_id=ID, x=N, y=N,
+    coverage=enum('OK','MARGINAL','BLIND'), coverage_reason=S,
+    predicted_tag_count=nullable(I), predicted_fix_error_cm=nullable(U),
+    leg_speed_cm_s=nullable(U), trim_budget=I, trim_progress=I,
+    return_leg=B, arrival_error_cm=nullable(U), tolerance_cm=nullable(U),
+    tolerance_verdict=enum('INSIDE','OUTER','OUTSIDE','UNKNOWN'))
+PROPOSER = obj(mode=enum('F','E','J'), source=S, escalation_reason=nullable(S))
+PROPOSAL = obj(id=ID, sha256=ID, option_id=ID, stops=arr(STOP), range_m=U, altitude_m=U, extent_m=U, duration_s=U, resolvable_classes=arr(ID), proposer=PROPOSER, justification=S, escalation_reason=nullable(S), guardrail_disagreements=arr(S), target_object_ids=arr(ID), eligibility=obj(consent=nullable(B),envelope=nullable(B),preflight=nullable(B),current=B), disabled_reasons=arr(S), run_id=ID, decision_version=I, correlation_id=ID)
+FRAME = obj(
+    id=ID, stop_id=ID, captured_at=nullable(S), commanded_pose=nullable(POSE),
+    measured_pose=nullable(POSE), analysis=enum('PENDING','ANALYSED','FAILED','NOT_RETAINED'),
+    detection_status=enum('CAPTURED','DETECTING','ANALYSED','FAILED'),
+    detection_latency_ms=nullable(U), detection_error=nullable(S), detection_count=nullable(I),
+    evidence=enum('AVAILABLE','MISSING','FORBIDDEN','REVOKED'), gap_reason=nullable(S),
+    failure=nullable(S), merge_eligible=B, artifact_id=nullable(ID),sha256=nullable(ID),
+    width=nullable(I),height=nullable(I),source_kind=enum('SIMULATED','REPLAYED','LIVE'))
 BOX = {'type':'array','items':{'type':'number','minimum':0,'maximum':1},'minItems':4,'maxItems':4}
 SIGHTING = obj(id=ID,frame_id=ID,class_name=ID,bbox=nullable(BOX),raw_score=nullable(N),score_semantics=S,provider=S,model=S)
 OBJECT = obj(id=ID,class_name=ID,state=enum('CONFIRMED','UNCERTAIN'),sighting_ids=arr(ID),reason=S,geometry_degraded=B)
@@ -26,15 +47,15 @@ TAG = obj(tag_id=I,corners_xy_normalized={'type':'array','minItems':4,'maxItems'
 POSE_EVIDENCE = obj(run_id=ID,report_id=ID,artifact_id=ID,sha256=ID,captured_at=S,width_px=I,height_px=I,source_kind=enum('SIMULATED','REPLAYED','LIVE'),tags=arr(TAG))
 REPORT_POSE = obj(run_id=ID,report_id=ID,observed_at=S,source_kind=enum('SIMULATED','REPLAYED','LIVE'),point=obj(x=N,y=N),heading_deg=N,altitude_m=nullable(N),method=S,tag_observations=arr(obj(tag_id=I,zone_id=ID,distance_m=U,reprojection_error_px=U)),reprojection_error_px=U)
 SCHEMA = obj(
- schema_version={'const':2},
+ schema_version={'const':3},
  session=obj(id=ID,mode=enum('REHEARSAL','LIVE'),startup_summary=obj(site_id=nullable(ID),pose_mode=enum('off','passive','reanchor'),detector_name=S)),
  run=obj(id=ID,request_text=S,status=enum('ACTIVE','COMPLETE','ABORTED','RECOVERY_REQUIRED'),phase=enum('REQUEST','PROPOSAL','APPROVAL','FLIGHT','ANALYSIS','REVIEW','REPORT'),version=I,decision_version=I,updated_at=S),
  source=obj(mode=enum('REHEARSAL','LIVE'),kind=enum('SIMULATED','REPLAYED','LIVE'),freshness=enum('FRESH','STALE')),
  safety=obj(land=SAFETY,emergency=SAFETY),
  chat=obj(messages=arr(obj(id=ID,run_id=ID,sequence=I,role=enum('OPERATOR','ASSISTANT','SYSTEM'),body=S,status=enum('COMPLETE','FAILED'),snapshot_version=I)),pending_command_id=nullable(ID)),
  proposal=nullable(PROPOSAL),
- mission=obj(flights=obj(used=I,max={'const':2}),sweep=nullable(obj(id=ID,option_id=ID,status=enum('PLANNED','ACTIVE','COMPLETE','ABORTED'),merged=B,flights_used_before=I,stops=arr(STOP))),envelope=nullable(obj(min_x=N,max_x=N,min_y=N,max_y=N)),route=arr(obj(stop_id=ID,x=N,y=N)),active_stop_id=nullable(ID),commanded_position=nullable(POINT)),
- localization=obj(status=enum('FRESH','AGING','STALE','UNAVAILABLE'),age_ms=nullable(U),stale_after_ms=U,latest_report=nullable(REPORT_POSE),recent_stream=obj(frames_seen=I,reports_emitted=I,no_tag_frames=I,gated_frames=I,timeouts=I),containment=enum('INSIDE','MARGIN','OUTSIDE','UNAVAILABLE'),pose_evidence=nullable(POSE_EVIDENCE),map_position=nullable(POINT)),
+ mission=obj(flights=obj(used=I,max={'const':2}),sweep=nullable(obj(id=ID,option_id=ID,status=enum('PLANNED','ACTIVE','COMPLETE','ABORTED'),merged=B,flights_used_before=I,stops=arr(STOP))),envelope=nullable(obj(min_x=N,max_x=N,min_y=N,max_y=N)),route=arr(ROUTE_STOP),active_stop_id=nullable(ID),commanded_position=nullable(POINT),return_to_start=B,return_error_cm=nullable(U)),
+ localization=obj(status=enum('FRESH','AGING','STALE','UNAVAILABLE'),age_ms=nullable(U),stale_after_ms=U,latest_report=nullable(REPORT_POSE),recent_stream=obj(frames_seen=I,reports_emitted=I,no_tag_frames=I,gated_frames=I,timeouts=I),containment=enum('INSIDE','MARGIN','OUTSIDE','UNAVAILABLE'),vertical_consistency=obj(status=enum('CONSISTENT','MARGINAL','INCONSISTENT','UNAVAILABLE'),measured_m=nullable(N),expected_m=nullable(N),error_m=nullable(N),reason=S),pose_evidence=nullable(POSE_EVIDENCE),map_position=nullable(POINT)),
  evidence=obj(frames=arr(FRAME),sightings=arr(SIGHTING),objects=arr(OBJECT),analysis=obj(analysed=I,total=I,dropped_labels=arr(S),unknown_labels=arr(S)),provider=obj(name=S,model=S,source_kind=S),failures=arr(S)),
  results=obj(counts=arr(COUNT)),
  report=obj(status=enum('ABSENT','ACCEPTED','REJECTED'),text=nullable(S),reason=nullable(S),run_id=ID,id=nullable(ID)),

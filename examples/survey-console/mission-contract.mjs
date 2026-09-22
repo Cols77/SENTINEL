@@ -30,5 +30,10 @@ export function validateMission(value){
  for(const row of value.evidence.sightings)if(!ids.frames.has(row.frame_id))bad();
  for(const row of [...value.evidence.objects,...value.results.counts])if(row.sighting_ids.some(id=>!ids.sightings.has(id)))bad();
  for(const row of value.evidence.frames)if(row.evidence==='AVAILABLE'&&(!row.artifact_id||!row.sha256||!row.width||!row.height))bad();
+ const routeIds=new Set(value.mission.route.map(row=>row.stop_id));
+ if(routeIds.size!==value.mission.route.length)bad();
+ if(value.mission.active_stop_id&&!routeIds.has(value.mission.active_stop_id))bad();
+ for(const row of value.evidence.frames)if(routeIds.size&&!routeIds.has(row.stop_id))bad();
+ if(value.proposal){const proposalIds=new Set(value.proposal.stops.map(row=>row.id));if(proposalIds.size!==value.proposal.stops.length)bad();if(routeIds.size&&[...proposalIds].some(id=>!routeIds.has(id)))bad();}
  return value;
 }
