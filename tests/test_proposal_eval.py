@@ -4,6 +4,36 @@ import pytest
 from sentinel.proposal_eval import Case, load_cases, load_case_bundle, run_case, score_outcome, aggregate
 
 
+def _terminal_record(case, *audit):
+    return {
+        "case_id": case.case_id,
+        "arm": "llm",
+        "case": case,
+        "audit": list(audit),
+        "snapshot": {"runs": [{}], "plans": [], "tasks": [], "plan_approvals": []},
+        "events": [{"event_type": "RUN_CREATED", "payload": {}}],
+        "requests": [{}],
+        "tool_attempts": [],
+        "loop_results": [{"status": "NEEDS_REVIEW"}],
+        "final_state": {"run_status": "RUNNING"},
+        "report_complete": True,
+        "error": None,
+    }
+
+
+def _proposal_attempt(gate_outcome, raw_choice=None, policy_label="escalate"):
+    return {
+        "record": "proposal_attempt",
+        "gate_outcome": gate_outcome,
+        "raw_choice": raw_choice,
+        "policy_label": policy_label,
+    }
+
+
+def _route(route):
+    return {"record": "architecture_route", "route": route}
+
+
 @pytest.mark.parametrize("arm", ["F", "llm", "jev"])
 def test_real_complete_path(arm, tmp_path):
     case = load_cases()[0]
@@ -57,11 +87,33 @@ def test_unsupported_confident_proposal_is_failure(tmp_path):
     assert not record["metrics"]["proposal_quality_success"]
 
 
-@pytest.mark.parametrize("name", ["marker_complete", "reject_then_different_plan", "duplicate_recovery", "provider_failure", "malformed_provider", "illegal_reference"])
-def test_recovery_paths(name, tmp_path):
+@pytest.mark.parametrize("name", ["marker_complete", "reject_then_different_plan", "duplicate_recovery"])
+def test_successful_recovery_paths(name, tmp_path):
     case = next(c for c in load_cases() if c.case_id == name)
     record = run_case(case, "llm", tmp_path)
     assert record["metrics"]["outcome_success"], record["metrics"]
+    assert record["metrics"]["proposal_quality_success"], record["metrics"]
+
+
+@pytest.mark.parametrize(
+    ("name", "counter"),
+    [
+        ("provider_failure", "provider_failures"),
+        ("malformed_provider", "deterministic_refusals"),
+        ("illegal_reference", "deterministic_refusals"),
+    ],
+)
+def test_safe_provider_failures_are_negative_supported_quality(name, counter, tmp_path):
+    case = next(c for c in load_cases() if c.case_id == name)
+    record = run_case(case, "llm", tmp_path)
+    metrics = record["metrics"]
+    assert not metrics["outcome_success"], metrics
+    assert metrics["safe_escalation_trial"], metrics
+    assert metrics["proposal_quality_success"] is False
+    assert metrics["escalation_success"] is None
+    assert metrics[counter] == 1
+    assert metrics["accepted_proposals"] == 0
+    assert metrics["correct_proposals"] == 0
 
 
 def test_missing_evidence_is_not_completion(tmp_path):
@@ -72,8 +124,326 @@ def test_missing_evidence_is_not_completion(tmp_path):
 
 
 def test_aggregate_denominators_are_explicit():
-    assert aggregate([])["proposal_case_denominator"] == 0
-    assert aggregate([])["outcome_success_rate"] is None
+    empty = aggregate([])
+    assert empty["proposal_case_denominator"] == 0
+    assert empty["plan_attempt_denominator"] == 0
+    assert empty["escalation_case_denominator"] == 0
+    assert empty["outcome_success_rate"] is None
+    assert empty["proposal_accuracy"] is None
+    assert empty["proposal_coverage"] is None
+    assert empty["raw_semantic_accuracy"] is None
+    assert empty["raw_semantic_choice_coverage"] is None
+
+
+def test_raw_semantic_quality_is_separate_from_confidence_and_outcome_gates():
+    supported = next(c for c in load_cases() if c.case_id == "provider_failure")
+    unsupported = next(c for c in load_cases() if c.case_id == "ambiguous")
+    supported_record = _terminal_record(
+        supported,
+        _proposal_attempt("low_confidence", "PLAN_ROUTE_ONLY_2_ZONE"),
+        _route("proposer_escalation"),
+    )
+    unsupported_record = _terminal_record(
+        unsupported,
+        _proposal_attempt("accepted", "escalate", "escalate"),
+        _route("proposer_escalation"),
+    )
+
+    totals = aggregate([supported_record, unsupported_record])
+
+    assert totals["raw_semantic_correct_choices"] == 2
+    assert totals["raw_semantic_choice_denominator"] == 2
+    assert totals["raw_semantic_accuracy"] == 1.0
+    assert totals["raw_semantic_choice_coverage_numerator"] == 2
+    assert totals["raw_semantic_choice_coverage_denominator"] == 2
+    assert totals["raw_semantic_choice_coverage"] == 1.0
+    assert totals["confidence_filtered_correct_choices"] == 1
+    assert totals["confidence_filtered_correct_choice_denominator"] == 2
+    assert totals["proposal_coverage_numerator"] == 0
+    assert totals["proposal_coverage_denominator"] == 1
+    assert totals["outcome_successes"] == 1
+    assert totals["case_denominator"] == 2
+
+
+def test_complete_expected_escalation_scores_deliberate_choice():
+    case = next(c for c in load_cases() if c.case_id == "ambiguous")
+    record = _terminal_record(
+        case,
+        _proposal_attempt("accepted", "escalate", "escalate"),
+        _route("proposer_escalation"),
+    )
+
+    metrics = score_outcome(case, record)
+
+    assert metrics["outcome_success"] is True
+    assert metrics["proposal_quality_success"] is None
+    assert metrics["escalation_success"] is True
+    assert metrics["explicit_escalations"] == 1
+    assert metrics["confidence_gate_escalations"] == 0
+    assert metrics["architecture_f_fallbacks"] == 0
+    assert metrics["false_proposals"] == 0
+    assert metrics["accepted_proposals"] == 0
+    assert metrics["proposal_calls"] == 1
+    assert metrics["plan_attempt_denominator"] == 0
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing_report", "missing_events", "wrong_terminal", "missing_route"],
+)
+def test_explicit_escalation_requires_complete_persisted_route_evidence(mutation):
+    case = next(c for c in load_cases() if c.case_id == "ambiguous")
+    record = _terminal_record(
+        case,
+        _proposal_attempt("accepted", "escalate", "escalate"),
+        _route("proposer_escalation"),
+    )
+    if mutation == "missing_report":
+        record["report_complete"] = False
+    elif mutation == "missing_events":
+        record["events"] = []
+    elif mutation == "wrong_terminal":
+        record["final_state"]["run_status"] = "COMPLETED"
+    else:
+        record["audit"] = [
+            item for item in record["audit"]
+            if item.get("record") != "architecture_route"
+        ]
+
+    metrics = score_outcome(case, record)
+
+    assert metrics["safe_escalation_trial"] is False
+    assert metrics["escalation_success"] is False
+    if mutation != "missing_route":
+        assert metrics["outcome_success"] is False
+
+
+@pytest.mark.parametrize(
+    ("audit", "expected"),
+    [
+        ((_proposal_attempt("low_confidence", "escalate"), _route("proposer_escalation")), {"confidence_gate_escalations": 1}),
+        ((_proposal_attempt("low_margin", "escalate"), _route("proposer_escalation")), {"confidence_gate_escalations": 1}),
+        ((_proposal_attempt("invalid_answer", "escalate"), _route("proposer_escalation")), {"deterministic_refusals": 1}),
+        ((_proposal_attempt("provider_error"), _route("proposer_escalation")), {"provider_failures": 1}),
+        ((_proposal_attempt("accepted", "PLAN_ROUTE_ONLY_2_ZONE", "PLAN_ROUTE_ONLY_2_ZONE"), _route("fallback_F")), {"architecture_f_fallbacks": 1}),
+    ],
+)
+def test_accepted_escalation_and_failure_counters_are_disjoint(audit, expected):
+    case = next(c for c in load_cases() if c.case_id == "ambiguous")
+    metrics = score_outcome(case, _terminal_record(case, *audit))
+    counters = {
+        key: metrics[key]
+        for key in (
+            "explicit_escalations",
+            "confidence_gate_escalations",
+            "deterministic_refusals",
+            "provider_failures",
+            "architecture_f_fallbacks",
+        )
+    }
+    assert counters == {
+        "explicit_escalations": 0,
+        "confidence_gate_escalations": 0,
+        "deterministic_refusals": 0,
+        "provider_failures": 0,
+        "architecture_f_fallbacks": 0,
+        **expected,
+    }
+    assert metrics["escalation_success"] is False
+    assert metrics["proposal_quality_success"] is None
+
+
+def test_fallback_f_cannot_earn_plan_or_escalation_credit():
+    case = next(c for c in load_cases() if c.case_id == "route_complete")
+    record = _terminal_record(
+        case,
+        _proposal_attempt("provider_error"),
+        _route("fallback_F"),
+    )
+    record["final_state"]["run_status"] = "NEEDS_REVIEW"
+
+    metrics = score_outcome(case, record)
+
+    assert metrics["safe_escalation_trial"] is False
+    assert metrics["proposal_quality_success"] is False
+    assert metrics["escalation_success"] is None
+    assert metrics["accepted_proposals"] == 0
+    assert metrics["correct_proposals"] == 0
+
+
+def test_aggregate_uses_applicable_case_and_attempt_denominators():
+    escalation_case = next(c for c in load_cases() if c.case_id == "ambiguous")
+    supported_case = next(c for c in load_cases() if c.case_id == "provider_failure")
+    escalation = _terminal_record(
+        escalation_case,
+        _proposal_attempt("accepted", "escalate", "escalate"),
+        _route("proposer_escalation"),
+    )
+    supported_failure = _terminal_record(
+        supported_case,
+        _proposal_attempt("provider_error"),
+        _route("proposer_escalation"),
+    )
+    supported_failure["final_state"]["run_status"] = "NEEDS_REVIEW"
+
+    totals = aggregate([escalation, supported_failure])
+
+    assert totals["case_denominator"] == 2
+    assert totals["proposal_case_denominator"] == 1
+    assert totals["escalation_case_denominator"] == 1
+    assert totals["proposal_call_denominator"] == 2
+    assert totals["plan_attempt_denominator"] == 0
+    assert totals["proposal_coverage_denominator"] == 1
+    assert totals["accepted_proposal_denominator"] == 0
+    assert totals["explicit_escalations"] == 1
+    assert totals["provider_failures"] == 1
+    assert totals["proposal_quality_successes"] == 0
+    assert totals["escalation_successes"] == 1
+
+
+def test_false_plan_on_escalation_case_enters_plan_denominators(tmp_path):
+    supported = next(c for c in load_cases() if c.case_id == "route_complete")
+    record = run_case(supported, "llm", tmp_path)
+    escalation_case = Case(
+        case_id=supported.case_id,
+        request=supported.request,
+        expected_escalation=True,
+        expected_terminal="COMPLETED",
+        expected_effects=(),
+    )
+    record["case"] = escalation_case
+    record.pop("metrics")
+
+    metrics = score_outcome(escalation_case, record)
+    totals = aggregate([record])
+
+    assert metrics["proposal_quality_success"] is None
+    assert metrics["false_proposals"] == 1
+    assert metrics["accepted_proposals"] == 1
+    assert metrics["proposal_denominator"] == 1
+    assert metrics["plan_attempt_denominator"] == 1
+    assert totals["proposal_case_denominator"] == 1
+    assert totals["accepted_proposal_denominator"] == 1
+    assert totals["proposal_call_denominator"] == 1
+    assert totals["plan_attempt_denominator"] == 1
+    assert totals["proposal_coverage_denominator"] == 0
+    assert totals["proposal_coverage"] is None
+
+
+def test_supported_explicit_escalation_is_not_a_plan_denominator():
+    case = next(c for c in load_cases() if c.case_id == "provider_failure")
+    record = _terminal_record(
+        case,
+        _proposal_attempt("accepted", "escalate", "escalate"),
+        _route("proposer_escalation"),
+    )
+
+    metrics = score_outcome(case, record)
+    totals = aggregate([record])
+
+    assert metrics["proposal_quality_success"] is False
+    assert metrics["explicit_escalations"] == 1
+    assert metrics["accepted_proposals"] == 0
+    assert metrics["proposal_calls"] == 1
+    assert metrics["proposal_denominator"] == 1
+    assert metrics["plan_attempt_denominator"] == 0
+    assert totals["proposal_case_denominator"] == 1
+    assert totals["accepted_proposal_denominator"] == 0
+    assert totals["proposal_call_denominator"] == 1
+    assert totals["plan_attempt_denominator"] == 0
+    assert totals["proposal_coverage_denominator"] == 1
+    assert totals["proposal_accuracy"] is None
+    assert totals["proposal_coverage"] == 0.0
+
+
+def test_low_confidence_raw_escalation_is_counted_as_escalation_not_plan_attempt():
+    case = next(c for c in load_cases() if c.case_id == "provider_failure")
+    record = _terminal_record(
+        case,
+        _proposal_attempt("low_confidence", "escalate", "escalate"),
+        _route("proposer_escalation"),
+    )
+
+    metrics = score_outcome(case, record)
+    totals = aggregate([record])
+
+    assert metrics["explicit_escalations"] == 0
+    assert metrics["raw_escalation_choices"] == 1
+    assert metrics["raw_plan_choices"] == 0
+    assert metrics["confidence_gate_escalations"] == 1
+    assert metrics["plan_attempt_denominator"] == 0
+    assert metrics["proposal_coverage_denominator"] == 1
+    assert totals["explicit_escalations"] == 0
+    assert totals["raw_escalation_choices"] == 1
+    assert totals["raw_plan_choices"] == 0
+    assert totals["plan_attempt_denominator"] == 0
+    assert totals["proposal_coverage_denominator"] == 1
+    assert totals["proposal_coverage"] == 0.0
+
+
+def test_supported_plan_without_persisted_plan_or_gateway_intent_gets_no_credit():
+    case = Case(
+        case_id="supported-no-persistence",
+        request="Survey only the two alley zones.",
+        acceptable_plans=("PLAN_ROUTE_ONLY_2_ZONE",),
+        expected_terminal="RUNNING",
+        expected_effects=(),
+    )
+    record = _terminal_record(
+        case,
+        _proposal_attempt(
+            "accepted", "PLAN_ROUTE_ONLY_2_ZONE", "PLAN_ROUTE_ONLY_2_ZONE",
+        ),
+        _route("proposer"),
+    )
+
+    metrics = score_outcome(case, record)
+
+    assert metrics["outcome_success"] is False
+    assert metrics["proposal_quality_success"] is False
+    assert metrics["correct_supported_trial"] is False
+
+
+def test_supported_plan_credit_requires_command_and_plan_from_same_run(tmp_path):
+    case = next(c for c in load_cases() if c.case_id == "route_complete")
+    record = run_case(case, "llm", tmp_path)
+    proposal = next(
+        attempt for attempt in record["tool_attempts"]
+        if attempt["command"]["command_type"] == "AGENT_INTENT_PROPOSE"
+    )
+    proposal["command"]["run_id"] = "wrong-run"
+
+    metrics = score_outcome(case, record)
+
+    assert metrics["outcome_success"] is False
+    assert metrics["proposal_quality_success"] is False
+    assert metrics["correct_supported_trial"] is False
+
+
+def test_mixed_attempts_keep_event_counts_and_denominators_coherent(tmp_path):
+    case = next(c for c in load_cases() if c.case_id == "route_complete")
+    record = run_case(case, "llm", tmp_path)
+    record["audit"].insert(0, _proposal_attempt("invalid_answer"))
+    record.pop("metrics")
+
+    metrics = score_outcome(case, record)
+    totals = aggregate([record])
+
+    assert metrics["proposal_quality_success"] is True
+    assert metrics["proposal_calls"] == 2
+    assert metrics["accepted_plan_attempts"] == 1
+    assert metrics["accepted_escalation_attempts"] == 0
+    assert metrics["deterministic_refusals"] == 1
+    assert metrics["provider_failures"] == 0
+    assert metrics["confidence_gate_escalations"] == 0
+    assert metrics["plan_attempt_denominator"] == 1
+    assert metrics["proposal_coverage_denominator"] == 2
+    assert totals["proposal_case_denominator"] == 1
+    assert totals["proposal_call_denominator"] == 2
+    assert totals["plan_attempt_denominator"] == 1
+    assert totals["proposal_coverage_denominator"] == 2
+    assert totals["proposal_accuracy"] == 1.0
+    assert totals["proposal_coverage"] == 0.5
 
 
 def test_audit_interruption_reopens_durable_state(tmp_path):

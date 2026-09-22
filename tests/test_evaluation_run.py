@@ -3,6 +3,29 @@ import json
 import pytest
 
 
+@pytest.mark.parametrize(
+    ("mode", "statuses", "expected"),
+    [
+        ("scripted", ["synthetic_declared"], "not a fresh model-quality measurement"),
+        ("live", ["independently_labelled"], "fresh independently labelled cases only"),
+        (
+            "live",
+            ["synthetic_declared"],
+            "fresh provider calls on synthetic-declared cases; harness and prompt-sensitivity evidence only",
+        ),
+        (
+            "live",
+            ["synthetic_declared", "independently_labelled"],
+            "fresh provider calls on mixed label provenance; only independently labelled cases support model-quality conclusions",
+        ),
+    ],
+)
+def test_quality_claim_matches_mode_and_case_label_provenance(mode, statuses, expected):
+    from sentinel.evaluation_run import quality_claim
+
+    assert quality_claim(mode, statuses) == expected
+
+
 def test_manifest_change_invalidates_authorization(monkeypatch):
     from sentinel.evaluation_run import manifest_digest, require_authorization
     manifest = {"version": "proposal-eval-run.v1", "mode": "live", "max_calls": 3}

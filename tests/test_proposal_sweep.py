@@ -1,28 +1,643 @@
-"""CLI consent and dry-run boundaries must not create providers or artifacts."""
+"""CLI consent, immutable telemetry, and live-gate boundaries."""
+import hashlib
 import json
+import os
+from pathlib import Path
 import pytest
+
+
+FIXTURE_RELATIVE = "fixtures/proposal_eval/generated-requests-v1.json"
+FIXTURE_SHA256 = "1b1089694fd74a82924c020bacfefc2e7a8b905077f05b8bbe01135777822f70"
+CASE_IDS = [
+    "generated_middle_only", "generated_short_route", "generated_no_ends",
+    "generated_all_tags", "generated_complete_verified", "generated_not_short",
+    "generated_left_only", "generated_front_pair", "generated_verified_middle",
+    "generated_unspecified", "generated_conflicting_coverage", "generated_visible_computers",
+]
+
+
+def _identity_args(arm, model):
+    return ["--expected-resolved-model", f"{arm}={model}",
+            "--identity-decision-note", f"{arm}=reviewed exact provider identity"]
 
 
 def test_dry_run_validates_and_prints_budget_without_artifacts(tmp_path, capsys):
     from scripts.proposal_sweep import main
+    from sentinel.decision_prompt import DECISION_PROMPT_REVISION
     out = tmp_path / "new"
     assert main(["--output", str(out), "--arms", "jev", "--repeats", "1"]) == 0
     printed = json.loads(capsys.readouterr().out)
-    assert printed["manifest"]["maximum_possible_calls"] > 0
-    assert printed["manifest"]["configurations"]["jev"]["requested_model"] == "typesafe/jev-1.13-20260917"
+    manifest = printed["manifest"]
+    fixture = Path(__file__).parents[1] / FIXTURE_RELATIVE
+    assert manifest["maximum_possible_calls"] == 12
+    assert manifest["fixture_path"] == FIXTURE_RELATIVE
+    assert manifest["fixture_sha256"] == hashlib.sha256(fixture.read_bytes()).hexdigest()
+    assert manifest["pinned_fixture_sha256"] == FIXTURE_SHA256
+    assert manifest["fixture_sha256"] != fixture.name
+    assert manifest["case_ids"] == CASE_IDS
+    config = manifest["configurations"]["jev"]
+    assert config["requested_model"] == "typesafe/jev-1.13-20260917"
+    assert config["prompt_revision"] == DECISION_PROMPT_REVISION
+    assert config["decision_prompt_revision"] == DECISION_PROMPT_REVISION
+    assert config["expected_resolved_model"] is None
+    assert config["resolved_model"] is None
+    assert config["identity_status"] == "unverified"
+    assert config["identity_decision_note"] is None
+    assert manifest["thresholds"] == {"jev_act_at": 0.60, "jev_min_margin": 0.15}
     assert len(printed["authorization_sha256"]) == 64
     assert not out.exists()
 
 
-def test_live_dry_run_reports_budgeted_maximum_fresh_calls(capsys):
+def test_dry_run_rejects_semantic_revision_drift_before_provider_or_output(
+        tmp_path, monkeypatch, capsys):
+    from scripts import proposal_sweep
+
+    out = tmp_path / "must-not-exist"
+    monkeypatch.setattr(proposal_sweep, "DECISION_PROMPT_REVISION", "drifted-revision")
+    monkeypatch.setattr(
+        proposal_sweep, "_live_transport",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("provider initialized before revision validation")),
+    )
+
+    status = proposal_sweep.main([
+        "--mode", "live", "--arms", "jev", "--dry-run", "--output", str(out),
+        *_identity_args("jev", "typesafe/jev-1.13-20260917"),
+    ])
+
+    assert status == 2
+    error = capsys.readouterr().err
+    assert "select_plan.complete_constraints.v4" in error
+    assert "drifted-revision" in error
+    assert not out.exists()
+
+
+def test_dry_run_rejects_changed_canonical_fixture_digest_before_provider_or_output(
+        tmp_path, monkeypatch, capsys):
+    from scripts import proposal_sweep
+
+    out = tmp_path / "must-not-exist"
+    actual_file_digest = proposal_sweep.file_digest
+
+    def changed_digest(path):
+        if path.resolve() == proposal_sweep.PINNED_CASES.resolve():
+            return "b" * 64
+        return actual_file_digest(path)
+
+    monkeypatch.setattr(proposal_sweep, "file_digest", changed_digest)
+    monkeypatch.setattr(
+        proposal_sweep, "_live_transport",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("provider initialized before fixture validation")),
+    )
+
+    status = proposal_sweep.main([
+        "--mode", "live", "--arms", "jev", "--dry-run", "--output", str(out),
+        *_identity_args("jev", "typesafe/jev-1.13-20260917"),
+    ])
+
+    assert status == 2
+    error = capsys.readouterr().err
+    assert FIXTURE_SHA256 in error
+    assert "b" * 64 in error
+    assert not out.exists()
+
+
+def test_live_dry_run_binds_reviewed_identity_cost_and_fixed_call_budget(capsys):
     from scripts.proposal_sweep import main
-    assert main(["--mode", "live", "--arms", "jev", "--dry-run", "--max-calls", "5"]) == 0
+    args = ["--mode", "live", "--arms", "jev", "--dry-run", "--max-calls", "36",
+            "--cost-per-call-usd", "0.025", *_identity_args("jev", "typesafe/jev-1.13-20260917")]
+    assert main(args) == 0
     manifest = json.loads(capsys.readouterr().out)["manifest"]
-    assert manifest["maximum_possible_calls"] > 5
-    assert manifest["maximum_fresh_provider_calls"] == 5
+    assert manifest["repeats"] == 3
+    assert manifest["maximum_possible_calls"] == 36
+    assert manifest["maximum_fresh_provider_calls"] == 36
+    assert manifest["cost_per_call_usd_assumption"] == 0.025
+    assert manifest["estimated_cost_usd"] == pytest.approx(0.9)
+    assert manifest["quality_claim"] == (
+        "fresh provider calls on synthetic-declared cases; "
+        "harness and prompt-sensitivity evidence only"
+    )
+    assert manifest["token_accounting"] == {
+        "prompt_tokens": None, "completion_tokens": None, "total_tokens": None,
+    }
+    assert manifest["configurations"]["jev"]["expected_resolved_model"] == "typesafe/jev-1.13-20260917"
+    assert manifest["configurations"]["jev"]["identity_decision_note"] == "reviewed exact provider identity"
 
 
-def test_live_refuses_before_initializing_provider_or_artifacts(tmp_path, monkeypatch):
+def test_llm_dry_run_requires_exact_reviewed_prompt_and_tool_revisions(monkeypatch, capsys):
+    from scripts.proposal_sweep import main
+
+    monkeypatch.setenv("SENTINEL_LLM_PROVIDER", "openrouter")
+    monkeypatch.setenv("SENTINEL_LLM_MODEL", "z-ai/glm-5.3")
+    monkeypatch.setenv("SENTINEL_LLM_TIMEOUT_MS", "10000")
+    monkeypatch.setenv("SENTINEL_LLM_PROMPT_REVISION", "prompt-v4-complete-constraints")
+    monkeypatch.setenv("SENTINEL_LLM_TOOL_POLICY_REVISION", "legal-tools-v2")
+    monkeypatch.setenv("SENTINEL_LLM_API_KEY_ENV", "OPENROUTER_API_KEY")
+    args = ["--mode", "live", "--arms", "llm", "--dry-run",
+            *_identity_args("llm", "z-ai/glm-5.3")]
+    assert main(args) == 0
+    config = json.loads(capsys.readouterr().out)["manifest"]["configurations"]["llm"]
+    assert config["prompt_revision"] == "prompt-v4-complete-constraints"
+    assert config["tool_policy_revision"] == "legal-tools-v2"
+    assert config["decision_prompt_revision"] == "select_plan.complete_constraints.v4"
+
+    monkeypatch.setenv("SENTINEL_LLM_PROMPT_REVISION", "old")
+    assert main(args) == 2
+    assert "prompt-v4-complete-constraints" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("option,value", [
+    ("--expected-resolved-model", "bogus=model"),
+    ("--identity-decision-note", "bogus=reviewed"),
+    ("--expected-resolved-model", "jev="),
+    ("--identity-decision-note", "jev="),
+])
+def test_identity_mapping_arguments_validate_selected_arms_and_nonempty_values(option, value, capsys):
+    from scripts.proposal_sweep import main
+    assert main(["--arms", "jev", option, value]) == 2
+    assert "evaluation refused" in capsys.readouterr().err
+
+
+def test_expected_model_identity_is_bounded_before_manifest_or_output(tmp_path, capsys):
+    from scripts.proposal_sweep import main
+
+    out = tmp_path / "must-not-exist"
+    status = main([
+        "--mode", "live", "--arms", "jev", "--dry-run", "--output", str(out),
+        *_identity_args("jev", "m" * 257),
+    ])
+    assert status == 2
+    assert "256" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_live_identity_mappings_are_required_for_each_model_arm(capsys):
+    from scripts.proposal_sweep import main
+    assert main(["--mode", "live", "--arms", "jev", "--dry-run"]) == 2
+    error = capsys.readouterr().err
+    assert "expected-resolved-model" in error
+    assert "identity-decision-note" in error
+
+
+@pytest.mark.parametrize(("observed", "expected", "total", "status"), [
+    (["typesafe/jev-1.13-20260917"] * 36, "typesafe/jev-1.13-20260917", 36, "verified"),
+    (["typesafe/jev-1.13-20260917"], "typesafe/jev-1.13-20260917", 36, "partially_verified"),
+    ([], "typesafe/jev-1.13-20260917", 36, "unverified"),
+    (["~typesafe/jev-latest"] * 36, "typesafe/jev-1.13-20260917", 36, "mismatched"),
+    (["z-ai/glm-5.3-flash"], "z-ai/glm-5.3", 1, "mismatched"),
+])
+def test_identity_classification_uses_exact_model_ids(observed, expected, total, status):
+    from scripts.proposal_sweep import _classify_identity
+    assert _classify_identity(observed, expected, total) == status
+
+
+def test_live_gate_has_exact_applicability_and_denominators():
+    from scripts.proposal_sweep import _evaluate_live_gate
+
+    manifest = {
+        "mode": "live", "arms": ["jev"], "fixture_path": FIXTURE_RELATIVE,
+        "fixture_sha256": FIXTURE_SHA256, "pinned_fixture_sha256": FIXTURE_SHA256,
+        "repeats": 3,
+        "max_calls": 36,
+    }
+    trials = []
+    for repeat in range(1, 4):
+        for index, case_id in enumerate(CASE_IDS):
+            supported = index < 6
+            trials.append({
+                "case_id": case_id, "repeat": repeat, "supported": supported,
+                "supported_correct": supported, "safe_escalation": not supported,
+                "correct_supported_trial": supported,
+                "safe_escalation_trial": not supported,
+                "unsupported_false_proposal": False, "architecture_f_fallbacks": 0,
+                "event_counts": {"provider_request": 1, "provider_result": 1,
+                                 "proposal_attempt": 1, "case_outcome": 1},
+            })
+    gate = _evaluate_live_gate(manifest, trials, identity_status="verified")
+    assert gate == {
+        "live_gate_applicable": True, "passed": True,
+        "supported_correct": 18, "supported_denominator": 18,
+        "safe_escalation": 18, "escalation_denominator": 18,
+        "unsupported_false_proposals": 0, "unsupported_denominator": 18,
+        "architecture_f_fallbacks": 0, "f_credit": 0,
+        "terminal_trials": 36, "failure_reasons": [],
+    }
+
+    for changed in (
+        {"mode": "scripted"}, {"arms": ["jev", "llm"]}, {"repeats": 2},
+        {"fixture_path": "fixtures/proposal_eval/cases.json"}, {"fixture_sha256": "b" * 64},
+    ):
+        candidate = {**manifest, **changed}
+        assert _evaluate_live_gate(candidate, trials, identity_status="verified")["live_gate_applicable"] is False
+    forged = {**manifest, "fixture_sha256": "b" * 64, "pinned_fixture_sha256": "b" * 64}
+    assert _evaluate_live_gate(forged, trials, identity_status="verified")["live_gate_applicable"] is False
+
+
+def test_overlength_provider_identity_cannot_verify_matching_256_character_prefix():
+    from scripts.proposal_sweep import _classify_identity
+    from sentinel.adapter.llm.openai_compatible import _observation_from_mapping
+
+    expected = "m" * 256
+    observation = _observation_from_mapping({"model": expected + "-different-release"})
+    observed = [observation["model"]] if observation["model"] else []
+
+    assert observation["model"] is None
+    assert _classify_identity(observed, expected, 1) == "unverified"
+
+
+def test_identity_mismatch_fails_applicable_gate_and_bad_shape_is_nonapplicable():
+    from scripts.proposal_sweep import _evaluate_live_gate
+    manifest = {"mode": "live", "arms": ["jev"], "fixture_path": FIXTURE_RELATIVE,
+                "fixture_sha256": FIXTURE_SHA256, "pinned_fixture_sha256": FIXTURE_SHA256,
+                "repeats": 3, "max_calls": 36}
+    trials = [{"case_id": CASE_IDS[i % 12], "repeat": i // 12 + 1, "supported": i % 12 < 6,
+               "supported_correct": i % 12 < 6, "safe_escalation": i % 12 >= 6,
+               "correct_supported_trial": i % 12 < 6,
+               "safe_escalation_trial": i % 12 >= 6,
+               "unsupported_false_proposal": False, "architecture_f_fallbacks": 0,
+               "event_counts": {"provider_request": 1, "provider_result": 1,
+                                "proposal_attempt": 1, "case_outcome": 1}}
+              for i in range(36)]
+    mismatch = _evaluate_live_gate(manifest, trials, identity_status="mismatched")
+    assert mismatch["live_gate_applicable"] is True
+    assert mismatch["passed"] is False
+    trials[0]["event_counts"]["provider_result"] = 0
+    gate = _evaluate_live_gate(manifest, trials, identity_status="verified")
+    assert gate["live_gate_applicable"] is False
+    assert gate["passed"] is False
+    assert "trial_event_shape" in gate["failure_reasons"]
+
+
+def test_live_gate_escalation_credit_requires_authoritative_safe_escalation_score():
+    from scripts.proposal_sweep import _evaluate_live_gate
+
+    manifest = {"mode": "live", "arms": ["jev"], "fixture_path": FIXTURE_RELATIVE,
+                "fixture_sha256": FIXTURE_SHA256, "pinned_fixture_sha256": FIXTURE_SHA256,
+                "repeats": 3, "max_calls": 36}
+    trials = [{
+        "case_id": CASE_IDS[i % 12], "repeat": i // 12 + 1, "supported": i % 12 < 6,
+        "supported_correct": i % 12 < 6, "safe_escalation": i % 12 >= 6,
+        "correct_supported_trial": i % 12 < 6,
+        "safe_escalation_trial": i % 12 >= 6,
+        "unsupported_false_proposal": False, "architecture_f_fallbacks": 0,
+        "event_counts": {"provider_request": 1, "provider_result": 1,
+                         "proposal_attempt": 1, "case_outcome": 1},
+    } for i in range(36)]
+    # Generic outcome success remains true, but one escalation lacks the
+    # authoritative proposer_escalation route/persisted evidence score.
+    escalation = next(row for row in trials if not row["supported"])
+    escalation["safe_escalation_trial"] = False
+
+    gate = _evaluate_live_gate(manifest, trials, identity_status="verified")
+
+    assert gate["live_gate_applicable"] is True
+    assert gate["safe_escalation"] == 17
+    assert gate["passed"] is False
+    assert "safe_escalation" in gate["failure_reasons"]
+
+
+def test_live_gate_supported_credit_requires_authoritative_correct_supported_score():
+    from scripts.proposal_sweep import _evaluate_live_gate
+
+    manifest = {"mode": "live", "arms": ["jev"], "fixture_path": FIXTURE_RELATIVE,
+                "fixture_sha256": FIXTURE_SHA256, "pinned_fixture_sha256": FIXTURE_SHA256,
+                "repeats": 3, "max_calls": 36}
+    trials = [{
+        "case_id": CASE_IDS[i % 12], "repeat": i // 12 + 1, "supported": i % 12 < 6,
+        "supported_correct": i % 12 < 6, "safe_escalation": i % 12 >= 6,
+        "correct_supported_trial": i % 12 < 6,
+        "safe_escalation_trial": i % 12 >= 6,
+        "unsupported_false_proposal": False, "architecture_f_fallbacks": 0,
+        "event_counts": {"provider_request": 1, "provider_result": 1,
+                         "proposal_attempt": 1, "case_outcome": 1},
+    } for i in range(36)]
+    supported = next(row for row in trials if row["supported"])
+    supported["correct_supported_trial"] = False
+
+    gate = _evaluate_live_gate(manifest, trials, identity_status="verified")
+
+    assert gate["live_gate_applicable"] is True
+    assert gate["supported_correct"] == 17
+    assert gate["passed"] is False
+    assert "supported_correct" in gate["failure_reasons"]
+
+
+def _semantic_gate_inputs():
+    manifest = {
+        "mode": "live", "arms": ["jev"], "fixture_path": FIXTURE_RELATIVE,
+        "fixture_sha256": FIXTURE_SHA256,
+        "pinned_fixture_sha256": FIXTURE_SHA256,
+        "repeats": 3, "max_calls": 36,
+    }
+    trials = []
+    for repeat in range(1, 4):
+        for index, case_id in enumerate(CASE_IDS):
+            supported = index < 6
+            trials.append({
+                "case_id": case_id, "repeat": repeat, "supported": supported,
+                "raw_semantic_correct_choices": 1,
+                "raw_semantic_choice_denominator": 1,
+                "raw_escalation_choices": 0 if supported else 1,
+                "raw_plan_choices": 1 if supported else 0,
+                "confidence_filtered_correct_choices": 0,
+                "confidence_filtered_correct_choice_denominator": 1,
+                "unsupported_false_proposals": 0,
+                "provider_failures": 0, "deterministic_refusals": 0,
+                "architecture_f_fallbacks": 0,
+                "event_counts": {
+                    "provider_request": 1, "provider_result": 1,
+                    "proposal_attempt": 1, "case_outcome": 1,
+                },
+            })
+    return manifest, trials
+
+
+def test_semantic_boundary_gate_accepts_correct_raw_choice_filtered_by_confidence():
+    from scripts.proposal_sweep import _evaluate_semantic_boundary_gate
+
+    manifest, trials = _semantic_gate_inputs()
+    trials[0]["confidence_filtered_correct_choices"] = 1
+
+    gate = _evaluate_semantic_boundary_gate(
+        manifest, trials, identity_status="verified",
+    )
+
+    assert gate["version"] == "semantic_boundary_gate.v1"
+    assert gate["applicable"] is True
+    assert gate["passed"] is True
+    assert gate["raw_supported_correct"] == 18
+    assert gate["raw_supported_denominator"] == 18
+    assert gate["raw_unsupported_escalations"] == 18
+    assert gate["raw_unsupported_denominator"] == 18
+    assert gate["confidence_filtered_correct_choices"] == 1
+    assert gate["confidence_filtered_correct_choice_denominator"] == 36
+
+
+def test_semantic_boundary_gate_rejects_wrong_high_confidence_supported_choice():
+    from scripts.proposal_sweep import _evaluate_semantic_boundary_gate
+
+    manifest, trials = _semantic_gate_inputs()
+    trials[0]["raw_semantic_correct_choices"] = 0
+
+    gate = _evaluate_semantic_boundary_gate(
+        manifest, trials, identity_status="verified",
+    )
+
+    assert gate["passed"] is False
+    assert gate["raw_supported_correct"] == 17
+    assert "raw_supported_labels" in gate["failure_reasons"]
+
+
+def test_semantic_boundary_gate_rejects_safe_low_confidence_unsupported_plan():
+    from scripts.proposal_sweep import _evaluate_semantic_boundary_gate
+
+    manifest, trials = _semantic_gate_inputs()
+    unsupported = next(row for row in trials if not row["supported"])
+    unsupported.update(
+        raw_semantic_correct_choices=0,
+        raw_escalation_choices=0,
+        raw_plan_choices=1,
+        confidence_filtered_correct_choices=0,
+    )
+
+    gate = _evaluate_semantic_boundary_gate(
+        manifest, trials, identity_status="verified",
+    )
+
+    assert gate["passed"] is False
+    assert gate["unsupported_raw_plan_choices"] == 1
+    assert "raw_unsupported_escalations" in gate["failure_reasons"]
+    assert "unsupported_raw_plan_choices" in gate["failure_reasons"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("missing", "trial_event_shape"),
+        ("identity", "identity_mismatched"),
+        ("fallback", "architecture_f_fallbacks"),
+        ("provider", "provider_failures"),
+        ("malformed", "deterministic_refusals"),
+        ("unsupported_accepted", "unsupported_accepted_plans"),
+    ],
+)
+def test_semantic_boundary_gate_refuses_ineligible_credit(mutation, reason):
+    from scripts.proposal_sweep import _evaluate_semantic_boundary_gate
+
+    manifest, trials = _semantic_gate_inputs()
+    identity = "verified"
+    if mutation == "missing":
+        trials[0]["event_counts"]["proposal_attempt"] = 0
+    elif mutation == "identity":
+        identity = "mismatched"
+    elif mutation == "fallback":
+        trials[0]["architecture_f_fallbacks"] = 1
+    elif mutation == "provider":
+        trials[0]["provider_failures"] = 1
+    elif mutation == "malformed":
+        trials[0]["deterministic_refusals"] = 1
+    else:
+        next(row for row in trials if not row["supported"])[
+            "unsupported_false_proposals"
+        ] = 1
+
+    gate = _evaluate_semantic_boundary_gate(
+        manifest, trials, identity_status=identity,
+    )
+
+    assert gate["passed"] is False
+    assert reason in gate["failure_reasons"]
+
+
+def test_completed_applicable_live_gate_failure_exits_nonzero_without_network(
+        tmp_path, monkeypatch, capsys):
+    from dataclasses import asdict
+    from types import SimpleNamespace
+    from scripts import proposal_sweep
+
+    expected_model = "typesafe/jev-1.13-20260917"
+    provider_calls = []
+
+    class FakeJudge:
+        def __init__(self, stream, observations):
+            self.stream = stream
+            self.observations = observations
+
+        def choice(self, **kwargs):
+            provider_calls.append(kwargs)
+            self.stream.write({"record": "provider_wire_request", "request": {"model": expected_model}})
+            self.observations.append({
+                "model": expected_model,
+                "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+            })
+            return {"value": "PLAN_ROUTE_ONLY_2_ZONE"}
+
+    def fake_run_case(case, arm, output_dir, proposer_factory=None, **kwargs):
+        directory = output_dir / case.case_id / arm
+        directory.mkdir(parents=True)
+        measured = proposer_factory(arm, SimpleNamespace(write=lambda row: None), case)
+        measured.choice(state={}, instruction="select", criteria={}, name="select_plan")
+        return {
+            "case": asdict(case),
+            "artifact_dir": str(directory),
+            "audit": [{"record": "proposal_attempt", "gate_outcome": "accepted"}],
+            "metrics": {
+                "outcome_success": True,
+                "failure_reasons": [],
+                "correct_supported_trial": not case.expected_escalation,
+                "safe_escalation_trial": False,
+                "architecture_f_fallbacks": 0,
+                "unsupported_false_proposals": 0,
+            },
+        }
+
+    monkeypatch.setattr(proposal_sweep, "require_authorization", lambda manifest: None)
+    monkeypatch.setattr(proposal_sweep, "require_proposer_consent", lambda arm: None)
+    monkeypatch.setattr(
+        proposal_sweep, "_live_transport",
+        lambda arm, config, stream, observations: FakeJudge(stream, observations),
+    )
+    monkeypatch.setattr(
+        proposal_sweep, "build_proposer",
+        lambda *args, judge_factory=None, **kwargs: judge_factory(),
+    )
+    monkeypatch.setattr(proposal_sweep, "run_case", fake_run_case)
+    monkeypatch.setattr(
+        proposal_sweep, "aggregate",
+        lambda records: {"case_denominator": len(records), "plan_attempt_denominator": len(records)},
+    )
+    out = tmp_path / "fake-live"
+
+    status = proposal_sweep.main([
+        "--mode", "live", "--arms", "jev", "--execute", "--output", str(out),
+        *_identity_args("jev", expected_model),
+    ])
+    capsys.readouterr()
+
+    summary = json.loads((out / "summary.json").read_text())
+    assert status == 1
+    assert len(provider_calls) == 36
+    assert summary["live_gate"]["live_gate_applicable"] is True
+    assert summary["live_gate"]["passed"] is False
+    assert summary["live_gate"]["supported_correct"] == 18
+    assert summary["live_gate"]["safe_escalation"] == 0
+
+
+def test_applicable_semantic_gate_failure_exits_nonzero_when_live_gate_passes(
+        tmp_path, monkeypatch, capsys):
+    from dataclasses import asdict
+    from types import SimpleNamespace
+    from scripts import proposal_sweep
+
+    expected_model = "typesafe/jev-1.13-20260917"
+
+    class FakeJudge:
+        def __init__(self, stream, observations):
+            self.stream = stream
+            self.observations = observations
+
+        def choice(self, **kwargs):
+            self.stream.write({
+                "record": "provider_wire_request",
+                "request": {"model": expected_model},
+            })
+            self.observations.append({
+                "model": expected_model,
+                "usage": {
+                    "prompt_tokens": 2, "completion_tokens": 1,
+                    "total_tokens": 3,
+                },
+            })
+            return {"value": "PLAN_ROUTE_ONLY_2_ZONE"}
+
+    def fake_run_case(case, arm, output_dir, proposer_factory=None, **kwargs):
+        directory = output_dir / case.case_id / arm
+        directory.mkdir(parents=True)
+        measured = proposer_factory(
+            arm, SimpleNamespace(write=lambda row: None), case,
+        )
+        measured.choice(
+            state={}, instruction="select", criteria={}, name="select_plan",
+        )
+        wrong_unsupported_raw_plan = (
+            case.expected_escalation and case.case_id == CASE_IDS[6]
+        )
+        raw_correct = not wrong_unsupported_raw_plan
+        return {
+            "case": asdict(case),
+            "artifact_dir": str(directory),
+            "audit": [{
+                "record": "proposal_attempt",
+                "gate_outcome": (
+                    "low_confidence" if wrong_unsupported_raw_plan else "accepted"
+                ),
+            }],
+            "metrics": {
+                "outcome_success": True,
+                "failure_reasons": [],
+                "correct_supported_trial": not case.expected_escalation,
+                "safe_escalation_trial": case.expected_escalation,
+                "raw_semantic_correct_choices": int(raw_correct),
+                "raw_semantic_choice_denominator": 1,
+                "raw_escalation_choices": int(
+                    case.expected_escalation and raw_correct
+                ),
+                "raw_plan_choices": int(
+                    not case.expected_escalation or wrong_unsupported_raw_plan
+                ),
+                "confidence_filtered_correct_choices": 0,
+                "confidence_filtered_correct_choice_denominator": int(raw_correct),
+                "architecture_f_fallbacks": 0,
+                "unsupported_false_proposals": 0,
+                "provider_failures": 0,
+                "deterministic_refusals": 0,
+            },
+        }
+
+    monkeypatch.setattr(
+        proposal_sweep, "require_authorization", lambda manifest: None,
+    )
+    monkeypatch.setattr(
+        proposal_sweep, "require_proposer_consent", lambda arm: None,
+    )
+    monkeypatch.setattr(
+        proposal_sweep, "_live_transport",
+        lambda arm, config, stream, observations: FakeJudge(
+            stream, observations,
+        ),
+    )
+    monkeypatch.setattr(
+        proposal_sweep, "build_proposer",
+        lambda *args, judge_factory=None, **kwargs: judge_factory(),
+    )
+    monkeypatch.setattr(proposal_sweep, "run_case", fake_run_case)
+    monkeypatch.setattr(
+        proposal_sweep, "aggregate",
+        lambda records: {
+            "case_denominator": len(records),
+            "plan_attempt_denominator": len(records),
+        },
+    )
+    out = tmp_path / "semantic-failure"
+
+    status = proposal_sweep.main([
+        "--mode", "live", "--arms", "jev", "--execute",
+        "--output", str(out), *_identity_args("jev", expected_model),
+    ])
+    capsys.readouterr()
+
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["live_gate"]["live_gate_applicable"] is True
+    assert summary["live_gate"]["passed"] is True
+    assert summary["semantic_boundary_gate"]["applicable"] is True
+    assert summary["semantic_boundary_gate"]["passed"] is False
+    assert summary["semantic_boundary_gate"]["unsupported_raw_plan_choices"] == 3
+    assert status == 1
+
+
+def test_live_refuses_manifest_authorization_before_initializing_provider_or_artifacts(
+        tmp_path, monkeypatch, capsys):
     from scripts import proposal_sweep
     monkeypatch.delenv("SENTINEL_PROPOSAL_EVAL_CONSENT", raising=False)
     monkeypatch.setenv("SENTINEL_JEV_PROPOSER_CONSENT", "older-generic-consent")
@@ -30,13 +645,209 @@ def test_live_refuses_before_initializing_provider_or_artifacts(tmp_path, monkey
         raise AssertionError("provider initialized without manifest authorization")
     monkeypatch.setattr(proposal_sweep, "_live_transport", forbidden)
     out = tmp_path / "new"
-    assert proposal_sweep.main(["--mode", "live", "--arms", "jev", "--execute", "--output", str(out)]) == 2
+    assert proposal_sweep.main([
+        "--mode", "live", "--arms", "jev", "--execute", "--output", str(out),
+        *_identity_args("jev", "typesafe/jev-1.13-20260917"),
+    ]) == 2
+    assert "SENTINEL_PROPOSAL_EVAL_CONSENT" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_jev_execute_loads_nearest_env_before_authorization_and_process_env_wins(
+        tmp_path, monkeypatch, capsys):
+    from dataclasses import asdict
+    from types import SimpleNamespace
+    from scripts import proposal_sweep
+
+    isolated_env = dict(os.environ)
+    isolated_env.pop("SENTINEL_PROPOSAL_EVAL_CONSENT", None)
+    isolated_env.pop("SENTINEL_JEV_PROPOSER_CONSENT", None)
+    monkeypatch.setattr(os, "environ", isolated_env)
+    monkeypatch.chdir(tmp_path)
+    fixture = _escalation_fixture(tmp_path)
+    common = [
+        "--mode", "live", "--arms", "jev", "--fixtures", str(fixture),
+        *_identity_args("jev", "typesafe/jev-1.13-20260917"),
+    ]
+
+    assert proposal_sweep.main([*common, "--dry-run"]) == 0
+    authorization = json.loads(capsys.readouterr().out)["authorization_sha256"]
+    file_consent = "jev-consent-from-nearest-env"
+    (tmp_path / ".env").write_text(
+        f"SENTINEL_PROPOSAL_EVAL_CONSENT={authorization}\n"
+        f"SENTINEL_JEV_PROPOSER_CONSENT={file_consent}\n",
+        encoding="utf-8",
+    )
+    provider_environments = []
+
+    def fake_transport(*args, **kwargs):
+        provider_environments.append((
+            os.environ.get("SENTINEL_PROPOSAL_EVAL_CONSENT"),
+            os.environ.get("SENTINEL_JEV_PROPOSER_CONSENT"),
+        ))
+        return SimpleNamespace()
+
+    def fake_run_case(case, arm, output_dir, proposer_factory=None, **kwargs):
+        directory = output_dir / case.case_id / arm
+        directory.mkdir(parents=True)
+        proposer_factory(arm, SimpleNamespace(write=lambda row: None), case)
+        return {
+            "case": asdict(case), "artifact_dir": str(directory), "audit": [],
+            "metrics": {
+                "outcome_success": False, "failure_reasons": ["fixture-only"],
+                "correct_supported_trial": False, "safe_escalation_trial": False,
+                "architecture_f_fallbacks": 0, "unsupported_false_proposals": 0,
+            },
+        }
+
+    monkeypatch.setattr(proposal_sweep, "_live_transport", fake_transport)
+    monkeypatch.setattr(proposal_sweep, "run_case", fake_run_case)
+    monkeypatch.setattr(
+        proposal_sweep, "aggregate",
+        lambda records: {"case_denominator": len(records),
+                         "plan_attempt_denominator": len(records)},
+    )
+    from_file = tmp_path / "from-file"
+    assert proposal_sweep.main([*common, "--execute", "--output", str(from_file)]) == 0
+    printed = capsys.readouterr()
+    assert provider_environments == [(authorization, file_consent)] * 3
+    assert file_consent not in printed.out + printed.err
+    persisted = "".join(
+        path.read_text(encoding="utf-8")
+        for path in from_file.rglob("*") if path.is_file()
+    )
+    assert file_consent not in persisted
+
+    explicit_consent = "explicit-process-consent"
+    isolated_env["SENTINEL_PROPOSAL_EVAL_CONSENT"] = authorization
+    isolated_env["SENTINEL_JEV_PROPOSER_CONSENT"] = explicit_consent
+    (tmp_path / ".env").write_text(
+        "SENTINEL_PROPOSAL_EVAL_CONSENT=wrong-file-authorization\n"
+        "SENTINEL_JEV_PROPOSER_CONSENT=wrong-file-consent\n",
+        encoding="utf-8",
+    )
+    provider_environments.clear()
+    from_process = tmp_path / "from-process"
+    assert proposal_sweep.main([
+        *common, "--execute", "--output", str(from_process),
+    ]) == 0
+    printed = capsys.readouterr()
+    assert provider_environments == [(authorization, explicit_consent)] * 3
+    assert explicit_consent not in printed.out
+    assert explicit_consent not in printed.err
+    persisted = "".join(
+        path.read_text(encoding="utf-8")
+        for path in from_process.rglob("*") if path.is_file()
+    )
+    assert explicit_consent not in persisted
+
+
+def test_jev_dry_run_loads_env_without_artifacts_provider_or_secret_output(
+        tmp_path, monkeypatch, capsys):
+    from scripts import proposal_sweep
+
+    isolated_env = dict(os.environ)
+    isolated_env.pop("SENTINEL_PROPOSAL_EVAL_CONSENT", None)
+    isolated_env.pop("SENTINEL_JEV_PROPOSER_CONSENT", None)
+    monkeypatch.setattr(os, "environ", isolated_env)
+    monkeypatch.chdir(tmp_path)
+    manifest_secret = "dry-run-manifest-secret"
+    provider_secret = "dry-run-provider-secret"
+    (tmp_path / ".env").write_text(
+        f"SENTINEL_PROPOSAL_EVAL_CONSENT={manifest_secret}\n"
+        f"SENTINEL_JEV_PROPOSER_CONSENT={provider_secret}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        proposal_sweep, "_live_transport",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("dry run initialized provider")),
+    )
+    out = tmp_path / "must-not-exist"
+
+    status = proposal_sweep.main([
+        "--mode", "live", "--arms", "jev", "--dry-run", "--output", str(out),
+        *_identity_args("jev", "typesafe/jev-1.13-20260917"),
+    ])
+
+    printed = capsys.readouterr()
+    assert status == 0
+    assert isolated_env["SENTINEL_PROPOSAL_EVAL_CONSENT"] == manifest_secret
+    assert isolated_env["SENTINEL_JEV_PROPOSER_CONSENT"] == provider_secret
+    assert manifest_secret not in printed.out + printed.err
+    assert provider_secret not in printed.out + printed.err
     assert not out.exists()
 
 
 def test_recorded_mode_requires_capture_file(tmp_path):
     from scripts.proposal_sweep import main
     assert main(["--mode", "recorded", "--execute", "--output", str(tmp_path / "new")]) == 2
+
+
+def test_report_separates_raw_semantics_confidence_filtering_and_outcomes():
+    from scripts.proposal_sweep import _render
+
+    metrics = {"jev": {
+        "raw_semantic_correct_choices": 36,
+        "raw_semantic_choice_denominator": 36,
+        "confidence_filtered_correct_choices": 6,
+        "confidence_filtered_correct_choice_denominator": 36,
+        "proposal_coverage_numerator": 13,
+        "proposal_coverage_denominator": 18,
+        "outcome_successes": 31,
+        "case_denominator": 36,
+    }}
+    report = _render(
+        {"mode": "recorded", "revision": "abc", "dirty": False},
+        [], metrics, {},
+        {
+            "live_gate_applicable": False, "passed": False,
+            "supported_correct": 0, "safe_escalation": 0,
+            "unsupported_false_proposals": 0,
+        },
+        {"version": "semantic_boundary_gate.v1", "passed": True},
+    )
+
+    assert "Decision layers" in report
+    assert "36 / 36" in report
+    assert "6 / 36" in report
+    assert "13 / 18" in report
+    assert "31 / 36" in report
+    assert "semantic_boundary_gate.v1" in report
+
+
+@pytest.mark.parametrize(("provider_model", "expected"), [
+    ("typesafe/jev-1.13-20260917", ["typesafe/jev-1.13-20260917"]),
+    ("m" * 256 + "-different-release", [None]),
+])
+def test_recorded_model_identity_uses_live_observation_sanitizer(
+        tmp_path, provider_model, expected):
+    from types import SimpleNamespace
+    from scripts.proposal_sweep import _load_recording
+
+    source_manifest = {"fixture_sha256": "f" * 64, "catalogue_sha256": "c" * 64}
+    key_fields = {"case_id": "case", "arm": "jev", "repeat": 1}
+    rows = [
+        {"record": "run_manifest", "manifest": source_manifest},
+        {"record": "provider_request", **key_fields, "request": {"state": "bounded"}},
+        {"record": "provider_result", **key_fields, "result": {"value": "plan"}},
+        {"record": "provider_wire_result", **key_fields,
+         "response": {"model": provider_model, "choices": ["must-not-be-projected"]}},
+    ]
+    recording = tmp_path / "raw.jsonl"
+    recording.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    _captured, identities, _source = _load_recording(
+        recording,
+        source_manifest,
+        [SimpleNamespace(case_id="case")],
+        ["jev"],
+        1,
+    )
+
+    assert identities[("case", "jev", 1)] == expected
+    if expected == [None]:
+        assert provider_model not in json.dumps(identities[("case", "jev", 1)])
 
 
 def _escalation_fixture(tmp_path):
@@ -96,6 +907,52 @@ def test_live_jev_preserves_http_failure_evidence(monkeypatch):
     assert responses and responses[0]["http_status"] == 429
     assert "rate limited" in json.dumps(responses[0])
     assert "private HTTP details" not in json.dumps(records)
+
+
+def test_provider_observation_is_ineligible_when_append_only_write_fails(monkeypatch):
+    import httpx
+    from scripts.proposal_sweep import _live_transport
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    observations = []
+
+    class ThrowingStream:
+        def __init__(self):
+            self.records = []
+            self.observation_writes = 0
+
+        def write(self, row):
+            if row.get("record") == "provider_observation":
+                self.observation_writes += 1
+                raise OSError("synthetic append-only failure")
+            self.records.append(row)
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "model": "typesafe/jev-1.13-20260917",
+                "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+                "answers": {"select_plan": {
+                    "type": "choice", "choice": "plan", "probabilities": {"plan": 1.0},
+                }},
+            }
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: Response())
+    stream = ThrowingStream()
+    judge = _live_transport("jev", None, stream, observations)
+
+    answer = judge.choice(
+        state={}, instruction="choose", criteria={"plan": "plan"}, name="select_plan")
+
+    assert answer["value"] == "plan"
+    assert stream.observation_writes == 1
+    assert observations == []
 
 
 def test_live_jev_preserves_malformed_http_body(monkeypatch):

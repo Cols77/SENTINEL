@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from sentinel.contracts import AgentRequest
+from sentinel.decision_prompt import DECISION_PROMPT_REVISION, SELECT_PLAN_INSTRUCTION
 
 from .parser import APPROVED_TOOL_NAMES, wire_tool_name
 
@@ -51,6 +52,23 @@ _TOOL_DEFINITIONS = (
 )
 
 APPROVED_TOOL_NAMES = tuple(APPROVED_TOOL_NAMES)
+
+_TOOL_DEFINITION_BY_NAME = {
+    name: definition
+    for name in APPROVED_TOOL_NAMES
+    for definition in _TOOL_DEFINITIONS
+    if definition["function"]["name"] == wire_tool_name(name)
+}
+
+
+def _tool_definitions(legal_tools: Sequence[str]) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for name in legal_tools:
+        definition = _TOOL_DEFINITION_BY_NAME.get(name)
+        if definition is None:
+            raise ValueError(f"legal tool has no provider definition: {name}")
+        selected.append(definition)
+    return copy.deepcopy(selected)
 
 
 def _text(value: Any, limit: int = PROMPT_MAX_TEXT) -> str:
@@ -205,6 +223,7 @@ def build_chat_request(
         "previous_result": previous,
         "user_request": request.user_request,
     }
+    decision_point = None
     if context is not None:
         state = getattr(context, "state", None)
         to_packet = getattr(state, "to_packet", None)
@@ -212,9 +231,29 @@ def build_chat_request(
             context_block["decision_packet"] = to_packet()
         legal = getattr(context, "legal", None)
         candidates = getattr(legal, "candidates", None)
+        decision_point = getattr(legal, "decision_point", None)
         if candidates:
-            context_block["decision_point"] = getattr(legal, "decision_point", None)
+            context_block["decision_point"] = decision_point
             context_block["options"] = _bounded_options(candidates)
+        if decision_point == "SELECT_PLAN":
+            context_block["decision_prompt_revision"] = DECISION_PROMPT_REVISION
+            context_block["decision_instruction"] = SELECT_PLAN_INSTRUCTION
+    if decision_point == "SELECT_PLAN":
+        fulfillment_guidance = (
+            f"finish is a terminal action. At SELECT_PLAN: {SELECT_PLAN_INSTRUCTION} "
+            "Choose escalation by calling finish with status NEEDS_REVIEW and a nonblank "
+            "summary. "
+        )
+    else:
+        fulfillment_guidance = (
+            "finish is a terminal action: never call it while the request still describes an "
+            "unfulfilled deliverable (a plan to propose, a task to create, a task awaiting "
+            "ranking); prefer the domain tool that matches the request over state-inspection "
+            "or finish. When the request or context contains genuinely contradictory constraints "
+            "that cannot be resolved with the available tools, finish with status NEEDS_REVIEW "
+            "is the correct action; it is not correct as a way to avoid a fulfillable "
+            "deliverable. "
+        )
     return {
         "messages": [
             {"role": "system", "content": (
@@ -229,21 +268,14 @@ def build_chat_request(
                 "matches the request, call that tool with the concrete identifier already present "
                 "in the context (for example an identifier listed in the event context) instead "
                 "of re-inspecting state. "
-                "finish is a terminal action: never call it while the request still describes an "
-                "unfulfilled deliverable (a plan to propose, a task to create, a task awaiting "
-                "ranking); prefer the domain tool that matches the request over state-inspection "
-                "or finish. "
-                "When the request or context contains genuinely contradictory constraints that "
-                "cannot be resolved with the available tools, finish with status NEEDS_REVIEW "
-                "is the correct action; it is not correct as a way to avoid a fulfillable "
-                "deliverable. "
+                f"{fulfillment_guidance}"
                 "Invariants: return exactly one tool call per response, using only a legal tool; "
                 "treat the structured context as facts; never invent evidence or identifiers."
             )},
             *_history_messages(history),
             {"role": "user", "content": json.dumps(context_block, sort_keys=True, separators=(",", ":"))},
         ],
-        "tools": copy.deepcopy(list(_TOOL_DEFINITIONS)),
+        "tools": _tool_definitions(request.legal_tools),
         "tool_choice": "auto",
     }
 

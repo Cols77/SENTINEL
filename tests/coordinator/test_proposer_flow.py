@@ -7,12 +7,13 @@ from types import SimpleNamespace
 import pytest
 
 from sentinel.contracts import AgentModelResult, AgentRequest
-from sentinel.coordinator import LlmProposer
-from sentinel.coordinator.architecture import build_policy
+from sentinel.coordinator import AgentLoop, LlmProposer
+from sentinel.coordinator.architecture import ArchitectureRouter, build_policy
+from sentinel.coordinator.boundary import CoordinatorBoundary
 from sentinel.coordinator.decision_state import DecisionState
 from sentinel.coordinator.driver import drive_run
 from sentinel.coordinator.legal_tools import SELECT_PLAN, legal_set, load_catalogue_plans
-from sentinel.coordinator.policy import PolicyContext
+from sentinel.coordinator.policy import PolicyContext, bind_context
 from sentinel.coordinator.shadow import MemoryAuditSink
 
 from .harness import AGENT_RUN_ID, FakeWorker, envelope, open_harness
@@ -94,6 +95,15 @@ class _LegalProposalAdapter:
                 },
             }],
         })
+
+
+class _CountingFallback:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def decide(self, request: dict, context: PolicyContext) -> dict:
+        self.calls += 1
+        raise AssertionError("architecture F must not handle explicit proposer escalation")
 
 
 def _latest_plan_reference(repo, run_id: str) -> dict:
@@ -207,6 +217,92 @@ def test_e_proposal_crosses_agent_loop_and_gateway_before_two_operator_approvals
             "intent": "REQUEST_OPERATOR_APPROVAL",
             "catalogue_plan_id": ROUTE_PLAN,
         }
+    finally:
+        repo.close()
+
+
+def test_real_e_loop_normalizes_llm_escalation_without_persisting_a_proposal(tmp_path):
+    from sentinel.adapter.llm.config import load_config
+    from sentinel.adapter.llm.openai_compatible import OpenAICompatibleAgentModel
+    from sentinel.adapter.llm.parser import wire_tool_name
+
+    repo, gateway = open_harness(tmp_path)
+    run_id = "88888888-8888-4888-8888-888888888888"
+    provider_summary = "provider cannot safely choose a plan"
+    response = {"choices": [{"message": {"tool_calls": [{
+        "type": "function", "function": {
+            "name": wire_tool_name("finish"),
+            "arguments": json.dumps({
+                "status": "NEEDS_REVIEW", "summary": provider_summary,
+            }),
+        },
+    }]}}]}
+    env = {
+        "SENTINEL_LLM_PROVIDER": "openrouter",
+        "SENTINEL_LLM_MODEL": "test-model",
+        "SENTINEL_LLM_TIMEOUT_MS": "1000",
+        "SENTINEL_LLM_PROMPT_REVISION": "test-prompt",
+        "SENTINEL_LLM_TOOL_POLICY_REVISION": "test-tools",
+        "SENTINEL_LLM_API_KEY_ENV": "TEST_API_KEY",
+        "TEST_API_KEY": "offline-test-only",
+    }
+    transport_calls: list[dict] = []
+
+    def create(**kwargs):
+        transport_calls.append(kwargs)
+        return response
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    adapter = OpenAICompatibleAgentModel(
+        load_config(env), client_factory=lambda **kwargs: client, environ=env,
+    )
+    sink = MemoryAuditSink()
+    fallback = _CountingFallback()
+    try:
+        gateway.submit(envelope(
+            "RUN_CREATE", {"request_text": "unsupported request"}, sequence=1,
+            run_id=run_id, actor_type="OPERATOR",
+        ))
+        events_before = repo.read_events(run_id, 0, 30)
+        router = ArchitectureRouter(fallback, LlmProposer(adapter, sink), sink)
+
+        result = AgentLoop(
+            CoordinatorBoundary(repo, gateway),
+            bind_context(router, repo, CATALOGUE),
+            repository=repo,
+            catalogue=CATALOGUE,
+        ).run(run_id, AGENT_RUN_ID, "unsupported request")
+
+        assert result == {
+            "status": "NEEDS_REVIEW",
+            "summary": "plan proposal needs operator review",
+        }
+        assert len(transport_calls) == 1
+        assert wire_tool_name("finish") in {
+            tool["function"]["name"] for tool in transport_calls[0]["tools"]
+        }
+        rendered_request = json.loads(adapter.last_request["messages"][-1]["content"])
+        assert rendered_request["agent_run_id"] == AGENT_RUN_ID
+        assert AGENT_RUN_ID not in json.dumps(response)
+        assert repo.read_events(run_id, 0, 30) == events_before
+        assert repo.read_state(run_id).to_dict()["run_status"] == "RUNNING"
+        for table in ("plans", "plan_approvals", "tasks"):
+            count = repo.connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE run_id = ?", (run_id,)
+            ).fetchone()[0]
+            assert count == 0
+        attempts = [record for record in sink.records if record["record"] == "proposal_attempt"]
+        assert len(attempts) == 1
+        assert attempts[0]["gate_outcome"] == "accepted"
+        assert attempts[0]["raw_choice"] == "escalate"
+        assert attempts[0]["policy_label"] == "escalate"
+        assert attempts[0]["provider_summary"] == provider_summary
+        assert not [record for record in sink.records if record["record"] == "proposal_recommendation"]
+        routes = [record for record in sink.records if record["record"] == "architecture_route"]
+        assert len(routes) == 1
+        assert routes[0]["route"] == "proposer_escalation"
+        assert routes[0]["label"] == "escalate"
+        assert fallback.calls == 0
     finally:
         repo.close()
 
