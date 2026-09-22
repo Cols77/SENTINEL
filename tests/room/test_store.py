@@ -155,7 +155,7 @@ def test_concurrent_first_open_applies_each_migration_once(tmp_path):
     assert errors == []
     connection = sqlite3.connect(path)
     assert connection.execute("SELECT version FROM room_schema_version ORDER BY version").fetchall() == [
-        (1,), (2,),
+        (1,), (2,), (3,),
     ]
 
 
@@ -170,7 +170,7 @@ def test_invalid_multi_statement_migration_rolls_back_all_ddl_and_version_rows(t
     monkeypatch.setattr(
         room_store_module,
         "_MIGRATIONS",
-        room_store_module._MIGRATIONS + ((3, broken),),
+        room_store_module._MIGRATIONS + ((4, broken),),
     )
     connection = sqlite3.connect(path)
     with pytest.raises(sqlite3.OperationalError):
@@ -179,7 +179,7 @@ def test_invalid_multi_statement_migration_rolls_back_all_ddl_and_version_rows(t
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'should_not_survive'",
     ).fetchone() is None
     assert connection.execute("SELECT version FROM room_schema_version ORDER BY version").fetchall() == [
-        (1,), (2,),
+        (1,), (2,), (3,),
     ]
 
 
@@ -353,3 +353,117 @@ def test_batch_rejects_partial_replay_duplicate_keys_and_stale_version_without_w
     with pytest.raises(VersionConflict):
         store.append_events(session_id="session-1", expected_version=0, events=(batch[1],))
     assert store.events("session-1") == (first,)
+
+
+@pytest.mark.parametrize("subset", [slice(0, 1), slice(1, 2), slice(None, None, -1)])
+def test_batch_replay_rejects_prefix_suffix_and_reordering(tmp_path, subset):
+    store = _store(tmp_path)
+    batch = _batch()
+    original = store.append_events(session_id="session-1", expected_version=0, events=batch)
+    with pytest.raises(IdempotencyConflict, match="batch"):
+        store.append_events(session_id="session-1", expected_version=2, events=batch[subset])
+    assert store.events("session-1") == original
+    assert store.session_version("session-1") == 2
+
+
+def test_adjacent_atomic_batches_cannot_be_replayed_as_one_batch(tmp_path):
+    store = _store(tmp_path)
+    first = _batch()
+    second = tuple({**event, "idempotency_key": "second:" + event["idempotency_key"]} for event in _batch())
+    a = store.append_events(session_id="session-1", expected_version=0, events=first)
+    b = store.append_events(session_id="session-1", expected_version=2, events=second)
+    with pytest.raises(IdempotencyConflict, match="batch"):
+        store.append_events(session_id="session-1", expected_version=4, events=first + second)
+    assert store.events("session-1") == a + b
+    assert store.session_version("session-1") == 4
+
+
+def test_batch_metadata_records_digest_count_and_order_and_is_append_only(tmp_path):
+    store = _store(tmp_path)
+    events = store.append_events(session_id="session-1", expected_version=0, events=_batch())
+    batch = store.connection.execute("SELECT * FROM room_event_batches").fetchone()
+    assert batch["batch_id"]
+    assert batch["session_id"] == "session-1"
+    assert len(batch["batch_sha256"]) == 64
+    assert batch["event_count"] == 2
+    members = store.connection.execute(
+        "SELECT event_id, ordinal FROM room_event_batch_members WHERE batch_id = ? ORDER BY ordinal",
+        (batch["batch_id"],),
+    ).fetchall()
+    assert [(row["event_id"], row["ordinal"]) for row in members] == [
+        (event.event_id, index) for index, event in enumerate(events)
+    ]
+    for table in ("room_event_batches", "room_event_batch_members"):
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            store.connection.execute(f"UPDATE {table} SET batch_id = 'changed'")
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            store.connection.execute(f"DELETE FROM {table}")
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            store.connection.execute(f"INSERT OR REPLACE INTO {table} SELECT * FROM {table}")
+    store.connection.rollback()  # finish the transaction opened by direct mutation probes
+    assert store.append_events(session_id="session-1", expected_version=2, events=_batch()) == events
+
+
+def test_failed_batch_has_no_metadata_or_members(tmp_path):
+    store = _store(tmp_path)
+    store.connection.execute(
+        "CREATE TRIGGER fail_batch_member BEFORE INSERT ON room_event_batch_members "
+        "WHEN NEW.ordinal = 1 BEGIN SELECT RAISE(ABORT, 'forced membership failure'); END",
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="forced membership failure"):
+        store.append_events(session_id="session-1", expected_version=0, events=_batch())
+    assert store.events("session-1") == ()
+    assert store.session_version("session-1") == 0
+    assert store.connection.execute("SELECT COUNT(*) FROM room_event_batches").fetchone()[0] == 0
+    assert store.connection.execute("SELECT COUNT(*) FROM room_event_batch_members").fetchone()[0] == 0
+
+
+def test_batch_identity_survives_reopen_and_backup(tmp_path):
+    store = _store(tmp_path)
+    events = store.append_events(session_id="session-1", expected_version=0, events=_batch())
+    backup = tmp_path / "batch-backup.sqlite3"
+    store.snapshot_to(backup)
+    store.close()
+    for path in (tmp_path / "room.sqlite3", backup):
+        reopened = RoomStore.open(path)
+        assert reopened.append_events(session_id="session-1", expected_version=0, events=_batch()) == events
+        with pytest.raises(IdempotencyConflict):
+            reopened.append_events(session_id="session-1", expected_version=2, events=_batch()[:1])
+        reopened.close()
+
+
+def test_migration_preserves_legacy_singleton_idempotency_without_inventing_batch_boundaries(tmp_path, monkeypatch):
+    source = _store(tmp_path)
+    first = _append(source)
+    second = _append(source, expected_version=1, key="key-2", payload={"goal": "find"})
+    source.close()
+    legacy_path = tmp_path / "legacy.sqlite3"
+    with monkeypatch.context() as legacy:
+        legacy.setattr(room_store_module, "_MIGRATIONS", room_store_module._MIGRATIONS[:2])
+        store = RoomStore.open(legacy_path)
+    store.create_session("session-1", "count computers", CapabilityProfile(()))
+    for event in (first, second):
+        store.connection.execute(
+            "INSERT INTO room_events "
+            "(sequence_no,event_id,session_id,state_version,event_type,correlation_id,causation_id,"
+            "idempotency_key,event_sha256,payload_json,wall_time,monotonic_ms) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (event.sequence_no, event.event_id, event.session_id, event.state_version, event.event_type,
+             event.correlation_id, event.causation_id, event.idempotency_key, event.event_sha256,
+             room_store_module._canonical_payload(event.payload), event.wall_time, event.monotonic_ms),
+        )
+    store.connection.execute("UPDATE room_sessions SET state_version = 2 WHERE session_id = 'session-1'")
+    store.connection.commit()
+    store.close()
+    migrated = RoomStore.open(legacy_path)
+    assert migrated.events("session-1") == (first, second)
+    assert _append(migrated, expected_version=2) == first
+    assert _append(migrated, expected_version=2, key="key-2", payload={"goal": "find"}) == second
+    rows = migrated.connection.execute("SELECT event_count FROM room_event_batches").fetchall()
+    assert [row["event_count"] for row in rows] == [1, 1]
+    regrouped = tuple({
+        "event_type": event.event_type, "payload": event.payload, "correlation_id": event.correlation_id,
+        "causation_id": event.causation_id, "idempotency_key": event.idempotency_key,
+    } for event in (first, second))
+    with pytest.raises(IdempotencyConflict, match="batch"):
+        migrated.append_events(session_id="session-1", expected_version=2, events=regrouped)

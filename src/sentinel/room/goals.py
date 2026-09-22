@@ -7,7 +7,7 @@ The accepted event carries the complete source snapshot and compiler profile.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import re
@@ -53,6 +53,11 @@ _ALIASES = re.compile(r"\b(?:cell\s+phones?|smartphones?|humans?|people)\b", re.
 
 @dataclass(frozen=True)
 class EntityRef:
+    """A result reference, optionally anchored to a pose or prior actor identity.
+
+    VERIFIED_DESIGNATED_PERSON uses relative_to for the actor whose identity
+    must be retained through verification; NEAREST_PHONE uses a pose reference.
+    """
     ref_id: str
     source_objective_id: str | None
     entity_role: str
@@ -132,6 +137,13 @@ class GoalCompiler:
             raise ValueError("snapshot belongs to a different session")
         if snapshot.state_version != self.store.session_version(session_id):
             raise VersionConflict("goal compilation requires the current session snapshot")
+        accepted = tuple(
+            event for event in self.store.events(session_id)
+            if event.event_type == "GOAL_LEDGER_ACCEPTED"
+        )
+        goal_revision = accepted[-1].payload["goal_revision"] if accepted else 0
+        if snapshot.goal_revision != goal_revision:
+            raise VersionConflict("snapshot goal revision differs from the persisted accepted ledger")
         return _Compilation(self, session_id, request_text, snapshot).run()
 
 
@@ -275,13 +287,24 @@ class _Compilation:
             self.choose("entity_reference", {"CURRENT_DRONE": self.drone.ref_id})
             subject = target = self.drone
         elif kind in _PHYSICAL:
-            target, producer = self.bind_target(classes)
+            if relation == "NEXT_TO_DRONE":
+                self.choose("relative_reference", {"CURRENT_DRONE": self.drone.ref_id})
+            target, producer = self.bind_target(classes, relative_drone=relation == "NEXT_TO_DRONE")
             if producer is None:
                 producer = self.observation(
                     objective_id + ":observe", classes, qualifier, relation, scope, bind_new=True,
                 )
                 self.goals.append(producer)
                 target = producer.subject_ref
+            elif relation == "NEXT_TO_DRONE":
+                # Observe the same phone relative to this pose; a new nearest
+                # phone must never replace an explicitly resolved antecedent.
+                producer = replace(
+                    self.observation(objective_id + ":observe", classes, qualifier, relation, scope, bind_new=True),
+                    subject_ref=target,
+                    depends_on_objective_ids=tuple(dict.fromkeys((target.source_objective_id, producer.objective_id))),
+                )
+                self.goals.append(producer)
             subject = self.drone
             dependencies = tuple(dict.fromkeys((target.source_objective_id, producer.objective_id)))
             # Anaphora carry the selected actor's qualifier; they cannot broaden
@@ -289,11 +312,27 @@ class _Compilation:
             if target == producer.subject_ref:
                 qualifier = qualifier or producer.qualifier
         elif re.search(r"\b(?:him|her|it|them)\b", self.clause.text, re.IGNORECASE):
-            target, producer = self.bind_target(classes)
+            if relation == "NEXT_TO_DRONE":
+                self.choose("relative_reference", {"CURRENT_DRONE": self.drone.ref_id})
+            target, producer = self.bind_target(classes, relative_drone=relation == "NEXT_TO_DRONE")
             subject = target
             dependencies = tuple(dict.fromkeys((target.source_objective_id, producer.objective_id)))
             if target == producer.subject_ref:
                 qualifier = qualifier or producer.qualifier
+            if relation == "HOLDS_PHONE":
+                verified = self.observation(
+                    objective_id, classes, qualifier, relation, scope, bind_new=True,
+                )
+                subject = EntityRef(
+                    verified.subject_ref.ref_id, objective_id, verified.subject_ref.entity_role,
+                    target.ref_id,
+                )
+                target = verified.target_ref
+            elif relation == "NEXT_TO_DRONE":
+                relative = self.observation(
+                    objective_id, classes, qualifier, relation, scope, bind_new=True,
+                )
+                target = relative.target_ref
         else:
             observed = self.observation(objective_id, classes, qualifier, relation, scope)
             subject, target = observed.subject_ref, observed.target_ref
@@ -373,14 +412,23 @@ class _Compilation:
             EntityRef(objective_id + ":subject", objective_id, role, relative_to), target, (),
         )
 
-    def bind_target(self, classes: tuple[str, ...]) -> tuple[EntityRef | None, GoalObjective | None]:
+    def bind_target(
+        self, classes: tuple[str, ...], *, relative_drone: bool = False,
+    ) -> tuple[EntityRef | None, GoalObjective | None]:
         assert self.clause is not None
-        pronouns = re.findall(r"\b(him|her|it|them|you)\b", self.clause.text.lower())
+        target_text = self.clause.text.lower()
+        if relative_drone:
+            target_text = re.sub(r"\bnext\s+to\s+you\b", "", target_text)
+        pronouns = re.findall(r"\b(him|her|it|them|you)\b", target_text)
         all_references = {}
         for goal in self.goals:
             if goal.kind != GoalKind.FIND_OBSERVE:
                 continue
             if goal.subject_ref is not None:
+                if goal.subject_ref.entity_role == "VERIFIED_DESIGNATED_PERSON":
+                    # Verification refines the same actor; its prior, unverified
+                    # reference is not a second possible person antecedent.
+                    all_references.pop(goal.subject_ref.relative_to, None)
                 all_references[goal.subject_ref.ref_id] = (goal.subject_ref, goal, goal.target_classes)
             if goal.target_ref and goal.target_ref.entity_role == "RELATED_PHONE":
                 all_references[goal.target_ref.ref_id] = (goal.target_ref, goal, ("phone",))

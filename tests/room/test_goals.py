@@ -488,3 +488,130 @@ def test_hierarchical_choices_receive_accepted_parameters_for_the_current_clause
         {"clause_id": "c1", "name": "qualifier", "label": "MAN"},
     ]
     assert_audit(store, judge, ledger)
+
+
+def test_pronoun_holding_relation_preserves_actor_and_creates_verified_follow_result(tmp_path):
+    request = "Find a man; verify him holding a phone; follow him"
+    script = objective("c1", "FIND_OBSERVE", "person", qualifier="MAN", terminal="OBSERVED")
+    script += objective("c2", "FIND_OBSERVE", "person", relation="HOLDS_PHONE",
+                        binding="REF:g1:c1:subject", terminal="RELATION_VERIFIED")
+    script += objective("c3", "FOLLOW", "person", binding="REF:g1:c2:subject",
+                        terminal="FOLLOW_BOUNDED_RETURN")
+    compiler, judge, store = setup(tmp_path, request, script + FINISH)
+    ledger = compiler.compile("session-1", request, snapshot())
+    found, verified, follow = ledger.objectives
+    assert verified.qualifier == "man"
+    assert verified.relation == "HOLDS_PHONE"
+    assert verified.subject_ref.entity_role == "VERIFIED_DESIGNATED_PERSON"
+    assert verified.subject_ref.source_objective_id == verified.objective_id
+    assert verified.subject_ref.relative_to == found.subject_ref.ref_id
+    assert verified.target_ref == EntityRef("g1:c2:phone", "g1:c2", "RELATED_PHONE", None)
+    assert verified.target_ref != verified.subject_ref
+    assert verified.depends_on_objective_ids == (found.objective_id,)
+    assert follow.target_ref == verified.subject_ref
+    assert follow.depends_on_objective_ids == (verified.objective_id,)
+    assert follow.qualifier == "man"
+    common = [(*FAMILIES, *SAFE), (*CLASSES, *SAFE), ("NONE", "MAN", "DESIGNATED", *SAFE),
+              ("NONE", "HOLDS_PHONE", "NEXT_TO_DRONE", *SAFE), ("ROOM", "CURRENT_VIEW", "REGION", *SAFE)]
+    observe_terminals = ("OBSERVED", "VALIDATED", "RELATION_VERIFIED", "RETURN_HOME", *SAFE)
+    assert [tuple(call[2]) for call in judge.calls] == [
+        ("NEXT_OBJECTIVE:c1", "NEXT_OBJECTIVE:c2", "NEXT_OBJECTIVE:c3", "DONE", *SAFE),
+        *common, ("NEW_ENTITY", *SAFE), observe_terminals,
+        ("NEXT_OBJECTIVE:c2", "NEXT_OBJECTIVE:c3", "DONE", *SAFE),
+        *common, ("REF:g1:c1:subject", *SAFE), observe_terminals,
+        ("NEXT_OBJECTIVE:c3", "DONE", *SAFE),
+        *common, ("REF:g1:c2:subject", *SAFE), ("FOLLOW_BOUNDED_RETURN", *SAFE),
+        ("DONE", *SAFE), ("CONSISTENT", *SAFE),
+    ]
+    assert_audit(store, judge, ledger)
+
+
+def test_direct_landing_separates_phone_target_from_current_drone_attachment(tmp_path):
+    request = "Land near the phone next to you"
+    script = objective("c1", "LAND_NEAR", "phone", relation="NEXT_TO_DRONE",
+                       binding="NEW_TARGET", terminal="LANDED_AT_CERTIFIED_ZONE")
+    script.insert(-2, ("relative_reference", "CURRENT_DRONE"))
+    compiler, judge, store = setup(tmp_path, request, script + FINISH)
+    ledger = compiler.compile("session-1", request, snapshot())
+    observe, land = ledger.objectives
+    assert observe.target_ref == EntityRef("drone:session-1:state:0:pose:7", None, "CURRENT_DRONE", None)
+    assert observe.subject_ref.entity_role == "NEAREST_PHONE"
+    assert observe.subject_ref.relative_to == observe.target_ref.ref_id
+    assert land.target_ref == observe.subject_ref
+    assert land.depends_on_objective_ids == (observe.objective_id,)
+    assert [tuple(call[2]) for call in judge.calls if call[0] in ("relative_reference", "entity_reference")] == [
+        ("CURRENT_DRONE", *SAFE), ("NEW_TARGET", *SAFE),
+    ]
+    assert_audit(store, judge, ledger)
+
+
+def test_landing_it_next_to_you_preserves_phone_identity_and_pose_dependency(tmp_path):
+    request = "Find the phone; land near it next to you"
+    first = objective("c1", "FIND_OBSERVE", "phone", terminal="OBSERVED")
+    landing = objective("c2", "LAND_NEAR", "phone", relation="NEXT_TO_DRONE",
+                        binding="REF:g1:c1:subject", terminal="LANDED_AT_CERTIFIED_ZONE")
+    landing.insert(-2, ("relative_reference", "CURRENT_DRONE"))
+    compiler, judge, store = setup(tmp_path, request, first + landing + FINISH)
+    ledger = compiler.compile("session-1", request, snapshot())
+    found, relative, land = ledger.objectives
+    assert relative.kind == GoalKind.FIND_OBSERVE
+    assert relative.relation == "NEXT_TO_DRONE"
+    assert relative.subject_ref == found.subject_ref
+    assert relative.target_ref == EntityRef("drone:session-1:state:0:pose:7", None, "CURRENT_DRONE", None)
+    assert relative.depends_on_objective_ids == (found.objective_id,)
+    assert land.target_ref == found.subject_ref
+    assert land.depends_on_objective_ids == (found.objective_id, relative.objective_id)
+    assert [tuple(call[2]) for call in judge.calls if call[0] in ("relative_reference", "entity_reference")] == [
+        ("NEW_ENTITY", *SAFE), ("CURRENT_DRONE", *SAFE), ("REF:g1:c1:subject", *SAFE),
+    ]
+    assert_audit(store, judge, ledger)
+
+
+def test_successive_compilations_use_distinct_persisted_goal_revisions(tmp_path):
+    first_script = objective("c1", "COUNT", "phone") + FINISH
+    second_script = objective("c1", "COUNT", "pen") + FINISH
+    compiler, judge, store = setup(tmp_path, "Count phones", first_script + second_script)
+    first = compiler.compile("session-1", "Count phones", snapshot())
+    second = compiler.compile("session-1", "Count pens", snapshot(
+        state_version=store.session_version("session-1"), goal_revision=1,
+    ))
+    assert first.objectives[0].objective_id == "g1:c1"
+    assert second.objectives[0].objective_id == "g2:c1"
+    assert first.objectives[0].subject_ref.ref_id != second.objectives[0].subject_ref.ref_id
+    accepted = [event for event in store.events("session-1") if event.event_type == "GOAL_LEDGER_ACCEPTED"]
+    assert [event.payload["goal_revision"] for event in accepted] == [1, 2]
+    assert judge.script == []
+
+
+@pytest.mark.parametrize("stale_revision", [0, 2])
+def test_current_state_version_cannot_hide_stale_or_invented_goal_revision(tmp_path, stale_revision):
+    script = objective("c1", "COUNT", "phone") + FINISH
+    compiler, judge, store = setup(tmp_path, "Count phones", script)
+    compiler.compile("session-1", "Count phones", snapshot())
+    original_events = store.events("session-1")
+    current_version = store.session_version("session-1")
+    store.close()
+    reopened = RoomStore.open(tmp_path / "goals.sqlite3")
+    compiler = GoalCompiler(judge, reopened, input_limit_bytes=4096, prompt_revision="goals-test.v1")
+    with pytest.raises(VersionConflict, match="goal revision"):
+        compiler.compile("session-1", "Count pens", snapshot(
+            state_version=current_version, goal_revision=stale_revision,
+        ))
+    assert len(judge.calls) == len(script)
+    assert reopened.events("session-1") == original_events
+    assert reopened.session_version("session-1") == current_version
+
+
+def test_observation_it_next_to_you_keeps_phone_subject_and_drone_relation_object(tmp_path):
+    request = "Find the phone; verify it next to you"
+    first = objective("c1", "FIND_OBSERVE", "phone", terminal="OBSERVED")
+    verification = objective("c2", "FIND_OBSERVE", "phone", relation="NEXT_TO_DRONE",
+                             binding="REF:g1:c1:subject", terminal="OBSERVED")
+    verification.insert(-2, ("relative_reference", "CURRENT_DRONE"))
+    compiler, judge, store = setup(tmp_path, request, first + verification + FINISH)
+    ledger = compiler.compile("session-1", request, snapshot())
+    found, relative = ledger.objectives
+    assert relative.subject_ref == found.subject_ref
+    assert relative.target_ref == EntityRef("drone:session-1:state:0:pose:7", None, "CURRENT_DRONE", None)
+    assert relative.depends_on_objective_ids == (found.objective_id,)
+    assert_audit(store, judge, ledger)

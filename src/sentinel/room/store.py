@@ -17,7 +17,8 @@ from .models import CapabilityProfile
 
 _SCHEMA = Path(__file__).with_name("sql") / "schema.sql"
 _MIGRATION_002 = Path(__file__).with_name("sql") / "migration_002_event_insert_guard.sql"
-_MIGRATIONS = ((1, _SCHEMA), (2, _MIGRATION_002))
+_MIGRATION_003 = Path(__file__).with_name("sql") / "migration_003_event_batches.sql"
+_MIGRATIONS = ((1, _SCHEMA), (2, _MIGRATION_002), (3, _MIGRATION_003))
 # Keys are case-folded and reduced to alphanumeric characters before comparison.
 # Sensitive aliases are rejected as complete keys or compound stems.  The only
 # exceptions are the narrowly named metadata entries below; no suffix alone
@@ -164,9 +165,9 @@ class RoomStore:
     ) -> tuple[StoredEvent, ...]:
         """Append a complete ordered batch, or recover its complete prior delivery.
 
-        Partial replay and duplicate keys are rejected: an atomic batch cannot
-        have committed only some of its events. No version or event survives
-        validation, insertion, or compare-and-set failure.
+        Replay requires the same persisted batch, digest, count and ordered
+        membership. Prefixes, suffixes and concatenated adjacent batches are
+        conflicts. No metadata, version or event survives a failed append.
         """
         prepared = []
         keys = set()
@@ -201,8 +202,7 @@ class RoomStore:
                 if recovered:
                     if len(recovered) != len(prepared):
                         raise IdempotencyConflict("partial replay of an atomic event batch")
-                    if any(b.sequence_no != a.sequence_no + 1 for a, b in zip(recovered, recovered[1:])):
-                        raise IdempotencyConflict("replayed batch is not contiguous and ordered")
+                    _validate_batch_replay(self.connection, recovered)
                     self.connection.commit()
                     return tuple(recovered)
                 session = self.connection.execute(
@@ -239,6 +239,7 @@ class RoomStore:
                          stored.idempotency_key, digest, payload_json, stored.wall_time, stored.monotonic_ms),
                     )
                     appended.append(stored)
+                _record_event_batch(self.connection, appended)
                 updated = self.connection.execute(
                     "UPDATE room_sessions SET state_version = state_version + ? "
                     "WHERE session_id = ? AND state_version = ?",
@@ -292,6 +293,8 @@ def _run_migrations(connection: sqlite3.Connection) -> None:
             if version <= current:
                 continue
             _execute_migration(connection, migration.read_text(encoding="utf-8"))
+            if version == 3:
+                _backfill_legacy_event_batches(connection)
             connection.execute(
                 "INSERT INTO room_schema_version(version, applied_at) VALUES (?, ?)",
                 (version, _utc_now()),
@@ -311,6 +314,59 @@ def _execute_migration(connection: sqlite3.Connection, script: str) -> None:
             statement = ""
     if statement.strip():
         raise ValueError("migration ends with an incomplete SQL statement")
+
+
+def _batch_sha256(events: Sequence[StoredEvent]) -> str:
+    return hashlib.sha256(_canonical_json({
+        "session_id": events[0].session_id,
+        "members": [{"idempotency_key": event.idempotency_key, "event_sha256": event.event_sha256}
+                    for event in events],
+    }).encode("utf-8")).hexdigest()
+
+
+def _record_event_batch(
+    connection: sqlite3.Connection, events: Sequence[StoredEvent], *, legacy_singleton: bool = False,
+) -> None:
+    batch_id = str(uuid.uuid4())
+    connection.execute(
+        "INSERT INTO room_event_batches (batch_id, session_id, batch_sha256, event_count, legacy_singleton) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (batch_id, events[0].session_id, _batch_sha256(events), len(events), int(legacy_singleton)),
+    )
+    connection.executemany(
+        "INSERT INTO room_event_batch_members (batch_id, ordinal, event_id) VALUES (?, ?, ?)",
+        ((batch_id, index, event.event_id) for index, event in enumerate(events)),
+    )
+
+
+def _validate_batch_replay(connection: sqlite3.Connection, events: Sequence[StoredEvent]) -> None:
+    batch = connection.execute(
+        "SELECT batch.* FROM room_event_batches AS batch "
+        "JOIN room_event_batch_members AS member ON member.batch_id = batch.batch_id "
+        "WHERE member.event_id = ?", (events[0].event_id,),
+    ).fetchone()
+    if batch is None or batch["event_count"] != len(events) or batch["batch_sha256"] != _batch_sha256(events):
+        raise IdempotencyConflict("replay does not match a complete original event batch")
+    members = connection.execute(
+        "SELECT event_id FROM room_event_batch_members WHERE batch_id = ? ORDER BY ordinal",
+        (batch["batch_id"],),
+    ).fetchall()
+    if tuple(row["event_id"] for row in members) != tuple(event.event_id for event in events):
+        raise IdempotencyConflict("replay differs from original batch membership or order")
+
+
+def _backfill_legacy_event_batches(connection: sqlite3.Connection) -> None:
+    """Old event rows do not identify original transaction boundaries.
+
+    Preserve singleton append_event retries, explicitly label that provenance,
+    and reject any attempted regrouping of legacy events into larger batches.
+    This runs in the same migration transaction as schema and version writes.
+    """
+    cursor = connection.cursor()
+    cursor.row_factory = sqlite3.Row
+    rows = cursor.execute("SELECT * FROM room_events ORDER BY session_id, sequence_no").fetchall()
+    for row in rows:
+        _record_event_batch(connection, (_stored_event(row),), legacy_singleton=True)
 
 
 def _canonical_payload(payload: Mapping[str, object]) -> str:
