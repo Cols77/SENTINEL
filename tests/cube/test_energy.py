@@ -106,8 +106,8 @@ def test_observed_burn_can_raise_the_calibrated_bound() -> None:
 def test_motor_time_is_only_a_consistency_check_not_the_burn_denominator() -> None:
     guard = _guard(percent_per_second_upper=0.01, telemetry_allowance_pct=0, landing_floor_pct=20)
 
-    guard.observe(_sample(80, 0, motor_time_s=10), _sample(79, 10, motor_time_s=11))
-    estimate = guard.assess(current=_sample(25, 10, motor_time_s=11), next_plan=None,
+    guard.observe(_sample(80, 0, motor_time_s=10), _sample(79, 10, motor_time_s=20))
+    estimate = guard.assess(current=_sample(25, 10, motor_time_s=20), next_plan=None,
                             recovery_plan=None, provider_wait_s=0, termination_plan=_plan("home", 10))
 
     assert guard.conservative_percent_per_second == 0.1
@@ -167,6 +167,46 @@ def test_motor_time_regression_is_immediately_invalid_even_within_quantization_e
 
     estimate = guard.assess(current=_sample(80, 10.25, motor_time_s=10), next_plan=None,
                             recovery_plan=None, provider_wait_s=0, termination_plan=_plan("home", 1))
+    assert estimate.decision is ReserveDecision.LAND_CONTINGENCY
+
+
+def test_repeated_subsecond_motor_stalls_accumulate_past_the_quantization_envelope() -> None:
+    guard = _guard(now=2)
+    previous = _sample(80, 0, motor_time_s=10)
+    for quarter_second in range(1, 9):
+        current = _sample(80, quarter_second / 4, motor_time_s=10)
+        guard.observe(previous, current)
+        previous = current
+
+    estimate = guard.assess(current=previous, next_plan=None, recovery_plan=None,
+                            provider_wait_s=0, termination_plan=_plan("home", 1))
+    assert estimate.decision is ReserveDecision.LAND_CONTINGENCY
+
+
+def test_floor_counter_advances_across_fractional_polls_stay_within_the_quantization_envelope() -> None:
+    guard = _guard(now=2)
+    samples = tuple(
+        _sample(80, index / 4, motor_time_s=10 + index // 4)
+        for index in range(9)
+    )
+
+    for previous, current in zip(samples, samples[1:]):
+        guard.observe(previous, current)
+
+    estimate = guard.assess(current=samples[-1], next_plan=None, recovery_plan=None,
+                            provider_wait_s=0, termination_plan=_plan("home", 1))
+    assert estimate.decision is ReserveDecision.CONTINUE
+
+
+def test_nonzero_motor_lag_beyond_one_second_quantization_envelope_fails_closed() -> None:
+    guard = _guard(now=2.25)
+    previous = _sample(80, 0, motor_time_s=10)
+    current = _sample(80, 2.25, motor_time_s=11)
+
+    guard.observe(previous, current)
+
+    estimate = guard.assess(current=current, next_plan=None, recovery_plan=None,
+                            provider_wait_s=0, termination_plan=_plan("home", 1))
     assert estimate.decision is ReserveDecision.LAND_CONTINGENCY
 
 

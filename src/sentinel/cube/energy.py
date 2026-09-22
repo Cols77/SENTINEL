@@ -25,12 +25,10 @@ class ReserveDecision(str, Enum):
 
 
 # Tello's ``time?`` telemetry is integral seconds.  A read can therefore lead
-# monotonic elapsed time by one reported second at a counter boundary.  It is
-# also motor-runtime telemetry, so a positive tick can lag wall time; retain a
-# calibrated nine-second telemetry tolerance after the one-second quantization
-# envelope.  A zero tick is only tolerated for the first quantized second.
+# or lag monotonic elapsed time by one reported second at a counter boundary.
+# Comparing against the last validated counter advance makes that phase
+# envelope cumulative across frequent subsecond polls.
 MOTOR_TIME_QUANTIZATION_ENVELOPE_S = Decimal("1")
-MOTOR_TIME_RUNTIME_TOLERANCE_S = Decimal("9")
 
 
 def _exact_decimal(value: object, field: str) -> Decimal:
@@ -200,6 +198,7 @@ class ReserveGuard:
         self._last_clock_s: float | None = None
         self._last_sample_s: float | None = None
         self._telemetry_invalid = False
+        self._motor_baseline: tuple[Decimal, Decimal, str] | None = None
 
     @property
     def conservative_percent_per_second(self) -> float:
@@ -240,17 +239,27 @@ class ReserveGuard:
             if previous.motor_time_source != current.motor_time_source:
                 self._telemetry_invalid = True
                 return
-            motor_elapsed = _exact_decimal(current.motor_time_s, "motor_time_s") - _exact_decimal(
-                previous.motor_time_s, "motor_time_s",
-            )
-            if (motor_elapsed < 0
-                    or motor_elapsed - elapsed > MOTOR_TIME_QUANTIZATION_ENVELOPE_S
-                    or (motor_elapsed == 0 and elapsed > MOTOR_TIME_QUANTIZATION_ENVELOPE_S)
-                    or elapsed - motor_elapsed > (
-                        MOTOR_TIME_QUANTIZATION_ENVELOPE_S + MOTOR_TIME_RUNTIME_TOLERANCE_S
-                    )):
+            measured_at = _exact_decimal(current.measured_at_s, "measured_at_s")
+            motor_time = _exact_decimal(current.motor_time_s, "motor_time_s")
+            if self._motor_baseline is None:
+                self._motor_baseline = (
+                    _exact_decimal(previous.measured_at_s, "measured_at_s"),
+                    _exact_decimal(previous.motor_time_s, "motor_time_s"),
+                    previous.motor_time_source,
+                )
+            baseline_at, baseline_motor_time, baseline_source = self._motor_baseline
+            if baseline_source != current.motor_time_source or motor_time < baseline_motor_time:
                 self._telemetry_invalid = True
                 return
+            baseline_elapsed = measured_at - baseline_at
+            baseline_motor_elapsed = motor_time - baseline_motor_time
+            if (baseline_elapsed < 0
+                    or abs(baseline_motor_elapsed - baseline_elapsed)
+                    > MOTOR_TIME_QUANTIZATION_ENVELOPE_S):
+                self._telemetry_invalid = True
+                return
+            if baseline_motor_elapsed > 0:
+                self._motor_baseline = (measured_at, motor_time, current.motor_time_source)
         burn = previous.battery_pct - current.battery_pct
         if burn > 0:
             self._observed_upper = max(self._observed_upper, Decimal(burn) / rate_elapsed)
