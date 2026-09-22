@@ -23,6 +23,7 @@ import uuid
 from .store import IdempotencyConflict, RoomStore
 
 SCHEMA_VERSION = "room-perception-v1"
+MAX_IDENTITY_LENGTH = 4096
 _INBOX_LOCK = threading.RLock()
 _ERROR_CATEGORIES = frozenset({
     "TIMEOUT", "AUTH", "TRANSPORT", "RATE_LIMIT", "SCHEMA", "RESPONSE_TOO_LARGE",
@@ -116,7 +117,7 @@ def detection_digest(evidence: DetectionEvidence) -> str:
 
 
 def _text(value) -> bool:
-    return isinstance(value, str) and bool(value.strip()) and len(value) <= 4096
+    return isinstance(value, str) and bool(value.strip()) and len(value) <= MAX_IDENTITY_LENGTH
 
 
 def _hash(value) -> bool:
@@ -216,8 +217,7 @@ def full_frame_bbox(evidence: DetectionEvidence) -> tuple[float, float, float, f
     return x, y, width, height
 
 
-def validate_result(result: PerceptionResult, *, check_frame: bool = True,
-                    allow_mismatch: bool = False) -> None:
+def validate_result(result: PerceptionResult, *, check_frame: bool = True) -> None:
     if not isinstance(result, PerceptionResult):
         raise InvalidPerception("invalid perception result")
     validate_request(result.request, check_frame=check_frame)
@@ -226,7 +226,7 @@ def validate_result(result: PerceptionResult, *, check_frame: bool = True,
     if result.identity_status not in ("VERIFIED", "UNVERIFIED", "MISMATCH"):
         raise InvalidPerception("invalid model identity status")
     if result.identity_status == "MISMATCH":
-        if not allow_mismatch or result.status != "FAILED" or not _text(result.resolved_model) \
+        if result.status != "FAILED" or not _text(result.resolved_model) \
                 or result.resolved_model == result.request.requested_model \
                 or result.error_category != "IDENTITY_MISMATCH":
             raise InvalidPerception("provider identity mismatch")
@@ -291,7 +291,7 @@ def result_from_dict(document) -> PerceptionResult:
             detections.append(DetectionEvidence(**item))
         data["detections"] = tuple(detections)
         result = PerceptionResult(**data)
-        validate_result(result, check_frame=False, allow_mismatch=True)
+        validate_result(result, check_frame=False)
         return result
     except (TypeError, KeyError, ValueError):
         raise InvalidPerception("malformed perception envelope") from None
@@ -417,7 +417,7 @@ def append_jsonl_record(path: Path, document) -> None:
 
 
 def append_inbox_result(path: Path, result: PerceptionResult) -> None:
-    validate_result(result, check_frame=False, allow_mismatch=True)
+    validate_result(result, check_frame=False)
     append_jsonl_record(path, asdict(result))
 
 

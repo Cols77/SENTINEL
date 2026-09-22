@@ -288,9 +288,11 @@ def test_inbox_rejects_duplicate_json_keys(tmp_path):
 
 def test_migration_upgrades_real_version_three_database_without_rewriting_events(tmp_path, monkeypatch):
     from sentinel.room import store as module
-    migration = module._MIGRATION_004.read_text(encoding="utf-8")
+    schema = module._SCHEMA.read_text(encoding="utf-8")
     old_schema = tmp_path / "v3-schema.sql"
-    old_schema.write_text(module._SCHEMA.read_text(encoding="utf-8").replace(migration, ""), encoding="utf-8")
+    old_schema.write_text(schema[:schema.index("-- Perception evidence schema")] +
+                          schema[schema.index("CREATE TRIGGER IF NOT EXISTS room_events_no_delete"):],
+                          encoding="utf-8")
     path = tmp_path / "old.sqlite3"
     with monkeypatch.context() as context:
         context.setattr(module, "_MIGRATIONS", ((1, old_schema), *module._MIGRATIONS[1:3]))
@@ -304,7 +306,7 @@ def test_migration_upgrades_real_version_three_database_without_rewriting_events
     assert upgraded.events("s1") == (event,)
     result = sample(tmp_path, snapshot=1)
     assert ingest_result(upgraded, result, current_snapshot_version=1).authorizes_current_state
-    assert upgraded.connection.execute("SELECT MAX(version) FROM room_schema_version").fetchone()[0] == 4
+    assert upgraded.connection.execute("SELECT MAX(version) FROM room_schema_version").fetchone()[0] == 5
 
 
 def test_unverified_payload_identity_cannot_be_replaced_through_null_index_alias(tmp_path):
@@ -320,3 +322,106 @@ def test_unverified_payload_identity_cannot_be_replaced_through_null_index_alias
                 "SELECT 'replacement', provider, '', request_digest, frame_sha256, payload_json "
                 "FROM room_perception_payloads",
             )
+
+
+def test_mismatch_failure_is_persisted_and_polling_continues_then_replays(tmp_path):
+    store, result = store_for(tmp_path), sample(tmp_path)
+    mismatch = replace(result, status="FAILED", resolved_model="other-model", identity_status="MISMATCH",
+                       detections=(), error_category="IDENTITY_MISMATCH")
+    success = replace(result, request=replace(result.request, observation_id="o2"))
+    inbox = tmp_path / "inbox.jsonl"
+    append_inbox_result(inbox, mismatch)
+    append_inbox_result(inbox, success)
+    outcomes = poll_inbox(store, inbox, current_snapshot_version=0)
+    assert len(outcomes) == 2
+    assert not outcomes[0].authorizes_current_state and outcomes[0].hypothesis_ids == ()
+    assert outcomes[1].authorizes_current_state and len(outcomes[1].hypothesis_ids) == 1
+    row = store.connection.execute("SELECT * FROM room_perception_results WHERE observation_id='o1'").fetchone()
+    assert (row["status"], row["identity_status"], row["resolved_model"], row["error_category"]) == (
+        "FAILED", "MISMATCH", "other-model", "IDENTITY_MISMATCH",
+    )
+    assert count(store, "room_hypothesis_revisions") == 1
+    assert all(outcome.duplicate for outcome in poll_inbox(store, inbox, current_snapshot_version=0))
+    assert count(store, "room_perception_results") == 2
+
+
+@pytest.mark.parametrize("mutation", [
+    {"status": "SUCCEEDED"}, {"error_category": "SCHEMA"}, {"resolved_model": None},
+    {"resolved_model": "pinned-model"}, {"detections": "original"},
+])
+def test_inconsistent_mismatch_is_rejected_without_persistence(tmp_path, mutation):
+    store, result = store_for(tmp_path), sample(tmp_path)
+    mismatch = replace(result, status="FAILED", resolved_model="other-model", identity_status="MISMATCH",
+                       detections=(), error_category="IDENTITY_MISMATCH")
+    if mutation.get("detections") == "original":
+        mutation = {"detections": result.detections}
+    with pytest.raises(InvalidPerception):
+        ingest_result(store, replace(mismatch, **mutation), current_snapshot_version=0)
+    assert count(store, "room_perception_results") == 0
+
+
+def test_unverified_failure_payload_deduplicates_across_sessions_with_separate_links(tmp_path):
+    store, result = store_for(tmp_path), sample(tmp_path)
+    first = replace(result, status="FAILED", resolved_model=None, identity_status="UNVERIFIED",
+                    detections=(), error_category="TIMEOUT")
+    second = replace(first, request=replace(first.request, session_id="s2"))
+    first_outcome = ingest_result(store, first, current_snapshot_version=0)
+    second_outcome = ingest_result(store, second, current_snapshot_version=0)
+    assert first_outcome.payload_id == second_outcome.payload_id
+    assert first_outcome.result_id != second_outcome.result_id
+    assert count(store, "room_perception_payloads") == 1
+    rows = store.connection.execute("SELECT session_id, payload_id, resolved_model FROM room_perception_results ORDER BY session_id").fetchall()
+    assert [(row["session_id"], row["payload_id"], row["resolved_model"]) for row in rows] == [
+        ("s1", first_outcome.payload_id, None), ("s2", first_outcome.payload_id, None),
+    ]
+    assert count(store, "room_observations") == 2
+    assert count(store, "room_hypothesis_revisions") == 0
+
+
+@pytest.mark.parametrize("failed_upgrade", [None, "sql", "foreign_key"])
+def test_v4_upgrade_retains_existing_results_evidence_and_foreign_keys(tmp_path, monkeypatch, failed_upgrade):
+    from sentinel.room import store as module
+    schema = module._SCHEMA.read_text(encoding="utf-8")
+    legacy_schema = tmp_path / "old-schema.sql"
+    legacy_schema.write_text(schema[:schema.index("-- Perception evidence schema")] +
+                             schema[schema.index("CREATE TRIGGER IF NOT EXISTS room_events_no_delete"):],
+                             encoding="utf-8")
+    path = tmp_path / "v4.sqlite3"
+    with monkeypatch.context() as context:
+        context.setattr(module, "_MIGRATIONS", ((1, legacy_schema), *module._MIGRATIONS[1:4]))
+        store = RoomStore.open(path)
+    store.create_session("s1", "look", CapabilityProfile(()))
+    original = sample(tmp_path)
+    first = ingest_result(store, original, current_snapshot_version=0)
+    before = {table: [tuple(row) for row in store.connection.execute(f"SELECT * FROM {table}")]
+              for table in ("room_observations", "room_perception_results", "room_detection_evidence",
+                            "room_object_hypotheses", "room_hypothesis_revisions")}
+    if failed_upgrade:
+        schema_before = store.connection.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall()
+        broken = tmp_path / "broken-v5.sql"
+        suffix = "\nTHIS IS INVALID SQL;\n" if failed_upgrade == "sql" else (
+            "\nCREATE TABLE broken_reference (session_id TEXT REFERENCES room_sessions(session_id));\n"
+            "INSERT INTO broken_reference VALUES ('missing');\n"
+        )
+        broken.write_text(module._MIGRATION_005.read_text(encoding="utf-8") + suffix, encoding="utf-8")
+        with monkeypatch.context() as context:
+            context.setattr(module, "_MIGRATIONS", (*module._MIGRATIONS[:4], (5, broken)))
+            with pytest.raises(sqlite3.Error):
+                module._run_migrations(store.connection)
+        assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert store.connection.execute("SELECT name, sql FROM sqlite_master ORDER BY name").fetchall() == schema_before
+        assert store.connection.execute("SELECT MAX(version) FROM room_schema_version").fetchone()[0] == 4
+        for table, rows in before.items():
+            assert [tuple(row) for row in store.connection.execute(f"SELECT * FROM {table}")] == rows
+    store.close()
+    upgraded = RoomStore.open(path)
+    for table, rows in before.items():
+        assert [tuple(row) for row in upgraded.connection.execute(f"SELECT * FROM {table}")] == rows
+    assert upgraded.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert upgraded.connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert ingest_result(upgraded, original, current_snapshot_version=0).result_id == first.result_id
+    mismatch = replace(original, request=replace(original.request, observation_id="o2"), status="FAILED",
+                       resolved_model="other-model", identity_status="MISMATCH", detections=(),
+                       error_category="IDENTITY_MISMATCH")
+    assert not ingest_result(upgraded, mismatch, current_snapshot_version=0).authorizes_current_state
+    assert upgraded.connection.execute("SELECT MAX(version) FROM room_schema_version").fetchone()[0] == 5

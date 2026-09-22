@@ -128,7 +128,7 @@ def _failure_category(error: Exception) -> str:
 def _detect_correlated(detector, record, row, classes, *, provider):
     from PIL import Image
     from sentinel.room.ingest import (
-        DetectionEvidence, InvalidPerception, PerceptionResult, detection_digest,
+        DetectionEvidence, InvalidPerception, MAX_IDENTITY_LENGTH, PerceptionResult, detection_digest,
         request_from_dict, validate_request, validate_result,
     )
     started = time.monotonic()
@@ -141,17 +141,23 @@ def _detect_correlated(detector, record, row, classes, *, provider):
     except InvalidPerception:
         row.update(error="INVALID_REQUEST", detect_s=round(time.monotonic() - started, 2))
         return row
-    provider_name = provider or getattr(detector, "provider", type(detector).__name__)
+    def valid_identity(value):
+        return isinstance(value, str) and bool(value.strip()) and len(value) <= MAX_IDENTITY_LENGTH
+
+    configured_provider = provider if provider is not None else getattr(detector, "provider", type(detector).__name__)
+    provider_name = configured_provider if valid_identity(configured_provider) else "UNKNOWN"
     resolved_model, identity_status, error_category, detections = None, "UNVERIFIED", None, ()
     try:
+        if not valid_identity(configured_provider):
+            raise InvalidPerception("invalid configured provider identity")
         batch = detector.detect(request.frame_path, classes)
         raw = batch.raw or {}
         reported_provider = raw.get("provider", provider_name)
-        if not isinstance(reported_provider, str) or not reported_provider.strip():
+        if not valid_identity(reported_provider):
             raise InvalidPerception("invalid provider identity")
         provider_name = reported_provider
         models = _reported_models(raw)
-        if any(model is not None and (not isinstance(model, str) or not model.strip()) for model in models):
+        if any(model is not None and not valid_identity(model) for model in models):
             raise InvalidPerception("invalid provider identity")
         if any(model is not None and model != request.requested_model for model in models):
             error_category = "IDENTITY_MISMATCH"
@@ -190,14 +196,17 @@ def _detect_correlated(detector, record, row, classes, *, provider):
             request, "FAILED" if error_category else "SUCCEEDED", provider_name, resolved_model,
             identity_status, datetime.now(timezone.utc).isoformat(), detections, error_category,
         )
-        validate_result(result, check_frame=False, allow_mismatch=True)
+        validate_result(result, check_frame=False)
     except Exception as error:  # never expose provider text, headers, or credentials
         result = PerceptionResult(
-            request, "FAILED", provider_name, resolved_model, identity_status,
+            request, "FAILED", provider_name, None, "UNVERIFIED",
             datetime.now(timezone.utc).isoformat(), (),
             "SCHEMA" if isinstance(error, (InvalidPerception, KeyError, TypeError, ValueError))
             else _failure_category(error),
         )
+    # The fallback follows the same contract as a provider response; no invalid
+    # identity survives into an envelope merely because its first validation failed.
+    validate_result(result, check_frame=False)
     row["perception_result"] = asdict(result)
     row["detect_s"] = round(time.monotonic() - started, 2)
     if result.status == "SUCCEEDED":

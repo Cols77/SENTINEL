@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS room_perception_results (
     status TEXT NOT NULL CHECK (status IN ('SUCCEEDED', 'FAILED')),
     provider TEXT NOT NULL,
     resolved_model TEXT,
-    identity_status TEXT NOT NULL CHECK (identity_status IN ('VERIFIED', 'UNVERIFIED')),
+    identity_status TEXT NOT NULL CHECK (identity_status IN ('VERIFIED', 'UNVERIFIED', 'MISMATCH')),
     completed_at TEXT NOT NULL,
     error_category TEXT,
     authorizes_current_state INTEGER NOT NULL CHECK (authorizes_current_state IN (0, 1)),
@@ -77,8 +77,27 @@ CREATE TABLE IF NOT EXISTS room_perception_results (
     UNIQUE (session_id, observation_id, result_id),
     FOREIGN KEY (session_id, observation_id) REFERENCES room_observations(session_id, observation_id),
     CHECK (status != 'SUCCEEDED' OR (identity_status = 'VERIFIED' AND resolved_model IS NOT NULL AND error_category IS NULL)),
-    CHECK (status != 'FAILED' OR (error_category IS NOT NULL AND authorizes_current_state = 0))
+    CHECK (status != 'FAILED' OR (error_category IS NOT NULL AND authorizes_current_state = 0)),
+    CHECK (identity_status != 'MISMATCH' OR
+        (status = 'FAILED' AND error_category = 'IDENTITY_MISMATCH' AND resolved_model IS NOT NULL)),
+    CHECK (identity_status != 'UNVERIFIED' OR resolved_model IS NULL),
+    CHECK (identity_status != 'VERIFIED' OR resolved_model IS NOT NULL),
+    CHECK (length(trim(provider)) BETWEEN 1 AND 4096),
+    CHECK (resolved_model IS NULL OR length(trim(resolved_model)) BETWEEN 1 AND 4096)
 );
+
+CREATE TRIGGER IF NOT EXISTS room_perception_results_identity
+BEFORE INSERT ON room_perception_results
+WHEN NEW.identity_status IN ('VERIFIED', 'MISMATCH') AND NOT EXISTS (
+    SELECT 1 FROM room_observations AS observation
+    WHERE observation.session_id = NEW.session_id AND observation.observation_id = NEW.observation_id
+      AND ((NEW.identity_status = 'VERIFIED' AND NEW.resolved_model = observation.requested_model)
+        OR (NEW.identity_status = 'MISMATCH' AND NEW.resolved_model != observation.requested_model))
+)
+BEGIN
+    SELECT RAISE(ABORT, 'inconsistent perception model identity');
+END;
+
 
 CREATE TABLE IF NOT EXISTS room_detection_evidence (
     session_id TEXT NOT NULL,

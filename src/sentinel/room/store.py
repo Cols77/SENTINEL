@@ -19,7 +19,9 @@ _SCHEMA = Path(__file__).with_name("sql") / "schema.sql"
 _MIGRATION_002 = Path(__file__).with_name("sql") / "migration_002_event_insert_guard.sql"
 _MIGRATION_003 = Path(__file__).with_name("sql") / "migration_003_event_batches.sql"
 _MIGRATION_004 = Path(__file__).with_name("sql") / "migration_004_perception_evidence.sql"
-_MIGRATIONS = ((1, _SCHEMA), (2, _MIGRATION_002), (3, _MIGRATION_003), (4, _MIGRATION_004))
+_MIGRATION_005 = Path(__file__).with_name("sql") / "migration_005_perception_mismatch_failures.sql"
+_MIGRATIONS = ((1, _SCHEMA), (2, _MIGRATION_002), (3, _MIGRATION_003), (4, _MIGRATION_004),
+               (5, _MIGRATION_005))
 # Keys are case-folded and reduced to alphanumeric characters before comparison.
 # Sensitive aliases are rejected as complete keys or compound stems.  The only
 # exceptions are the narrowly named metadata entries below; no suffix alone
@@ -305,6 +307,11 @@ class RoomStore:
 
 
 def _run_migrations(connection: sqlite3.Connection) -> None:
+    # SQLite table rebuilds require FK enforcement disabled before BEGIN. The
+    # connection is private during open; all rebuilt references are checked
+    # before commit, and the caller's enforcement setting is always restored.
+    foreign_keys = int(connection.execute("PRAGMA foreign_keys").fetchone()[0])
+    connection.execute("PRAGMA foreign_keys = OFF")
     try:
         # SQLite's write lock serializes first-open callers.  Version rows are
         # read only after obtaining it, so a waiting opener sees completed work.
@@ -326,10 +333,14 @@ def _run_migrations(connection: sqlite3.Connection) -> None:
                 "INSERT INTO room_schema_version(version, applied_at) VALUES (?, ?)",
                 (version, _utc_now()),
             )
+        if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise sqlite3.IntegrityError("room migration violates foreign keys")
         connection.commit()
     except Exception:
         connection.rollback()
         raise
+    finally:
+        connection.execute(f"PRAGMA foreign_keys = {foreign_keys}")
 
 
 def _execute_migration(connection: sqlite3.Connection, script: str) -> None:

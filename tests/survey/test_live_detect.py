@@ -366,3 +366,52 @@ def test_malformed_provider_metadata_still_emits_a_valid_typed_failure(tmp_path)
                        _correlated_record(tmp_path))
     result = result_from_dict(row["perception_result"])
     assert result.status == "FAILED" and result.error_category == "SCHEMA"
+
+
+@pytest.mark.parametrize("invalid_identity", [
+    {"provider": "p" * 4097}, {"model": "m" * 4097}, {"provider": None}, {"model": []},
+], ids=["long-provider", "long-model", "null-provider", "non-string-model"])
+def test_follower_publishes_safe_schema_failure_and_continues(tmp_path, invalid_identity):
+    from sentinel.room.ingest import result_from_dict, poll_inbox
+    from sentinel.room.models import CapabilityProfile
+    from sentinel.room.store import RoomStore
+    records = [_correlated_record(tmp_path), _correlated_record(tmp_path)]
+    frames, inbox, output = tmp_path / "frames.jsonl", tmp_path / "inbox.jsonl", tmp_path / "out.jsonl"
+    frames.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    valid_raw = {"provider": "fixture", "model": "pinned-model"}
+    batches = [DetectionBatch((), "OK", raw={**valid_raw, **invalid_identity}),
+               DetectionBatch((), "OK", raw=valid_raw)]
+    assert follow(frames, output, FakeDetector(batches), done=lambda: True,
+                  inbox_log=inbox, print_fn=lambda _: None) == 2
+    results = [result_from_dict(json.loads(line)) for line in inbox.read_text().splitlines()]
+    assert results[0].status == "FAILED" and results[0].error_category == "SCHEMA"
+    assert results[0].identity_status == "UNVERIFIED" and results[0].resolved_model is None
+    assert isinstance(results[0].provider, str) and 0 < len(results[0].provider) <= 4096
+    assert results[1].status == "SUCCEEDED"
+    store = RoomStore.open(tmp_path / "room.sqlite3")
+    store.create_session("s1", "look", CapabilityProfile(()))
+    outcomes = poll_inbox(store, inbox, current_snapshot_version=0)
+    assert len(outcomes) == 2 and not outcomes[0].authorizes_current_state and outcomes[1].authorizes_current_state
+
+
+def test_detector_raw_score_survives_follower_inbox_ingest_and_consumer(tmp_path):
+    from sentinel.room.ingest import poll_inbox
+    from sentinel.room.models import CapabilityProfile
+    from sentinel.room.store import RoomStore
+    record = _correlated_record(tmp_path)
+    frames, inbox, output = tmp_path / "frames.jsonl", tmp_path / "inbox.jsonl", tmp_path / "out.jsonl"
+    frames.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    detection = {**_laptop().detections[0], "raw_score": 0.37, "score_kind": "DETECTOR_RAW"}
+    # The supplied band is preserved, rather than recomputed from the score.
+    batch = DetectionBatch((detection,), "OK", ("medium",),
+                           raw={"provider": "fixture", "model": "pinned-model"})
+    assert follow(frames, output, FakeDetector([batch]), done=lambda: True,
+                  inbox_log=inbox, print_fn=lambda _: None) == 1
+    store = RoomStore.open(tmp_path / "room.sqlite3")
+    store.create_session("s1", "look", CapabilityProfile(()))
+    assert poll_inbox(store, inbox, current_snapshot_version=0)[0].authorizes_current_state
+    current = store.current_hypotheses("s1", snapshot_version=0)
+    assert len(current) == 1
+    assert (current[0]["raw_score"], current[0]["score_kind"], current[0]["confidence_band"]) == (
+        0.37, "DETECTOR_RAW", "medium",
+    )
