@@ -20,3 +20,15 @@ def test_transport_limits_cover_configured_control_retries_and_read_queries():
                                     base_timeout_s=limits.reply_timeout_s) == 30
     assert set_speed_upper_bound_s(limits) == 90
     assert limits.read_timeout_s == 30.0
+
+
+def test_transport_limits_keep_sdk_default_control_and_read_waits_separate_from_motion():
+    limits = TransportLimits(
+        reply_timeout_s=1.0, control_attempts=3,
+        control_timeout_s=7.0, read_timeout_s=7.0,
+    )
+
+    assert move_reply_upper_bound_s(distance_cm=20, speed_cm_s=20,
+                                    base_timeout_s=limits.reply_timeout_s) == 8
+    assert set_speed_upper_bound_s(limits) == 21
+    assert limits.read_timeout_s == 7.0

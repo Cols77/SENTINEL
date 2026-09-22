@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 from .client import EmergencyAborted
 from .motion_bounds import (
+    DJITELLOPY_SDK_DEFAULT_TIMEOUT_S,
     MOTION_REPLY_SLACK_S,
     ROTATION_DEG_PER_S,
     TransportLimits,
@@ -228,7 +229,8 @@ class DjitellopyClient:
             reply_timeout_s=self.timeout,
             control_attempts=self.retry_count,
             control_retry_gap_s=0.0,
-            read_timeout_s=self.timeout,
+            control_timeout_s=max(self.timeout, DJITELLOPY_SDK_DEFAULT_TIMEOUT_S),
+            read_timeout_s=max(self.timeout, DJITELLOPY_SDK_DEFAULT_TIMEOUT_S),
         )
 
     def _ensure_available(self) -> None:

@@ -101,6 +101,25 @@ def test_checkpoint_uses_configured_transport_limits_for_speed_and_vertical_tele
     assert dict(vertical_read.arguments)["phase"] == "vertical"
 
 
+def test_checkpoint_preserves_sdk_default_timeout_floor_for_speed_and_vertical_query():
+    plan = plan_checkpoint(
+        checkpoint_id="sdk-floor", start=Position(0, 0, 100), target=Position(0, 0, 120),
+        start_heading_deg=90, terminal_heading_deg=90, speed_cm_s=20,
+        looks_deg=(), capture_count=0,
+        limits=CommandLimits(transport_limits=TransportLimits(
+            reply_timeout_s=1.0, control_attempts=3,
+            control_timeout_s=7.0, read_timeout_s=7.0,
+        )),
+    )
+
+    assert next(command.upper_bound_s for command in plan.commands if command.kind == "SET_SPEED") == 21
+    vertical_read = next(
+        command for command in plan.commands
+        if command.kind == "READ_TELEMETRY" and dict(command.arguments).get("phase") == "vertical"
+    )
+    assert vertical_read.upper_bound_s == 7
+
+
 def test_checkpoint_enforces_dead_band_settle_speed_and_canonical_terminal_heading():
     slow = plan_checkpoint(
         checkpoint_id="slow", start=Position(0, 0, 100), target=Position(10, 11, 100),

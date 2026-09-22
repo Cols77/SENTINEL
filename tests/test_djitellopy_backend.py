@@ -1,3 +1,4 @@
+import inspect
 from threading import Thread
 
 import pytest
@@ -8,6 +9,7 @@ from sentinel.djitellopy_backend import (
     DjitellopyClient,
     EmergencyAborted,
 )
+from sentinel.motion_bounds import DJITELLOPY_SDK_DEFAULT_TIMEOUT_S
 
 
 def test_backend_reuses_shared_emergency_exception_type():
@@ -381,3 +383,21 @@ def test_backend_exports_its_configured_transport_limits_for_planning():
     assert client.transport_limits.reply_timeout_s == 30.0
     assert client.transport_limits.control_attempts == 3
     assert client.transport_limits.read_timeout_s == 30.0
+
+
+def test_backend_exports_sdk_definition_timeout_floor_for_control_and_read_queries():
+    client = DjitellopyClient(local_ip="192.168.10.2", timeout=1.0, retry_count=3)
+
+    assert client.transport_limits.reply_timeout_s == 1.0
+    assert client.transport_limits.control_timeout_s == 7.0
+    assert client.transport_limits.read_timeout_s == 7.0
+
+
+def test_sdk_timeout_floor_matches_djitellopy_definition_time_defaults():
+    from djitellopy import Tello
+
+    control_timeout = inspect.signature(Tello.send_control_command).parameters["timeout"].default
+    read_timeout = inspect.signature(Tello.send_command_with_return).parameters["timeout"].default
+
+    assert control_timeout == DJITELLOPY_SDK_DEFAULT_TIMEOUT_S
+    assert read_timeout == DJITELLOPY_SDK_DEFAULT_TIMEOUT_S
