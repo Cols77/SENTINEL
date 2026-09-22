@@ -306,3 +306,21 @@ def test_managed_runner_safety_abort_cannot_return_success(tmp_path):
     with pytest.raises(EmergencyAborted):flight.fly(option)
     assert done
     assert 'takeoff' not in flight.client.commands
+
+
+def test_observer_managed_flight_rejects_failed_runner_without_legacy_callbacks(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import sentinel.survey.cube_bridge as bridge_module
+    class FailedRunner:
+        def __init__(self, *args, **kwargs):
+            self.client = kwargs.get('client', DryRunClient())
+        def run(self, *, confirm):
+            return SimpleNamespace(status='FAIL', error='simulated failure')
+        def check_interruption(self):
+            return None
+    monkeypatch.setattr(bridge_module, 'CubeMissionRunner', FailedRunner)
+    flight = _flight(tmp_path)
+    flight.observer = object()
+    option = SweepOption('ONE', 'one', ((150, 300),), 120, (0,), 100, 22, (), 300)
+    with pytest.raises(RuntimeError, match='FLIGHT_FAILED'):
+        flight.fly(option)

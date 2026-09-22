@@ -168,7 +168,8 @@ class CubeFlight:
             report=runner.run(confirm=self.confirm)
             # Existing CLI retains partial frames; a managed UI mission must stop
             # on safety/failure rather than proposing another flight.
-            if self.on_runner:
+            managed = self.on_runner is not None or self.observer is not None
+            if managed:
                 runner.check_interruption()
                 if report.status != 'PASS':raise RuntimeError('FLIGHT_FAILED')
         finally:

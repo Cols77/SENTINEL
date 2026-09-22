@@ -35,6 +35,9 @@ class StopProgressEvent:
     stop: str | None = None
     status: str = ""
     payload: dict[str, Any] | None = None
+    option_id: str | None = None
+    x_cm: float | None = None
+    y_cm: float | None = None
 
 
 @dataclass(frozen=True)

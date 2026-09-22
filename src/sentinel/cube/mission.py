@@ -779,9 +779,18 @@ class CubeMissionRunner(FlightTestRunner):
                 self.on_stop(dict(entry))
             except Exception:
                 pass
+        waypoint = entry.get("waypoint", "")
+        parts = waypoint.rsplit("_", 1)
+        commanded = entry.get("commanded_cm") or [None, None]
+        measured = entry.get("fix_cm")
         notify(self.observer, StopProgressEvent(
-            run_id=self.run_id, stop=entry.get("waypoint"), status=entry.get("status"),
-            payload=dict(entry)))
+            run_id=self.run_id, stop=waypoint, status=entry.get("status"),
+            option_id=parts[0] if len(parts) == 2 and parts[1].isdigit() else waypoint,
+            stop_index=int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else None,
+            x_cm=(measured or commanded)[0], y_cm=(measured or commanded)[1],
+            payload={"option_id": parts[0] if len(parts) == 2 and parts[1].isdigit() else waypoint,
+                     "stop_index": int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else None,
+                     "x_cm": (measured or commanded)[0], "y_cm": (measured or commanded)[1]}))
 
     def _fly_sequence(self) -> None:
         self._enter_altitude_band()

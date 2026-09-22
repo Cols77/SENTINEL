@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from PIL import Image, ImageDraw
 from sentinel.dry_run import DryRunClient
+from sentinel.client import EmergencyAborted
 from sentinel.runner import FlightTestRunner
 from sentinel.survey.envelope import SweepEnvelope
 from sentinel.survey.options import generate_options
@@ -12,7 +13,7 @@ from sentinel.survey.flight import FlightFrame
 from sentinel.survey.detector import ScriptedDetector
 from sentinel.survey.proposer import RuleProposer
 from sentinel.survey.observability import SYNTHETIC_LEVEL, IMAGE_WIDTH, IMAGE_HEIGHT, PRINCIPAL_X, PRINCIPAL_Y, FOCAL_PX
-from sentinel.mission_observer import (RunnerLifecycleEvent, StopProgressEvent, notify)
+from sentinel.mission_observer import (AbortEvent, RunnerLifecycleEvent, StopProgressEvent, notify)
 
 @dataclass(frozen=True)
 class ScenarioAdapters:
@@ -43,19 +44,31 @@ class ScenarioFlight:
             self.registry.bind(self.run_id,runner)
         notify(self.observer, RunnerLifecycleEvent(run_id=self.run_id, stage='MISSION', status='STARTED', runner=runner))
         self.flights+=1
+        succeeded = False
         try:
             result=[]
             for frame in self.frames[option.option_id]:
                 runner.check_interruption()
                 payload=dict(stop_index=frame.stop_index,x_cm=frame.x_cm,y_cm=frame.y_cm,option_id=option.option_id)
                 notify(self.observer, StopProgressEvent(run_id=self.run_id, stop_index=frame.stop_index,
-                                                        stop=option.option_id, status='ARRIVED', payload=payload))
+                                                        stop=f"{option.option_id}_{frame.stop_index}",
+                                                        option_id=option.option_id,
+                                                        x_cm=frame.x_cm, y_cm=frame.y_cm,
+                                                        status='ARRIVED', payload=payload))
                 if self.observer is None:
                     self.emit('STOP_ARRIVED',payload)
                 result.append(frame)
+            succeeded = True
             return result
+        except Exception as exc:
+            status = 'EMERGENCY_ABORTED' if isinstance(exc, EmergencyAborted) else 'FAILED'
+            notify(self.observer, AbortEvent(run_id=self.run_id, stage='MISSION', reason=str(exc)))
+            notify(self.observer, RunnerLifecycleEvent(run_id=self.run_id, stage='MISSION', status=status,
+                                                        message=str(exc), runner=runner))
+            raise
         finally:
-            notify(self.observer, RunnerLifecycleEvent(run_id=self.run_id, stage='MISSION', status='PASS', runner=runner))
+            if succeeded:
+                notify(self.observer, RunnerLifecycleEvent(run_id=self.run_id, stage='MISSION', status='PASS', runner=runner))
             if self.registry and self.observer is None:
                 self.registry.unbind(self.run_id,runner)
 

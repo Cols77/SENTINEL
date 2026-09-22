@@ -76,7 +76,12 @@ class SurveyRuntime:
     def _publish_structured(self, run_id, event_type, phase, event):
         payload = {'summary': event_type.replace('_', ' ').capitalize()}
         if isinstance(event, StopProgressEvent):
-            payload['stop'] = event.payload or {}
+            payload['stop'] = {
+                'option_id': event.option_id or self._option_id(event.stop),
+                'stop_index': event.stop_index if event.stop_index is not None else self._stop_index(event.stop),
+                'x_cm': event.x_cm,
+                'y_cm': event.y_cm,
+            }
         elif isinstance(event, FrameCapturedEvent):
             payload['refs'] = [event.artifact_id] if event.artifact_id else []
         elif isinstance(event, DetectorResultEvent):
@@ -86,8 +91,22 @@ class SurveyRuntime:
         with self.lock:
             state=self.state.setdefault(run_id,{})
             state['phase']=phase; state['updated_at']=now()
-            if isinstance(event, StopProgressEvent): state['stop']=event.payload
+            if isinstance(event, StopProgressEvent): state['stop']=payload['stop']
             self.store.append_event(run_id,event_type,payload)
+
+    @staticmethod
+    def _option_id(stop):
+        if not stop:
+            return None
+        parts = stop.rsplit('_', 1)
+        return parts[0] if len(parts) == 2 and parts[1].isdigit() else stop
+
+    @staticmethod
+    def _stop_index(stop):
+        try:
+            return int(stop.rsplit('_', 1)[1])
+        except (AttributeError, IndexError, ValueError):
+            return None
 
     def execute(self, request):
         run_id=request['run_id']
