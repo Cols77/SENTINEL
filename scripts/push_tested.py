@@ -31,9 +31,15 @@ def _record_path(worktree: str) -> Path:
     return git_dir / "TESTED_TIP"
 
 
+def _dirty(worktree: str) -> bool:
+    """Modified or staged tracked files. Untracked files are another session's
+    drafts in a shared worktree; they are not in HEAD and do not go with a push."""
+    return bool(_git(worktree, "status", "--porcelain", "--untracked-files=no"))
+
+
 def record(worktree: str) -> int:
-    if _git(worktree, "status", "--porcelain"):
-        print("refusing to record: the working tree is not clean", file=sys.stderr)
+    if _dirty(worktree):
+        print("refusing to record: tracked files are modified", file=sys.stderr)
         return 2
     tip = _git(worktree, "rev-parse", "HEAD")
     _record_path(worktree).write_text(tip + "\n", encoding="utf-8")
@@ -52,8 +58,8 @@ def push(worktree: str, branch: str) -> int:
         print(f"refusing to push: HEAD is {tip[:7]} but the suite ran on {tested[:7]}; "
               "run the suite again and re-record", file=sys.stderr)
         return 2
-    if _git(worktree, "status", "--porcelain"):
-        print("refusing to push: the working tree is not clean", file=sys.stderr)
+    if _dirty(worktree):
+        print("refusing to push: tracked files are modified", file=sys.stderr)
         return 2
     subprocess.run(["git", "-C", worktree, "push", "origin", branch], check=True)
     return 0
