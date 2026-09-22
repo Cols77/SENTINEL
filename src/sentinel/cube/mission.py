@@ -62,6 +62,9 @@ VERTICAL_MISMATCH_CM = 25.0
 #: joystick" at 40 cm/s (09-22 104429) and at 50 cm/s (09-22 152455), and the drone landed.
 SETTLE_AFTER_FAST_MOVE_S = 1.5
 SETTLE_AFTER_SLOW_MOVE_S = 0.7
+#: A trim round that leaves the stop farther from its target than this beyond the previous fix
+#: ends the trimming there (the burst fix itself wanders by a couple of centimetres).
+WORSE_MARGIN_CM = 2.0
 #: The extra stop a ``return_to_start`` mission ends with.
 RETURN_NAME = "RETURN"
 YAW_TRIM_THRESHOLD_DEG = 10.0
@@ -578,6 +581,14 @@ class CubeMissionRunner(FlightTestRunner):
             # Inside the tolerance circle, a 20 cm minimum move can only make things worse
             # (2026-09-21 enlarged trial: 12 cm became 25.7 cm after two trims).
             if not trims or rounds >= self.mission.max_trim_rounds or entry["tolerance"] == "INSIDE":
+                return self._accept_arrival(wp, entry)
+            errors = entry["trim_errors_cm"]
+            if rounds > 0 and errors[-1] > errors[-2] + WORSE_MARGIN_CM:
+                # 20 cm minimum trims overshoot errors of 15-25 cm; another round can grow it
+                # further (09-22 FAR_MID_HI: 19.4 -> 23.4 -> 34.2 cm).
+                entry["trims_stopped"] = "WORSE"
+                self._emit("alert", f"{wp.name}: the last trim made it worse ({errors[-2]} -> "
+                                    f"{errors[-1]} cm); no more trims at this stop")
                 return self._accept_arrival(wp, entry)
             self._set_speed(int(COMMAND_SPEED_CM_S))   # trims are short and want precision
             sent = [self._step(direction, distance, optional=True) for direction, distance in trims]

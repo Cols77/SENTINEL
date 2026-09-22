@@ -815,3 +815,26 @@ def test_a_hover_fix_counts_as_settling(tmp_path):
     between = moves[moves.index("forward 50") + 1:moves.index("left 120")]
     # the hover before WP1's fix and the look; no move-settle pause on top
     assert between.count(("sleep", SETTLE_S)) == 2 and len(between) == 2
+
+
+def test_trimming_stops_when_a_trim_makes_the_error_worse(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), max_trim_rounds=5)
+    bursts = [[_report(270, 275)] * 10,      # 25 cm short: trim forward 25
+              [_report(270, 330)] * 10,      # overshot to 30 cm: worse, stop here
+              [_report(270, 300)] * 10]      # never asked for
+    runner, client = _runner(tmp_path, "reanchor", bursts, mission=mission)
+    assert runner.run(confirm=True).status == "PASS"      # 30 cm is the outer circle
+    (wp1,) = _log(tmp_path)
+    assert wp1["trim_errors_cm"] == [25.0, 30.0] and wp1["trims_stopped"] == "WORSE"
+    assert wp1["trim_rounds_sent"] == 1 and wp1["tolerance"] == "OUTER"
+
+
+def test_a_trim_within_the_fix_noise_does_not_stop_trimming(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), max_trim_rounds=5)
+    bursts = [[_report(270, 278)] * 10,      # 22 cm
+              [_report(270, 322)] * 10,      # 22 cm the other way: not worse by more than 2
+              [_report(270, 303)] * 10]      # 3 cm
+    runner, _ = _runner(tmp_path, "reanchor", bursts, mission=mission)
+    assert runner.run(confirm=True).status == "PASS"
+    (wp1,) = _log(tmp_path)
+    assert wp1["trim_errors_cm"] == [22.0, 22.0, 3.0] and "trims_stopped" not in wp1
