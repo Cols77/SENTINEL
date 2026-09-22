@@ -17,11 +17,16 @@ recorded for the location and date (``RETAIN``) and the operator's
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import time
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 from .consent import ConsentMissing, consent_policy
+from .detector import DetectionBatch
 from .observability import NOMINAL_WIDTH_CM
 from .store import SurveyStore
 
@@ -31,6 +36,181 @@ LIVE_CLASSES = tuple(sorted(NOMINAL_WIDTH_CM))
 
 class LiveDetectRefused(RuntimeError):
     """A gate is not met; the flight must not start with live detection."""
+
+
+def _frame_key(path: str | Path | None, sha256: str | None) -> tuple[str, str]:
+    """Return the stable identity used at both sides of the process boundary.
+
+    The capture directory is unique per sweep, so a resolved path plus the
+    bytes hash is sufficient to reject both stale rows and a row for a
+    different image that happened to use the same basename.
+    """
+    return (str(Path(path).resolve()) if path is not None else "", str(sha256 or ""))
+
+
+@dataclass(frozen=True)
+class DetectionCache:
+    """Immutable, idempotent view of one follower's JSONL output."""
+
+    run_id: str
+    rows: tuple[dict, ...]
+    process_status: str = "OK"
+    process_error: str | None = None
+
+    def __init__(self, run_id: str, rows: Iterable[dict], process_status: str = "OK",
+                 process_error: str | None = None) -> None:
+        object.__setattr__(self, "run_id", run_id)
+        object.__setattr__(self, "rows", tuple(dict(row) for row in rows))
+        object.__setattr__(self, "process_status", process_status)
+        object.__setattr__(self, "process_error", process_error)
+
+    def for_frame(self, frame, classes: tuple[str, ...] = LIVE_CLASSES):
+        """Return the cached batch for *frame*, never invoking a provider.
+
+        A result is retained after it is read, making repeated projection or
+        retry reads idempotent. Every failure is an explicit non-OK batch;
+        callers must not turn it into a zero-count success.
+        """
+        key = _frame_key(getattr(frame, "image_path", None), getattr(frame, "sha256", None))
+        if not key[0] or not key[1]:
+            return self._gap("ANALYSIS_GAP_HASH_MISMATCH", "frame identity/hash missing", classes)
+        same_path: list[dict] = []
+        foreign = False
+        for row in self.rows:
+            row_key = _frame_key(row.get("path"), row.get("sha256"))
+            if row_key[0] == key[0]:
+                same_path.append(row)
+            if row_key == key:
+                if row.get("run_id") not in (None, self.run_id):
+                    foreign = True
+                    continue
+                raw = dict(row.get("raw") or {})
+                raw.setdefault("detect_s", row.get("detect_s"))
+                if row.get("error"):
+                    raw.setdefault("error", row["error"])
+                detections = tuple(row.get("detections") or ())
+                bands = tuple(d.get("band", "low") for d in detections)
+                return DetectionBatch(detections, str(row.get("status") or "DETECTOR_ERROR"),
+                                      bands=bands, dropped=tuple(row.get("dropped") or ()),
+                                      raw=raw)
+        if foreign:
+            return self._gap("ANALYSIS_GAP_STALE", "cached result belongs to another run", classes)
+        if same_path:
+            return self._gap("ANALYSIS_GAP_HASH_MISMATCH", "cached frame hash does not match", classes)
+        status = self.process_status.upper()
+        if status not in {"OK", ""}:
+            return self._gap(f"ANALYSIS_GAP_PROCESS_{status}", self.process_error, classes)
+        return self._gap("ANALYSIS_GAP_MISSING", "follower produced no row", classes)
+
+    @staticmethod
+    def _gap(status: str, error: str | None, classes: tuple[str, ...]):
+        return DetectionBatch((), status, bands=(), dropped=(),
+                              raw={"error": error or status, "classes": list(classes)})
+
+
+class LiveDetectionSupervisor:
+    """Bound one separate ``live_detect.py`` process to one live sweep.
+
+    The supervisor owns only files and a child process. It is deliberately
+    ignorant of flight control: a launch, detector, or drain failure becomes a
+    cache gap while the caller remains responsible for the controlled landing.
+    """
+
+    def __init__(self, *, root: str | Path, run_id: str, detector_name: str,
+                 consent_db: str | Path | None = None, location: str | None = None,
+                 date: str | None = None, tiles: str = "none", authorised: bool = True,
+                 launcher: Callable | None = None, script: str | Path | None = None,
+                 drain_timeout_s: float = 90.0) -> None:
+        self.run_id = run_id
+        self.detector_name = detector_name
+        self.consent_db, self.location, self.date = consent_db, location, date
+        self.tiles, self.authorised = tiles, authorised
+        self.launcher = launcher or subprocess.Popen
+        self.script = Path(script) if script else Path(__file__).resolve().parents[3] / "scripts" / "live_detect.py"
+        self.drain_timeout_s = drain_timeout_s
+        self.sweep_id = f"{run_id}-{uuid.uuid4().hex}"
+        safe_run = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in run_id)
+        self.run_dir = Path(root) / "live-detection" / f"{safe_run}-{uuid.uuid4().hex}"
+        self.frames_dir = self.run_dir / "frames"
+        self.frames_log = self.frames_dir / "frames.jsonl"
+        self.out_log = self.run_dir / "detections.jsonl"
+        self.done_file = self.run_dir / "flight.done"
+        self.process = None
+        self.process_status = "NOT_STARTED"
+        self.process_error: str | None = None
+        self._cache: DetectionCache | None = None
+
+    def command(self) -> list[str]:
+        command = [sys.executable, str(self.script), "--detector", self.detector_name,
+                   "--frames-log", str(self.frames_log), "--out", str(self.out_log),
+                   "--done-file", str(self.done_file), "--tiles", self.tiles]
+        if self.consent_db is not None:
+            command += ["--consent-db", str(self.consent_db)]
+        if self.location is not None:
+            command += ["--location", self.location]
+        if self.date is not None:
+            command += ["--date", self.date]
+        if self.authorised:
+            command.append("--i-authorise-paid-calls")
+        return command
+
+    def start(self) -> "LiveDetectionSupervisor":
+        self.frames_dir.mkdir(parents=True, exist_ok=True)
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.process = self.launcher(self.command())
+            self.process_status = "RUNNING"
+        except Exception as exc:  # child failure must not affect flight
+            self.process_status = "START_FAILED"
+            self.process_error = f"{type(exc).__name__}: {exc}"
+        return self
+
+    def finish(self, frames: Iterable | None = None) -> DetectionCache:
+        if self._cache is not None:
+            return self._cache
+        self.done_file.parent.mkdir(parents=True, exist_ok=True)
+        self.done_file.touch(exist_ok=True)
+        if self.process is not None and self.process_status == "RUNNING":
+            try:
+                code = self.process.wait(timeout=self.drain_timeout_s)
+                self.process_status = "OK" if code in (None, 0) else "CRASHED"
+                if self.process_status != "OK":
+                    self.process_error = f"follower exited {code}"
+            except (subprocess.TimeoutExpired, TimeoutError) as exc:
+                self.process_status, self.process_error = "TIMEOUT", str(exc)
+                try:
+                    self.process.kill()
+                finally:
+                    try:
+                        self.process.wait()
+                    except Exception:
+                        pass
+            except Exception as exc:
+                self.process_status = "CRASHED"
+                self.process_error = f"{type(exc).__name__}: {exc}"
+                try:
+                    self.process.kill()
+                    self.process.wait()
+                except Exception:
+                    pass
+        elif self.process is None and self.process_status == "NOT_STARTED":
+            self.process_status = "START_FAILED"
+        rows: list[dict] = []
+        if self.out_log.exists():
+            for line in self.out_log.read_text(encoding="utf-8").splitlines():
+                try:
+                    row = json.loads(line)
+                    if isinstance(row, dict):
+                        rows.append(row)
+                except (json.JSONDecodeError, TypeError):
+                    self.process_status = "MALFORMED_OUTPUT"
+                    self.process_error = "invalid JSONL row"
+        self._cache = DetectionCache(self.run_id, rows, self.process_status,
+                                     self.process_error)
+        return self._cache
+
+    def detection_for(self, frame, classes: tuple[str, ...] = LIVE_CLASSES):
+        return self.finish().for_frame(frame, classes)
 
 
 def check_gates(*, consent_db: Path | None, location: str | None, date: str | None,
@@ -69,8 +249,10 @@ def summarise(stop: str, look_deg, status: str, detections: list[dict],
 def detect_frame(detector, record: dict, classes: tuple[str, ...] = LIVE_CLASSES) -> dict:
     """One frame record from ``frames.jsonl`` -> one result row. Never raises: a
     detector failure is a row with the error named, not a stopped follower."""
-    row = {"stop": record.get("stop"), "look_deg": record.get("look_deg"),
+    row = {"run_id": record.get("run_id"), "stop": record.get("stop"),
+           "look_deg": record.get("look_deg"),
            "path": record.get("path"), "sha256": record.get("sha256"),
+           "artifact_id": record.get("artifact_id"),
            "captured_at": record.get("captured_at"), "classes": list(classes)}
     started = time.monotonic()
     try:

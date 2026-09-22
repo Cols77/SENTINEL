@@ -157,19 +157,32 @@ def _fly_and_ingest(store, run_id, option, flight, detector,
             pose={"x_cm": frame.x_cm, "y_cm": frame.y_cm, "z_cm": frame.z_cm,
                   "heading_deg": frame.heading_deg,
                   "position_kind": frame.position_kind}))
+        # LiveFlight owns a separate follower process.  Its cache is the only
+        # legal source for a real frame: consulting ``detector`` here would
+        # pay for the same provider request a second time.  Rehearsal and
+        # replay flights do not expose this hook and retain their old path.
+        notify(observer, DetectorResultEvent(run_id=run_id, frame_id=frame_id,
+                                             status="DETECTING"))
         started = time.perf_counter()
         try:
-            batch = detector.detect(frame.image_path, option.resolvable_classes)
+            cached = getattr(flight, "detection_for", None)
+            if callable(cached):
+                batch = cached(frame, option.resolvable_classes)
+            else:
+                batch = detector.detect(frame.image_path, option.resolvable_classes)
         except Exception as exc:
             notify(observer, DetectorResultEvent(
                 run_id=run_id, frame_id=frame_id, status="ERROR",
                 latency_ms=(time.perf_counter() - started) * 1000, error=str(exc)))
             raise
+        cached_latency = (batch.raw or {}).get("detect_s") if callable(getattr(flight, "detection_for", None)) else None
+        latency_ms = (float(cached_latency) * 1000.0
+                      if cached_latency is not None else (time.perf_counter() - started) * 1000)
         notify(observer, DetectorResultEvent(
             run_id=run_id, frame_id=frame_id, status=batch.status,
             detections=tuple(batch.detections),
-            latency_ms=(time.perf_counter() - started) * 1000,
-            error=getattr(batch, "error", None)))
+            latency_ms=latency_ms,
+            error=(batch.raw or {}).get("error") or getattr(batch, "error", None)))
         store.set_frame_analysis(frame_id, "OK" if batch.status == "OK" else batch.status)
         # R3: the band detector.normalise attached to each detection is
         # stored as-is -- never overwritten to a fixed value.

@@ -18,6 +18,7 @@ from sentinel.pose.persistence import ensure_schema
 from sentinel.runner import FlightTestRunner
 from sentinel.survey.consent import consent_policy
 from sentinel.survey.cube_bridge import CubeFlight, envelope_from_site
+from sentinel.survey.live_detect import DetectionCache, LiveDetectionSupervisor
 from sentinel.survey.options import generate_options
 from sentinel.survey.proposer import RuleProposer
 from sentinel.survey.store import SurveyStore
@@ -120,38 +121,68 @@ class LivePoseFeed:
 
 
 class LiveFlight:
-    def __init__(self,config,site,tag_map,pose_feed):
+    def __init__(self,config,site,tag_map,pose_feed,supervisor_factory=None):
         self.config,self.site,self.tag_map,self.pose_feed=config,site,tag_map,pose_feed
+        self.supervisor_factory=supervisor_factory
         self.registry=None;self.run_id=config.run_id;self.emit=lambda *args:None
         self.observer=None
         self.artifacts={};self.start=(config.start_x_cm,config.start_y_cm)
+        self._detection_cache = None
+
+    def _new_supervisor(self, option):
+        if self.supervisor_factory is not None:
+            return self.supervisor_factory(self.config, option)
+        config = self.config
+        return LiveDetectionSupervisor(
+            root=config.artifact_root or config.data_dir / 'images',
+            run_id=self.run_id, detector_name=config.detector_name,
+            consent_db=config.survey_db or config.data_dir / 'survey.sqlite',
+            location=config.location, date=config.consent_date,
+            tiles=getattr(config, 'detect_tiles', 'none'),
+            authorised=getattr(config, 'authorise_paid_calls', True))
+
+    def detection_for(self, frame, classes):
+        """Read the follower's exact-frame cache; never call the provider."""
+        if self._detection_cache is None:
+            from sentinel.survey.detector import DetectionBatch
+            return DetectionBatch((), 'ANALYSIS_GAP_MISSING', raw={
+                'error': 'live detection cache unavailable', 'classes': list(classes)})
+        return self._detection_cache.for_frame(frame, classes)
 
     def fly(self,option):
         config=self.config
-        client=make_client(config)
-        conn=sqlite3.connect(config.pose_db)
-        def register(runner):
-            if self.observer is None and self.registry:
-                self.registry.bind(self.run_id,runner)
-        def unregister(runner):
-            if self.observer is None and self.registry:
-                self.registry.unbind(self.run_id,runner)
-        def stop(entry):
-            if entry.get('waypoint','').startswith(option.option_id+'_') and entry.get('status')!='ABORTED_EN_ROUTE':
-                index=int(entry['waypoint'].rsplit('_',1)[1]);x,y=entry['commanded_cm'][:2]
-                if self.observer is None:
-                    self.emit('STOP_ARRIVED',dict(stop_index=index,x_cm=x,y_cm=y,option_id=option.option_id))
-        bridge=CubeFlight(client=client,site=self.site,mode='real',pose_mode=config.pose_mode,
-            run_id=self.run_id,mission_log=config.data_dir/'mission.jsonl',capture_dir=config.artifact_root or config.data_dir/'images',
-            start_x_cm=self.start[0],start_y_cm=self.start[1],surface_z_cm=config.surface_z_cm,
-            sr063_amended=config.sr063_amended,tag_map=self.tag_map,conn=conn,confirm=True,
-            on_runner=None if self.observer is not None else register,
-            on_runner_done=None if self.observer is not None else unregister,
-            on_stop=None if self.observer is not None else stop,
-            on_pose=None if self.observer is not None else self.pose_feed.accept,
-            on_pose_health=None if self.observer is not None else self.pose_feed.accept_health,
-            observer=self.observer)
+        supervisor = self._new_supervisor(option)
+        # This is deliberately before client creation and before CubeFlight's
+        # runner.  The first saved frame can therefore be consumed while the
+        # drone is in flight, without coupling follower health to navigation.
+        supervisor.start()
+        client = None
+        conn = None
+        frames = None
         try:
+            client=make_client(config)
+            conn=sqlite3.connect(config.pose_db)
+            def register(runner):
+                if self.observer is None and self.registry:
+                    self.registry.bind(self.run_id,runner)
+            def unregister(runner):
+                if self.observer is None and self.registry:
+                    self.registry.unbind(self.run_id,runner)
+            def stop(entry):
+                if entry.get('waypoint','').startswith(option.option_id+'_') and entry.get('status')!='ABORTED_EN_ROUTE':
+                    index=int(entry['waypoint'].rsplit('_',1)[1]);x,y=entry['commanded_cm'][:2]
+                    if self.observer is None:
+                        self.emit('STOP_ARRIVED',dict(stop_index=index,x_cm=x,y_cm=y,option_id=option.option_id))
+            bridge=CubeFlight(client=client,site=self.site,mode='real',pose_mode=config.pose_mode,
+                run_id=self.run_id,mission_log=config.data_dir/'mission.jsonl',capture_dir=supervisor.frames_dir,
+                start_x_cm=self.start[0],start_y_cm=self.start[1],surface_z_cm=config.surface_z_cm,
+                sr063_amended=config.sr063_amended,tag_map=self.tag_map,conn=conn,confirm=True,
+                on_runner=None if self.observer is not None else register,
+                on_runner_done=None if self.observer is not None else unregister,
+                on_stop=None if self.observer is not None else stop,
+                on_pose=None if self.observer is not None else self.pose_feed.accept,
+                on_pose_health=None if self.observer is not None else self.pose_feed.accept_health,
+                observer=self.observer)
             frames=bridge.fly(option)
             self.start=(bridge.start_x_cm,bridge.start_y_cm)
             for f in frames:
@@ -160,7 +191,18 @@ class LiveFlight:
                 self.artifacts[f.artifact_id]=dict(path=path,sha256=f.sha256,width=w,height=h)
             return frames
         finally:
-            conn.close();client.close()
+            try:
+                if conn is not None: conn.close()
+                if client is not None: client.close()
+            finally:
+                # A flight exception still reaches this drain.  Timeout/kill
+                # is bounded and represented in DetectionCache, never raised
+                # into the controlled-landing path.
+                try:
+                    self._detection_cache = supervisor.finish(frames)
+                except Exception as exc:
+                    self._detection_cache = DetectionCache(
+                        self.run_id, (), 'SUPERVISOR_ERROR', f'{type(exc).__name__}: {exc}')
 
 
 def report_writer(results):
