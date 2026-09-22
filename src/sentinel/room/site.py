@@ -16,7 +16,9 @@ import uuid
 
 from sentinel.cube.checkpoint import HomeDefinition
 from sentinel.cube.localization import DriftProfile, LocalizationState, PoseHealth, finite_number
-from sentinel.cube.recovery import RecoveryEnvironment, RecoveryVolume, contains_disk
+from sentinel.cube.recovery import (
+    RecoveryEnvironment, RecoveryVolume, contains_disk, normalize_mapped_heading_tag_ids,
+)
 from sentinel.models import Position
 
 
@@ -255,13 +257,14 @@ def parse_room_site(doc: dict, *, real_mode: bool = True) -> RoomSite:
 
 def adapt_recovery_environment(site: RoomSite, assurances: tuple[ContingencyAssurance, ...], *,
         session_id: str, clock_domain_id: str, navigation_contingency_id: str,
-        now_monotonic_ms: int, mapped_heading_tag_ids: tuple[tuple[int, tuple[int, ...]], ...]) -> RecoveryEnvironment:
+        now_monotonic_ms: int, mapped_heading_tag_ids: tuple[tuple[float, tuple[int, ...]], ...]) -> RecoveryEnvironment:
     """Resolve exactly one live assurance. Revocation is irreversible per ID.
 
     The caller supplies observations already qualified by the site's named
     clearance policy. Their persisted evidence is required here; this adapter
     never manufactures an assurance from static survey data.
     """
+    mapped_heading_tag_ids = normalize_mapped_heading_tag_ids(mapped_heading_tag_ids)
     site.validate(real_mode=True)
     entries = [entry for entry in site.terminal_contingencies if entry.contingency_id == navigation_contingency_id]
     if len(entries) != 1 or entries[0].trigger != ContingencyTrigger.NAVIGATION_UNAVAILABLE:
@@ -279,8 +282,6 @@ def adapt_recovery_environment(site: RoomSite, assurances: tuple[ContingencyAssu
     deadline = min(assurance.expires_monotonic_ms, assurance.assured_monotonic_ms + entry.max_assurance_age_ms)
     if not assurance.assured_monotonic_ms <= now_monotonic_ms < deadline:
         raise ValueError("assurance expired or monotonic clock reset")
-    if len({heading for heading, _ in mapped_heading_tag_ids}) != len(mapped_heading_tag_ids):
-        raise ValueError("duplicate mapped recovery heading")
     volumes = tuple(RecoveryVolume(volume.volume_id, volume.polygon_xy_cm, volume.z_interval_cm)
                     for volume in site.free_space_volumes
                     if not any(_overlaps(volume, forbidden) for forbidden in site.forbidden_volumes))

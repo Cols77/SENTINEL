@@ -214,7 +214,7 @@ def test_invalid_or_incomplete_site_cannot_admit_real_mode(fault):
 def adapt(records, **changes):
     return adapt_recovery_environment(site(), records, session_id="session", clock_domain_id="clock",
         navigation_contingency_id="NAVIGATION_UNAVAILABLE", now_monotonic_ms=changes.pop("now_monotonic_ms", 11000),
-        mapped_heading_tag_ids=environment().mapped_heading_tag_ids, **changes)
+        mapped_heading_tag_ids=changes.pop("mapped_heading_tag_ids", environment().mapped_heading_tag_ids), **changes)
 
 
 def test_adapter_clamps_assurance_lifetime_and_only_copies_monotonic_deadline():
@@ -765,5 +765,100 @@ def test_malformed_report_fix_is_refused_without_losing_integrity_or_raising(cha
 def test_malformed_report_identity_is_a_controlled_rejection():
     recovery, value, clock = controller()
     action = recovery.next_action(value.health, environment(), ())
-    sample = (replace(reports(clock)[0], report_id=["invalid"]),) + reports(clock)[1:]
+    malformed = reports(clock)[0]
+    object.__setattr__(malformed, "report_id", ["invalid"])
+    sample = (malformed,) + reports(clock)[1:]
     assert not recovery.assess_burst(action, sample).accepted
+
+
+INVALID_HEADING_MAPS = [
+    None, (), [], [(90, (1, 2))], "90", ([],), ((90,),),
+    ([90, (1, 2)],), (([90], (1, 2)),), (("90", (1, 2)),),
+    ((float("nan"), (1, 2)),), ((float("inf"), (1, 2)),),
+    ((float("-inf"), (1, 2)),), ((True, (1, 2)),),
+    ((90, ()),), ((90, [1, 2]),), ((90, "12"),), ((90, ([1], 2)),),
+    ((90, (True, 2)),), ((90, (-1, 2)),), ((90, (1.0, 2)),),
+    ((90, ("1", 2)),), ((90, (1, 1)),),
+    ((90, (1, 2)), (90.0, (2, 3))), ((0, (1, 2)), (360, (2, 3))),
+]
+
+
+@pytest.mark.parametrize("mapping", INVALID_HEADING_MAPS)
+@pytest.mark.parametrize("boundary", ["environment", "room_adapter"])
+def test_heading_tag_map_rejects_malformed_input_at_both_boundaries(mapping, boundary):
+    with pytest.raises(ValueError):
+        if boundary == "environment":
+            replace(environment(), mapped_heading_tag_ids=mapping)
+        else:
+            adapt((assurance(),), mapped_heading_tag_ids=mapping)
+
+
+def test_heading_tag_map_has_one_immutable_canonical_representation():
+    mapping = ((450, (2, 1)), (-30.5, (4, 0)), (720, (3,)))
+    expected = ((0.0, (3,)), (90.0, (1, 2)), (329.5, (0, 4)))
+    direct = replace(environment(), mapped_heading_tag_ids=mapping)
+    adapted = adapt((assurance(),), mapped_heading_tag_ids=mapping)
+    assert direct.mapped_heading_tag_ids == adapted.mapped_heading_tag_ids == expected
+    assert all(type(heading) is float for heading, _ in direct.mapped_heading_tag_ids)
+    with pytest.raises(AttributeError):
+        direct.mapped_heading_tag_ids = mapping
+
+
+@pytest.mark.parametrize("heading,expected", [(9007199254740993, 33.0), (-1e-300, 0.0)])
+def test_heading_normalization_preserves_integer_angle_and_canonical_float_range(heading, expected):
+    direct = replace(environment(), mapped_heading_tag_ids=((heading, (1, 2)),))
+    assert direct.mapped_heading_tag_ids == ((expected, (1, 2)),)
+
+
+@pytest.mark.parametrize("mapping", INVALID_HEADING_MAPS)
+def test_recovery_rechecks_restored_heading_map_before_any_action(mapping):
+    recovery, value, _ = controller()
+    env = environment()
+    stationary = recovery.next_action(value.health, env, ())
+    recovery.assess_burst(stationary, ())
+    # Model an old deserializer that bypasses frozen dataclass validation.
+    object.__setattr__(env, "mapped_heading_tag_ids", mapping)
+    result = recovery.next_action(value.health, env, ())
+    assert result.kind == "CONTINGENCY"
+    assert result.reason == "invalid_mapped_heading_tags"
+
+
+@pytest.mark.parametrize("field", ["session_id", "clock_domain_id"])
+def test_invalid_heading_map_cannot_bypass_session_or_clock_change(field):
+    recovery, value, _ = controller()
+    env = environment()
+    recovery.next_action(value.health, env, ())
+    changed = replace(env, **{field: "another"})
+    object.__setattr__(changed, "mapped_heading_tag_ids", [])
+    result = recovery.next_action(value.health, changed, ())
+    assert result.kind == "EMERGENCY" and result.contingency_id is None
+    assert result.reason == "session_or_clock_changed"
+
+
+@pytest.mark.parametrize("report_id", ["", " ", "frame ", " frame", "frame\n", None, True, ["frame"]])
+def test_pose_report_rejects_noncanonical_identity_on_construction(report_id):
+    _, _, clock = controller()
+    with pytest.raises(ValueError):
+        PoseReport(report_id, fix(clock))
+
+
+def test_pose_report_keeps_canonical_identity_immutable():
+    _, _, clock = controller()
+    report = PoseReport("frame-1", fix(clock))
+    assert report.report_id == "frame-1"
+    with pytest.raises(AttributeError):
+        report.report_id = "other"
+
+
+@pytest.mark.parametrize("identities", [("frame", "frame", "frame"), ("frame", " frame", "frame ")])
+def test_same_report_and_whitespace_aliases_never_count_as_distinct(identities):
+    persisted = []
+    recovery, value, clock = controller(commit_reanchor=persisted.append)
+    action = recovery.next_action(value.health, environment(), ())
+    samples = reports(clock)
+    for sample, report_id in zip(samples, identities):
+        object.__setattr__(sample, "report_id", report_id)
+    revision = value.health.pose_revision
+    result = recovery.assess_burst(action, samples)
+    assert not result.accepted and not result.events and not persisted
+    assert value.health.pose_revision == revision

@@ -13,8 +13,39 @@ import uuid
 from sentinel.models import Position
 from .checkpoint import PlannedCommand
 from .localization import (
-    LocalizationState, LocalizationTracker, PoseFix, PoseHealth, heading_distance, valid_fix,
+    LocalizationState, LocalizationTracker, PoseFix, PoseHealth, finite_number, heading_distance, valid_fix,
 )
+
+
+def normalize_mapped_heading_tag_ids(values: object) -> tuple[tuple[float, tuple[int, ...]], ...]:
+    """Validate the map before hashing/arithmetic and freeze one canonical form.
+
+    A tag can be visible from several headings, but identities within a heading
+    and headings modulo one revolution must be unique.
+    """
+    if type(values) is not tuple or not values:
+        raise ValueError("mapped recovery headings require a nonempty tuple")
+    normalized = []
+    headings = set()
+    for item in values:
+        if type(item) is not tuple or len(item) != 2:
+            raise ValueError("mapped recovery heading must be a heading/tag tuple")
+        heading, tags = item
+        if type(heading) not in (int, float) or not finite_number(heading):
+            raise ValueError("mapped recovery heading must be a finite number")
+        # Reduce integers before conversion to preserve their exact angle.
+        # A tiny negative float can round modulo to 360; fold that back to zero.
+        heading = float(heading % 360) % 360.0
+        if heading in headings:
+            raise ValueError("duplicate mapped recovery heading")
+        if (type(tags) is not tuple or not tags
+                or any(type(tag) is not int or tag < 0 for tag in tags)):
+            raise ValueError("mapped recovery tags require nonnegative integer identities")
+        if len(set(tags)) != len(tags):
+            raise ValueError("duplicate mapped recovery tag identity")
+        headings.add(heading)
+        normalized.append((heading, tuple(sorted(tags))))
+    return tuple(sorted(normalized))
 
 
 @dataclass(frozen=True)
@@ -28,16 +59,32 @@ class RecoveryVolume:
 class RecoveryEnvironment:
     session_id: str
     clock_domain_id: str
-    mapped_heading_tag_ids: tuple[tuple[int, tuple[int, ...]], ...]
+    mapped_heading_tag_ids: tuple[tuple[float, tuple[int, ...]], ...]
     rotation_clearance_volumes: tuple[RecoveryVolume, ...]
     navigation_contingency_id: str
     navigation_contingency_expires_monotonic_ms: int
+
+    def __post_init__(self):
+        object.__setattr__(self, "mapped_heading_tag_ids",
+                           normalize_mapped_heading_tag_ids(self.mapped_heading_tag_ids))
+
+
+def _canonical_report_id(value: object) -> str:
+    if type(value) is not str:
+        raise ValueError("report identity must be a string")
+    canonical = value.strip()
+    if not canonical or canonical != value:
+        raise ValueError("report identity must be nonblank and normalized")
+    return canonical
 
 
 @dataclass(frozen=True)
 class PoseReport:
     report_id: str
     fix: PoseFix
+
+    def __post_init__(self):
+        object.__setattr__(self, "report_id", _canonical_report_id(self.report_id))
 
 
 @dataclass(frozen=True)
@@ -162,6 +209,11 @@ class RecoveryController:
         ):
             self._clock_failed = True
             return self._terminal(environment, "session_or_clock_changed")
+        try:
+            # Revalidate restored objects and keep a private immutable snapshot.
+            environment = replace(environment)
+        except ValueError:
+            return self._terminal(environment, "invalid_mapped_heading_tags")
         self._environment = environment
         current = self.tracker.health
         if (pose.state == LocalizationState.LOST or current.state == LocalizationState.LOST
@@ -282,13 +334,17 @@ class RecoveryController:
             return reject("superseded_pose")
         if pose.state == LocalizationState.LOST or current.state == LocalizationState.LOST:
             return reject("lost")
-        if (not isinstance(reports, (tuple, list)) or any(not isinstance(report, PoseReport)
-                or not isinstance(report.report_id, str) or not report.report_id.strip() for report in reports)):
+        if not isinstance(reports, (tuple, list)) or any(not isinstance(report, PoseReport) for report in reports):
             return reject("malformed_report")
-        if len({report.report_id for report in reports if report.report_id}) < profile.min_burst_reports:
+        try:
+            # Legacy decoders may bypass construction; never count raw aliases.
+            report_ids = tuple(_canonical_report_id(report.report_id) for report in reports)
+        except ValueError:
+            return reject("malformed_report")
+        if len(set(report_ids)) < profile.min_burst_reports:
             return reject("insufficient_distinct_reports")
         # Duplicate identities may not weight the aggregate or hide spread.
-        if len({report.report_id for report in reports}) != len(reports):
+        if len(set(report_ids)) != len(reports):
             return reject("duplicate_reports")
         mapped = set().union(*(set(tags) for heading, tags in environment.mapped_heading_tag_ids
                                   if heading_distance(heading, action.heading_deg) <= profile.max_fix_heading_jump_deg))
