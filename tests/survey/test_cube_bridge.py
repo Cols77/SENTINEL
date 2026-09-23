@@ -230,6 +230,23 @@ def test_a_stop_aborted_en_route_yields_no_frames(tmp_path):
     assert flight.fly(option) == []
 
 
+def test_partial_cube_run_preserves_frames_and_aborted_terminal_status(tmp_path):
+    fixes = iter([[_report(150, 300)] * 10, [_report(150, 900)] * 10])
+    flight = _flight(tmp_path, pose_mode="passive", burst_fn=lambda: next(fixes))
+    option = SweepOption("PARTIAL", "two stops", ((150, 300), (200, 350)), 120, (0,), 100, 44, (), 300)
+    result = flight.fly(option)
+    assert len(result) == 1
+    assert result.status == "ABORTED"
+    assert result.runner_status == "FAIL"
+
+
+def test_completed_cube_run_exposes_completed_runner_status(tmp_path):
+    option = SweepOption("ONE_STOP", "one stop", ((150, 300),), 120, (0,), 100, 22, (), 300)
+    result = _flight(tmp_path).fly(option)
+    assert result.status == "COMPLETED"
+    assert result.runner_status == "PASS"
+
+
 # -- guards: synthetic camera, reanchor without the SR-063 amendment --------
 
 def test_the_synthetic_camera_is_refused(tmp_path):

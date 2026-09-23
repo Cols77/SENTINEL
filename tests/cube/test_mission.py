@@ -6,11 +6,13 @@ from datetime import datetime, timezone
 import pytest
 
 from sentinel.contracts.pose import DronePoseReport, TagObservation
+from sentinel.cube.checkpoint import PlannedCommand
 from sentinel.cube.mission import (
     CubeMissionRunner, Mission, PlanError, Waypoint, axis_move, load_mission,
 )
 from sentinel.cube.site import parse_site
 from sentinel.dry_run import DryRunClient
+from sentinel.motion_bounds import TransportLimits
 
 SITE_DOC = {
     "schema_version": "cube-site-v1",
@@ -59,6 +61,163 @@ def _log(tmp_path):
 
 def test_axis_move_rule():
     assert [axis_move(d) for d in (0, 10, -10, 11, -14, 20, -135.4)] == [0, 0, 0, 20, 20, 20, 135]
+
+
+def test_legacy_waypoints_are_dispatched_from_shared_checkpoint_plans(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),))
+    runner, _ = _runner(tmp_path, "off", [], mission=mission)
+    dispatched = []
+    execute = runner.execute_command
+    runner.execute_command = lambda command: (dispatched.append(command), execute(command))[1]
+
+    assert runner.run(confirm=True).status == "PASS"
+    (plan,) = runner.checkpoint_plans
+    assert plan.checkpoint_id == "WP1"
+    assert tuple(dispatched) == plan.commands
+
+
+def test_checkpoint_sink_drives_telemetry_settles_rotations_and_captures(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100, looks_deg=(-45, 45)),))
+    runner, client = _runner(tmp_path, "off", [], mission=mission)
+    sleeps = []
+    runner.sleep_fn = sleeps.append
+
+    assert runner.run(confirm=True).status == "PASS"
+    (plan,) = runner.checkpoint_plans
+    assert [kind for kind, _ in runner.checkpoint_effects] == [command.kind for command in plan.commands]
+    assert [effect for kind, effect in runner.checkpoint_effects if kind == "CAPTURE"] == ["capture", "capture"]
+    assert [effect for kind, effect in runner.checkpoint_effects if kind == "READ_TELEMETRY"] == ["telemetry", "telemetry"]
+    assert all(command.kind != "LOCALISE" for command in plan.commands)
+    assert _log(tmp_path)[0]["battery_pct"] == 100
+    assert sleeps == [dict(command.arguments)["duration_s"] for command in plan.commands if command.kind == "SETTLE"]
+
+
+def test_legacy_settle_sleep_has_a_separate_supervised_completion_allowance(tmp_path):
+    from sentinel.cube.step_executor import StepExecutor
+    now = [0.0]
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),))
+    runner, client = _runner(tmp_path, "off", [], mission=mission)
+    StepExecutor(runner, clock=lambda: now[0])
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    runner.sleep_fn = sleep
+    report = runner.run(confirm=True)
+    assert report.status == "PASS", report.error
+    settles = [c for c in runner.checkpoint_plans[0].commands if c.kind == "SETTLE"]
+    assert sleeps == [dict(c.arguments)["duration_s"] for c in settles]
+    assert all(dict(c.arguments)["duration_s"] < c.upper_bound_s for c in settles)
+
+
+@pytest.mark.parametrize("provider_kind", ["LOCALISE", "CAPTURE"])
+def test_legacy_provider_timeout_lands_before_provider_returns_and_rejects_late_effects(tmp_path, provider_kind):
+    from dataclasses import replace
+    from threading import Event, Thread
+    from sentinel.cube.step_executor import StepExecutor
+    from sentinel.models import Position
+    now = [10.0]
+    entered, release, landed, callback_finished = Event(), Event(), Event(), Event()
+    runner, client = _runner(tmp_path, "reanchor", [])
+    executor = StepExecutor(runner, clock=lambda: now[0])
+    executor.start_legacy()
+    runner.envelope.position = Position(270, 300, 100)
+    waypoint = MISSION.waypoints[0]
+    node = PlannedCommand(provider_kind, (("look_deg", 0), ("settle_s", 0)), 1, True)
+    original_plan = runner._plan_for_waypoint(waypoint)
+    checkpoint = replace(original_plan, commands=(node,), worst_case_s=1)
+    runner._plan_for_waypoint = lambda wp: checkpoint
+    runner._active_checkpoint_plan = checkpoint
+    original_land, original_read, original_execute = client.land, client.read_frame, runner.execute_command
+
+    def land():
+        result = original_land()
+        landed.set()
+        return result
+
+    def provider(*args, **kwargs):
+        entered.set()
+        assert release.wait(3)
+        if provider_kind == "CAPTURE":
+            return original_read(*args, **kwargs)
+        return [_report(270, 270)] * 10  # Would require a later trim move.
+
+    def execute(command):
+        try:
+            return original_execute(command)
+        finally:
+            callback_finished.set()
+
+    client.land, runner.execute_command = land, execute
+    if provider_kind == "CAPTURE":
+        client.read_frame = provider
+    else:
+        runner.burst_fn = provider
+    entry = {"status": "OPEN_LOOP"}
+    errors = []
+
+    def go():
+        try:
+            runner._go_to(waypoint, entry)
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = Thread(target=go, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(1)
+        now[0] += 2
+        assert landed.wait(1), "provider waits must not retain the SDK command lock"
+        assert not executor._command_completion_unknown
+        worker.join(1)
+        assert not worker.is_alive()
+    finally:
+        release.set()
+        worker.join(1)
+        assert callback_finished.wait(1)
+        executor.close()
+    assert len(errors) == 1 and "DEADLINE_EXCEEDED" in str(errors[0])
+    assert client.commands.count("land") == 1
+    assert not any(cmd.startswith(("forward ", "back ", "left ", "right ", "cw ", "ccw "))
+                   for cmd in client.commands)
+    assert runner.envelope.position == Position(270, 300, 100)
+    assert not entry.get("frames") and "fix_cm" not in entry
+
+
+def test_runner_derives_checkpoint_motion_bounds_from_the_client_transport_policy(tmp_path):
+    client = DryRunClient()
+    client.transport_limits = TransportLimits(reply_timeout_s=30.0, control_attempts=3, read_timeout_s=30.0)
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),))
+    runner = CubeMissionRunner(client, "dry-run", mission=mission, site=SITE, pose_mode="off",
+                               mission_log=tmp_path / "mission.jsonl", sleep_fn=lambda seconds: None)
+
+    assert runner.run(confirm=True).status == "PASS"
+    (plan,) = runner.checkpoint_plans
+    assert next(command.upper_bound_s for command in plan.commands if command.kind == "MOVE") == 30
+    assert next(command.upper_bound_s for command in plan.commands if command.kind == "SET_SPEED") == 90
+
+
+def test_checkpoint_sink_does_not_lossily_truncate_a_planned_speed(tmp_path):
+    runner, client = _runner(tmp_path, "off", [])
+    command = PlannedCommand("SET_SPEED", (("speed_cm_s", 20.9),), 0.0, False)
+
+    with pytest.raises(ValueError, match="planned speed_cm_s must be an integer"):
+        runner.execute_command(command)
+
+    assert all(not item.startswith("speed ") for item in client.commands)
+
+
+def test_vertical_checkpoint_move_dispatches_its_planned_height_query(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 250, 140),))
+    runner, _ = _runner(tmp_path, "off", [], mission=mission)
+
+    assert runner.run(confirm=True).status == "PASS"
+    (plan,) = runner.checkpoint_plans
+    assert any(command.kind == "READ_TELEMETRY" and dict(command.arguments).get("phase") == "vertical"
+               for command in plan.commands)
+    assert ("READ_TELEMETRY", "vertical_height") in runner.checkpoint_effects
 
 
 def test_off_mode_navigates_open_loop_with_height_and_looks(tmp_path):
@@ -256,7 +415,10 @@ def test_a_failed_land_during_move_is_surfaced_in_the_mission_log(tmp_path):
     aborted en route to."""
     client = _SlowMoveClient()
 
+    land_attempts = []
+
     def failing_land():
+        land_attempts.append(True)
         raise RuntimeError("simulated link drop")
 
     client.land = failing_land
@@ -271,6 +433,7 @@ def test_a_failed_land_during_move_is_surfaced_in_the_mission_log(tmp_path):
     assert wp1["status"] == "ABORTED_EN_ROUTE"
     assert wp1["watchdog_land_error"] is not None
     assert "simulated link drop" in wp1["watchdog_land_error"]
+    assert len(land_attempts) == 1
 
 
 class _InterruptibleMoveClient(DryRunClient):
@@ -307,6 +470,7 @@ def test_an_immediate_land_reports_the_containment_abort_not_a_movement_fault(tm
     assert "watchdog" in report.error.lower()
     assert "auto land" not in report.error.lower()
     assert _log(tmp_path)[0]["status"] == "ABORTED_EN_ROUTE"
+    assert "land" not in client.commands  # land_now already owns the terminal attempt
 
 
 def test_an_immediate_land_trips_inside_the_cube_edge_and_a_deferred_one_at_it(tmp_path):
@@ -402,6 +566,45 @@ def test_reanchor_recovers_an_axis_left_outside_the_bounds_before_the_other_axis
     report = runner.run(confirm=True)
     assert report.status == "PASS", report.error
     assert [e["status"] for e in _log(tmp_path)] == ["LOCALISED", "LOCALISED"]
+
+
+def test_reanchor_plans_an_outside_axis_recovery_before_its_regular_move(tmp_path):
+    """The recovery must lead the plan even when that same axis has a normal
+    target delta.  Otherwise the x command is rejected while y is stale."""
+    mission = Mission(270, 235, (
+        Waypoint("WP1", 270, 235, 100), Waypoint("WP2", 220, 250, 100)))
+    bursts = [[_report(270, 226)] * 10, [_report(220, 250)] * 10]
+    runner, client = _runner(tmp_path, "reanchor", bursts, mission=mission)
+
+    assert runner.run(confirm=True).status == "PASS"
+    moves = [command for command in client.commands if command.split()[0] in {"forward", "back", "left", "right"}]
+    assert moves[-2:] == ["forward 24", "left 50"]
+
+
+def test_a_planned_trim_may_be_farther_from_its_target_than_the_plausibility_radius(tmp_path):
+    mission = Mission(65, 250, (Waypoint("WP1", 80, 250, 100),))
+    bursts = [[_report(145, 250)] * 10, [_report(80, 250)] * 10]
+    runner, client = _runner(tmp_path, "reanchor", bursts, mission=mission)
+
+    assert runner.run(confirm=True).status == "PASS"
+    assert [command for command in client.commands if command.startswith(("right", "left"))] == [
+        "right 20", "left 65",
+    ]
+
+
+def test_reanchor_effect_trace_attributes_burst_yaw_and_trim_to_the_checkpoint(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),))
+    bursts = [[_report(250, 282, heading=104)] * 10, [_report(270, 300)] * 10]
+    runner, _ = _runner(tmp_path, "reanchor", bursts, mission=mission)
+
+    assert runner.run(confirm=True).status == "PASS"
+    effects = runner.checkpoint_effects
+    assert ("LOCALISE", "burst") in effects
+    assert ("TRIM_ALLOWANCE", "yaw_trim") in effects
+    assert ("TRIM_ALLOWANCE", "trim_speed") in effects
+    assert ("TRIM_ALLOWANCE", "trim_move") in effects
+    assert ("TRIM_ALLOWANCE", "trim_settle") in effects
+    assert _log(tmp_path)[0]["trim_rounds_sent"] == 1
 
 
 def test_reanchor_recovers_both_axes_left_outside_the_bounds_at_once(tmp_path):
@@ -597,6 +800,27 @@ def test_trim_rounds_outside_one_to_ten_are_refused(rounds):
 def test_leg_speeds_outside_twenty_to_fifty_are_refused(speed):
     with pytest.raises(ValueError, match="leg_speed_cm_s"):
         Mission(None, None, (Waypoint("WP1", 270, 300, 100),), leg_speed_cm_s=speed)
+
+
+@pytest.mark.parametrize("speed", [True, 20.0, 20.9])
+def test_mission_rejects_non_exact_leg_speeds_before_client_effects(speed):
+    client = DryRunClient()
+
+    with pytest.raises(ValueError, match="leg_speed_cm_s"):
+        Mission(None, None, (Waypoint("WP1", 270, 300, 100),), leg_speed_cm_s=speed)
+
+    assert client.commands == ()
+    assert "takeoff" not in client.commands
+
+
+@pytest.mark.parametrize("speed", [True, 20.0, 20.9])
+def test_load_mission_keeps_non_exact_leg_speeds_for_early_validation(tmp_path, speed):
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps({"schema_version": "cube-mission-v1", "leg_speed_cm_s": speed,
+                                "waypoints": [{"name": "A", "x_cm": 250, "y_cm": 250, "z_cm": 100}]}))
+
+    with pytest.raises(ValueError, match="leg_speed_cm_s"):
+        load_mission(path)
 
 
 def test_legs_fly_at_the_mission_speed_and_trims_go_back_to_twenty(tmp_path):
@@ -818,3 +1042,95 @@ def test_a_flight_that_matches_the_site_file_re_checks_nothing(tmp_path):
     runner._check_vertical("WP1", [_ranged(250, 240, math.hypot(1.6, 0.52))] * 5, (250.0, 240.0),
                            {"height_cm": 100})
     assert checked == [] and not [m for e, m in events if e == "alert"]
+
+def _timeline(runner, client):
+    """Commands with a ('sleep', s) marker wherever the runner paused."""
+    events = []
+    runner.sleep_fn = lambda seconds: events.append(("sleep", seconds, len(client.commands)))
+    return events
+
+
+def _moves_and_pauses(client, events):
+    out, marks = [], {}
+    for _, seconds, index in events:
+        marks.setdefault(index, []).append(seconds)
+    for index, command in enumerate(client.commands):
+        out += [("sleep", s) for s in marks.get(index, [])]
+        if command.split()[0] in {"forward", "back", "left", "right"}:
+            out.append(command)
+    return out
+
+
+def test_a_move_straight_after_another_waits_for_the_drone_to_settle(tmp_path):
+    """09-22: `left 95` sent the instant `back 31` returned "ok" at 50 cm/s was refused with
+    "error Not joystick" and the flight landed. A move that follows a move now waits."""
+    from sentinel.cube.mission import SETTLE_AFTER_FAST_MOVE_S
+    mission = Mission(270, 250, (Waypoint("WP1", 300, 300, 100),), leg_speed_cm_s=50)
+    client = DryRunClient()
+    runner = CubeMissionRunner(client, "dry-run", mission=mission, site=_site(0.4),
+                               pose_mode="off", mission_log=tmp_path / "m.jsonl",
+                               sleep_fn=lambda s: None)
+    events = _timeline(runner, client)
+    assert runner.run(confirm=True).status == "PASS"
+    moves = _moves_and_pauses(client, events)
+    first, second = [i for i, m in enumerate(moves) if isinstance(m, str)][:2]
+    assert ("sleep", SETTLE_AFTER_FAST_MOVE_S) in moves[first + 1:second]
+    assert all(not isinstance(m, tuple) for m in moves[:first])
+
+
+
+def test_a_hover_fix_counts_as_settling(tmp_path):
+    """After a localisation burst (SETTLE_S hover) the next leg goes without an extra pause."""
+    from sentinel.cube.mission import SETTLE_S
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100), Waypoint("WP2", 150, 300, 100)),
+                      leg_speed_cm_s=40)
+    queue = [[_report(270, 300)] * 10, [_report(150, 300)] * 10]
+    client = DryRunClient()
+    runner = CubeMissionRunner(client, "dry-run", mission=mission, site=SITE,
+                               pose_mode="reanchor", mission_log=tmp_path / "m.jsonl",
+                               burst_fn=lambda: queue.pop(0), sleep_fn=lambda s: None)
+    events = _timeline(runner, client)
+    assert runner.run(confirm=True).status == "PASS"
+    moves = _moves_and_pauses(client, events)
+    assert [m for m in moves if isinstance(m, str)] == ["forward 50", "left 120"]
+    between = moves[moves.index("forward 50") + 1:moves.index("left 120")]
+    # the hover before WP1's fix and the look; no move-settle pause on top
+    assert between.count(("sleep", SETTLE_S)) == 2 and len(between) == 2
+
+
+def test_trimming_stops_when_a_trim_makes_the_error_worse(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), max_trim_rounds=5)
+    bursts = [[_report(270, 275)] * 10,      # 25 cm short: trim forward 25
+              [_report(270, 330)] * 10,      # overshot to 30 cm: worse, stop here
+              [_report(270, 300)] * 10]      # never asked for
+    runner, client = _runner(tmp_path, "reanchor", bursts, mission=mission)
+    assert runner.run(confirm=True).status == "PASS"      # 30 cm is the outer circle
+    (wp1,) = _log(tmp_path)
+    assert wp1["trim_errors_cm"] == [25.0, 30.0] and wp1["trims_stopped"] == "WORSE"
+    assert wp1["trim_rounds_sent"] == 1 and wp1["tolerance"] == "OUTER"
+
+
+def test_a_trim_within_the_fix_noise_does_not_stop_trimming(tmp_path):
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), max_trim_rounds=5)
+    bursts = [[_report(270, 278)] * 10,      # 22 cm
+              [_report(270, 322)] * 10,      # 22 cm the other way: not worse by more than 2
+              [_report(270, 303)] * 10]      # 3 cm
+    runner, _ = _runner(tmp_path, "reanchor", bursts, mission=mission)
+    assert runner.run(confirm=True).status == "PASS"
+    (wp1,) = _log(tmp_path)
+    assert wp1["trim_errors_cm"] == [22.0, 22.0, 3.0] and "trims_stopped" not in wp1
+
+
+def test_legacy_mission_dispatches_plans_through_its_shared_executor(tmp_path):
+    runner, client = _runner(tmp_path, "off", [])
+    plans = []
+    execute = runner.step_executor.execute_legacy
+
+    def record(plan, sink):
+        plans.append(plan)
+        return execute(plan, sink)
+
+    runner.step_executor.execute_legacy = record
+    assert runner.run(confirm=True).status == "PASS"
+    assert tuple(plans) == runner.checkpoint_plans
+    assert client.commands.count("takeoff") == client.commands.count("land") == 1

@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "room-site-base-v1.schema.json",
+  "title": "Reusable surveyed room site (no session timestamps)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "site_id", "cube_site_sha256", "tag_map_sha256", "free_space_volumes", "forbidden_volumes", "corridors", "routes", "home", "terminal_contingencies", "clearance_provenance"],
+  "properties": {
+    "schema_version": {"const": "room-site-base-v1"},
+    "site_id": {"$ref": "#/$defs/id"},
+    "cube_site_sha256": {"$ref": "#/$defs/hash"},
+    "tag_map_sha256": {"$ref": "#/$defs/hash"},
+    "free_space_volumes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/volume"}},
+    "forbidden_volumes": {"type": "array", "items": {"$ref": "#/$defs/volume"}},
+    "corridors": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/volume"}},
+    "routes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/route"}},
+    "home": {"$ref": "#/$defs/home"},
+    "terminal_contingencies": {
+      "type": "array", "minItems": 2, "items": {"$ref": "#/$defs/contingency"},
+      "allOf": [
+        {"contains": {"properties": {"trigger": {"const": "NAVIGATION_UNAVAILABLE"}}, "required": ["trigger"]}},
+        {"contains": {"properties": {"trigger": {"const": "RETURN_ENERGY_UNAVAILABLE"}}, "required": ["trigger"]}}
+      ]
+    },
+    "clearance_provenance": {"$ref": "#/$defs/id"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "xy": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}], "items": false, "minItems": 2, "maxItems": 2},
+    "polygon": {"type": "array", "minItems": 3, "uniqueItems": true, "items": {"$ref": "#/$defs/xy"}},
+    "band": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}], "items": false, "minItems": 2, "maxItems": 2},
+    "position": {
+      "type": "object", "additionalProperties": false,
+      "required": ["x_cm", "y_cm", "z_cm"],
+      "properties": {"x_cm": {"type": "number"}, "y_cm": {"type": "number"}, "z_cm": {"type": "number"}}
+    },
+    "volume": {
+      "type": "object", "additionalProperties": false,
+      "required": ["volume_id", "polygon_xy_cm", "z_interval_cm"],
+      "properties": {
+        "volume_id": {"$ref": "#/$defs/id"},
+        "polygon_xy_cm": {"$ref": "#/$defs/polygon"},
+        "z_interval_cm": {"$ref": "#/$defs/band"}
+      }
+    },
+    "route": {
+      "type": "object", "additionalProperties": false,
+      "required": ["route_id", "checkpoints", "corridor_volume_ids"],
+      "properties": {
+        "route_id": {"$ref": "#/$defs/id"},
+        "checkpoints": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/position"}},
+        "corridor_volume_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+      }
+    },
+    "home": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pad_id", "nominal_pose", "heading_deg", "route_id"],
+      "properties": {
+        "pad_id": {"$ref": "#/$defs/id"},
+        "nominal_pose": {"$ref": "#/$defs/position"},
+        "heading_deg": {"type": "number"},
+        "route_id": {"$ref": "#/$defs/id"}
+      }
+    },
+    "contingency": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contingency_id", "trigger", "kind", "landing_polygon_xy_cm", "z_band_cm", "required_pose_state", "clearance_source", "assurance_policy_id", "max_assurance_age_ms"],
+      "properties": {
+        "contingency_id": {"$ref": "#/$defs/id"},
+        "trigger": {"enum": ["NAVIGATION_UNAVAILABLE", "RETURN_ENERGY_UNAVAILABLE"]},
+        "kind": {"enum": ["LAND_IN_PLACE", "CONTROLLED_DESCENT", "EMERGENCY"]},
+        "landing_polygon_xy_cm": {"type": "array", "items": {"$ref": "#/$defs/xy"}},
+        "z_band_cm": {"$ref": "#/$defs/band"},
+        "required_pose_state": {"enum": ["ANCHORED", "COASTING", "ANY"]},
+        "clearance_source": {"type": "string"},
+        "assurance_policy_id": {"type": "string"},
+        "max_assurance_age_ms": {"type": "integer", "minimum": 1}
+      },
+      "allOf": [{
+        "if": {"properties": {"kind": {"enum": ["LAND_IN_PLACE", "CONTROLLED_DESCENT"]}}},
+        "then": {"properties": {
+          "landing_polygon_xy_cm": {"$ref": "#/$defs/polygon"},
+          "clearance_source": {"$ref": "#/$defs/id"},
+          "assurance_policy_id": {"$ref": "#/$defs/id"}
+        }}
+      }]
+    }
+  }
+}

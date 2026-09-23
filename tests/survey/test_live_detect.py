@@ -258,3 +258,271 @@ def test_a_find_only_a_crop_made_is_marked_in_the_row_and_the_line():
     row = detect_frame(Tiled(), {"stop": "S", "look_deg": 0, "path": "x.png"})
     assert row["detections"][0]["tile"] == "r1c1"
     assert "1 phone (medium crop)" in summarise("S", 0, "OK", row["detections"])
+
+
+def _correlated_record(tmp_path):
+    from dataclasses import asdict
+    from PIL import Image
+    from sentinel.room.ingest import capture_request
+    path = tmp_path / "correlated.png"
+    Image.new("RGB", (640, 480)).save(path)
+    request = capture_request(
+        {"session_id": "s1", "action_id": "a1", "snapshot_version": 0,
+         "pose_revision_id": "pose1", "requested_model": "pinned-model"},
+        frame_path=path, run_id="RUN", captured_at="2026-09-22T00:00:00+00:00",
+        classes=("computer",),
+    )
+    return {"stop": "NEAR", "look_deg": 0, "path": str(path), "sha256": request.frame_sha256,
+            "captured_at": request.captured_at, "perception_request": asdict(request)}
+
+
+def test_correlated_detection_preserves_contract_and_never_invents_a_score(tmp_path):
+    from sentinel.room.ingest import result_from_dict
+    record = _correlated_record(tmp_path)
+    batch = DetectionBatch(_laptop().detections, "OK", ("high",),
+                           raw={"provider": "fixture", "model": "pinned-model"})
+    row = detect_frame(FakeDetector([batch]), record, classes=("computer",))
+    result = result_from_dict(row["perception_result"])
+    assert result.request.observation_id == record["perception_request"]["observation_id"]
+    assert result.status == "SUCCEEDED" and result.identity_status == "VERIFIED"
+    assert result.provider == "fixture" and result.resolved_model == "pinned-model"
+    assert result.detections[0].raw_score is None and result.detections[0].confidence_band == "high"
+    assert result.detections[0].frame_width_px == 640
+
+
+@pytest.mark.parametrize("exception_name,category", [
+    ("ProviderTimeout", "TIMEOUT"), ("ProviderAuthError", "AUTH"),
+    ("ProviderTransportError", "TRANSPORT"),
+])
+def test_correlated_failure_is_typed_without_leaking_exception_text(tmp_path, exception_name, category):
+    from sentinel.survey import providers
+    row = detect_frame(FakeDetector(error=getattr(providers, exception_name)("api-key-secret")),
+                       _correlated_record(tmp_path))
+    result = row["perception_result"]
+    assert result["status"] == "FAILED" and result["error_category"] == category
+    assert result["resolved_model"] is None and result["identity_status"] == "UNVERIFIED"
+    assert "api-key-secret" not in json.dumps(row)
+
+
+def test_correlated_success_without_provider_identity_fails_closed(tmp_path):
+    row = detect_frame(FakeDetector([_laptop()]), _correlated_record(tmp_path))
+    assert row["perception_result"]["status"] == "FAILED"
+    assert row["perception_result"]["error_category"] == "IDENTITY_UNVERIFIED"
+    assert row["detections"] == []
+
+
+def test_correlated_hash_failure_does_not_call_provider(tmp_path):
+    record = _correlated_record(tmp_path)
+    Path(record["path"]).write_bytes(b"changed")
+    detector = FakeDetector()
+    row = detect_frame(detector, record)
+    assert detector.calls == []
+    assert row["status"] == "DETECTOR_ERROR" and row["error"] == "INVALID_REQUEST"
+
+
+def test_follower_writes_correlated_inbox_and_skips_partial_last_record(tmp_path):
+    from sentinel.room.ingest import result_from_dict
+    record = _correlated_record(tmp_path)
+    frames, inbox, output = tmp_path / "frames.jsonl", tmp_path / "inbox.jsonl", tmp_path / "out.jsonl"
+    frames.write_text(json.dumps(record) + '\n{"partial":', encoding="utf-8")
+    batch = DetectionBatch((), "OK", raw={"provider": "fixture", "model": "pinned-model"})
+    assert follow(frames, output, FakeDetector([batch]), done=lambda: True,
+                  inbox_log=inbox, print_fn=lambda _: None) == 1
+    result = result_from_dict(json.loads(inbox.read_text()))
+    assert result.status == "SUCCEEDED"
+    assert live_detect_script.build_parser().parse_args(["--inbox", str(inbox)]).inbox == inbox
+
+
+def test_producer_assigns_unique_correlation_at_capture(tmp_path):
+    runner = CubeMissionRunner(
+        DryRunClient(), "dry-run", mission=MISSION, site=SITE, run_id="RUN",
+        mission_log=tmp_path / "mission.jsonl", sleep_fn=lambda _: None,
+        correlation_context={"session_id": "s1", "action_id": "a1", "snapshot_version": 0,
+                             "pose_revision_id": "pose1", "requested_model": "pinned-model"},
+    )
+    runner.recorder = FakeRecorder(tmp_path / "frames")
+    assert runner.run(confirm=True).status == "PASS"
+    records = [json.loads(line) for line in (tmp_path / "frames" / FRAMES_LOG_NAME).read_text().splitlines()]
+    requests = [row["perception_request"] for row in records]
+    assert len({request["observation_id"] for request in requests}) == 4
+    assert len({request["frame_id"] for request in requests}) == 4
+    assert all(request["session_id"] == "s1" and request["run_id"] == "RUN" for request in requests)
+
+
+def test_correlated_mismatch_reports_actual_identity_in_the_inbox(tmp_path):
+    from sentinel.room.ingest import append_inbox_result, result_from_dict
+    record = _correlated_record(tmp_path)
+    batch = DetectionBatch((), "OK", raw={"provider": "fixture", "model": "wrong-model"})
+    row = detect_frame(FakeDetector([batch]), record)
+    result = result_from_dict(row["perception_result"])
+    assert result.status == "FAILED" and result.identity_status == "MISMATCH"
+    assert result.resolved_model == "wrong-model" and result.error_category == "IDENTITY_MISMATCH"
+    append_inbox_result(tmp_path / "inbox.jsonl", result)
+
+
+def test_malformed_provider_metadata_still_emits_a_valid_typed_failure(tmp_path):
+    from sentinel.room.ingest import result_from_dict
+    row = detect_frame(FakeDetector([DetectionBatch((), "OK", raw={"provider": None, "model": []})]),
+                       _correlated_record(tmp_path))
+    result = result_from_dict(row["perception_result"])
+    assert result.status == "FAILED" and result.error_category == "SCHEMA"
+
+
+@pytest.mark.parametrize("invalid_identity", [
+    {"provider": "p" * 4097}, {"model": "m" * 4097}, {"provider": None}, {"model": []},
+], ids=["long-provider", "long-model", "null-provider", "non-string-model"])
+def test_follower_publishes_safe_schema_failure_and_continues(tmp_path, invalid_identity):
+    from sentinel.room.ingest import result_from_dict, poll_inbox
+    from sentinel.room.models import CapabilityProfile
+    from sentinel.room.store import RoomStore
+    records = [_correlated_record(tmp_path), _correlated_record(tmp_path)]
+    frames, inbox, output = tmp_path / "frames.jsonl", tmp_path / "inbox.jsonl", tmp_path / "out.jsonl"
+    frames.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    valid_raw = {"provider": "fixture", "model": "pinned-model"}
+    batches = [DetectionBatch((), "OK", raw={**valid_raw, **invalid_identity}),
+               DetectionBatch((), "OK", raw=valid_raw)]
+    assert follow(frames, output, FakeDetector(batches), done=lambda: True,
+                  inbox_log=inbox, print_fn=lambda _: None) == 2
+    results = [result_from_dict(json.loads(line)) for line in inbox.read_text().splitlines()]
+    assert results[0].status == "FAILED" and results[0].error_category == "SCHEMA"
+    assert results[0].identity_status == "UNVERIFIED" and results[0].resolved_model is None
+    assert isinstance(results[0].provider, str) and 0 < len(results[0].provider) <= 4096
+    assert results[1].status == "SUCCEEDED"
+    store = RoomStore.open(tmp_path / "room.sqlite3")
+    store.create_session("s1", "look", CapabilityProfile(()))
+    outcomes = poll_inbox(store, inbox, current_snapshot_version=0)
+    assert len(outcomes) == 2 and not outcomes[0].authorizes_current_state and outcomes[1].authorizes_current_state
+
+
+def test_detector_raw_score_survives_follower_inbox_ingest_and_consumer(tmp_path):
+    from sentinel.room.ingest import poll_inbox
+    from sentinel.room.models import CapabilityProfile
+    from sentinel.room.store import RoomStore
+    record = _correlated_record(tmp_path)
+    frames, inbox, output = tmp_path / "frames.jsonl", tmp_path / "inbox.jsonl", tmp_path / "out.jsonl"
+    frames.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    detection = {**_laptop().detections[0], "raw_score": 0.37, "score_kind": "DETECTOR_RAW"}
+    # The supplied band is preserved, rather than recomputed from the score.
+    batch = DetectionBatch((detection,), "OK", ("medium",),
+                           raw={"provider": "fixture", "model": "pinned-model"})
+    assert follow(frames, output, FakeDetector([batch]), done=lambda: True,
+                  inbox_log=inbox, print_fn=lambda _: None) == 1
+    store = RoomStore.open(tmp_path / "room.sqlite3")
+    store.create_session("s1", "look", CapabilityProfile(()))
+    assert poll_inbox(store, inbox, current_snapshot_version=0)[0].authorizes_current_state
+    current = store.current_hypotheses("s1", snapshot_version=0)
+    assert len(current) == 1
+    assert (current[0]["raw_score"], current[0]["score_kind"], current[0]["confidence_band"]) == (
+        0.37, "DETECTOR_RAW", "medium",
+    )
+
+
+def test_raised_structured_mismatch_preserves_actual_identity_through_follower(tmp_path):
+    from sentinel.survey.providers import ModelIdentityMismatch
+    from sentinel.room.ingest import result_from_dict
+    record = _correlated_record(tmp_path)
+    error = ModelIdentityMismatch("do not serialize this api-key-secret", provider="actual-provider",
+                                  requested_model="pinned-model", resolved_model="actual-model")
+    frames, inbox, output = tmp_path / "frames.jsonl", tmp_path / "inbox.jsonl", tmp_path / "out.jsonl"
+    frames.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    assert follow(frames, output, FakeDetector(error=error), done=lambda: True,
+                  inbox_log=inbox, print_fn=lambda _: None) == 1
+    result = result_from_dict(json.loads(inbox.read_text()))
+    assert (result.status, result.identity_status, result.provider, result.resolved_model) == (
+        "FAILED", "MISMATCH", "actual-provider", "actual-model",
+    )
+    assert result.error_category == "IDENTITY_MISMATCH"
+    assert "api-key-secret" not in inbox.read_text() + output.read_text()
+
+
+def test_legacy_mismatch_exception_remains_a_valid_unverified_failure(tmp_path):
+    from sentinel.survey.providers import ModelIdentityMismatch
+    from sentinel.room.ingest import result_from_dict
+    error = ModelIdentityMismatch("drift")
+    assert str(error) == "drift"
+    result = result_from_dict(detect_frame(FakeDetector(error=error), _correlated_record(tmp_path))["perception_result"])
+    assert result.status == "FAILED" and result.identity_status == "UNVERIFIED"
+    assert result.resolved_model is None and result.error_category == "IDENTITY_MISMATCH"
+
+
+@pytest.mark.parametrize("metadata", [
+    {"provider": "x" * 4097}, {"resolved_model": "x" * 4097},
+    {"requested_model": "another-request"}, {"resolved_model": "pinned-model"},
+])
+def test_malformed_raised_identity_metadata_fails_closed(tmp_path, metadata):
+    from sentinel.survey.providers import ModelIdentityMismatch
+    from sentinel.room.ingest import result_from_dict
+    identity = {"provider": "actual-provider", "requested_model": "pinned-model", "resolved_model": "actual-model"}
+    error = ModelIdentityMismatch(**{**identity, **metadata})
+    result = result_from_dict(detect_frame(FakeDetector(error=error), _correlated_record(tmp_path))["perception_result"])
+    assert result.status == "FAILED" and result.error_category == "SCHEMA"
+    assert result.resolved_model is None and result.identity_status == "UNVERIFIED"
+
+
+def test_partial_frame_announcement_log_alerts_without_failing_the_mission(tmp_path):
+    events = []
+    runner = CubeMissionRunner(
+        DryRunClient(), "dry-run", mission=MISSION, site=SITE, run_id="RUN",
+        mission_log=tmp_path / "mission.jsonl", sleep_fn=lambda _: None,
+        progress=lambda event, message: events.append((event, message)),
+        correlation_context={"session_id": "s1", "action_id": "a1", "snapshot_version": 0,
+                             "pose_revision_id": "pose1", "requested_model": "pinned-model"},
+    )
+    runner.recorder = FakeRecorder(tmp_path / "frames")
+    log = tmp_path / "frames" / FRAMES_LOG_NAME
+    log.write_bytes(b'{"partial":')
+    assert runner.run(confirm=True).status == "PASS"
+    assert log.read_bytes() == b'{"partial":'
+    assert any(event == "alert" and "frame not announced" in message for event, message in events)
+
+
+def test_260_detection_oversized_success_publishes_bounded_failure_and_follower_continues(tmp_path):
+    from dataclasses import asdict
+    from sentinel.room.ingest import MAX_INBOX_RECORD_BYTES, poll_inbox, result_from_dict
+    from sentinel.room.models import CapabilityProfile
+    from sentinel.room.store import RoomStore
+    records = [_correlated_record(tmp_path), _correlated_record(tmp_path)]
+    # Each resulting detection ID remains legal (<4096 characters), but the
+    # complete 260-detection success would exceed the canonical inbox limit.
+    records[0]["perception_request"]["observation_id"] = "observation:" + "o" * 3980
+    frames, inbox, output = tmp_path / "frames.jsonl", tmp_path / "inbox.jsonl", tmp_path / "out.jsonl"
+    frames.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    identity = {"provider": "fixture", "model": "pinned-model", "secret": "private-provider-secret"}
+    batches = [DetectionBatch(_laptop().detections * 260, "OK", ("high",) * 260, raw=identity),
+               DetectionBatch(_laptop().detections, "OK", ("high",), raw=identity)]
+    assert follow(frames, output, FakeDetector(batches), done=lambda: True,
+                  inbox_log=inbox, print_fn=lambda _: None) == 2
+    lines = inbox.read_bytes().splitlines(keepends=True)
+    assert len(lines) == 2 and all(len(line) <= MAX_INBOX_RECORD_BYTES for line in lines)
+    failed, success = [result_from_dict(json.loads(line)) for line in lines]
+    assert failed.status == "FAILED" and failed.error_category == "RESPONSE_TOO_LARGE"
+    assert failed.identity_status == "UNVERIFIED" and failed.resolved_model is None
+    assert failed.detections == ()
+    assert asdict(failed.request) == records[0]["perception_request"]
+    assert success.status == "SUCCEEDED" and len(success.detections) == 1
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert rows[0]["detections"] == [] and rows[0]["raw"] is None
+    assert rows[0]["error"] == "RESPONSE_TOO_LARGE"
+    assert "private-provider-secret" not in inbox.read_text() + output.read_text()
+    store = RoomStore.open(tmp_path / "room.sqlite3")
+    store.create_session("s1", "look", CapabilityProfile(()))
+    outcomes = poll_inbox(store, inbox, current_snapshot_version=0)
+    assert len(outcomes) == 2 and not outcomes[0].authorizes_current_state and outcomes[1].authorizes_current_state
+    assert store.connection.execute("SELECT COUNT(*) FROM room_inbox_rejections").fetchone()[0] == 0
+    assert store.connection.execute("SELECT COUNT(*) FROM room_perception_results").fetchone()[0] == 2
+    store.close()
+
+
+def test_oversized_success_fallback_bounds_request_timestamp_without_losing_capture_instant(tmp_path):
+    from datetime import datetime
+    from sentinel.room.ingest import MAX_INBOX_RECORD_BYTES, canonical_line, result_from_dict
+    record = _correlated_record(tmp_path)
+    captured_at = "2026-09-22T00:00:00." + "0" * MAX_INBOX_RECORD_BYTES + "+00:00"
+    record["perception_request"]["captured_at"] = captured_at
+    batch = DetectionBatch((), "OK", raw={"provider": "fixture", "model": "pinned-model"})
+    row = detect_frame(FakeDetector([batch]), record)
+    result = result_from_dict(row["perception_result"])
+    assert result.status == "FAILED" and result.error_category == "RESPONSE_TOO_LARGE"
+    assert len(canonical_line(row["perception_result"])) <= MAX_INBOX_RECORD_BYTES
+    assert datetime.fromisoformat(result.request.captured_at) == datetime.fromisoformat(captured_at)
+    assert result.request.observation_id == record["perception_request"]["observation_id"]

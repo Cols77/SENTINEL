@@ -82,6 +82,16 @@ class ModelIdentityMismatch(ProviderError):
     rather than have it disappear into a routine empty-scene status.
     """
 
+    def __init__(self, message: str | None = None, *, provider: str | None = None,
+                 requested_model: str | None = None, resolved_model: str | None = None) -> None:
+        # Keep message-only construction compatible. Structured fields preserve
+        # provenance without requiring consumers to parse or expose error text;
+        # the receiving boundary must still validate these external values.
+        super().__init__(message if message is not None else "provider model identity mismatch")
+        self.provider = provider
+        self.requested_model = requested_model
+        self.resolved_model = resolved_model
+
 
 #: Bounds shared by both adapters. Generous enough for one detection call
 #: on a single 960x720 still; not a substitute for provider-side limits.

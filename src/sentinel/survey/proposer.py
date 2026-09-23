@@ -35,6 +35,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from sentinel.jev_choice import ChoiceAssessment, assess_choice
+from sentinel.judgment import ChoiceJudge
+
 from .candidates import ESCALATE_LABEL, REPORT_LABEL
 from .context import SurveyContext
 
@@ -106,7 +109,7 @@ class JevProposer:
     as a candidate -- escalation is derived from the gates below, not handed
     to the model as a free abstention (Jev handoff, section 2.2)."""
 
-    def __init__(self, judge, sink, act_at: float = DEFAULT_ACT_AT,
+    def __init__(self, judge: ChoiceJudge, sink, act_at: float = DEFAULT_ACT_AT,
                  min_margin: float = DEFAULT_MIN_MARGIN) -> None:
         self.judge, self.sink = judge, sink
         self.act_at, self.min_margin = act_at, min_margin
@@ -115,6 +118,9 @@ class JevProposer:
         options = _actionable(context)
         if not options:
             return _escalate(context, "no actionable candidate")
+        labels = tuple(candidate.label for candidate in options)
+        if len(labels) != len(set(labels)):
+            return self._record(context, ESCALATE_LABEL, "invalid_answer", None)
         criteria = {c.label: c.description for c in options}
         state = {"request_text": request.get("request_text", ""), "results": context.results}
         instruction = "Choose the sweep that best answers the operator's request."
@@ -127,25 +133,31 @@ class JevProposer:
         except Exception as exc:  # noqa: BLE001 -- the advisor boundary fails closed
             return self._record(context, ESCALATE_LABEL, f"judge_error:{type(exc).__name__}", None)
 
-        label = answer.get("value")
-        probabilities = answer.get("probabilities") or {}
-        if label not in criteria:
-            return self._record(context, ESCALATE_LABEL, "unknown_label", answer)
+        assessment = assess_choice(
+            answer, criteria, escalation_label=ESCALATE_LABEL,
+            act_at=self.act_at, min_margin=self.min_margin,
+        )
+        return self._record(
+            context, assessment.final_label, self._audit_outcome(assessment, criteria), answer,
+        )
 
-        confidence = answer.get("confidence")
-        if confidence is None:
-            # V8e: JevPolicy falls back to probabilities[label] before
-            # escalating; use .get so a missing entry still fails closed
-            # here instead of raising past this boundary.
-            confidence = probabilities.get(label)
-        if confidence is None or confidence < self.act_at:
-            return self._record(context, ESCALATE_LABEL, "below_act_at", answer)
-
-        ranked = sorted(probabilities.values(), reverse=True)
-        margin = ranked[0] - ranked[1] if len(ranked) > 1 else 1.0
-        if margin < self.min_margin:
-            return self._record(context, ESCALATE_LABEL, "thin_margin", answer)
-        return self._record(context, label, "accepted", answer)
+    @staticmethod
+    def _audit_outcome(
+        assessment: ChoiceAssessment, criteria: dict[str, str],
+    ) -> str:
+        if assessment.outcome == "ACCEPTED":
+            return "accepted"
+        if assessment.outcome == "LOW_CONFIDENCE":
+            return "below_act_at"
+        if assessment.outcome == "THIN_MARGIN":
+            return "thin_margin"
+        if assessment.outcome == "MISSING_OR_NON_MAX_SELECTION":
+            return "below_act_at"
+        if assessment.outcome == "INVALID_CONFIGURATION":
+            return "invalid_answer"
+        if assessment.selected_label not in criteria:
+            return "unknown_label"
+        return "invalid_answer"
 
     def _record(self, context: SurveyContext, label: str, outcome: str, answer) -> dict:
         self.sink.write({"record": "survey_route", "mode": "J", "outcome": outcome,

@@ -20,6 +20,7 @@ Each error is applied alone, at its bound, with the others nominal: all of them 
 once made the stops that localised every time BLIND, which the flights contradict.
 """
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -101,22 +102,44 @@ class CoverageModel:
         return np.array([x_cm, y_cm, z_cm + self.height_offset_cm], dtype=float) / 100.0
 
     def tags_in_view(self, x_cm: float, y_cm: float, z_cm: float, *,
+                     commanded_yaw_deg: float = 90.0,
                      yaw_err_deg: float = 0.0, pitch_err_deg: float = 0.0) -> int:
         """Tags fully in frame from a commanded altitude ``z_cm`` (the altimeter's reading)."""
         pos = self._room_point(x_cm, y_cm, z_cm)
-        R, t = _camera(pos, yaw_err_deg, HOVER_PITCH_DOWN_DEG + pitch_err_deg)
+        if not all(math.isfinite(value) for value in (commanded_yaw_deg, yaw_err_deg, pitch_err_deg)):
+            raise ValueError("camera headings must be finite")
+        R, t = _camera(pos, commanded_yaw_deg - 90 + yaw_err_deg,
+                       HOVER_PITCH_DOWN_DEG + pitch_err_deg)
         return len(_visible(self.tag_map, pos, R, t))
 
-    def verdict(self, x_cm: float, y_cm: float, z_cm: float) -> Coverage:
-        nominal = self.tags_in_view(x_cm, y_cm, z_cm)
+    def verdict(self, x_cm: float, y_cm: float, z_cm: float, *,
+                commanded_yaw_deg: float = 90.0, xy_uncertainty_cm: float = 0.0,
+                heading_uncertainty_deg: float = 0.0) -> Coverage:
+        if any(not math.isfinite(value) or value < 0
+               for value in (xy_uncertainty_cm, heading_uncertainty_deg)):
+            raise ValueError("coverage uncertainty must be finite and nonnegative")
+        nominal = self.tags_in_view(x_cm, y_cm, z_cm, commanded_yaw_deg=commanded_yaw_deg)
+        # Preserve the measured canonical samples and additionally evaluate the
+        # propagated error region at joint corners and heading extremes. This
+        # is a visibility ranking, never a substitute for swept-clearance proof.
+        offsets = ((0.0, 0.0),) if xy_uncertainty_cm == 0 else tuple(
+            (dx * xy_uncertainty_cm, dy * xy_uncertainty_cm)
+            for dx, dy in ((0, 0), (1, 1), (1, -1), (-1, 1), (-1, -1)))
+        headings = (0.0,) if heading_uncertainty_deg == 0 else (-heading_uncertainty_deg, 0.0, heading_uncertainty_deg)
         worst = min(self.tags_in_view(x_cm + dx, y_cm + dy, z_cm + dz,
-                                      yaw_err_deg=yaw, pitch_err_deg=pitch)
-                    for dx, dy, dz, yaw, pitch in _one_error_at_a_time())
+                                      commanded_yaw_deg=commanded_yaw_deg,
+                                      yaw_err_deg=yaw + error, pitch_err_deg=pitch)
+                    for ox, oy in offsets for error in headings
+                    for sx, sy, dz, yaw, pitch in _one_error_at_a_time()
+                    for dx, dy in ((sx + ox, sy + oy),))
         if worst == 0:
             return Coverage(BLIND, nominal, 0, None)
         pos = self._room_point(x_cm, y_cm, z_cm)
-        p95 = predict_cell(self.tag_map, *pos, rng=np.random.default_rng(0), trials=40,
-                           pitch_extra_deg=HOVER_PITCH_DOWN_DEG)["p95_cm"]
+        # The existing Monte Carlo calibration is canonical-heading only.
+        # Do not label a different heading with that error estimate.
+        p95 = (predict_cell(self.tag_map, *pos, rng=np.random.default_rng(0), trials=40,
+                            pitch_extra_deg=HOVER_PITCH_DOWN_DEG)["p95_cm"]
+               if commanded_yaw_deg % 360 == 90 else None)
         good = worst >= 2 and p95 is not None and p95 <= MAX_P95_CM
         return Coverage(OK if good else MARGINAL, nominal, worst, p95)
 

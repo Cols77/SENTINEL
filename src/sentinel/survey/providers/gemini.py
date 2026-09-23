@@ -176,7 +176,8 @@ class GeminiDetector:
         if resolved_model != self.model:
             raise ModelIdentityMismatch(
                 f"{self.provider}: pinned {self.model!r} but the provider resolved "
-                f"{resolved_model!r}")
+                f"{resolved_model!r}", provider=self.provider,
+                requested_model=self.model, resolved_model=resolved_model)
 
         items = _items_from(raw)
         if items is None:

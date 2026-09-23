@@ -1,4 +1,6 @@
 from sentinel.coordinator.legal_tools import Candidate, LegalSet
+import pytest
+
 from sentinel.judgment import JevJudge, StaticJudge
 from sentinel.survey.candidates import ESCALATE_LABEL, PROPOSE_SWEEP, REPORT_LABEL, REVIEW_RESULTS
 from sentinel.survey.context import SurveyContext
@@ -47,8 +49,9 @@ class _Judge:
         self.probabilities = probabilities or {}
         self.calls = []
 
-    def choice(self, state, instruction, **kwargs):
-        self.calls.append({"state": state, "instruction": instruction, **kwargs})
+    def choice(self, state, instruction, *, criteria, name):
+        self.calls.append({"state": state, "instruction": instruction,
+                           "criteria": criteria, "name": name})
         return {"value": self.value, "confidence": self.confidence,
                 "probabilities": self.probabilities}
 
@@ -59,7 +62,7 @@ def test_the_rule_proposer_takes_the_first_non_escalate_option():
 
 def test_jev_acting_above_the_threshold_and_margin_picks_its_option():
     judge = _Judge("RAIL_HIGH_WIDE", 0.82,
-                   {"RAIL_HIGH_WIDE": 0.82, "RAIL_MID_HEIGHT": 0.10, ESCALATE_LABEL: 0.08})
+                   {"RAIL_HIGH_WIDE": 0.82, "RAIL_MID_HEIGHT": 0.10})
     result = JevProposer(judge, _Sink()).decide(REQUEST, CONTEXT)
     assert chosen_label(result) == "RAIL_HIGH_WIDE"
 
@@ -85,6 +88,48 @@ def test_jev_is_never_offered_escalate_as_a_candidate():
     assert ESCALATE_LABEL not in judge.calls[0]["criteria"]
 
 
+def test_provider_selected_escalation_remains_an_unknown_survey_choice():
+    sink = _Sink()
+    result = JevProposer(
+        _Judge(ESCALATE_LABEL, 0.9,
+               {"RAIL_MID_HEIGHT": 0.05, "RAIL_HIGH_WIDE": 0.05, ESCALATE_LABEL: 0.90}),
+        sink,
+    ).decide(REQUEST, CONTEXT)
+
+    assert chosen_label(result) == ESCALATE_LABEL
+    assert sink.records[0]["outcome"] == "unknown_label"
+    assert result["tool_calls"][0]["arguments"]["reason"] == "jev: unknown_label"
+
+
+def test_invalid_survey_gate_configuration_escalates_without_calling_the_candidate():
+    sink = _Sink()
+    judge = _Judge("RAIL_HIGH_WIDE", 0.9,
+                   {"RAIL_HIGH_WIDE": 0.8, "RAIL_MID_HEIGHT": 0.1})
+
+    result = JevProposer(judge, sink, act_at="0.6").decide(REQUEST, CONTEXT)
+
+    assert chosen_label(result) == ESCALATE_LABEL
+    assert sink.records[0]["outcome"] == "invalid_answer"
+
+
+def test_duplicate_survey_candidate_labels_fail_closed_before_the_judge_call():
+    duplicate_context = SurveyContext("RUN1", LegalSet(PROPOSE_SWEEP, (
+        Candidate("survey.propose_sweep", {"option_id": "ONE", "reason": ""},
+                  "DUPLICATE", "first duplicate"),
+        Candidate("survey.propose_sweep", {"option_id": "TWO", "reason": ""},
+                  "DUPLICATE", "second duplicate"),
+        Candidate("survey.escalate", {"reason": ""}, ESCALATE_LABEL, "unclear"),
+    )), {})
+    sink = _Sink()
+    judge = _Judge("DUPLICATE", 0.9, {"DUPLICATE": 1.0})
+
+    result = JevProposer(judge, sink).decide(REQUEST, duplicate_context)
+
+    assert chosen_label(result) == ESCALATE_LABEL
+    assert judge.calls == []
+    assert sink.records[0]["outcome"] == "invalid_answer"
+
+
 def test_jev_records_a_derived_justification_because_it_returns_no_rationale():
     judge = _Judge("RAIL_HIGH_WIDE", 0.82,
                    {"RAIL_HIGH_WIDE": 0.82, "RAIL_MID_HEIGHT": 0.10})
@@ -97,12 +142,17 @@ def test_jev_records_a_derived_justification_because_it_returns_no_rationale():
 
 def test_an_unknown_label_from_any_advisor_escalates():
     judge = _Judge("RAIL_INVENTED", 0.99, {"RAIL_INVENTED": 0.99})
-    assert chosen_label(JevProposer(judge, _Sink()).decide(REQUEST, CONTEXT)) == ESCALATE_LABEL
+    sink = _Sink()
+    result = JevProposer(judge, sink).decide(REQUEST, CONTEXT)
+
+    assert chosen_label(result) == ESCALATE_LABEL
+    assert sink.records[0]["outcome"] == "unknown_label"
+    assert result["tool_calls"][0]["arguments"]["reason"] == "jev: unknown_label"
 
 
 def test_a_judge_that_raises_fails_closed_to_escalate():
     class _Boom:
-        def choice(self, state, instruction, **kwargs):
+        def choice(self, state, instruction, *, criteria, name):
             raise RuntimeError("provider down")
 
     assert chosen_label(JevProposer(_Boom(), _Sink()).decide(REQUEST, CONTEXT)) == ESCALATE_LABEL
@@ -137,6 +187,17 @@ def test_jev_escalates_when_confidence_is_none_and_the_label_has_no_probability_
     assert chosen_label(JevProposer(judge, _Sink()).decide(REQUEST, CONTEXT)) == ESCALATE_LABEL
 
 
+def test_missing_selected_probability_keeps_the_existing_below_act_at_audit_reason():
+    sink = _Sink()
+    result = JevProposer(
+        _Judge("RAIL_HIGH_WIDE", None, {"RAIL_MID_HEIGHT": 0.10}), sink,
+    ).decide(REQUEST, CONTEXT)
+
+    assert sink.records[0]["label"] == ESCALATE_LABEL
+    assert sink.records[0]["outcome"] == "below_act_at"
+    assert result["tool_calls"][0]["arguments"]["reason"] == "jev: below_act_at"
+
+
 def test_jev_proposer_works_against_the_real_jev_judge_class(monkeypatch):
     """Rev-4 V1 requires exercising a real judge class, not only a
     permissive **kwargs fake. JevJudge accepts an injected `transport`, so
@@ -155,15 +216,40 @@ def test_jev_proposer_works_against_the_real_jev_judge_class(monkeypatch):
     assert chosen_label(result) == "RAIL_HIGH_WIDE"
 
 
-def test_the_static_judge_has_no_criteria_parameter_so_pairing_it_with_jev_mode_fails_closed():
-    """StaticJudge.choice (judgment.py) takes `options`, not `criteria` --
-    JevProposer always passes `criteria`, so pairing them raises TypeError
-    at the judge boundary and fails closed to escalate rather than crashing
-    past it. Real use of mode J requires a criteria-capable judge (JevJudge
-    or LlmJudge)."""
+def test_the_static_judge_implements_the_described_choice_protocol():
     judge = StaticJudge(choices={PROPOSE_SWEEP.lower(): (
         "RAIL_HIGH_WIDE", {"RAIL_HIGH_WIDE": 0.82, "RAIL_MID_HEIGHT": 0.10})})
-    assert chosen_label(JevProposer(judge, _Sink()).decide(REQUEST, CONTEXT)) == ESCALATE_LABEL
+    assert chosen_label(JevProposer(judge, _Sink()).decide(REQUEST, CONTEXT)) == "RAIL_HIGH_WIDE"
+
+
+@pytest.mark.parametrize(("confidence", "expected_label", "expected_outcome"), [
+    (0.82, "RAIL_HIGH_WIDE", "accepted"),
+    (0.40, ESCALATE_LABEL, "below_act_at"),
+])
+def test_jev_audit_keeps_its_label_and_gate_reason_after_shared_validation(
+    confidence, expected_label, expected_outcome,
+):
+    sink = _Sink()
+    judge = _Judge(
+        "RAIL_HIGH_WIDE", confidence,
+        {"RAIL_HIGH_WIDE": 0.82, "RAIL_MID_HEIGHT": 0.10},
+    )
+
+    JevProposer(judge, sink).decide(REQUEST, CONTEXT)
+
+    assert sink.records == [{
+        "record": "survey_route",
+        "mode": "J",
+        "outcome": expected_outcome,
+        "label": expected_label,
+        "run_id": "RUN1",
+        "decision_point": PROPOSE_SWEEP,
+        "judge_answer": {
+            "value": "RAIL_HIGH_WIDE",
+            "confidence": confidence,
+            "probabilities": {"RAIL_HIGH_WIDE": 0.82, "RAIL_MID_HEIGHT": 0.10},
+        },
+    }]
 
 
 def test_escalating_at_the_propose_point_synthesises_a_call_even_with_no_escalate_candidate():

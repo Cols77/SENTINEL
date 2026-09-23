@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 
 from sentinel.coordinator.legal_tools import LegalSet
-from sentinel.coordinator.policy import PolicyContext
+from sentinel.coordinator.policy import PolicyContext, one_call
 from sentinel.coordinator.shadow import MemoryAuditSink, ShadowLadder
 
 from .test_shadow import _dummy_state, _evidence_gate_legal, _request
@@ -54,6 +54,25 @@ class _TimestampingExecutor:
         return result
 
 
+class _ImmediateExecutor:
+    """Deterministic near-zero executor for measuring advisor wait time only."""
+
+    def __init__(self, legal: LegalSet) -> None:
+        self.legal = legal
+        self.called_at: float | None = None
+        self.last = None
+
+    def decide(self, request, context):
+        self.called_at = time.perf_counter()
+        from sentinel.coordinator.policies import Decision
+
+        candidate = context.legal.by_label("escalate")
+        self.last = Decision(chooser="OPERATOR", label=candidate.label, confidence=None,
+                             band=None, legal_labels=context.legal.labels, model=None,
+                             error=None, latency_ms=None)
+        return one_call(request, candidate.tool_name, candidate.arguments)
+
+
 def _judgment_context() -> tuple[PolicyContext, LegalSet]:
     """A two-candidate EVIDENCE_GATE turn with no rule_choice — a real
     judgment point (the duplicate-detection shape), so ShadowLadder takes its
@@ -87,7 +106,7 @@ def test_total_turn_cost_is_one_timeout_not_one_per_advisor():
     """Advisors run concurrently against a single shared deadline, so the audit
     record costs at most one advisor_timeout_s regardless of advisor count."""
     context, legal = _judgment_context()
-    executor = _TimestampingExecutor(legal)
+    executor = _ImmediateExecutor(legal)
     advisors = [(f"slow-{i}", _GlacialAdvisor()) for i in range(ADVISOR_COUNT)]
     ladder = ShadowLadder(executor, advisors, MemoryAuditSink(), advisor_timeout_s=TIMEOUT_S)
     try:

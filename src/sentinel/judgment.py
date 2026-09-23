@@ -43,9 +43,17 @@ def _provider_observation(raw: Any) -> dict[str, Any]:
         "prompt_tokens", "completion_tokens", "total_tokens")}}
 
 
-class BoundedJudge(Protocol):
+class ChoiceJudge(Protocol):
+    """A judge that selects one label from caller-described criteria."""
+
+    def choice(
+        self, state: dict, instruction: str, *,
+        criteria: Mapping[str, str | None], name: str,
+    ) -> dict[str, Any]: ...
+
+
+class BoundedJudge(ChoiceJudge, Protocol):
     def boolean(self, state: dict, instruction: str, *, name: str) -> dict[str, Any]: ...
-    def choice(self, state: dict, instruction: str, *, options: Sequence[str], name: str) -> dict[str, Any]: ...
     def evaluate(self, state: dict, questions: list[dict]) -> dict[str, dict[str, Any]]: ...
 
 
@@ -101,9 +109,11 @@ class StaticJudge:
     def boolean(self, state: dict, instruction: str, *, name: str) -> dict[str, Any]:
         return self.evaluate(state, [{"name": name, "type": "noul", "instruction": instruction, "criteria": None}])[name]
 
-    def choice(self, state: dict, instruction: str, *, options: Sequence[str], name: str) -> dict[str, Any]:
+    def choice(self, state: dict, instruction: str, *, options: Sequence[str] | None = None,
+               criteria: Mapping[str, str | None] | None = None, name: str) -> dict[str, Any]:
+        resolved = dict(criteria) if criteria is not None else {opt: None for opt in (options or [])}
         return self.evaluate(state, [{"name": name, "type": "choice", "instruction": instruction,
-                                      "criteria": {opt: None for opt in options}}])[name]
+                                      "criteria": resolved}])[name]
 
 
 class JudgeUnavailable(RuntimeError):
