@@ -8,9 +8,26 @@ const feedback={
  INVALID_PROFILE_REQUEST:'Choose a valid site profile.',
 };
 
+export function profileActivityKey(snapshot){
+ return JSON.stringify([snapshot.run.id,snapshot.run.status,snapshot.run.phase,
+  snapshot.run.decision_version??null,snapshot.events.watermark,
+  snapshot.chat?.messages?.at(-1)?.id??null,snapshot.proposal?.id??null]);
+}
+
+export function createProfileActivityWatcher(load){
+ let previous=null;
+ return snapshot=>{
+  if(snapshot?.session.mode!=='LIVE')return;
+  const key=profileActivityKey(snapshot);
+  if(key===previous)return;
+  previous=key;
+  return load();
+ };
+}
+
 export function createSiteProfileController(client,refreshSnapshot=async()=>{}){
  let state={profiles:[],selected_profile_id:null,switch_allowed:false,switch_reason:null,pending:false,feedback:''};
- let revision=0,loading=null,queued=null;
+ let revision=0,loading=null,rerun=false;
  const listeners=new Set();
  const emit=()=>{for(const listener of listeners)listener({...state,profiles:state.profiles.map(profile=>({...profile}))});};
  const update=catalogue=>{
@@ -25,12 +42,21 @@ export function createSiteProfileController(client,refreshSnapshot=async()=>{}){
   subscribe(listener){listeners.add(listener);return ()=>listeners.delete(listener);},
   update,
   async load(){
-   if(loading){
-    if(!queued)queued=loading.then(()=>{queued=null;return api.load();});
-    return queued;
-   }
-   const started=revision;
-   loading=(async()=>{try{const catalogue=await client.read_site_profiles();if(started===revision&&!state.pending)update(catalogue);}catch{if(started===revision){state={...state,feedback:'Site catalogue unavailable.'};emit();}}finally{loading=null;}})();
+   if(loading){rerun=true;return loading;}
+   loading=(async()=>{
+    do{
+     rerun=false;
+     const started=revision;
+     try{
+      const catalogue=await client.read_site_profiles();
+      if(started===revision&&!state.pending)update(catalogue);
+      else rerun=true;
+     }catch{
+      if(started===revision&&!state.pending){state={...state,feedback:'Site catalogue unavailable.'};emit();}
+      else rerun=true;
+     }
+    }while(rerun&&!state.pending);
+   })().finally(()=>{loading=null;});
    return loading;
   },
   async select(profile_id){
@@ -48,6 +74,7 @@ export function createSiteProfileController(client,refreshSnapshot=async()=>{}){
    }catch{
     state={...state,selected_profile_id:previous,pending:false,feedback:'Site selection could not be confirmed. Refresh the catalogue.'};emit();
    }
+   if(rerun){rerun=false;await api.load();}
  },
  };
  return api;

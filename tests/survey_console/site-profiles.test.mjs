@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createSiteProfileController} from '../../examples/survey-console/site-profiles.mjs';
+import {createSiteProfileController,profileActivityKey,createProfileActivityWatcher} from '../../examples/survey-console/site-profiles.mjs';
 
 const catalogue=(selected='CanningSt',allowed=true)=>({version:1,selected_profile_id:selected,switch_allowed:allowed,switch_reason:allowed?null:'MISSION_NOT_IDLE',profiles:[
  {id:'CanningSt',label:'Canning Street',enabled:true,setup_status:'Ready'},
@@ -38,14 +38,15 @@ test('typed failure retains previous selection and allowlisted feedback',async()
 });
 
 test('stale catalogue response cannot undo a successful selection',async()=>{
- let finish;
- const control=createSiteProfileController({read_site_profiles:()=>new Promise(resolve=>finish=resolve),select_site_profile:async()=>({...catalogue('Harbor'),status:'ACKNOWLEDGED',reason_code:null})});
+ let finish,reads=0;
+ const control=createSiteProfileController({read_site_profiles:()=>++reads===1?new Promise(resolve=>finish=resolve):Promise.resolve(catalogue('Harbor')),select_site_profile:async()=>({...catalogue('Harbor'),status:'ACKNOWLEDGED',reason_code:null})});
  const old=control.load();
  // A catalogue can be pending when a server response to a selection arrives.
  control.update(catalogue());
  await control.select('Harbor');
  finish(catalogue());await old;
  assert.equal(control.getState().selected_profile_id,'Harbor');
+ assert.equal(reads,2);
 });
 
 test('acknowledged selection remains selected when snapshot refresh fails',async()=>{
@@ -62,4 +63,61 @@ test('phase change queues one fresh catalogue read behind an in-flight read',asy
  finish(catalogue());await Promise.all([first,second,third]);
  assert.equal(calls,2);
  assert.equal(control.getState().switch_allowed,false);
+});
+
+test('activity key detects chat and event changes without refreshing unchanged polls',async()=>{
+ const calls=[];
+ const watch=createProfileActivityWatcher(()=>{calls.push('load');});
+ const snapshot={session:{mode:'LIVE'},run:{id:'r',status:'ACTIVE',phase:'REQUEST',version:1},events:{watermark:0},proposal:null};
+ assert.equal(typeof profileActivityKey(snapshot),'string');
+ watch(snapshot);watch(structuredClone(snapshot));
+ const readinessOnly=structuredClone(snapshot);readinessOnly.run.version=2;
+ watch(readinessOnly);
+ assert.equal(calls.length,1);
+ const message=structuredClone(readinessOnly);message.chat={messages:[{id:'chat-1'}]};
+ watch(message);watch(structuredClone(message));
+ assert.equal(calls.length,2);
+ const chat=structuredClone(message);chat.events.watermark=1;
+ watch(chat);watch(structuredClone(chat));
+ assert.equal(calls.length,3);
+ watch({...chat,session:{mode:'REHEARSAL'}});
+ assert.equal(calls.length,3);
+});
+
+test('catalogue response during pending selection triggers one post-settlement reload',async()=>{
+ let finishSelect,finishRead,readCalls=0;
+ const control=createSiteProfileController({
+  read_site_profiles:()=>{readCalls++;return readCalls===1?Promise.resolve(catalogue()):readCalls===2?new Promise(resolve=>finishRead=resolve):Promise.resolve(catalogue('Harbor',false));},
+  select_site_profile:()=>new Promise(resolve=>finishSelect=resolve),
+ });
+ const watch=createProfileActivityWatcher(()=>control.load());
+ const initial={session:{mode:'LIVE'},run:{id:'r',status:'ACTIVE',phase:'REQUEST',version:1},events:{watermark:0},proposal:null};
+ await watch(initial);
+ const selection=control.select('Harbor');
+ const activity={...initial,run:{...initial.run,version:2},events:{watermark:1}};
+ const activityRead=watch(activity);
+ watch(structuredClone(activity));
+ finishRead(catalogue('CanningSt',false));await activityRead;
+ finishSelect({...catalogue('Harbor'),status:'ACKNOWLEDGED',reason_code:null});
+ await selection;
+ assert.equal(control.getState().selected_profile_id,'Harbor');
+ assert.equal(control.getState().switch_allowed,false);
+ assert.equal(readCalls,3);
+});
+
+test('pending selection failure also rechecks a discarded activity catalogue',async()=>{
+ let finishSelect,finishRead,readCalls=0;
+ const control=createSiteProfileController({
+  read_site_profiles:()=>{readCalls++;return readCalls===1?Promise.resolve(catalogue()):readCalls===2?new Promise(resolve=>finishRead=resolve):Promise.resolve(catalogue('CanningSt',false));},
+  select_site_profile:()=>new Promise(resolve=>finishSelect=resolve),
+ });
+ await control.load();
+ const selection=control.select('Harbor');
+ const activityRead=control.load();
+ finishRead(catalogue('CanningSt',false));await activityRead;
+ finishSelect({...catalogue(),status:'CONFLICT',reason_code:'MISSION_NOT_IDLE'});
+ await selection;
+ assert.equal(control.getState().selected_profile_id,'CanningSt');
+ assert.equal(control.getState().switch_allowed,false);
+ assert.equal(readCalls,3);
 });

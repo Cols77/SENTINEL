@@ -8,7 +8,7 @@ import {renderCounts} from './counts.mjs';
 import {createChatView} from './chat.mjs';
 import {createControlledLandController,createSafetyView} from './safety.mjs';
 import {createLocalizationView} from './localization.mjs';
-import {createSiteProfileController} from './site-profiles.mjs';
+import {createSiteProfileController,createProfileActivityWatcher} from './site-profiles.mjs';
 import {missionMapModel,renderMissionMap} from './mission-map.mjs';
 const root=document.getElementById('app');
 root.classList.add('mission-console');document.title='SENTINEL · Mission Control';
@@ -31,9 +31,10 @@ root.append(top,readinessHost,el('div',{class:'mission-layout'},[chatHost,center
 const client=createHttpClient();
 const controller=createController(client,missionContract);
 const profiles=createSiteProfileController(client,()=>controller.refresh());
+const refreshProfilesOnActivity=createProfileActivityWatcher(()=>profiles.load());
 profiles.subscribe(()=>{if(snapshot?.session.mode==='LIVE')renderReadiness(toSurveyView(snapshot));});
 let snapshot=null,selection=null,restored=false;
-let profileCatalogueActive=false,profileLockKey=null;
+let profileCatalogueActive=false;
 const landController=createControlledLandController({getSnapshot:()=>snapshot,requestLand:client.request_land});
 const chat=createChatView(chatHost,client,()=>snapshot,{landController});
 const safety=createSafetyView(safetyHost,client,()=>snapshot,{landController});
@@ -93,8 +94,7 @@ controller.subscribe(state=>{
  if(!state.survey){if(state.error)status.textContent=`Connection unavailable: ${state.error}`;return;}
  snapshot=state.survey;
  if(profileCatalogueActive&&snapshot.session.mode==='LIVE'){
-  const key=`${snapshot.run.status}:${snapshot.run.phase}:${snapshot.proposal?.id??''}`;
-  if(key!==profileLockKey){profileLockKey=key;void profiles.load();}
+  void refreshProfilesOnActivity(snapshot);
  }
  safety.render(snapshot);localization.render(snapshot);renderMissionMap(mapHost,missionMapModel(snapshot));
  const view=toSurveyView(snapshot);
@@ -111,5 +111,5 @@ controller.subscribe(state=>{
  if(selection){const ids=selection.kind==='frame'?[selection.id]:supportingSightings(view,selection).map(x=>x.frame_id);if(ids.some(id=>snapshot.evidence.frames.find(f=>f.id===id)?.evidence!=='AVAILABLE')){evidence.clear();selection=null;}}
  if(!restored){restored=true;const saved=localStorage.getItem(`sentinel:${snapshot.session.id}:${snapshot.run.id}:decision`);if(saved){try{decision.restore(JSON.parse(saved));}catch{localStorage.removeItem(`sentinel:${snapshot.session.id}:${snapshot.run.id}:decision`);}}}
 });
-try{const session=await client.session();await controller.open(session.active_run_id);if(session.mode==='LIVE'){profileCatalogueActive=true;profileLockKey=`${snapshot.run.status}:${snapshot.run.phase}:${snapshot.proposal?.id??''}`;await profiles.load();}const stop=startPolling(()=>controller.refresh());window.addEventListener('pagehide',()=>{stop();chat.dispose();evidence.dispose();safety.dispose();localization.dispose();});}
+try{const session=await client.session();await controller.open(session.active_run_id);if(session.mode==='LIVE'){profileCatalogueActive=true;await refreshProfilesOnActivity(snapshot);}const stop=startPolling(()=>controller.refresh());window.addEventListener('pagehide',()=>{stop();chat.dispose();evidence.dispose();safety.dispose();localization.dispose();});}
 catch(e){status.textContent='Local runtime unavailable: '+e.message;}
