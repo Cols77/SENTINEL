@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 import uuid
 
+from sentinel.camera import TELLO_MEASURED, CameraModel
 from sentinel.cube.checkpoint import CheckpointPlan, CommandLimits, PlannedCommand, plan_checkpoint
 from sentinel.models import Position
 from sentinel.motion_bounds import rotate_reply_upper_bound_s
@@ -32,6 +33,8 @@ from sentinel.survey.live_detect import LIVE_CLASSES, detect_frame
 
 from . import calibration
 from .artifacts import atomic_write_bytes
+from .grounding import CountGeometry
+from .spatial import SupportDeclaration, SupportKind
 from .ingest import PerceptionRequest, PerceptionResult, capture_request, result_from_dict
 from .semantic import resolve_pose_id
 from .site import RoomSite
@@ -148,6 +151,32 @@ def make_resolve_checkpoint(
         return _retarget_terminal_heading(plan, pose_yaw_deg, limits)
 
     return resolve_checkpoint
+
+
+# ---------------------------------------------------------------------------
+# count_geometry: the calibrated Tello camera plus the site's support planes
+# ---------------------------------------------------------------------------
+
+
+def make_count_geometry(site: RoomSite, *, camera: CameraModel = TELLO_MEASURED) -> CountGeometry:
+    """Task B item 3: the production ``CountGeometry``.
+
+    The camera is ``sentinel.camera.TELLO_MEASURED`` (stream fx ~893 and the
+    measured 8.6 degree down pitch -- the single real-pixel camera model per
+    coherence spec section 10.5). Each class a site support plane names rests
+    on it: the FLOOR plane gives FLOOR support, any other plane a declared
+    horizontal plane at its surveyed height. A class no plane names keeps
+    UNKNOWN support, so its detections are reported unplaced, never as zero.
+    """
+    supports = []
+    for plane in site.support_planes:
+        for class_name in plane.classes:
+            if plane.plane_id == "FLOOR":
+                supports.append((class_name, SupportDeclaration(SupportKind.FLOOR)))
+            else:
+                supports.append((class_name, SupportDeclaration(SupportKind.DECLARED_HORIZONTAL_PLANE,
+                                                                plane.plane_id, float(plane.z_cm))))
+    return CountGeometry(camera, tuple(supports))
 
 
 # ---------------------------------------------------------------------------

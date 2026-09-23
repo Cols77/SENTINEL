@@ -201,6 +201,33 @@ class SemanticFrame:
             raise ValueError("duplicate landmark identity")
 
 
+#: The static classes a support plane may declare (``person`` is never placed).
+_PLACEABLE_CLASSES = ("computer", "phone", "pen")
+
+
+@dataclass(frozen=True)
+class SupportPlane:
+    """A surveyed horizontal surface detections of some classes rest on.
+
+    Task B item 3: ``plane_id`` ``"FLOOR"`` is the floor (z 0); any other ID
+    is a declared horizontal plane at ``z_cm`` (e.g. the demo table). A class
+    names at most one plane per site; a class no plane names has UNKNOWN
+    support, so its detections are reported unplaced -- never guessed.
+    """
+    plane_id: str
+    z_cm: float
+    classes: tuple[str, ...]
+
+    def __post_init__(self):
+        object.__setattr__(self, "classes", tuple(self.classes))
+        if not self.plane_id or not finite_number(self.z_cm):
+            raise ValueError("support plane needs an identity and a finite height")
+        if self.plane_id == "FLOOR" and self.z_cm != 0:
+            raise ValueError("the FLOOR support plane is at z 0")
+        if len(set(self.classes)) != len(self.classes) or any(c not in _PLACEABLE_CLASSES for c in self.classes):
+            raise ValueError("support plane classes must be unique placeable static classes")
+
+
 @dataclass(frozen=True)
 class RoomSite:
     site_id: str
@@ -222,6 +249,10 @@ class RoomSite:
     #: calibrated frustum/occlusion model -- see the task report. Sorted by
     #: pose_id; each pose's cell IDs are sorted and unique.
     pose_visibility: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    #: Task B item 3: the surveyed support surfaces grounded counting places
+    #: static detections on (see ``SupportPlane``). Optional; none declared
+    #: leaves every static class unplaced.
+    support_planes: tuple[SupportPlane, ...] = ()
 
     def validate(self, *, real_mode: bool = True) -> None:
         if not self.site_id or not self.clearance_provenance.strip() or not self.free_space_volumes:
@@ -312,6 +343,12 @@ class RoomSite:
                 raise ValueError(f"pose {pose_id!r} declares visibility of an unknown coverage cell")
             if not _declared_pose_resolves(self, pose_id):
                 raise ValueError(f"pose {pose_id!r} does not resolve to a declared, in-envelope semantic pose")
+        plane_ids = [plane.plane_id for plane in self.support_planes]
+        if len(set(plane_ids)) != len(plane_ids):
+            raise ValueError("duplicate support plane identity")
+        declared = [name for plane in self.support_planes for name in plane.classes]
+        if len(set(declared)) != len(declared):
+            raise ValueError("a class may rest on only one declared support plane")
 
 
 def _contains(volume, position):
@@ -407,6 +444,8 @@ def room_site_document(site: RoomSite) -> dict:
         fields_dict.pop("coverage_cells", None)
     if not fields_dict.get("pose_visibility"):
         fields_dict.pop("pose_visibility", None)
+    if not fields_dict.get("support_planes"):
+        fields_dict.pop("support_planes", None)
     return json.loads(json.dumps({"schema_version": "room-site-base-v1", **fields_dict}, allow_nan=False))
 
 
@@ -425,7 +464,7 @@ def parse_room_site(doc: dict, *, real_mode: bool = True) -> RoomSite:
         if doc.get("schema_version") != "room-site-base-v1":
             raise ValueError("unsupported room site version")
         raw = _keys({key: value for key, value in doc.items() if key != "schema_version"}, RoomSite,
-                    optional=("semantic_frame", "coverage_cells", "pose_visibility"))
+                    optional=("semantic_frame", "coverage_cells", "pose_visibility", "support_planes"))
 
         def volume(item):
             item = _keys(item, Volume3D)
@@ -468,7 +507,10 @@ def parse_room_site(doc: dict, *, real_mode: bool = True) -> RoomSite:
             **({"coverage_cells": tuple(coverage_cell(item) for item in raw["coverage_cells"])}
                if "coverage_cells" in raw else {}),
             **({"pose_visibility": tuple((pose_id, tuple(cells)) for pose_id, cells in raw["pose_visibility"])}
-               if "pose_visibility" in raw else {})})
+               if "pose_visibility" in raw else {}),
+            **({"support_planes": tuple(SupportPlane(**_keys(item, SupportPlane))
+                                        for item in raw["support_planes"])}
+               if "support_planes" in raw else {})})
         result.validate(real_mode=real_mode)
         return result
     except (KeyError, TypeError, AttributeError, OverflowError) as exc:

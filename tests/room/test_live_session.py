@@ -319,3 +319,14 @@ def test_a_stack_without_a_recovery_adapter_keeps_recovery_unavailable(tmp_path)
         assert supervisor.recovery is None and supervisor.mapped_heading_tag_ids == ()
     finally:
         store.close()
+
+
+def test_the_live_session_counts_with_the_production_count_geometry(tmp_path):
+    from sentinel.camera import TELLO_MEASURED
+    from sentinel.room.grounding import CountGeometry
+    store, (supervisor, stack, ledger, collaborators) = _prepare_with(tmp_path, FlightStackFactory())
+    try:
+        geometry = collaborators["count_geometry"]
+        assert isinstance(geometry, CountGeometry) and geometry.camera is TELLO_MEASURED
+    finally:
+        store.close()

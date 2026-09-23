@@ -346,3 +346,73 @@ def test_perception_provider_default_fails_closed_without_credentials(tmp_path):
     request = _request(tmp_path)
     with pytest.raises(RuntimeError):
         provide(request)
+
+
+# ---------------------------------------------------------------------------
+# Task B item 3: CountGeometry in production
+# ---------------------------------------------------------------------------
+
+
+def _site_with_planes():
+    from dataclasses import replace
+    from sentinel.room.site import SupportPlane
+    return replace(room_site(coverage=True), support_planes=(
+        SupportPlane("FLOOR", 0, ("pen",)), SupportPlane("demo-surface", 50, ("computer", "phone"))))
+
+
+def test_count_geometry_uses_the_calibrated_tello_camera_and_the_sites_support_planes():
+    from sentinel.camera import TELLO_MEASURED
+    from sentinel.room.spatial import SupportKind
+    geometry = wiring.make_count_geometry(_site_with_planes())
+    assert geometry.camera is TELLO_MEASURED
+    assert geometry.camera.pitch_down_deg == 8.6 and round(geometry.camera.fx) == 893
+    assert geometry.support_for("pen").support == SupportKind.FLOOR
+    table = geometry.support_for("computer")
+    assert table.support == SupportKind.DECLARED_HORIZONTAL_PLANE
+    assert (table.support_plane_id, table.plane_height_cm) == ("demo-surface", 50.0)
+
+
+def test_count_geometry_leaves_undeclared_classes_unknown_so_they_are_unplaced_never_zero():
+    from sentinel.room.grounding import ground_frame
+    from sentinel.room.ingest import DetectionEvidence, detection_digest
+    from sentinel.room.spatial import PoseEvidence, SupportKind
+    from dataclasses import replace
+    geometry = wiring.make_count_geometry(room_site(coverage=True))  # no support planes declared
+    assert geometry.support_for("phone").support == SupportKind.UNKNOWN
+    detection = DetectionEvidence("d1", "phone", "high", None, "VLM_CONFIDENCE_BAND", (400, 500, 40, 40),
+                                  "FULL_FRAME_PIXELS", 960, 720, None, "")
+    detection = replace(detection, evidence_sha256=detection_digest(detection))
+    evidence = ground_frame((detection,), observation_id="o1", frame_id="f1", pose_id="p",
+                            pose=PoseEvidence(250, 200, 100, 0, captured_at="t"), geometry=geometry)
+    assert evidence.estimates == ()
+    assert [(item.class_name, item.reason) for item in evidence.unplaced] == [("phone", "SUPPORT_UNDECLARED")]
+
+
+def test_count_geometry_places_a_table_detection_on_the_declared_plane():
+    from sentinel.room.grounding import ground_frame
+    from sentinel.room.ingest import DetectionEvidence, detection_digest
+    from sentinel.room.spatial import PoseEvidence
+    from dataclasses import replace
+    geometry = wiring.make_count_geometry(_site_with_planes())
+    detection = DetectionEvidence("d1", "computer", "high", None, "VLM_CONFIDENCE_BAND", (440, 560, 60, 40),
+                                  "FULL_FRAME_PIXELS", 960, 720, None, "")
+    detection = replace(detection, evidence_sha256=detection_digest(detection))
+    evidence = ground_frame((detection,), observation_id="o1", frame_id="f1", pose_id="p",
+                            pose=PoseEvidence(250, 200, 120, 0, captured_at="t"), geometry=geometry)
+    estimate, = evidence.estimates
+    assert estimate.support_plane_id == "demo-surface" and estimate.z_interval_cm[0] == 50.0
+    assert estimate.y_cm > 200  # in front of the camera, on the table
+
+
+def test_site_support_planes_round_trip_and_refuse_a_class_on_two_planes():
+    from dataclasses import replace
+    from sentinel.room.site import SupportPlane, parse_room_site, room_site_document
+    site = _site_with_planes()
+    assert parse_room_site(room_site_document(site)) == site
+    # A site without planes keeps its pre-existing document (and digest).
+    assert "support_planes" not in room_site_document(room_site(coverage=True))
+    clash = replace(site, support_planes=site.support_planes + (SupportPlane("shelf", 90, ("pen",)),))
+    with pytest.raises(ValueError, match="only one declared support plane"):
+        clash.validate()
+    with pytest.raises(ValueError, match="FLOOR"):
+        SupportPlane("FLOOR", 10, ("pen",))

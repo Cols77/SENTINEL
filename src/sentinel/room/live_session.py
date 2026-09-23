@@ -338,5 +338,8 @@ def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, ca
         terminal = RoomController(store, judge).run_until_terminal(session_id)
         return LiveSessionOutcome(terminal, False, ledger.status.value, None, "GOAL_LEDGER_NOT_PENDING")
     collaborators = {"resolve_checkpoint": resolve_checkpoint, "perception_capture": perception_capture,
-                     "perception_provider": perception_provider}
+                     "perception_provider": perception_provider,
+                     # Task B item 3: the calibrated Tello camera and the
+                     # site's declared support planes place detections.
+                     "count_geometry": wiring.make_count_geometry(site)}
     return supervisor, stack, ledger, collaborators
