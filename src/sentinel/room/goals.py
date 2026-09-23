@@ -284,6 +284,18 @@ class _Compilation:
                 "assessment": audit_assessment, "provider_error": provider_error, "attempt": attempt + 1,
                 "latency_ms": (time.monotonic_ns() - started) // 1_000_000,
             })
+            # A single-option confirmation (one controller label vs clarify/unsupported)
+            # is binary: accept when the model put gate-level probability on that label
+            # even if its scalar confidence is lower (real model: NEW_ENTITY p 0.61,
+            # scalar below 0.5, twice, in Mission Control's Jev rehearsal).
+            if (assessment.outcome == "LOW_CONFIDENCE" and len(options) == 1
+                    and assessment.selected_label in options
+                    and (assessment.selected_probability or 0.0) >= self.compiler.act_at):
+                assessment = replace(assessment, final_label=assessment.selected_label,
+                                     outcome="ACCEPTED_CONFIRMATION")
+                self.attempts[-1]["assessment"]["final_label"] = assessment.final_label
+                self.attempts[-1]["assessment"]["outcome"] = assessment.outcome
+                break
             # Re-ask once only when the model leaned to a real label but below the gate
             # (or the provider failed); an explicit CLARIFICATION/UNSUPPORTED stands.
             retryable = provider_error is not None or (

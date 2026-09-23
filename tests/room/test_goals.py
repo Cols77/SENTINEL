@@ -767,3 +767,28 @@ def test_goal_compiler_default_gate_is_the_calibrated_jev_gate():
     from sentinel.room.goals import GOAL_ACT_AT, GoalCompiler
     assert GOAL_ACT_AT == 0.50
     assert GoalCompiler.__init__.__kwdefaults__["act_at"] == GOAL_ACT_AT
+
+
+def test_single_option_confirmation_accepts_gate_level_probability_despite_low_scalar(tmp_path):
+    # Real model: entity_reference NEW_ENTITY at probability 0.61 with a scalar
+    # confidence below the gate. A one-label confirmation accepts on probability.
+    request = "count the phones and computers in the room"
+    confirm = {"value": "NEW_ENTITY", "confidence": 0.3,
+               "probabilities": {"NEW_ENTITY": 0.61, "CLARIFICATION_REQUIRED": 0.25, "UNSUPPORTED": 0.14}}
+    script = [("next_objective", "NEXT_OBJECTIVE:c1"), ("goal_family", "COUNT"),
+              ("target_classes", "CLASS_GROUP"),
+              ("qualifier", "NONE"), ("relation", "NONE"), ("spatial_scope", "ROOM"),
+              ("entity_reference", confirm), ("terminal_condition", "REPORTED")] + FINISH
+    compiler, judge, store = setup(tmp_path, request, script)
+    ledger = compiler.compile("session-1", request, snapshot())
+    assert ledger.status == GoalStatus.PENDING
+    assert ledger.objectives[0].target_classes == ("phone", "computer")
+
+
+def test_multi_option_choice_still_needs_scalar_confidence(tmp_path):
+    request = "Follow him"
+    lean = {"value": "NEXT_OBJECTIVE:c1", "confidence": 0.3,
+            "probabilities": {"NEXT_OBJECTIVE:c1": 0.7, "DONE": 0.3}}
+    compiler, judge, store = setup(tmp_path, request, [("next_objective", lean)] * 2)
+    ledger = compiler.compile("session-1", request, snapshot())
+    assert ledger.status == GoalStatus.CLARIFICATION_REQUIRED
