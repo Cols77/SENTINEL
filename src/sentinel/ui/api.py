@@ -1,6 +1,7 @@
 """Typed local routes; private errors never cross the HTTP boundary."""
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 
 def build_router(service):
@@ -16,7 +17,7 @@ def build_router(service):
             command = await request.json()
         except ValueError:
             command = None
-        return result(service.select_site_profile(command))
+        return result(await run_in_threadpool(service.select_site_profile, command))
     @router.get('/session')
     def session(): return service.session()
     @router.get('/runs/{run_id}/snapshot')

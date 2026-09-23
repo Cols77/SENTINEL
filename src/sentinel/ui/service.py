@@ -21,6 +21,12 @@ _DISPATCH_FAILURES = {
     'emergency': {'INDEPENDENT_EMERGENCY_UNAVAILABLE'},
 }
 
+
+def _profile_switch_status(reason):
+    return ('UNAVAILABLE' if reason == 'PROFILE_SWITCH_UNAVAILABLE'
+            else 'CONFLICT')
+
+
 class MissionControlService:
     def __init__(self, *, config, adapters, readiness=None,
                  site_profile_registry=None, profile_base_config=None):
@@ -105,7 +111,7 @@ class MissionControlService:
     def session(self):
         return dict(id=self.session_id,mode=self.config.mode,active_run_id=self.config.run_id)
 
-    def _profile_switch_reason(self, conn=None):
+    def _profile_switch_reason(self, conn=None, candidate_config=None):
         """Shared catalogue/admission predicate; caller holds readiness lock."""
         if self.config.mode != 'LIVE' or self.site_profile_registry is None or self.closed:
             return 'PROFILE_SWITCH_UNAVAILABLE'
@@ -141,9 +147,14 @@ class MissionControlService:
                                 'SELECT 1 FROM survey_runs WHERE run_id=? LIMIT 1',
                                 (run_id,)).fetchone():
                             return 'MISSION_NOT_IDLE'
-                pose_path = self.config.pose_db
-                if pose_path is not None and Path(pose_path).is_file():
-                    uri = Path(pose_path).resolve().as_uri() + '?mode=ro'
+                pose_paths = {Path(path) for path in (
+                    self.config.pose_db,
+                    getattr(candidate_config, 'pose_db', None))
+                    if path is not None}
+                for pose_path in pose_paths:
+                    if not pose_path.is_file():
+                        continue
+                    uri = pose_path.resolve().as_uri() + '?mode=ro'
                     with closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as pose:
                         exists = pose.execute(
                             "SELECT 1 FROM sqlite_master WHERE type='table' "
@@ -191,9 +202,7 @@ class MissionControlService:
         with self._readiness_lock:
             reason = self._profile_switch_reason()
             if reason:
-                status = ('UNAVAILABLE' if reason == 'PROFILE_SWITCH_UNAVAILABLE'
-                          else 'CONFLICT')
-                return dict(status=status, reason_code=reason,
+                return dict(status=_profile_switch_status(reason), reason_code=reason,
                             **self._site_profile_catalogue(reason))
             from .bootstrap import StartupError
             from .site_profiles import apply_site_profile
@@ -227,7 +236,8 @@ class MissionControlService:
                   self.registry._lock, self.safety._lock):
                 try:
                     with self.store.connection(write=True) as conn:
-                        reason = self._profile_switch_reason(conn)
+                        reason = self._profile_switch_reason(
+                            conn, candidate_config=candidate_config)
                         if reason is None:
                             self.store.event_in(conn, self.config.run_id,
                                 'SITE_PROFILE_CHANGED',
@@ -253,7 +263,7 @@ class MissionControlService:
                                     'PROFILE_SWITCH_UNAVAILABLE'))
             if reason is not None:
                 self._close_local_adapters(candidate_adapters)
-                return dict(status='CONFLICT', reason_code=reason,
+                return dict(status=_profile_switch_status(reason), reason_code=reason,
                             **self._site_profile_catalogue(reason))
             self._close_local_adapters(previous_adapters)
             return dict(status='ACKNOWLEDGED', reason_code=None,

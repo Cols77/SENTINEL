@@ -277,6 +277,178 @@ def test_profile_switch_pose_history_is_run_scoped_and_read_only(tmp_path):
         service.close()
 
 
+def test_profile_switch_checks_candidate_pose_database_before_commit(
+        tmp_path, monkeypatch):
+    from dataclasses import replace
+    from sentinel.pose.persistence import ensure_schema
+    from sentinel.ui import live
+
+    service = _profile_service(tmp_path)
+    candidate_pose_path = tmp_path / 'candidate-pose.sqlite'
+    registry = service.site_profile_registry
+    service.site_profile_registry = replace(registry, profiles=tuple(
+        replace(profile, pose_db=candidate_pose_path)
+        if profile.id == 'Second' else profile
+        for profile in registry.profiles))
+    with closing(sqlite3.connect(candidate_pose_path)) as pose:
+        with pose:
+            ensure_schema(pose)
+            pose.execute('INSERT INTO pose_events VALUES (?,?,?,?,?,?)',
+                (service.config.run_id, 1, 'DRONE_POSE_REPORTED', '{}', 'sha',
+                 '2026-09-23T00:00:00+00:00'))
+
+    original_compose = live.compose
+    candidates = []
+    closed = []
+    def capture_compose(*args, **kwargs):
+        candidate = original_compose(*args, **kwargs)
+        candidates.append(candidate)
+        return candidate
+    monkeypatch.setattr(live, 'compose', capture_compose)
+    monkeypatch.setattr(live.LiveFlight, 'close', lambda self: closed.append(self))
+    monkeypatch.setattr(live.LivePoseFeed, 'close', lambda self: closed.append(self))
+    prior = (service.config, service.adapters, service.runtime.adapters,
+             service.pose_feed, service.artifacts, service.readiness,
+             service._readiness_overlays.copy())
+    try:
+        with TestClient(build_app(service, repository_root=Path.cwd())) as client:
+            response = client.post('/api/v1/site-profiles/select',
+                                   json={'profile_id': 'Second'})
+            assert response.status_code == 409
+            assert response.json()['status'] == 'CONFLICT'
+            assert response.json()['reason_code'] == 'MISSION_NOT_IDLE'
+            assert (service.config, service.adapters, service.runtime.adapters,
+                    service.pose_feed, service.artifacts, service.readiness,
+                    service._readiness_overlays) == prior
+            assert service.site_profiles()['selected_profile_id'] == 'First'
+            assert service.read_events('mission', 0, 200) == []
+            assert candidates and candidates[0].flight in closed
+            assert candidates[0].pose_feed in closed
+    finally:
+        service.close()
+
+
+def test_profile_switch_final_unavailable_recheck_uses_unavailable_status(
+        tmp_path, monkeypatch):
+    from sentinel.ui import live
+
+    service = _profile_service(tmp_path)
+    original_reason = service._profile_switch_reason
+    closed = []
+    monkeypatch.setattr(live.LiveFlight, 'close', lambda self: closed.append(self))
+    def unavailable_at_final_recheck(*args, **kwargs):
+        conn = args[0] if args else kwargs.get('conn')
+        if conn is not None:
+            return 'PROFILE_SWITCH_UNAVAILABLE'
+        return original_reason(*args, **kwargs)
+    monkeypatch.setattr(service, '_profile_switch_reason',
+                        unavailable_at_final_recheck)
+    prior = (service.config, service.adapters, service.runtime.adapters,
+             service.pose_feed, service.artifacts, service.readiness)
+    try:
+        with TestClient(build_app(service, repository_root=Path.cwd())) as client:
+            response = client.post('/api/v1/site-profiles/select',
+                                   json={'profile_id': 'Second'})
+            assert response.status_code == 503
+            assert response.json()['status'] == 'UNAVAILABLE'
+            assert response.json()['reason_code'] == 'PROFILE_SWITCH_UNAVAILABLE'
+            assert (service.config, service.adapters, service.runtime.adapters,
+                    service.pose_feed, service.artifacts, service.readiness) == prior
+            assert closed and prior[1].flight not in closed
+            assert service.read_events('mission', 0, 200) == []
+    finally:
+        service.close()
+
+
+def test_profile_switch_commit_failure_rolls_back_state_and_closes_candidate(
+        tmp_path, monkeypatch):
+    from sentinel.ui import live, store
+
+    service = _profile_service(tmp_path)
+    original_connect = store.sqlite3.connect
+
+    class CommitFailureConnection(sqlite3.Connection):
+        def commit(self):
+            changed = self.execute(
+                "SELECT 1 FROM ui_events WHERE event_type='SITE_PROFILE_CHANGED' "
+                'LIMIT 1').fetchone()
+            if changed is not None:
+                raise sqlite3.OperationalError('injected commit failure')
+            return super().commit()
+
+    def connect_with_commit_failure(path, *args, **kwargs):
+        if Path(path) == service.store.path:
+            kwargs['factory'] = CommitFailureConnection
+        return original_connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(store.sqlite3, 'connect', connect_with_commit_failure)
+    closed = []
+    monkeypatch.setattr(live.LiveFlight, 'close', lambda self: closed.append(self))
+    prior = (service.config, service.adapters, service.runtime.adapters,
+             service.pose_feed, service.artifacts, service.readiness,
+             service._readiness_overlays.copy())
+    try:
+        with TestClient(build_app(service, repository_root=Path.cwd())) as client:
+            response = client.post('/api/v1/site-profiles/select',
+                                   json={'profile_id': 'Second'})
+            assert response.status_code == 503
+            assert response.json()['status'] == 'UNAVAILABLE'
+            assert response.json()['reason_code'] == 'PROFILE_SWITCH_UNAVAILABLE'
+            assert (service.config, service.adapters, service.runtime.adapters,
+                    service.pose_feed, service.artifacts, service.readiness,
+                    service._readiness_overlays) == prior
+            assert service.site_profiles()['selected_profile_id'] == 'First'
+            assert closed and prior[1].flight not in closed
+            assert service.read_events('mission', 0, 200) == []
+    finally:
+        service.close()
+
+
+def test_profile_select_does_not_block_event_loop(tmp_path, monkeypatch):
+    from threading import Event, Thread, Timer
+
+    service = _profile_service(tmp_path)
+    entered = Event()
+    release = Event()
+    responses = []
+    errors = []
+
+    def blocked_selection(command):
+        entered.set()
+        if not release.wait(timeout=3):
+            raise AssertionError('controlled profile selection was not released')
+        return {'status': 'ACKNOWLEDGED', 'reason_code': None}
+
+    monkeypatch.setattr(service, 'select_site_profile', blocked_selection)
+    try:
+        with TestClient(build_app(service, repository_root=Path.cwd())) as client:
+            def select_profile():
+                try:
+                    responses.append(client.post('/api/v1/site-profiles/select',
+                                                 json={'profile_id': 'Second'}))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            request = Thread(target=select_profile)
+            request.start()
+            assert entered.wait(timeout=1)
+            watchdog = Timer(1, release.set)
+            watchdog.start()
+            try:
+                session = client.get('/api/v1/session')
+                assert session.status_code == 200
+                assert not release.is_set()
+            finally:
+                release.set()
+                request.join(timeout=3)
+                watchdog.cancel()
+            assert not request.is_alive()
+            assert not errors
+            assert responses and responses[0].status_code == 200
+    finally:
+        service.close()
+
+
 def test_profile_switch_event_failure_preserves_selection_and_closes_candidate(
         tmp_path, monkeypatch):
     from sentinel.ui import live
