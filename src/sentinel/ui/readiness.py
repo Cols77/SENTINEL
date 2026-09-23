@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from contextlib import closing
 import ipaddress
 import json
 import math
@@ -161,7 +162,7 @@ def _flight(network_ready: bool) -> ReadinessCheck:
 def _has_recorded_consent_readonly(database_path: Path, location: str,
                                    consent_date: str) -> bool:
     uri = database_path.resolve().as_uri() + '?mode=ro'
-    with sqlite3.connect(uri, uri=True, timeout=1.0) as connection:
+    with closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as connection:
         row = connection.execute(
             'SELECT 1 FROM filming_consent '
             'WHERE location = ? AND consent_date = ?',

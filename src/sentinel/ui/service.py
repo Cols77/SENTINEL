@@ -2,6 +2,7 @@
 from io import BytesIO
 from pathlib import Path
 import hashlib
+from threading import RLock
 from uuid import uuid4
 from PIL import Image
 from .store import UIStore
@@ -23,6 +24,7 @@ class MissionControlService:
         self.config,self.adapters=config,adapters
         self.readiness=readiness
         self._readiness_overlays={}
+        self._readiness_lock=RLock()
         self.store=UIStore.open(config.ui_db or config.data_dir/'ui.sqlite')
         try:
             self.session_id=self.store.read_run(config.run_id)['session_id']
@@ -54,20 +56,21 @@ class MissionControlService:
     def _update_readiness(self, readiness):
         if self.config.mode == 'LIVE':
             from .readiness import evaluate_live_readiness
-            base = evaluate_live_readiness(self.config)
-            base_checks = {check.capability: check for check in base.checks}
-            for check in readiness.checks:
-                baseline = base_checks[check.capability]
-                route_current = (check.capability not in {'flight', 'emergency'} or
-                                 readiness.resolved_local_ip == base.resolved_local_ip)
-                if (not check.ready and
-                        check.reason_code in _DISPATCH_FAILURES.get(check.capability, ())
-                        and baseline.ready and route_current):
-                    self._readiness_overlays[check.capability] = (
-                        baseline, base.resolved_local_ip, check)
-                else:
-                    self._readiness_overlays.pop(check.capability, None)
-            self._refresh_live_readiness(base)
+            with self._readiness_lock:
+                base = evaluate_live_readiness(self.config)
+                base_checks = {check.capability: check for check in base.checks}
+                for check in readiness.checks:
+                    baseline = base_checks[check.capability]
+                    route_current = (check.capability not in {'flight', 'emergency'} or
+                                     readiness.resolved_local_ip == base.resolved_local_ip)
+                    if (not check.ready and
+                            check.reason_code in _DISPATCH_FAILURES.get(check.capability, ())
+                            and baseline.ready and route_current):
+                        self._readiness_overlays[check.capability] = (
+                            baseline, base.resolved_local_ip, check)
+                    else:
+                        self._readiness_overlays.pop(check.capability, None)
+                self._refresh_live_readiness(base)
         else:
             self.readiness = readiness
 
@@ -100,7 +103,9 @@ class MissionControlService:
     def read_snapshot(self, run_id):
         if self.config.mode == 'LIVE':
             from .readiness import evaluate_live_readiness
-            self._refresh_live_readiness(evaluate_live_readiness(self.config))
+            with self._readiness_lock:
+                self._refresh_live_readiness(evaluate_live_readiness(self.config))
+                return self.projection.snapshot(run_id)
         return self.projection.snapshot(run_id)
 
     def read_events(self, run_id, after_sequence, limit):

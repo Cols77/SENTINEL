@@ -1,7 +1,9 @@
 from dataclasses import FrozenInstanceError, replace
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import json
 from pathlib import Path
 import sqlite3
+from threading import Event, get_ident
 import time
 import pytest
 from sentinel.ui import bootstrap
@@ -380,6 +382,109 @@ def test_live_consent_inspection_preserves_existing_bytes_mtime_and_schema(
     assert schema_rows() == before_schema
     assert consent_db.read_bytes() == before_bytes
     assert consent_db.stat().st_mtime_ns == before_mtime
+
+
+@pytest.mark.parametrize('query_fails', [False, True])
+def test_readonly_consent_connection_closes_after_query(tmp_path, monkeypatch,
+                                                         query_fails):
+    from sentinel.ui import readiness
+
+    calls = []
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            calls.append('exit')
+
+        def execute(self, statement, parameters):
+            calls.append('execute')
+            if query_fails:
+                raise sqlite3.OperationalError('query unavailable')
+            return self
+
+        def fetchone(self):
+            return (1,)
+
+        def close(self):
+            calls.append('close')
+
+    def connect(path, *, uri, timeout):
+        assert path.endswith('?mode=ro')
+        assert uri is True
+        return Connection()
+
+    monkeypatch.setattr(readiness.sqlite3, 'connect', connect)
+    if query_fails:
+        with pytest.raises(sqlite3.OperationalError):
+            readiness._has_recorded_consent_readonly(tmp_path / 'survey.sqlite',
+                                                     'lab', '2026-09-21')
+    else:
+        assert readiness._has_recorded_consent_readonly(
+            tmp_path / 'survey.sqlite', 'lab', '2026-09-21')
+    assert calls[0] == 'execute'
+    assert calls[-1] == 'close'
+
+
+def test_older_poll_cannot_discard_newer_dispatch_failure(live_config, monkeypatch):
+    from sentinel.ui import readiness
+    from sentinel.ui.readiness import LiveReadiness, ReadinessCheck
+
+    route = {'address': '192.168.10.2'}
+    monkeypatch.setattr(readiness, 'discover_local_ipv4',
+                        lambda tello_ip: route['address'])
+    service = bootstrap.build_service(replace(live_config, local_ip=None))
+    original_evaluate = readiness.evaluate_live_readiness
+    poll_captured = Event()
+    resume_poll = Event()
+    callback_started = Event()
+    poll_thread = {'id': None}
+
+    def evaluate(config):
+        observed = original_evaluate(config)
+        if get_ident() == poll_thread['id']:
+            poll_captured.set()
+            assert resume_poll.wait(5), 'timed out resuming the paused poll'
+        return observed
+
+    monkeypatch.setattr(readiness, 'evaluate_live_readiness', evaluate)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            def read_poll():
+                poll_thread['id'] = get_ident()
+                return service.read_snapshot('mission')
+
+            poll = pool.submit(read_poll)
+            assert poll_captured.wait(5)
+            route['address'] = '192.168.10.3'
+            current = original_evaluate(service.config)
+            failure = ReadinessCheck('flight', False, 'LIVE_PREFLIGHT_FAILED',
+                                     'Resolve the no-takeoff preflight failure.')
+            update = LiveReadiness(
+                'READY_TO_PLAN', tuple(failure if row.capability == 'flight' else row
+                                       for row in current.checks), '',
+                current.resolved_local_ip)
+
+            def publish_failure():
+                callback_started.set()
+                service._update_readiness(update)
+
+            callback = pool.submit(publish_failure)
+            assert callback_started.wait(5)
+            try:
+                callback.result(timeout=1)
+            except FutureTimeout:
+                pass  # Serialized callback waits for the paused poll.
+            finally:
+                resume_poll.set()
+            poll.result(timeout=5)
+            callback.result(timeout=5)
+        flight = next(row for row in service.read_snapshot('mission')['readiness']['checks']
+                      if row['capability'] == 'flight')
+        assert flight['reason_code'] == 'LIVE_PREFLIGHT_FAILED'
+    finally:
+        resume_poll.set()
+        service.close()
 
 
 def _chat_command(service, text='count the computers'):
