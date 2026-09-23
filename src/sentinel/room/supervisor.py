@@ -109,6 +109,11 @@ class SafetySupervisor:
         self.last_persistence_error = None
         self.last_preempted_version = 0
         self.last_preemption = None
+        #: The grant the most recent successful ``validate_bindings`` admitted
+        #: this session under (None until bindings validate, and reset to None
+        #: by any later failed validation). ``RoomController`` reads it to
+        #: decide whether REAL-mode observation is authorized.
+        self.admitted_grant: CapabilityGrant | None = None
         # A restart cannot erase a durable return/terminal latch or import old
         # clearances: it has a new clock domain and must obtain new assurances.
         events = store.events(session_id)
@@ -119,6 +124,13 @@ class SafetySupervisor:
                              e.payload.get("transition") in {"RETURN_NOW", "LAND_CONTINGENCY"} for e in events)
 
     def validate_bindings(self, site: RoomSite) -> None:
+        try:
+            self._validate_bindings(site)
+        except Exception:
+            self.admitted_grant = None
+            raise
+
+    def _validate_bindings(self, site: RoomSite) -> None:
         self.reserve.profile.validate_for_execution(mode=self.mode,
             site_sha256=site.cube_site_sha256, aircraft_id=self.aircraft_id)
         profile = self.tracker.profile
@@ -133,18 +145,20 @@ class SafetySupervisor:
                                          "evidence_ids": tuple(g["evidence_ids"])}) for g in raw["grants"])
         now = self.wall_clock()
         if self.mode == ExecutionMode.SIMULATION:
-            allowed = any(g.state == "SIMULATION_ONLY" and g.capability == self.capability
+            admitted = next((g for g in grants if g.state == "SIMULATION_ONLY" and g.capability == self.capability
                 and g.site_sha256 == site.cube_site_sha256 and g.aircraft_id == self.aircraft_id
                 and tuple(sorted(g.profile_sha256s)) == hashes and g.evidence_ids
                 and g.grant_sha256 == canonical_grant_sha256(g) and g.expires_at is not None
-                and now < datetime.fromisoformat(g.expires_at.replace("Z", "+00:00")) for g in grants)
+                and now < datetime.fromisoformat(g.expires_at.replace("Z", "+00:00"))), None)
         else:
-            allowed = CapabilityProfile(grants).allows(capability=self.capability,
+            admitted = next((g for g in grants if g.allows(capability=self.capability,
                 site_sha256=site.cube_site_sha256, aircraft_id=self.aircraft_id,
                 profile_sha256s=hashes, now=now, session_id=self.session_id,
-                acceptance_manifest=self.acceptance_manifest)
-        if not allowed:
+                acceptance_manifest=self.acceptance_manifest)), None)
+        if admitted is None:
+            self.admitted_grant = None
             raise ValueError("capability does not match session/site/aircraft/calibrations")
+        self.admitted_grant = admitted
 
     def _assurances(self):
         return self.store.contingency_assurances(self.session_id, clock_domain_id=self.clock_domain_id)

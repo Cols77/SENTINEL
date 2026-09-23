@@ -59,6 +59,32 @@ def _heading_within_tolerance(a_deg: float, b_deg: float, tolerance_deg: float =
     return abs(delta) <= tolerance_deg
 
 
+#: The one capability under which a REAL-mode session may fly OBSERVE
+#: checkpoints (count-and-return and its autonomous search).
+OBSERVATION_CAPABILITY = "count_return"
+
+
+def real_observation_admitted(supervisor) -> bool:
+    """Whether a REAL-mode supervisor's validated binding authorizes OBSERVE.
+
+    True only when the supervisor flies ``count_return`` and its last binding
+    validation admitted a matching ``count_return`` grant that is PROMOTED,
+    or TRIAL inside an ACCEPTANCE-kind manifest. Every other case -- no
+    validation yet, a failed one, another capability, closer inspection --
+    keeps observation disabled.
+    """
+    grant = getattr(supervisor, "admitted_grant", None)
+    if grant is None or getattr(supervisor, "capability", None) != OBSERVATION_CAPABILITY:
+        return False
+    if grant.capability != OBSERVATION_CAPABILITY:
+        return False
+    if grant.state == "PROMOTED":
+        return True
+    manifest = getattr(supervisor, "acceptance_manifest", None)
+    return (grant.state == "TRIAL" and manifest is not None
+            and getattr(manifest, "session_kind", None) == "ACCEPTANCE")
+
+
 @dataclass(frozen=True)
 class TurnOutcome:
     candidate_id: str
@@ -120,15 +146,24 @@ class RoomController:
 
     @property
     def _observation_enabled(self) -> bool:
-        # Plan 03 Task 4 enables OBSERVE for replay/simulation only; real mode
-        # stays disabled until Plan 06 promotes matching pose/energy/site
-        # profiles (fix round 1, Q8). A REAL-mode session must never fly an
-        # OBSERVE checkpoint just because the base ADAPTIVE_FLIGHT grant and
-        # observation collaborators happen to be present.
-        return (self.supervisor is not None and self.flight_executor is not None
+        # Plan 03 Task 4 enabled OBSERVE for replay/simulation only (fix
+        # round 1, Q8). Task B (room-live-adapters, item 2): REAL mode enables
+        # it only for a session admitted under the count_return capability by
+        # a matching PROMOTED grant, or a TRIAL grant inside its acceptance
+        # run -- and only once the supervisor's own binding validation
+        # actually admitted that grant (``admitted_grant``). A REAL-mode
+        # session must never fly an OBSERVE checkpoint just because some
+        # other grant (e.g. ADAPTIVE_FLIGHT) and the observation
+        # collaborators happen to be present.
+        if not (self.supervisor is not None and self.flight_executor is not None
                 and self.resolve_checkpoint is not None and self.perception_capture is not None
-                and self.perception_provider is not None
-                and self.supervisor.mode == ExecutionMode.SIMULATION)
+                and self.perception_provider is not None):
+            return False
+        if self.supervisor.mode == ExecutionMode.SIMULATION:
+            return True
+        if self.supervisor.mode == ExecutionMode.REAL:
+            return real_observation_admitted(self.supervisor)
+        return False
 
     def _observation_objectives(self, snapshot):
         if snapshot.ledger is None or snapshot.ledger.status != GoalStatus.PENDING:
