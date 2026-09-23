@@ -513,7 +513,12 @@ class RoomAgentService:
         if pack.get("jev_acceptance_json"):
             argv += ["--jev-acceptance-json", json.dumps(pack["jev_acceptance_json"])]
         manifest_run_id = json.loads(Path(path("manifest")).read_text(encoding="utf-8"))["run_id"]
-        return argv, Path(path("run_root")) / manifest_run_id, manifest_run_id
+        run_dir = Path(path("run_root")) / manifest_run_id
+        if (run_dir / "terminal.json").exists():
+            # One pack is one flight: reopening a finished run would fly on its closed ledger.
+            raise RuntimeError(f"the pack's run {manifest_run_id} already flew; re-run "
+                               "scripts/room_live_prepare.py for a fresh run, then approve again")
+        return argv, run_dir, manifest_run_id
 
     def _run_live(self, run):
         argv, run_dir, manifest_run_id = self.live_argv(run)
