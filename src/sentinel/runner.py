@@ -15,6 +15,10 @@ from .models import CommandRecord, Position, RunReport, VideoFrame
 Result = TypeVar("Result")
 
 
+class ControlledLandRequested(RuntimeError):
+    """A terminal controlled landing, distinct from emergency motor stop."""
+
+
 class FlightTestRunner:
     """Run SENTINEL's single approved sequence through a :class:`DroneClient`.
 
@@ -58,6 +62,9 @@ class FlightTestRunner:
         self.emergency_event = Event()
         self._emergency_error: Exception | None = None
         self._emergency_lock = RLock()
+        self.land_event = Event()
+        self._land_lock = RLock()
+        self.land_status = "IDLE"
         self._step_executor = None
 
     @property
@@ -81,6 +88,8 @@ class FlightTestRunner:
     def _raise_if_emergency(self) -> None:
         if self.emergency_event.is_set():
             raise EmergencyAborted("operator emergency stop was triggered")
+        if self.land_event.is_set():
+            raise ControlledLandRequested("controlled landing was requested")
 
     def _capture_records(
         self,
@@ -141,6 +150,36 @@ class FlightTestRunner:
             raise RuntimeError(f"invalid height telemetry: {height!r}")
         return height
 
+    def latch_emergency(self) -> bool:
+        """Latch only; independent emergency transport can run outside normal I/O."""
+        with self._emergency_lock:
+            fresh = not self.emergency_event.is_set()
+            self.emergency_event.set()
+            if fresh:
+                # Both the direct motor-stop path and an independent emergency
+                # transport latch here, so the shared step executor always
+                # becomes terminal before any further SDK work is admitted.
+                self.step_executor.note_emergency()
+            return fresh
+
+    def request_controlled_land(self) -> None:
+        """Latch before the one landing request; never resume normal sequencing."""
+        with self._land_lock:
+            if self.land_event.is_set():
+                return
+            if self.emergency_event.is_set():
+                raise EmergencyAborted("emergency already latched")
+            self.land_event.set()
+            self.land_status = "REQUESTED"
+            try:
+                response = self.client.land()
+                if not self._is_ok(response):
+                    raise RuntimeError("LAND_NOT_ACKNOWLEDGED")
+                self.land_status = "ACKNOWLEDGED"
+            except Exception:
+                self.land_status = "FAILED"
+                raise
+
     def trigger_emergency(self) -> None:
         """Latch emergency state before sending the direct motor-stop command.
 
@@ -151,10 +190,8 @@ class FlightTestRunner:
         """
 
         with self._emergency_lock:
-            if self.emergency_event.is_set():
+            if not self.latch_emergency():
                 return
-            self.emergency_event.set()
-            self.step_executor.note_emergency()
             record_count = len(self._client_records())
             try:
                 self.client.emergency()
@@ -244,6 +281,14 @@ class FlightTestRunner:
             height = next_height
 
         self.envelope.position = Position(0, 0, height)
+
+    def check_interruption(self) -> None:
+        """Public adapter boundary: refuse work after either safety latch."""
+        self._raise_if_emergency()
+
+    def preflight(self) -> None:
+        """Validate the existing no-takeoff preflight; caller owns client cleanup."""
+        self._preflight()
 
     def _preflight(self) -> None:
         self._emit("preflight", "connecting to Tello")
@@ -404,6 +449,9 @@ class FlightTestRunner:
                 "FAIL", "operator interrupted; controlled landing attempted"
             )
             self._emit("run_failed", report.error or "operator interrupted")
+        except ControlledLandRequested:
+            report = self._make_report("FAIL", "operator controlled landing requested")
+            self._emit("controlled_land", "normal mission stopped after landing request")
         except EmergencyAborted as exc:
             self.emergency_event.set()
             report = self._make_report(

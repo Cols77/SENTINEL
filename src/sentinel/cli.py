@@ -897,7 +897,12 @@ def _run_cube_layout_check(args: Any) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    import sys
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["mission-control"]:
+        from .ui.__main__ import main as mission_control
+        return mission_control(arguments[1:])
+    args = build_parser().parse_args(arguments)
 
     if args.command == "emergency":
         if args.local_ip:

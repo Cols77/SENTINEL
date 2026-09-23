@@ -59,16 +59,23 @@ provider used a label the class map does not know" rather than guessing.
 from __future__ import annotations
 
 import json
+import math
+import time
 from typing import Any
 
 from .candidates import (ESCALATE_LABEL, MAX_FLIGHTS, REPORT_LABEL, propose_candidates,
                          review_candidates)
 from .consent import ConsentMissing, consent_policy
 from .context import SurveyContext
+from .detector import DetectionBatch
 from .merge import merge_sightings
 from .observability import SYNTHETIC_LEVEL, CameraModel
 from .proposer import chosen_label
 from .report import ReportMismatch, check_report, class_counts, unconfirmed_caveat
+from .read_model import SurveyReadModel
+from sentinel.mission_observer import (AbortEvent, DetectorResultEvent, FrameCapturedEvent,
+                                        MergeEvent, MissionObserver, PublicEscalationEvent,
+                                        ReportEvent, RunnerLifecycleEvent, notify)
 
 #: The camera's altitude above the plane its subjects rest on (design spec
 #: 5.2's worked example: Delta_z = 55 cm, D = 3 m -> v ~ 125 px). Fixed for
@@ -121,12 +128,15 @@ def get_results(store, run_id: str, options) -> dict[str, Any]:
 
 
 def _fly_and_ingest(store, run_id, option, flight, detector,
-                    camera: CameraModel = SYNTHETIC_LEVEL) -> tuple[str, ...]:
+                    camera: CameraModel = SYNTHETIC_LEVEL, emit=None,
+                    observer: MissionObserver | None = None) -> tuple[str, ...]:
     """Returns every raw label this sweep's frames could not map to a known
     class (rev 3 R6's ``dropped``), in the order seen, duplicates included --
     the caller (``run_survey``) accumulates these across the whole run for
     R8's ``dropped_labels`` attribution signal."""
     sweep_id = store.add_sweep(run_id, option.option_id, len(option.stops))
+    if emit:
+        emit("SWEEP_STARTED", {"option_id": option.option_id, "sweep_id": sweep_id})
     dropped: list[str] = []
     frames = flight.fly(option)
     # Legacy replay lists represent complete recorded sweeps. Live adapters
@@ -146,7 +156,51 @@ def _fly_and_ingest(store, run_id, option, flight, detector,
             artifact_id=frame.artifact_id, sha256=frame.sha256,
             image_path=frame.image_path, delta_z_cm=delta_z_cm,
             tolerance=frame.tolerance)
-        batch = detector.detect(frame.image_path, option.resolvable_classes)
+        if emit:
+            emit("FRAME_CAPTURED", {"frame_id": frame_id, "artifact_id": frame.artifact_id})
+        notify(observer, FrameCapturedEvent(
+            run_id=run_id, frame_id=frame_id, artifact_id=frame.artifact_id,
+            image_path=frame.image_path, sha256=frame.sha256,
+            pose={"x_cm": frame.x_cm, "y_cm": frame.y_cm, "z_cm": frame.z_cm,
+                  "heading_deg": frame.heading_deg,
+                  "position_kind": frame.position_kind}))
+        # LiveFlight owns a separate follower process.  Its cache is the only
+        # legal source for a real frame: consulting ``detector`` here would
+        # pay for the same provider request a second time.  Rehearsal and
+        # replay flights do not expose this hook and retain their old path.
+        notify(observer, DetectorResultEvent(run_id=run_id, frame_id=frame_id,
+                                             status="DETECTING"))
+        started = time.perf_counter()
+        try:
+            cached = getattr(flight, "detection_for", None)
+            if callable(cached):
+                batch = cached(frame, option.resolvable_classes)
+            else:
+                batch = detector.detect(frame.image_path, option.resolvable_classes)
+        except Exception as exc:
+            notify(observer, DetectorResultEvent(
+                run_id=run_id, frame_id=frame_id, status="ERROR",
+                latency_ms=(time.perf_counter() - started) * 1000, error=str(exc)))
+            raise
+        using_cache = callable(getattr(flight, "detection_for", None))
+        cached_latency = (batch.raw or {}).get("detect_s") if using_cache else None
+        if using_cache and cached_latency is not None:
+            if isinstance(cached_latency, (int, float)) and not isinstance(cached_latency, bool) \
+                    and math.isfinite(cached_latency) and cached_latency >= 0:
+                latency_ms = float(cached_latency) * 1000.0
+            else:
+                batch = DetectionBatch((), "ANALYSIS_GAP_INVALID_RESULT", raw={
+                    "error": "detect_s is invalid"})
+                latency_ms = None
+        elif using_cache:
+            latency_ms = None
+        else:
+            latency_ms = (time.perf_counter() - started) * 1000
+        notify(observer, DetectorResultEvent(
+            run_id=run_id, frame_id=frame_id, status=batch.status,
+            detections=tuple(batch.detections),
+            latency_ms=latency_ms,
+            error=(batch.raw or {}).get("error") or getattr(batch, "error", None)))
         store.set_frame_analysis(frame_id, "OK" if batch.status == "OK" else batch.status)
         # R3: the band detector.normalise attached to each detection is
         # stored as-is -- never overwritten to a fixed value.
@@ -154,13 +208,27 @@ def _fly_and_ingest(store, run_id, option, flight, detector,
         # calls the provider without also being a retain path.
         bands = batch.bands or ("low",) * len(batch.detections)
         for detection, band in zip(batch.detections, bands):
-            store.add_sighting(frame_id, detection, band, raw_response=batch.raw)
+            # The follower serialises its parallel band beside each detection
+            # for display.  ``band`` is a Sighting field, not part of the
+            # schema-v2 Detection document accepted by SurveyStore.
+            clean_detection = {key: value for key, value in detection.items()
+                               if key != "band"}
+            store.add_sighting(frame_id, clean_detection, band, raw_response=batch.raw)
         dropped.extend(batch.dropped)
+    # The sweep's terminal status was recorded from the flight result before
+    # ingest (room-agent side); only the analysis-completed event remains.
+    if emit:
+        emit("ANALYSIS_COMPLETED", {"sweep_id": sweep_id})
 
     rows = store.sightings(run_id)
     for row in rows:
         row["bbox"] = json.loads(row["bbox_json"]) if row["bbox_json"] else None
     store.set_objects(run_id, merge_sightings(rows, delta_z_cm=DELTA_Z_CM, camera=camera))
+    if emit:
+        emit("MERGE_COMPLETED", {"sweep_id": sweep_id})
+    public = SurveyReadModel(store).read(run_id)
+    notify(observer, MergeEvent(run_id=run_id, sweep_id=sweep_id,
+                                objects=tuple(public["objects"] if public else ())))
     return tuple(dropped)
 
 
@@ -230,7 +298,8 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
                flight, detector, on_approval, writer,
                location: str | None = None, consent_date: str | None = None,
                max_flights: int = MAX_FLIGHTS,
-               camera: CameraModel = SYNTHETIC_LEVEL) -> dict[str, Any]:
+               camera: CameraModel = SYNTHETIC_LEVEL, emit=None,
+               observer: MissionObserver | None = None) -> dict[str, Any]:
     """rev 3 R5 (Task 8): when ``location`` is given, filming consent is
     gated *before anything else happens* -- before ``store.create_run``,
     before any sweep, before the detector is ever touched. Absent consent,
@@ -253,6 +322,7 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
                     "decision_quality": None, "dropped_labels": ()}
 
     store.create_run(run_id, request_text)
+    notify(observer, RunnerLifecycleEvent(run_id=run_id, stage="SURVEY", status="STARTED"))
     request = {"run_id": run_id, "request_text": request_text, "site": get_site(options)}
     escalations: list[dict] = []
     # R8/V8c: one entry per REVIEW_RESULTS turn that had an uncertain object
@@ -267,6 +337,8 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
     if label == ESCALATE_LABEL or label is None:
         escalations.append({"point": legal.decision_point, "label": ESCALATE_LABEL,
                             "result": result})
+        notify(observer, PublicEscalationEvent(run_id=run_id, point=legal.decision_point,
+                                               reason="policy escalation", payload=result))
         return {"status": "ESCALATED", "flights": 0, "counts": {}, "report": None,
                 "escalations": escalations, "decision_quality": None, "dropped_labels": ()}
 
@@ -274,6 +346,7 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
     while True:
         call = _approval_call(context, result, label)
         if not on_approval(call):
+            notify(observer, AbortEvent(run_id=run_id, stage="APPROVAL", reason="operator refused"))
             return {"status": "REFUSED", "flights": store.flights_used(run_id),
                     "counts": store.counts(run_id), "report": None,
                     "escalations": escalations,
@@ -281,8 +354,12 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
                     "dropped_labels": tuple(dict.fromkeys(dropped_labels))}
 
         option = next(o for o in options if o.option_id == call["arguments"]["option_id"])
-        dropped_labels.extend(_fly_and_ingest(store, run_id, option, flight, detector,
-                                              camera))
+        try:
+            dropped_labels.extend(_fly_and_ingest(store, run_id, option, flight, detector,
+                                                  camera, emit, observer))
+        except Exception as exc:
+            notify(observer, AbortEvent(run_id=run_id, stage="FLIGHT", reason=str(exc)))
+            raise
 
         results = get_results(store, run_id, options)
         if store.connection.execute(
@@ -305,6 +382,8 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
         if label == ESCALATE_LABEL:
             escalations.append({"point": review.decision_point, "label": ESCALATE_LABEL,
                                 "result": result})
+            notify(observer, PublicEscalationEvent(run_id=run_id, point=review.decision_point,
+                                                   reason="policy escalation", payload=result))
             break
 
     decision_quality = min(decision_qualities) if decision_qualities else None
@@ -312,11 +391,16 @@ def run_survey(*, store, run_id: str, request_text: str, options, policy,
     results = get_results(store, run_id, options)
     body, mismatch = _write_report(writer, results)
     if mismatch is not None:
+        notify(observer, ReportEvent(run_id=run_id, status="REJECTED", counts=results["counts"]))
         return {"status": "REPORT_REJECTED", "flights": results["flights_used"],
                 "counts": results["counts"], "report": None,
                 "escalations": escalations + [{"point": "REPORT", "error": str(mismatch)}],
                 "decision_quality": decision_quality, "dropped_labels": dropped}
     store.add_report(run_id, body, results["class_counts"])
+    if emit:
+        emit("REPORT_ACCEPTED", {"summary": "Validated evidence-backed report"})
+    notify(observer, ReportEvent(run_id=run_id, status="ACCEPTED", body=body,
+                                 counts=results["counts"]))
     return {"status": "REPORTED", "flights": results["flights_used"],
             "counts": results["counts"], "report": body, "escalations": escalations,
             "decision_quality": decision_quality, "dropped_labels": dropped}

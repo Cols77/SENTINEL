@@ -170,6 +170,8 @@ class JevProposalGates:
 
 
 class JevProposer:
+    provenance_mode = 'J'
+    provenance_source = 'JUDGE'
     """Let Jev select one complete legal plan call, pending operator approval."""
 
     def __init__(
@@ -317,6 +319,8 @@ class JevProposer:
 
 
 class LlmProposer:
+    provenance_mode = 'E'
+    provenance_source = 'AGENT'
     """Ask an agent model for one current catalogue-plan recommendation.
 
     The returned proposal is still only an intent: ``AgentLoop`` submits it

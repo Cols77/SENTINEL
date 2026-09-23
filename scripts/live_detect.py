@@ -45,6 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "finds small objects, costs 1 + rows*cols calls per frame")
     parser.add_argument("--done-file", type=Path,
                         help="the flight is over once this file exists; drain and exit")
+    parser.add_argument("--run-id", help="Mission Control run identity (optional standalone metadata)")
+    parser.add_argument("--sweep-id", help="Mission Control sweep identity (optional standalone metadata)")
     return parser
 
 
@@ -73,7 +75,7 @@ def main(argv: list[str] | None = None, *, build_detector=None) -> int:
         return 1
     count = follow(args.frames_log, args.out, detector, done=args.done_file.exists,
                    print_fn=lambda line: print(line, flush=True), inbox_log=args.inbox,
-                   provider=args.detector)
+                   provider=args.detector, run_id=args.run_id, sweep_id=args.sweep_id)
     print(f"[detect] done: {count} frame(s), results in {args.out}", flush=True)
     return 0
 

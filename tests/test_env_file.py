@@ -13,6 +13,12 @@ def _write_env(path: Path, text: str) -> None:
 
 def test_parses_comments_and_quoted_values(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    for name in (
+        "SENTINEL_LLM_PROVIDER",
+        "SENTINEL_LLM_MODEL",
+        "SENTINEL_LLM_TIMEOUT_MS",
+    ):
+        monkeypatch.delenv(name, raising=False)
     _write_env(
         tmp_path / ".env",
         "# comment line\n"

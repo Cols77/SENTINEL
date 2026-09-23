@@ -154,3 +154,4 @@ class SurveyStore:
                 "VALUES (?, ?, ?, ?, ?)",
                 (report_id, run_id, body, json.dumps(class_counts), utc_now()))
         return report_id
+

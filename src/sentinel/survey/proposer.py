@@ -95,6 +95,8 @@ def justify(label: str, context: SurveyContext) -> str:
 
 class RuleProposer:
     """Deterministic: the first actionable candidate."""
+    provenance_mode = 'F'
+    provenance_source = 'RULES'
 
     def decide(self, request: dict, context: SurveyContext) -> dict:
         options = _actionable(context)
@@ -104,6 +106,8 @@ class RuleProposer:
 
 
 class JevProposer:
+    provenance_mode = 'J'
+    provenance_source = 'JUDGE'
     """Jev picks among the pre-built calls; code gates on confidence and
     margin and writes the justification. Jev is never offered ``escalate``
     as a candidate -- escalation is derived from the gates below, not handed
@@ -170,6 +174,8 @@ class JevProposer:
 
 
 class LlmProposer:
+    provenance_mode = 'E'
+    provenance_source = 'AGENT'
     """Mirrors the validation P3b1's own proposer performs: exactly one
     call, a legal tool, a legal choice, and (for a sweep) a non-blank
     reason. Anything else escalates.
