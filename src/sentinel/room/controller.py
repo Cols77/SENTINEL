@@ -17,13 +17,14 @@ from sentinel.cube.supervised_wait import SupervisedWait
 from sentinel.cube.step_executor import ExecutorState, TerminalOutcome
 from sentinel.models import Position
 
-from .candidates import build_candidates, build_observation_candidates, count_answer_candidate, count_scope
-from .coverage import CellObservation, CoverageProjection, project_coverage
+from .candidates import (build_candidates, build_observation_candidates, count_answer_candidate, count_scope,
+                         is_search_objective, search_answer_candidate, search_pose_ids, search_sightings)
+from .coverage import CellObservation, CoverageProjection, project_coverage, render_coverage_note
 from .grounding import CountGeometry, ground_frame, project_objective_count, render_objective_count
 from .ingest import ingest_result
 from .models import CandidateKind, GoalKind, GoalStatus, RoomCandidate, TerminalState
 from .queries import READ_KINDS, ReadFact, ReadQueries, ReadSnapshot, ToolOutcome, relevant_hash, render_answer
-from .semantic import resolve_pose_id
+from .semantic import resolve_pose_id, semantic_region_of
 from .spatial import PoseEvidence, semantic_heading_to_compass_deg
 from .store import RoomStore, VersionConflict
 
@@ -322,13 +323,82 @@ class RoomController:
         observations that states full-room coverage is unknown). Its only
         terminal routes are the grounded ``ANSWER:COUNTS`` candidate and the
         explicit ``ANSWER:<objective>:INCOMPLETE`` candidate."""
-        return self._observation_enabled and bool(self._count_objectives(snapshot))
+        # Task B item 2b: a search objective likewise answers only from this
+        # session's own observations (ANSWER:SEARCH), never from historical
+        # READ_OBSERVATIONS evidence that happens to name the class.
+        return self._observation_enabled and (bool(self._count_objectives(snapshot))
+                                              or bool(self._search_objectives(snapshot)))
+
+    def _search_objectives(self, snapshot: ReadSnapshot):
+        return tuple(sorted((o for o in self._observation_objectives(snapshot) if is_search_objective(o)),
+                            key=lambda o: o.ordinal))
 
     def _count_answer_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
         if not self._observation_enabled:
             return ()
-        candidate = count_answer_candidate(snapshot, self._coverage(snapshot))
-        return (candidate,) if candidate is not None else ()
+        coverage = self._coverage(snapshot)
+        candidates = (count_answer_candidate(snapshot, coverage),
+                      search_answer_candidate(snapshot, self.supervisor.site, coverage))
+        return tuple(candidate for candidate in candidates if candidate is not None)
+
+    def _detection_bands(self, snapshot: ReadSnapshot) -> dict[str, str]:
+        """``<observation_id>/<detection_id>`` -> the detector's confidence band,
+        from the session's persisted observation evidence."""
+        bands = {}
+        for fact in snapshot.sources:
+            if fact.kind != CandidateKind.READ_OBSERVATIONS or len(fact.evidence_ids) < 3:
+                continue
+            observation_id, _, detection_id = fact.evidence_ids[:3]
+            bands[f"{observation_id}/{detection_id}"] = dict(fact.values).get("confidence_band")
+        return bands
+
+    def _search_sections(self, snapshot: ReadSnapshot) -> tuple[list[str], bool]:
+        """Task B item 2b: one answer section per search objective, and
+        whether every search was conclusive (found, or every declared region
+        in scope actually observed)."""
+        site = self.supervisor.site
+        coverage = self._coverage(snapshot)
+        bands = self._detection_bands(snapshot)
+        observed = {o.count_evidence.pose_id for o in snapshot.outcomes
+                    if o.code == "OBSERVE_SUCCEEDED" and o.count_evidence is not None}
+        sections, conclusive = [], True
+        for objective in self._search_objectives(snapshot):
+            classes = ", ".join(objective.target_classes)
+            header = f"Objective {objective.objective_id} (search for {classes}):"
+            sightings = search_sightings(objective, site, snapshot.outcomes)
+            if not sightings:
+                in_scope = search_pose_ids(objective, site)
+                seen = [pose_id for pose_id in in_scope if pose_id in observed]
+                missing = [pose_id for pose_id in in_scope if pose_id not in observed]
+                conclusive = conclusive and not missing
+                lines = [header, f"{classes}: not found in observed regions "
+                                 f"({', '.join(seen) or 'none observed'})."]
+                if missing:
+                    lines.append(f"Regions that could not be observed: {', '.join(missing)}.")
+                lines.append(render_coverage_note(coverage, scope="ROOM"))
+                sections.append("\n".join(lines))
+                continue
+            lines = [header]
+            for outcome, item in sightings:
+                pose_id = outcome.count_evidence.pose_id
+                band = bands.get(item.source_detection_id if hasattr(item, "source_detection_id")
+                                 else item.detection_id)
+                confidence = ("high confidence" if band == "high"
+                              else f"uncertain ({band or 'unknown'} confidence)")
+                viewpoint = "-".join(pose_id.split("-")[:3])
+                if hasattr(item, "x_cm"):
+                    horizontal, depth, inside = semantic_region_of(site, item.x_cm, item.y_cm)
+                    where = f"{horizontal}-{depth} part of the room" + ("" if inside else ", beyond the flyable area")
+                    placement = (f"placed on the {item.support_plane_id} support plane in the {where} "
+                                 f"(about x={round(item.x_cm)} cm, y={round(item.y_cm)} cm; "
+                                 f"{item.pose_provenance.lower()} camera pose)")
+                else:
+                    placement = f"seen but not placed ({item.reason})"
+                lines.append(f"{item.class_name}: seen from the {viewpoint} region "
+                             f"(declared pose {pose_id}); {placement}; {confidence}. "
+                             f"[observation={outcome.count_evidence.observation_id}; event={outcome.event_id}]")
+            sections.append("\n".join(lines))
+        return sections, conclusive
 
     def _legal_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
         base = build_candidates(snapshot)
@@ -689,6 +759,25 @@ class RoomController:
                 # session's own observations, each with its scope-worded
                 # coverage caveat -- and persist it on the terminal outcome.
                 # The legacy READ_COUNTS report is never rendered as a count.
+                if candidate_id == "ANSWER:SEARCH":
+                    # Task B item 2b: where the searched object was seen (or
+                    # "not found in observed regions" with the coverage
+                    # note), plus any count objectives' grounded counts; the
+                    # safe return runs before this is recorded.
+                    sections, conclusive = self._search_sections(snapshot)
+                    projections = self._count_projections(snapshot)
+                    sections += [render_objective_count(p) for p in projections]
+                    facts = tuple(f for f in snapshot.facts if f.kind != CandidateKind.READ_COUNTS)
+                    others = [o for o in self._observation_objectives(snapshot)
+                              if o.kind != GoalKind.COUNT and not is_search_objective(o)]
+                    if others and facts:
+                        sections.append(render_answer(facts))
+                    return self._finalize_terminal(
+                        session_id, correlation, snapshot, prior, candidate_id, kind, digest,
+                        code="ANSWERED_SEARCH" if conclusive else "ANSWERED_INCOMPLETE",
+                        requested_terminal=TerminalState.COMPLETED if conclusive else TerminalState.INCOMPLETE_RETURNED,
+                        answer="\n\n".join(sections), facts=facts,
+                        extra={"count_projection": [p.to_payload() for p in projections]})
                 if candidate_id == "ANSWER:COUNTS" or candidate_id.endswith(":INCOMPLETE"):
                     projections = self._count_projections(snapshot)
                     sections = [render_objective_count(p) for p in projections]

@@ -200,6 +200,8 @@ def count_answer_candidate(snapshot: ReadSnapshot, coverage: CoverageProjection)
     if not all(count_objective_ready(o, coverage, snapshot.outcomes) for o in counts):
         return None
     others = tuple(o for o in ledger.objectives if o.kind != GoalKind.COUNT)
+    if any(is_search_objective(o) for o in others):
+        return None  # a ledger with a search is answered by ANSWER:SEARCH (it renders the counts too)
     if others and not can_answer_objectives(snapshot, others):
         return None
     candidate_id = "ANSWER:COUNTS"
@@ -282,6 +284,121 @@ def _incomplete_answer_candidate(objective: GoalObjective, coverage: CoveragePro
                          coverage.evidence_refs)
 
 
+# ---------------------------------------------------------------------------
+# Task B item 2b: autonomous search ("find the phone")
+# ---------------------------------------------------------------------------
+
+
+def is_search_objective(objective: GoalObjective) -> bool:
+    """A FIND_OBSERVE objective this session can search for by flying: an
+    unqualified, non-relational find whose terminal condition is OBSERVED,
+    scoped to the room or to one requested semantic region. Every other
+    FIND_OBSERVE (a qualifier, a relation, a VALIDATED closer look) keeps its
+    existing route."""
+    return (objective.kind == GoalKind.FIND_OBSERVE and objective.terminal_condition == "OBSERVED"
+            and not objective.relation and not objective.qualifier and bool(objective.target_classes)
+            and (objective.spatial_scope == "ROOM" or _region_pose_id(objective.spatial_scope) is not None))
+
+
+def search_pose_ids(objective: GoalObjective, site: RoomSite) -> tuple[str, ...]:
+    """The declared poses a search objective may observe: every pose the site
+    declares visibility for (a room-wide search), or the one requested
+    region's pose (a region search)."""
+    declared = tuple(sorted(pose_id for pose_id, _ in site.pose_visibility))
+    if objective.spatial_scope == "ROOM":
+        return declared
+    pose_id = _region_pose_id(objective.spatial_scope)
+    return (pose_id,) if pose_id is not None else ()
+
+
+def _observed_pose_id(outcome: ToolOutcome) -> str | None:
+    if outcome.code != "OBSERVE_SUCCEEDED":
+        return None
+    if outcome.count_evidence is not None:
+        return outcome.count_evidence.pose_id
+    return outcome.candidate_id.rsplit(":", 1)[-1]
+
+
+def search_sightings(objective: GoalObjective, site: RoomSite,
+                     outcomes: tuple[ToolOutcome, ...]) -> tuple[tuple[ToolOutcome, object], ...]:
+    """Every grounded detection of a target class in this search's scope.
+
+    Each entry is ``(outcome, item)`` where ``item`` is a placed
+    ``SpatialEstimate`` or an ``UnplacedDetection`` -- a sighting the session
+    saw but could not place is still a sighting, never silently dropped. A
+    frame whose pose was stale at capture is still evidence the object was
+    seen, so it counts here (its detections are then unplaced)."""
+    scope = set(search_pose_ids(objective, site))
+    classes = set(objective.target_classes)
+    sightings = []
+    for outcome in outcomes:
+        evidence = outcome.count_evidence
+        if outcome.code != "OBSERVE_SUCCEEDED" or evidence is None or evidence.pose_id not in scope:
+            continue
+        sightings.extend((outcome, item) for item in (*evidence.estimates, *evidence.unplaced)
+                         if item.class_name in classes)
+    return tuple(sightings)
+
+
+def _search_candidates(objective: GoalObjective, site: RoomSite, coverage: CoverageProjection,
+                       outcomes: tuple[ToolOutcome, ...], snapshot_version: int) -> list[RoomCandidate]:
+    if search_sightings(objective, site, outcomes):
+        return []  # found (confirmed or uncertain): stop searching
+    observed = {_observed_pose_id(outcome) for outcome in outcomes}
+    classes = ", ".join(objective.target_classes)
+    candidates = []
+    for pose_id in search_pose_ids(objective, site):
+        if pose_id in observed:
+            continue
+        description = (f"Search for {classes}: fly to declared pose {pose_id} and look for it there "
+                       f"(objective {objective.objective_id}).")
+        candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version)
+        if candidate is not None:
+            candidates.append(candidate)
+    return candidates
+
+
+def search_objective_ready(objective: GoalObjective, site: RoomSite, coverage: CoverageProjection,
+                           outcomes: tuple[ToolOutcome, ...]) -> bool:
+    """A search can be answered once a target detection is grounded, or once
+    no declared region is left that could still be observed for it."""
+    return (bool(search_sightings(objective, site, outcomes))
+            or not _search_candidates(objective, site, coverage, outcomes, 0))
+
+
+def search_answer_candidate(snapshot: ReadSnapshot, site: RoomSite,
+                            coverage: CoverageProjection) -> RoomCandidate | None:
+    """``ANSWER:SEARCH``: offered once every search objective is ready (found,
+    or every reachable region observed), every COUNT objective is ready and
+    every other objective is answerable from persisted reads. Answering
+    requests the supervisor's safe return before the answer is recorded."""
+    ledger = snapshot.ledger
+    if snapshot.terminal_state or ledger is None or ledger.status != GoalStatus.PENDING:
+        return None
+    searches = tuple(o for o in ledger.objectives if is_search_objective(o))
+    if not searches or not all(search_objective_ready(o, site, coverage, snapshot.outcomes) for o in searches):
+        return None
+    counts = tuple(o for o in ledger.objectives if o.kind == GoalKind.COUNT)
+    if any(o.relation or o.qualifier or o.terminal_condition not in ("REPORTED", "OBSERVED")
+           or not count_objective_ready(o, coverage, snapshot.outcomes) for o in counts):
+        return None
+    others = tuple(o for o in ledger.objectives if o.kind != GoalKind.COUNT and not is_search_objective(o))
+    if others and not can_answer_objectives(snapshot, others):
+        return None
+    candidate_id = "ANSWER:SEARCH"
+    observed = sorted(o.event_id for o in snapshot.outcomes if o.code == "OBSERVE_SUCCEEDED")
+    digest = _digest({"candidate_id": candidate_id, "coverage": list(coverage.by_cell_and_class),
+                      "observed": observed, "facts": relevant_hash(CandidateKind.ANSWER, snapshot)})
+    if _answer_suppressed(snapshot.outcomes, candidate_id, digest):
+        return None
+    found = [o.objective_id for o in searches if search_sightings(o, site, snapshot.outcomes)]
+    description = ("Answer the search from this session's own grounded observations -- where the object was "
+                   "seen, its placement and confidence (uncertain stays uncertain), or 'not found in observed "
+                   f"regions' with the coverage note -- then return home. Found for: {', '.join(found) or 'none'}.")
+    return RoomCandidate(candidate_id, CandidateKind.ANSWER, snapshot.state_version, digest, description,
+                         description, coverage.evidence_refs + tuple(observed))
+
+
 def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: RoomSite,
                                  coverage: CoverageProjection, outcomes: tuple[ToolOutcome, ...],
                                  snapshot_version: int) -> tuple[RoomCandidate, ...]:
@@ -362,4 +479,16 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
                 objective_candidates = [fallback]
         room_candidates.extend(objective_candidates)
 
-    return tuple(region_candidates) + tuple(room_candidates)
+    # Task B item 2b: one-checkpoint OBSERVE candidates over the declared
+    # regions for every search objective still looking. Jev chooses the
+    # order; a region already observed (by any objective) is never offered
+    # again, and a found target stops the search.
+    search_candidates: list[RoomCandidate] = []
+    offered = {c.candidate_id for c in (*region_candidates, *room_candidates)}
+    for objective in sorted((o for o in objectives if is_search_objective(o)), key=lambda o: o.ordinal):
+        for candidate in _search_candidates(objective, site, coverage, outcomes, snapshot_version):
+            if candidate.candidate_id not in offered:
+                offered.add(candidate.candidate_id)
+                search_candidates.append(candidate)
+
+    return tuple(region_candidates) + tuple(room_candidates) + tuple(search_candidates)

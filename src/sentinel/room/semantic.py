@@ -171,6 +171,32 @@ def resolve_pose_id(site: RoomSite, pose_id: str) -> ResolvedPose | None:
         return None
 
 
+def semantic_region_of(site: RoomSite, x_cm: float, y_cm: float) -> tuple[str, str, bool]:
+    """Name the horizontal/depth region a room-plane point falls in.
+
+    Returns ``(horizontal, depth, inside)``: the envelope's thirds along the
+    declared left-to-right and rear-to-front axes (the same thirds
+    ``resolve_semantic_pose`` places its regions at), and whether the point
+    lies inside the envelope footprint at all. A point beyond the envelope
+    (an object on a surface outside the flyable volume) is named after the
+    nearest region, with ``inside`` False so callers can say so.
+    """
+    frame = _require_frame(site)
+    volume = _volume_by_id(site, frame.envelope_volume_id)
+    origin = _centroid(volume.polygon_xy_cm)
+    names = []
+    inside = True
+    for axis, values in ((frame.left_to_right_axis_xy, HORIZONTAL_VALUES),
+                         (frame.rear_to_front_axis_xy, DEPTH_VALUES)):
+        low, high = _axis_extent(volume.polygon_xy_cm, axis, origin)
+        value = (x_cm - origin[0]) * axis[0] + (y_cm - origin[1]) * axis[1]
+        fraction = (value - low) / (high - low)
+        inside = inside and 0.0 <= fraction <= 1.0
+        names.append(values[min(2, max(0, int(fraction * 3)))] if 0.0 <= fraction < 1.0
+                     else values[0] if fraction < 0.0 else values[2])
+    return names[0], names[1], inside
+
+
 def resolve_landmark(site: RoomSite, landmark_id: str) -> Position:
     """Executor-facing: the concrete Position behind a declared landmark ID.
 
