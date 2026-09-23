@@ -152,6 +152,18 @@ def _unit_axis(axis) -> bool:
             and math.isclose(math.hypot(axis[0], axis[1]), 1.0, rel_tol=1e-6, abs_tol=1e-6))
 
 
+def _is_right_handed(axis_u, axis_v) -> bool:
+    """True iff (axis_u, axis_v) is a right-handed orthonormal pair.
+
+    In this codebase's CCW-from-+x heading convention, a mirrored (left-handed)
+    frame silently inverts every left/right and look=left/right meaning: the
+    drone's declared "right" is its actual left. Orthogonality and unit length
+    alone do not exclude a mirror; the cross product must also be +1, not -1.
+    """
+    cross = axis_u[0] * axis_v[1] - axis_u[1] * axis_v[0]
+    return math.isclose(cross, 1.0, abs_tol=1e-6)
+
+
 @dataclass(frozen=True)
 class SemanticFrame:
     """A declared 3-axis vocabulary (left/right, rear/front, bottom/top) for one envelope.
@@ -179,6 +191,8 @@ class SemanticFrame:
                + self.left_to_right_axis_xy[1] * self.rear_to_front_axis_xy[1])
         if not math.isclose(dot, 0.0, abs_tol=1e-6):
             raise ValueError("semantic frame axes must be orthogonal")
+        if not _is_right_handed(self.left_to_right_axis_xy, self.rear_to_front_axis_xy):
+            raise ValueError("semantic frame axes must be right-handed, not mirrored")
         landmark_ids = [landmark_id for landmark_id, _ in self.landmarks]
         if any(not landmark_id for landmark_id in landmark_ids):
             raise ValueError("landmark needs an identity")
@@ -228,9 +242,25 @@ class RoomSite:
             raise ValueError("duplicate terminal contingency identity")
         if real_mode and {entry.trigger for entry in self.terminal_contingencies} != set(ContingencyTrigger):
             raise ValueError("real mode requires both condition-specific terminal contingencies")
-        if (self.semantic_frame is not None
-                and self.semantic_frame.envelope_volume_id not in {v.volume_id for v in self.free_space_volumes}):
-            raise ValueError("semantic frame envelope must be a declared free-space volume")
+        if self.semantic_frame is not None:
+            frame = self.semantic_frame
+            envelope_matches = [v for v in self.free_space_volumes if v.volume_id == frame.envelope_volume_id]
+            if not envelope_matches:
+                raise ValueError("semantic frame envelope must be a declared free-space volume")
+            envelope_volume = envelope_matches[0]
+            # Matches adapt_recovery_environment, which drops any free-space volume
+            # that overlaps a forbidden one: a semantic envelope must not either,
+            # or every pose resolved inside it could land in a no-fly volume.
+            if any(_overlaps(envelope_volume, forbidden) for forbidden in self.forbidden_volumes):
+                raise ValueError("semantic frame envelope overlaps a forbidden volume")
+            if not _is_axis_aligned_rectangle(envelope_volume.polygon_xy_cm,
+                    frame.left_to_right_axis_xy, frame.rear_to_front_axis_xy):
+                raise ValueError("semantic frame envelope must be an axis-aligned rectangle")
+            for landmark_id, position in frame.landmarks:
+                if not any(_contains(volume, position) for volume in self.free_space_volumes):
+                    raise ValueError(f"landmark {landmark_id!r} outside surveyed free space")
+                if any(_contains(volume, position) for volume in self.forbidden_volumes):
+                    raise ValueError(f"landmark {landmark_id!r} inside a forbidden volume")
 
 
 def _contains(volume, position):
@@ -252,6 +282,37 @@ def _overlaps(a, b):
         if max(point[axis] for point in b.polygon_xy_cm) < min(point[axis] for point in a.polygon_xy_cm):
             return False
     return True
+
+
+def _is_axis_aligned_rectangle(polygon, axis_u, axis_v) -> bool:
+    """True iff polygon is exactly the rectangle spanned by axis_u/axis_v.
+
+    axis_u/axis_v must already be validated unit length and orthogonal.
+    Semantic pose resolution places each region at a fraction of the
+    envelope's axis-projected bounding box (see
+    sentinel.room.semantic._axis_extent); for any convex envelope that is
+    not itself that box, some fractional placements land outside the actual
+    polygon while still being advertised as resolvable model-facing pose_ids.
+    Requiring the envelope to equal its own axis-aligned bounding box makes
+    every canonical pose resolvable by construction.
+    """
+    if len(polygon) != 4:
+        return False
+    origin = polygon[0]
+
+    def project(point):
+        dx, dy = point[0] - origin[0], point[1] - origin[1]
+        return (round(dx * axis_u[0] + dy * axis_u[1], 6), round(dx * axis_v[0] + dy * axis_v[1], 6))
+
+    projected = [project(point) for point in polygon]
+    if len(set(projected)) != 4:
+        return False
+    u_values = sorted({point[0] for point in projected})
+    v_values = sorted({point[1] for point in projected})
+    if len(u_values) != 2 or len(v_values) != 2:
+        return False
+    expected = {(u, v) for u in u_values for v in v_values}
+    return set(projected) == expected
 
 
 def room_site_document(site: RoomSite) -> dict:

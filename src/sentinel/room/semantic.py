@@ -7,6 +7,15 @@ coordinates. ResolvedPose carries real coordinates and is for the executor
 only. Corridor/swept-path validation between two resolved endpoints is a
 later task; resolve_semantic_pose only validates that the resolved endpoint
 itself is contained in the declared envelope volume.
+
+RoomSite.validate() (called by parse_room_site) enforces the static geometry
+invariants this module relies on at load time, so a RoomSite that reached
+this module through the normal loading path already guarantees: the
+envelope never overlaps a forbidden volume, the envelope is an axis-aligned
+rectangle with respect to the declared frame axes (so every one of the 27
+canonical poses is resolvable), and every declared landmark lies inside
+surveyed free space and outside every forbidden volume. A RoomSite built by
+hand, bypassing validate(), does not get these guarantees for free.
 """
 from __future__ import annotations
 
@@ -144,7 +153,14 @@ def resolve_semantic_sequence(site: RoomSite, poses: Sequence[SemanticPose]) -> 
 
 
 def resolve_landmark(site: RoomSite, landmark_id: str) -> Position:
-    """Executor-facing: the concrete Position behind a declared landmark ID."""
+    """Executor-facing: the concrete Position behind a declared landmark ID.
+
+    Landmarks are flyable waypoints, not merely look-at references:
+    RoomSite.validate() rejects, at load time, any landmark that falls
+    outside surveyed free space or inside a forbidden volume. A position
+    returned here is therefore always a validated endpoint, the same
+    contract resolve_semantic_pose gives for its resolved poses.
+    """
     frame = _require_frame(site)
     for candidate_id, candidate_position in frame.landmarks:
         if candidate_id == landmark_id:

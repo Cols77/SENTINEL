@@ -136,11 +136,12 @@ def test_height_values_move_only_altitude():
 
 
 def test_depth_and_front_direction_are_axis_derived_not_hardcoded_to_y():
-    # Flip rear_to_front_axis_xy to point toward -y; front must follow the
-    # declared axis, not a hard-coded assumption that front == max Y. Every
-    # other test in this file uses an identity frame, so without this test a
-    # hard-coded x/y implementation would pass the whole suite.
-    frame = SemanticFrame("room", (1.0, 0.0), (0.0, -1.0), "FRONT", ())
+    # A proper 180-degree rotation of the identity frame (right-handed: cross
+    # product +1); front must follow the declared axis, not a hard-coded
+    # assumption that front == max Y. Every other test in this file uses an
+    # identity frame, so without this test a hard-coded x/y implementation
+    # would pass the whole suite.
+    frame = SemanticFrame("room", (-1.0, 0.0), (0.0, -1.0), "FRONT", ())
     site = _site(semantic_frame=frame, envelope=RECT, z_band=(60, 140), home_xy=(250, 140))
     rear = resolve_semantic_pose(site, SemanticPose("center", "rear", "middle"))
     front = resolve_semantic_pose(site, SemanticPose("center", "front", "middle"))
@@ -174,7 +175,8 @@ def test_yaw_deg_tracks_the_declared_look_direction():
 
 
 def test_toward_targets_yaw_tracks_a_flipped_rear_to_front_axis():
-    frame = SemanticFrame("room", (1.0, 0.0), (0.0, -1.0), "FRONT", ())
+    # Same proper 180-degree rotation as above (right-handed).
+    frame = SemanticFrame("room", (-1.0, 0.0), (0.0, -1.0), "FRONT", ())
     site = _site(semantic_frame=frame, envelope=RECT, z_band=(60, 140), home_xy=(250, 140))
     resolved = resolve_semantic_pose(site, SemanticPose("center", "middle", "middle", "toward_targets"))
     assert resolved.yaw_deg == -90
@@ -222,6 +224,15 @@ def test_non_normalized_axis_is_rejected():
 def test_non_orthogonal_axes_are_rejected():
     with pytest.raises(ValueError):
         SemanticFrame("room", (1.0, 0.0), (0.70710678, 0.70710678), "FRONT", ())
+
+
+def test_mirrored_left_handed_frame_is_rejected():
+    # Unit and orthogonal, but a mirror (cross product -1, not +1): in this
+    # codebase's CCW-from-+x heading convention this silently swaps the
+    # drone's actual left/right, so it must be rejected even though the
+    # weaker unit/orthogonal checks alone would accept it.
+    with pytest.raises(ValueError):
+        SemanticFrame("room", (1.0, 0.0), (0.0, -1.0), "FRONT", ())
 
 
 def test_wrong_schema_version_is_rejected():
@@ -312,6 +323,70 @@ def test_semantic_frame_referencing_a_forbidden_volume_is_rejected_at_load():
     doc["semantic_frame"]["envelope_volume_id"] = "hazard"
     with pytest.raises(ValueError):
         parse_room_site(doc)
+
+
+def test_semantic_frame_envelope_overlapping_a_forbidden_volume_is_rejected_at_load():
+    # The envelope itself ("room") must never overlap a forbidden volume --
+    # matching adapt_recovery_environment, which drops any free-space volume
+    # that overlaps a forbidden one. Without this, a resolved pose (e.g.
+    # SemanticPose('center','middle','middle') -> (250,190,100)) can legally
+    # land inside a declared no-fly zone.
+    doc = json.loads(FIXTURE_PATH.read_text())
+    doc["forbidden_volumes"] = [{
+        "volume_id": "tablevol",
+        "polygon_xy_cm": [[240, 180], [260, 180], [260, 200], [240, 200]],
+        "z_interval_cm": [60, 140],
+    }]
+    with pytest.raises(ValueError):
+        parse_room_site(doc)
+
+
+def test_semantic_frame_envelope_must_be_an_axis_aligned_rectangle():
+    # A convex but non-rectangular envelope (here a triangle) still lets the
+    # site load and semantic_vocabulary still advertises all 27 pose_ids, but
+    # a fractional placement inside the axis-projected *bounding box* of a
+    # triangle can escape the triangle itself -- offering pose_ids that
+    # cannot actually resolve. Requiring the envelope to be an axis-aligned
+    # rectangle (its own bounding box) makes every canonical pose resolvable
+    # by construction.
+    doc = json.loads(FIXTURE_PATH.read_text())
+    doc["free_space_volumes"][0]["polygon_xy_cm"] = [[100, 100], [500, 100], [100, 500]]
+    with pytest.raises(ValueError):
+        parse_room_site(doc)
+
+
+def test_landmark_outside_surveyed_free_space_is_rejected_at_load():
+    # resolve_landmark is executor-facing and documented as a flyable
+    # waypoint; an unsurveyed landmark position must not load silently.
+    doc = json.loads(FIXTURE_PATH.read_text())
+    doc["semantic_frame"]["landmarks"].append(["stray", {"x_cm": 9999, "y_cm": -5000, "z_cm": 5000}])
+    with pytest.raises(ValueError):
+        parse_room_site(doc)
+
+
+def test_landmark_inside_a_forbidden_volume_is_rejected_at_load():
+    # A second free-space volume ("annex") overlaps a forbidden volume
+    # ("hazard") that does not touch the semantic envelope ("room"), so this
+    # isolates the landmark-specific check from the envelope-overlap check.
+    annex = {"volume_id": "annex", "polygon_xy_cm": [[400, 120], [500, 120], [500, 260], [400, 260]],
+             "z_interval_cm": [60, 140]}
+    hazard = {"volume_id": "hazard", "polygon_xy_cm": [[420, 140], [480, 140], [480, 200], [420, 200]],
+              "z_interval_cm": [60, 140]}
+    doc = json.loads(FIXTURE_PATH.read_text())
+    doc["free_space_volumes"].append(annex)
+    doc["forbidden_volumes"] = [hazard]
+    doc["semantic_frame"]["landmarks"].append(["stray", {"x_cm": 450, "y_cm": 170, "z_cm": 90}])
+    with pytest.raises(ValueError):
+        parse_room_site(doc)
+
+
+def test_fixture_landmarks_are_valid_flyable_waypoints():
+    # The concrete fixture values: 'window' sits exactly on the envelope
+    # wall (x=150), which the boundary-inclusive containment check (used
+    # uniformly for home/route/landmark geometry in this module) accepts.
+    site = _fixture_site()
+    assert resolve_landmark(site, "window") == Position(150, 190, 120)
+    assert resolve_landmark(site, "table") == Position(250, 250, 90)
 
 
 def test_wp5_flight3_corners_document_is_never_a_valid_semantic_frame():
