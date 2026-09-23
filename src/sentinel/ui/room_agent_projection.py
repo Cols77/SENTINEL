@@ -15,6 +15,9 @@ import threading
 
 HOME_TOLERANCE_CM = 25.0
 _REGION_LABELS = {"center": "Center", "left": "Left", "right": "Right"}
+#: Mirrors ``sentinel.room.candidates.CONFIDENCE_GATE_REFUSALS``.
+_CHOICE_GATE_REFUSALS = frozenset({"LOW_CONFIDENCE", "THIN_MARGIN", "MALFORMED_ANSWER", "ILLEGAL_OR_MALFORMED",
+                                   "MISSING_OR_NON_MAX_SELECTION", "PROVIDER_ERROR"})
 _PLURAL = {"computer": "computers", "phone": "phones", "person": "people", "pen": "pens"}
 
 
@@ -252,7 +255,19 @@ class RoomAgentProjection:
 
     def _on_room_choice_attempt(self, payload):
         assessment = payload.get("assessment") or {}
-        label = assessment.get("final_label") or assessment.get("selected_label")
+        outcome = assessment.get("outcome")
+        # Task 4b item 5: a refused turn shows what Jev actually chose (its
+        # label, probability and the refusal code), never the escalation
+        # label the gate substitutes as final_label.
+        refused = None
+        if payload.get("provider_error"):
+            refused = "PROVIDER_ERROR"
+        elif outcome and not str(outcome).startswith("ACCEPTED"):
+            refused = outcome
+        if refused:
+            label = assessment.get("selected_label")  # None: no usable label at all
+        else:
+            label = assessment.get("final_label") or assessment.get("selected_label")
         candidates = {c.get("candidate_id"): c for c in payload.get("candidates") or ()}
         for candidate_id in candidates:
             if candidate_id and candidate_id.startswith("OBSERVE:"):
@@ -265,9 +280,12 @@ class RoomAgentProjection:
         if payload.get("provider_error"):
             reason = f"provider error: {payload['provider_error']}"
         decisions = self.state["decisions"]
-        decisions.append(dict(turn=len(decisions) + 1, action=label, label=_candidate_label(label or ""),
-                              outcome=assessment.get("outcome"), confidence=assessment.get("confidence"),
-                              reason=reason or "(no reason given)"))
+        kind_mass = assessment.get("confidence") if assessment.get("confidence_source") == "KIND_MASS" else None
+        decisions.append(dict(turn=len(decisions) + 1, action=label,
+                              label=_candidate_label(label) if label else "No usable choice",
+                              outcome=outcome, confidence=assessment.get("confidence"),
+                              probability=assessment.get("selected_probability"), refused=refused,
+                              kind_mass=kind_mass, reason=reason or "(no reason given)"))
 
     def _on_room_tool_outcome(self, payload):
         candidate_id = payload.get("candidate_id") or ""
@@ -288,7 +306,9 @@ class RoomAgentProjection:
                         confidence="low" if estimate.get("estimate_id") in low else "high"))
                     region["detections"] += 1
                 s["unplaced"] += len(evidence.get("unplaced") or ())
-            elif region["status"] != "OBSERVED":
+            elif region["status"] != "OBSERVED" and code not in _CHOICE_GATE_REFUSALS:
+                # A confidence-gate refusal leaves the region offered (Task
+                # 4b item 1); only a physical or tool refusal marks it.
                 region["status"] = "FAILED" if code in ("TOOL_FAILURE",) else code or "FAILED"
         if payload.get("answer"):
             s["answer"] = dict(text=payload["answer"], code=code,
