@@ -14,8 +14,10 @@ from sentinel.judgment import ChoiceJudge
 from sentinel.cube.supervised_wait import SupervisedWait
 from sentinel.cube.step_executor import TerminalOutcome
 
-from .candidates import build_candidates
-from .models import CandidateKind, RoomCandidate, TerminalState
+from .candidates import build_candidates, build_observation_candidates
+from .coverage import CellObservation, CoverageProjection, project_coverage
+from .ingest import ingest_result
+from .models import CandidateKind, GoalKind, GoalStatus, RoomCandidate, TerminalState
 from .queries import READ_KINDS, ReadFact, ReadQueries, ReadSnapshot, ToolOutcome, relevant_hash, render_answer
 from .store import RoomStore, VersionConflict
 
@@ -38,10 +40,11 @@ class RoomController:
     def __init__(self, store: RoomStore, judge: ChoiceJudge, *,
                  survey_store: SurveyStore | None = None, survey_run_id: str | None = None,
                  queries: ReadQueries | None = None, act_at: float = .8, min_margin: float = .15,
-                 candidate_builder: Callable[[ReadSnapshot], tuple[RoomCandidate, ...]] = build_candidates,
+                 candidate_builder: Callable[[ReadSnapshot], tuple[RoomCandidate, ...]] | None = None,
                  executor: Callable[[RoomCandidate, ReadSnapshot], tuple[ReadFact, ...]] | None = None,
                  ingest_pending: Callable[[str], object] | None = None,
-                 supervisor=None, flight_executor=None, provider_wait_s: float = 10.0):
+                 supervisor=None, flight_executor=None, provider_wait_s: float = 10.0,
+                 resolve_checkpoint=None, perception_capture=None, perception_provider=None):
         for value in (act_at, min_margin):
             if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
                 raise ValueError("choice thresholds must be finite probabilities")
@@ -51,13 +54,101 @@ class RoomController:
         self.queries = queries if queries is not None else ReadQueries(
             store, survey_store=survey_store, survey_run_id=survey_run_id, **query_clock)
         self.act_at, self.min_margin = act_at, min_margin
-        self.candidate_builder, self.executor = candidate_builder, executor
+        self.executor = executor
         self.ingest_pending = ingest_pending
         if (supervisor is None) != (flight_executor is None):
             raise ValueError("supervisor and flight executor must be supplied together")
         if type(provider_wait_s) not in (int, float) or not math.isfinite(provider_wait_s) or provider_wait_s <= 0:
             raise ValueError("provider wait must be finite and positive")
         self.supervisor, self.flight_executor, self.provider_wait_s = supervisor, flight_executor, provider_wait_s
+        # Observation execution (checkpoint + correlated perception round trip) is
+        # a separate opt-in runtime boundary from the base supervisor/executor
+        # pairing above: either all three observation collaborators are supplied
+        # or none are, and OBSERVE candidates are only ever offered when they are.
+        # This is Plan 03 Task 4's "capability" -- there is no distinct
+        # CapabilityGrant string for it (see task report); it rides on the same
+        # SafetySupervisor mode/grant machinery every other checkpoint already uses.
+        observation_collaborators = (resolve_checkpoint, perception_capture, perception_provider)
+        if any(c is not None for c in observation_collaborators) and not all(c is not None for c in observation_collaborators):
+            raise ValueError("resolve_checkpoint, perception_capture and perception_provider "
+                             "must be supplied together")
+        self.resolve_checkpoint, self.perception_capture = resolve_checkpoint, perception_capture
+        self.perception_provider = perception_provider
+        self.candidate_builder = candidate_builder if candidate_builder is not None else self._legal_candidates
+
+    @property
+    def _observation_enabled(self) -> bool:
+        return (self.supervisor is not None and self.flight_executor is not None
+                and self.resolve_checkpoint is not None and self.perception_capture is not None
+                and self.perception_provider is not None)
+
+    def _observation_objectives(self, snapshot):
+        if snapshot.ledger is None or snapshot.ledger.status != GoalStatus.PENDING:
+            return ()
+        return snapshot.ledger.objectives
+
+    def _coverage(self, snapshot: ReadSnapshot) -> CoverageProjection:
+        """Rebuild the coverage projection purely from replayed OBSERVE outcomes.
+
+        A pose declares visibility of a set of coverage cells
+        (``RoomSite.pose_visibility``); once an OBSERVE checkpoint at that pose
+        has completed and its perception result was ingested, every
+        (cell, class) pair that pose declares is resolved for that flight --
+        this session never infers *which* class a detection belongs to a
+        specific cell (that per-detection geometric grounding is future work;
+        see the task report), only that the region was actually examined.
+        ``observed_at``/evidence use the durable ROOM_TOOL_OUTCOME event ID,
+        never a fabricated timestamp.
+        """
+        site = self.supervisor.site
+        cells_by_id = {cell.cell_id: cell for cell in site.coverage_cells}
+        declared_views_by_cell: dict[str, list[str]] = {}
+        for pose_id, cell_ids in site.pose_visibility:
+            for cell_id in cell_ids:
+                declared_views_by_cell.setdefault(cell_id, []).append(pose_id)
+        observations = []
+        for outcome in snapshot.outcomes:
+            if outcome.kind != CandidateKind.OBSERVE.value or outcome.code != "OBSERVE_SUCCEEDED":
+                continue
+            pose_id = outcome.candidate_id.rsplit(":", 1)[-1]
+            for cell_id in dict(site.pose_visibility).get(pose_id, ()):
+                cell = cells_by_id.get(cell_id)
+                if cell is None:
+                    continue
+                for class_name in cell.required_classes:
+                    observations.append(CellObservation(cell_id, class_name, pose_id, "OBSERVED",
+                                                         outcome.event_id, evidence_refs=(outcome.event_id,)))
+        return project_coverage(site.coverage_cells, tuple(observations),
+                                declared_views_by_cell={k: tuple(v) for k, v in declared_views_by_cell.items()})
+
+    def _closer_unavailable_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
+        """Plan 03 Task 3 (closer-inspection viewpoints) is deferred: any goal
+        that can only be satisfied by getting closer -- a FIND_OBSERVE
+        objective whose terminal condition requires validation -- can never be
+        offered an executable closer candidate. Rather than let Jev loop
+        between CLARIFY/ESCALATE, this reports that limitation explicitly."""
+        candidates = []
+        for objective in self._observation_objectives(snapshot):
+            if objective.kind != GoalKind.FIND_OBSERVE or objective.terminal_condition != "VALIDATED":
+                continue
+            candidate_id = f"VALIDATE:{objective.objective_id}:UNAVAILABLE"
+            digest = relevant_hash(CandidateKind.ESCALATE, snapshot)
+            description = (f"Closer inspection is not available in this session for objective "
+                          f"{objective.objective_id}; only surveyed viewpoints and existing evidence "
+                          f"can be reported.")
+            candidates.append(RoomCandidate(candidate_id, CandidateKind.VALIDATE_DETECTION,
+                                            snapshot.state_version, digest, description, description))
+        return tuple(candidates)
+
+    def _observation_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
+        if not self._observation_enabled:
+            return ()
+        return build_observation_candidates(self._observation_objectives(snapshot), self.supervisor.site,
+                                            self._coverage(snapshot), snapshot.outcomes, snapshot.state_version)
+
+    def _legal_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
+        return (*build_candidates(snapshot), *self._observation_candidates(snapshot),
+               *self._closer_unavailable_candidates(snapshot))
 
     def _local_terminal(self, terminal, candidate_id):
         if not isinstance(terminal, TerminalOutcome):
@@ -210,7 +301,10 @@ class RoomController:
 
         # Custom builders may narrow the legal set, but cannot add a physical,
         # stale, unsupported or previously refused action at this boundary.
-        legal = {c.candidate_id: c for c in build_candidates(snapshot)}
+        # OBSERVE (and the closer-inspection-unavailable answer) are only ever
+        # legal when this session's observation collaborators are configured;
+        # see _observation_enabled.
+        legal = {c.candidate_id: c for c in self._legal_candidates(snapshot)}
         candidates = {c.candidate_id: c for c in self.candidate_builder(snapshot) if legal.get(c.candidate_id) == c}
         if not candidates:
             payload = self._outcome(snapshot, "ESCALATE", "ESCALATE", relevant_hash(CandidateKind.ESCALATE, snapshot),
@@ -283,12 +377,33 @@ class RoomController:
                     raise ValueError("read facts must match the projected persisted sources")
                 payload = self._outcome(snapshot, candidate_id, kind, digest,
                                         "READ_SUCCEEDED" if facts else "NO_EVIDENCE", facts=facts)
+            elif selected.kind == CandidateKind.OBSERVE:
+                # Effectful: resolves a checkpoint, admits/dispatches it through
+                # the safety supervisor and, only once that checkpoint actually
+                # completes, waits for and ingests its correlated perception
+                # result. A mandatory recovery/return transition is applied and
+                # reported here directly -- bypassing Jev, never persisted as an
+                # ordinary ROOM_TOOL_OUTCOME refusal -- so the caller's outcome
+                # already includes this turn's ROOM_CHOICE_ATTEMPT event.
+                outcome = self._execute_observation(session_id, selected, snapshot, expected_version)
+                if isinstance(outcome, TurnOutcome):
+                    return replace(outcome, event_ids=tuple(e.event_id for e in prior) + outcome.event_ids)
+                payload = self._outcome(snapshot, candidate_id, kind, digest, outcome["code"],
+                                        refusal=outcome.get("refusal"))
+                return self._record(snapshot, correlation, payload, prior=prior)
             elif selected.kind == CandidateKind.ANSWER:
                 payload = self._outcome(snapshot, candidate_id, kind, digest, "ANSWERED", facts=snapshot.facts,
                                         answer=render_answer(snapshot.facts), terminal=TerminalState.COMPLETED)
             elif selected.kind == CandidateKind.CLARIFY:
                 payload = self._outcome(snapshot, candidate_id, kind, digest, "CLARIFICATION_REQUIRED", terminal=TerminalState.BLOCKED,
                                         answer="Please clarify the request or provide the missing recorded evidence. This session supports historical reads only.")
+            elif selected.kind == CandidateKind.VALIDATE_DETECTION:
+                # Plan 03 Task 3 (closer-inspection viewpoints) is deferred; see
+                # _closer_unavailable_candidates. This never executes a checkpoint.
+                payload = self._outcome(snapshot, candidate_id, kind, digest, "CLOSER_INSPECTION_UNAVAILABLE",
+                                        terminal=TerminalState.BLOCKED,
+                                        answer="Closer inspection is not available in this session; only "
+                                               "surveyed viewpoints and existing evidence can be reported.")
             else:
                 payload = self._outcome(snapshot, candidate_id, kind, digest, "ESCALATED", terminal=TerminalState.ESCALATED)
         except Exception:
@@ -300,6 +415,62 @@ class RoomController:
         except VersionConflict:
             payload = self._outcome(snapshot, candidate_id, kind, digest, "STALE_DECISION", refusal="STALE_DECISION")
             return self._record(snapshot, correlation, payload, prior=prior)
+
+    def _execute_observation(self, session_id, candidate, snapshot, expected_version):
+        """Resolve, admit and dispatch exactly one checkpoint for ``candidate``,
+        then wait for and ingest its correlated perception result.
+
+        Returns a plain dict payload (``{"code": ..., "refusal": ...}``) for the
+        normal ROOM_TOOL_OUTCOME append path, or a fully-formed ``TurnOutcome``
+        when a mandatory safety transition bypassed Jev and must be reported
+        directly (see the OBSERVE branch in ``_decide``).
+        """
+        try:
+            plan = self.resolve_checkpoint(candidate, snapshot)
+        except Exception:
+            plan = None
+        if plan is None:
+            return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
+        admission = self.supervisor.prepare(snapshot_version=expected_version, checkpoint=plan)
+        result = self.supervisor.dispatch(admission, self.flight_executor)
+        if admission.transition != "CONTINUE" or isinstance(result, TerminalOutcome):
+            # Mandatory recovery/return/contingency: the checkpoint the candidate
+            # asked for was never (fully) executed as chosen. No perception is
+            # attempted; a fresh Jev choice must wait for the next turn.
+            terminal_outcome = result if isinstance(result, TerminalOutcome) else None
+            return self._preempted(session_id, admission, terminal_outcome=terminal_outcome)
+        if result.status != "COMPLETED" or not result.completion_known:
+            # SDK/command completion uncertainty: never treated as a success,
+            # and never releases a second optional checkpoint this turn.
+            return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
+        try:
+            request = self.perception_capture(candidate, result, snapshot)
+        except Exception:
+            return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
+
+        def perceive(cancel):
+            try:
+                return self.perception_provider(request), None
+            except Exception as exc:
+                return None, type(exc).__name__
+
+        waited = self.wait_for_perception(perceive, session_id=session_id)
+        if waited.status == "PREEMPTED":
+            return self._preempted(session_id, self.supervisor.last_preemption)
+        if waited.status == "COMPLETED":
+            perception_result, provider_error = waited.value
+        else:
+            perception_result, provider_error = None, waited.status
+        if provider_error or perception_result is None:
+            return {"code": "PROVIDER_ERROR", "refusal": "PROVIDER_ERROR"}
+        try:
+            current_version = self.store.session_version(session_id)
+            ingest_result(self.store, perception_result, current_snapshot_version=current_version)
+        except Exception:
+            return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
+        if perception_result.status != "SUCCEEDED":
+            return {"code": "PROVIDER_ERROR", "refusal": "PROVIDER_ERROR"}
+        return {"code": "OBSERVE_SUCCEEDED"}
 
     def run_until_terminal(self, session_id: str) -> TerminalState:
         while True:
