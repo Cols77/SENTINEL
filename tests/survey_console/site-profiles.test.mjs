@@ -15,6 +15,24 @@ test('catalogue exposes selected and disabled draft options',async()=>{
  assert.equal(control.getState().profiles[2].enabled,false);
 });
 
+test('initial catalogue failure can be retried without a mission change or duplicate requests',async()=>{
+ let calls=0,finish;
+ const control=createSiteProfileController({read_site_profiles:()=>{
+  calls++;
+  if(calls===1)throw Error('private transport detail');
+  return new Promise(resolve=>finish=resolve);
+ }});
+ await control.load();
+ assert.equal(control.getState().catalogue_unavailable,true);
+ assert.equal(control.getState().feedback,'Site catalogue unavailable.');
+ const first=control.retry();const duplicate=control.retry();
+ assert.equal(calls,2);
+ finish(catalogue());await Promise.all([first,duplicate]);
+ assert.equal(calls,2);
+ assert.equal(control.getState().catalogue_unavailable,false);
+ assert.equal(control.getState().selected_profile_id,'CanningSt');
+});
+
 test('selection suppresses duplicates and refreshes snapshot on success',async()=>{
  let finish,calls=0,refreshes=0;
  const control=createSiteProfileController({read_site_profiles:async()=>catalogue(),select_site_profile:()=>{calls++;return new Promise(resolve=>finish=resolve);}},async()=>{refreshes++;});

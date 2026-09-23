@@ -26,13 +26,13 @@ export function createProfileActivityWatcher(load){
 }
 
 export function createSiteProfileController(client,refreshSnapshot=async()=>{}){
- let state={profiles:[],selected_profile_id:null,switch_allowed:false,switch_reason:null,pending:false,feedback:''};
+ let state={profiles:[],selected_profile_id:null,switch_allowed:false,switch_reason:null,pending:false,catalogue_unavailable:false,feedback:''};
  let revision=0,loading=null,rerun=false;
  const listeners=new Set();
  const emit=()=>{for(const listener of listeners)listener({...state,profiles:state.profiles.map(profile=>({...profile}))});};
  const update=catalogue=>{
   revision++;
-  state={...state,profiles:catalogue.profiles??[],selected_profile_id:catalogue.selected_profile_id??null,
+  state={...state,profiles:catalogue.profiles??[],selected_profile_id:catalogue.selected_profile_id??null,catalogue_unavailable:false,
    switch_allowed:catalogue.switch_allowed===true,switch_reason:catalogue.switch_reason??null,
    feedback:catalogue.switch_reason?feedback[catalogue.switch_reason]??'Site selection is unavailable.':''};
   emit();
@@ -41,6 +41,7 @@ export function createSiteProfileController(client,refreshSnapshot=async()=>{}){
   getState:()=>({...state,profiles:state.profiles.map(profile=>({...profile}))}),
   subscribe(listener){listeners.add(listener);return ()=>listeners.delete(listener);},
   update,
+  retry(){if(loading)return loading;if(state.catalogue_unavailable)return api.load();},
   async load(){
    if(loading){rerun=true;return loading;}
    loading=(async()=>{
@@ -52,7 +53,7 @@ export function createSiteProfileController(client,refreshSnapshot=async()=>{}){
       if(started===revision&&!state.pending)update(catalogue);
       else rerun=true;
      }catch{
-      if(started===revision&&!state.pending){state={...state,feedback:'Site catalogue unavailable.'};emit();}
+      if(started===revision&&!state.pending){state={...state,catalogue_unavailable:true,feedback:'Site catalogue unavailable.'};emit();}
       else rerun=true;
      }
     }while(rerun&&!state.pending);

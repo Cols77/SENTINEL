@@ -41,6 +41,13 @@ test('site profile client retains typed failure bodies',async()=>{
  }
 });
 
+test('typed failures require the exact HTTP status and body pair',async()=>{
+ for(const [status,type] of [[409,'INVALID'],[409,'UNAVAILABLE'],[422,'CONFLICT'],[422,'UNAVAILABLE'],[503,'CONFLICT'],[503,'INVALID']]){
+  const client=createHttpClient('/api/v1',async()=>new Response(JSON.stringify({status:type,message:'Mismatched response'}),{status}));
+  await assert.rejects(client.select_site_profile('Harbor'),/Mismatched response/);
+ }
+});
+
 test('poller schedules only after the outstanding request finishes',async()=>{
  const {startPolling}=await import('../../examples/survey-console/http-client.mjs');
  let resolve;const pending=new Promise(r=>resolve=r);const scheduled=[];

@@ -9,6 +9,7 @@ import {createChatView} from './chat.mjs';
 import {createControlledLandController,createSafetyView} from './safety.mjs';
 import {createLocalizationView} from './localization.mjs';
 import {createSiteProfileController,createProfileActivityWatcher} from './site-profiles.mjs';
+import {startMissionLifecycle} from './mission-lifecycle.mjs';
 import {missionMapModel,renderMissionMap} from './mission-map.mjs';
 const root=document.getElementById('app');
 root.classList.add('mission-console');document.title='SENTINEL · Mission Control';
@@ -64,6 +65,7 @@ function renderReadiness(view){
   el('label',{for:'site-profile'},['Physical site profile']),siteSelect,
   el('p',{id:'site-profile-status',role:'status',class:'meta'},[profileState.pending?'Selecting site profile…':profileState.feedback||
    (profileState.switch_allowed?'Select the calibrated site before the mission begins.':'Site selection locked for this mission.')]),
+  ...(profileState.catalogue_unavailable?[button('Retry site catalogue',()=>void profiles.retry(),{id:'retry-site-profiles','aria-describedby':'site-profile-status'})]:[]),
  ]));
  if(model.failed.length)nodes.push(el('ul',{class:'readiness-checks'},model.failed.map(check=>
   el('li',{id:`readiness-${check.capability}`},[
@@ -111,5 +113,11 @@ controller.subscribe(state=>{
  if(selection){const ids=selection.kind==='frame'?[selection.id]:supportingSightings(view,selection).map(x=>x.frame_id);if(ids.some(id=>snapshot.evidence.frames.find(f=>f.id===id)?.evidence!=='AVAILABLE')){evidence.clear();selection=null;}}
  if(!restored){restored=true;const saved=localStorage.getItem(`sentinel:${snapshot.session.id}:${snapshot.run.id}:decision`);if(saved){try{decision.restore(JSON.parse(saved));}catch{localStorage.removeItem(`sentinel:${snapshot.session.id}:${snapshot.run.id}:decision`);}}}
 });
-try{const session=await client.session();await controller.open(session.active_run_id);if(session.mode==='LIVE'){profileCatalogueActive=true;await refreshProfilesOnActivity(snapshot);}const stop=startPolling(()=>controller.refresh());window.addEventListener('pagehide',()=>{stop();chat.dispose();evidence.dispose();safety.dispose();localization.dispose();});}
+try{const session=await client.session();await controller.open(session.active_run_id);startMissionLifecycle({
+ startPolling:()=>startPolling(()=>controller.refresh()),
+ registerCleanup:cleanup=>window.addEventListener('pagehide',cleanup),
+ dispose:()=>{chat.dispose();evidence.dispose();safety.dispose();localization.dispose();},
+ loadProfiles:()=>{if(session.mode==='LIVE'){profileCatalogueActive=true;return refreshProfilesOnActivity(snapshot);}},
+ onLoadError:()=>{status.textContent='Site catalogue unavailable';},
+});}
 catch(e){status.textContent='Local runtime unavailable: '+e.message;}
