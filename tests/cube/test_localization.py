@@ -186,6 +186,16 @@ def test_heading_uncertainty_propagates_into_translational_uncertainty():
     assert health.xy_uncertainty_cm >= 18  # 1 cm fix error + ~17.43 cm heading error
 
 
+def test_a_heading_error_never_displaces_a_vertical_move_horizontally():
+    # Task B2: yaw rotates only the horizontal displacement; a climb keeps
+    # its x/y, so it adds only the per-cm drift, never a bearing chord.
+    value, clock = tracker(xy_drift_cm_s=0, xy_drift_per_cm=0, heading_drift_per_cm=0,
+                           max_translation_cm=200, max_xy_uncertainty_cm=50)
+    value.accept_fix(fix(clock, heading_uncertainty_deg=10))
+    health = value.note_command(command(direction="up", distance_cm=100), 10)
+    assert health.xy_uncertainty_cm == 1  # the fix's own error only
+
+
 @pytest.mark.parametrize("changes", [
     {"heading_deg": "90"}, {"measured_at": None}, {"xy_uncertainty_cm": "1"},
     {"heading_uncertainty_deg": True}, {"position": Position(None, 100, 100)},

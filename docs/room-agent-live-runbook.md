@@ -284,11 +284,31 @@ WP5 trials in `C:/coding/sentinel/.worktrees/integration/artifacts/trials/`
 
 | File | What it is |
 |---|---|
-| `canningst-flight-profile.json` | `room-calibration-profile-v1`, kind `flight`, state `CALIBRATION` (legal only under a TRIAL grant), speeds 20/50 cm/s, the worst battery burn, the sampled pose-drift envelope |
-| `canningst-energy.json` | `EnergyProfile`, `execution_scope: CALIBRATION` (the supervisor admits it in REAL mode only under a TRIAL acceptance grant), aircraft `tello-canningst` |
-| `canningst-drift.json` | `pose-drift-v1`, measured `xy_drift_per_cm`, `heading_drift_per_cm`, `max_height_error_cm`; every other limit is declared in `canningst-policy.json` |
+| `canningst-flight-profile.json` | `room-calibration-profile-v1`, kind `flight`, state `CALIBRATION` (legal only under a TRIAL grant), speeds 20/50 cm/s, the p90 whole-flight battery burn, the sampled pose-drift envelope |
+| `canningst-energy.json` | `EnergyProfile`, `execution_scope: CALIBRATION` (the supervisor admits it in REAL mode only under a TRIAL acceptance grant), aircraft `tello-canningst`, **0.288 %/s** |
+| `canningst-drift.json` | `pose-drift-v1`: `xy_drift_per_cm` **0.157** (the robust statistic, declared in the policy), measured `heading_drift_per_cm` 0.022 and `max_height_error_cm` 20; every other limit is declared in `canningst-policy.json` |
 | `canningst-command-limits.json` | `trim_rounds: 0`, `localise: false` (the supervisor refuses conditional trims) |
-| `canningst-policy.json` | the declared margins and limits the recordings cannot measure |
+| `canningst-policy.json` | the declared margins and limits the recordings cannot measure, the excluded run and its reason, and the robust-drift rule |
+
+How the numbers are derived (Task B2):
+
+- **Drift.** Per leg: the open-loop arrival error divided by the commanded
+  path flown since the last accepted tag fix (|dx| + |dy| + |dz|, exactly
+  what the tracker charges and what a fix resets). The run
+  `20260923-122157-reanchor` is excluded, with its reason in the policy:
+  it took off at 51 % (42 % after takeoff) and 76-77 C, below the 50 %
+  floor, and ended on the Tello's own auto-land at 10 %; its first leg is
+  the old 0.45 cm/cm figure. Over the 7 nominal legs of the two other
+  flights the p90 is 0.131 cm/cm; with a 20 % margin **0.157**, declared as
+  `declared_overrides.xy_drift_per_cm` (named in the drift profile's
+  evidence, next to `excluded-run:20260923-122157-reanchor`).
+- **Energy.** Whole flights: first post-takeoff battery reading to the
+  last, over the time from the first command after takeoff to `land`, plus
+  one 1 % reading step; windows under 30 s are dropped (a 1 % step over a
+  few seconds is quantization, not a burn). p90 across the flights
+  (0.273 and 0.222 %/s) is 0.268, + 0.02 margin = **0.288 %/s**. In flight
+  the reserve guard no longer learns a rate from a single 1 % step between
+  two samples less than 10 s apart.
 
 To re-derive them (read-only on the history; same bytes as committed):
 
@@ -301,33 +321,43 @@ declaration refuses naming it.
 
 ### What L3 will do with the history profiles
 
-Read this before flying. The measured worst open-loop drift is
-**0.45 cm per cm travelled** (2026-09-23 12:21 flight, first leg; the median
-leg is about 0.16). The supervisor forecasts that drift for every checkpoint
-and the route home, and the start pad is only 30 cm from the cube's rear
-face. Offline, with these files (the CanningSt admission check in
-`tests/room/test_canningst_site.py`, and the same check per region):
+Read this before flying. With the committed profiles, offline
+(`tests/room/test_canningst_site.py` for the admission of each region,
+`tests/room/test_canningst_mission.py` for the whole mission on the fake
+stack):
 
-- takeoff is admitted;
-- every declared observation region (`left/center/right-rear-middle`) is
-  refused (`RETURN_NOW`, `OPTIONAL_PATH_INVALID` or
-  `PROJECTED_TERMINATION_PATH_INVALID`): the forecast uncertainty on the way
-  back would not fit between the pad and the cube face.
+- takeoff is admitted from about 50 % battery;
+- the **center** region (`center-rear-middle`) is admitted and observed:
+  frame captured, detector run, detections grounded on the demo surface;
+- the **left and right** regions are refused (`RETURN_NOW`,
+  `OPTIONAL_PATH_INVALID` or `PROJECTED_TERMINATION_PATH_INVALID`). The
+  supervisor forecasts the out-and-back without assuming any tag fix on
+  the way, and it must end over the pad, which is only 30 cm from the
+  cube's rear face: 160 cm of travel at 0.157 cm/cm is already 25 cm of
+  uncertainty, more than the 18 cm the 12 cm rotation radius leaves there.
 
-So an L3 run with the committed profiles takes off, is refused every
-observation, returns and lands, and ends `INCOMPLETE_RETURNED` (or
-`SAFE_LANDED`) without a count. That is the correct, safe result for these
-numbers. To see a count, one of these operator decisions is needed (none is
-made in this build):
+So an L3 run with the committed profiles takes off, counts what the center
+view sees, is refused left and right, returns over the pad and lands (the
+count is reported with its coverage gap). That is the correct, safe result
+for these numbers. Left and right need, offline, about 0.03 cm/cm with
+0.005 deg/cm, 0.02 cm/s and 0.01 deg/s hover drift -- four to five times
+below what the history supports. Getting them is an operator decision, not
+made in this build:
 
-1. Accept a smaller per-centimetre drift for this trial: add
-   `"declared_overrides": {"xy_drift_per_cm": {"value": <v>, "justification": "<why>"}}`
-   to the policy and re-run the script. The override is named in the drift
-   profile's evidence (`operator-declared:xy_drift_per_cm`). Offline, 0.1
-   admits the center region; 0.05 is not enough for the left/right regions.
+1. Declare a smaller drift for this trial in the policy
+   (`declared_overrides.xy_drift_per_cm` with a justification; the hover
+   terms are in `drift_limits`) and re-run the script. The override is named
+   in the drift profile's evidence (`operator-declared:xy_drift_per_cm`).
    Then re-issue the grant (the profile hashes change).
-2. Move the start pad further from the cube's faces (a new Mission Control
-   start, then a new site file).
+2. Or fly from a site whose start pad is further from the cube faces (the
+   2026-09-22 flights flew the larger `wp5-flight3-site.json` cube, y from
+   100 cm; `canningst-site.json` binds the Mission Control registry's
+   `wp5-flight1-site.json`, y from 160 cm): a new site file.
+
+A tag loss mid-mission is recovered, not landed: the supervisor's recovery
+first tries a stationary burst, then yaws to the mapped-tag heading (90 deg,
+tags 0 and 2), accepts the fix there (`POSE_REANCHORED`) and the mission
+resumes; a second loss in the same flight is recovered the same way.
 
 ### Issue the TRIAL grant (b)
 
@@ -398,10 +428,13 @@ python scripts/room_assurance.py --site fixtures/room_agent/v1/canningst-site.js
 3. **Pre-flight checklist (before the motors-on step).** Do not run step 4
    until every line is true:
 
-   - [ ] Battery at least **50 %** (check in the Tello app or the L0 line
-         `battery=<n>%`). With the history energy profile each observation
-         reserves roughly 50-60 % of battery, so expect the supervisor to
-         refuse observations below about 75 %.
+   - [ ] Battery at least **85 %** (check in the Tello app or the L0 line
+         `battery=<n>%`). Each observation is admitted only while it can
+         still pay, above the 20 % floor, its own worst case, a recovery and
+         the whole return (about 44-49 % at 0.288 %/s): below about 65-70 %
+         no observation is admitted and the aircraft returns; below about
+         50 % takeoff itself is refused. A real observation burns about
+         5-8 %, so 85 % leaves room for three.
    - [ ] The Tello sits on the start mark (250, 190 cm), nose toward the tag
          stands, and both tags are in view of its camera.
    - [ ] Clear distance **measured with the tape** in each move direction
@@ -696,9 +729,15 @@ run.
 ## Known follow-ups
 
 - **Real-mode counting under the history profiles.** Observation is open
-  in REAL mode under `count_return` grants, but with the measured worst
-  drift the supervisor refuses every CanningSt region (see "What L3 will do
-  with the history profiles"). Counting needs an operator decision there.
+  in REAL mode under `count_return` grants. With the robust history drift
+  the supervisor admits the CanningSt center region only; left and right
+  need an operator decision (see "What L3 will do with the history
+  profiles").
+- **Arrival without trims.** `trim_rounds` is 0, so an observation is
+  credited when the measured pose is within the planner's dead band (10 cm)
+  plus 5 cm of the declared pose; an open-loop arrival further off (the
+  history's median leg error is about 10 cm) is a `TOOL_FAILURE` for that
+  region, and the loop moves on.
 - **Pre-takeoff pose.** The default flight stack
   (`sentinel.room.live_stack`) anchors the tracker from a tag burst taken
   on the pad, at pad height. Start admission assesses the return from the

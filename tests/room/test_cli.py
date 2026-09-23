@@ -1572,7 +1572,7 @@ def test_runbook_l3_states_the_checklist_before_the_motors_on_step():
     checklist = section.index("Pre-flight checklist")
     motors_on = section.index("python scripts/room_session.py live")
     assert checklist < motors_on
-    for needle in ("at least **50 %**", "Clear distance **measured", "emergency stop",
+    for needle in ("at least **85 %**", "Clear distance **measured", "emergency stop",
                    cli.DEFAULT_REQUEST_TEXT.split(",")[0]):
         assert needle in " ".join(section.split()) or needle in section, needle
     assert "L1" not in _runbook_section(L3_PREP_HEADING).replace("no L1 calibration", "")

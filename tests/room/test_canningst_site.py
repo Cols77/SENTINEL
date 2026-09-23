@@ -16,6 +16,8 @@ import json
 from pathlib import Path
 import time
 
+import pytest
+
 from sentinel.cube.checkpoint import CommandLimits
 from sentinel.cube.energy import ExecutionMode, ReserveGuard
 from sentinel.cube.localization import LocalizationState, LocalizationTracker
@@ -190,7 +192,7 @@ def test_canningst_takeoff_is_admitted_under_one_trial_grant_with_the_history_pr
         link.close()
 
 
-def _airborne_supervisor(tmp_path, drift_override=None):
+def _airborne_supervisor(tmp_path, drift_override=None, battery=90):
     """The CanningSt supervisor with the committed history profiles (drift
     optionally overridden), airborne over the pad after the real stack's
     takeoff; bindings are item 5's concern and are stubbed here."""
@@ -206,7 +208,7 @@ def _airborne_supervisor(tmp_path, drift_override=None):
                                                                           xy_drift_per_cm=drift_override)
     clock = time.monotonic
     tracker = LocalizationTracker(drift, clock=clock, real_mode=True)
-    link = live_stack.TelloLink(build_client=FakeTransport(battery=90), clock=clock)
+    link = live_stack.TelloLink(build_client=FakeTransport(battery=battery), clock=clock)
     stack = live_stack.TelloFlightStackFactory(
         link=link, tag_map=None, run_id="run-0001", run_dir=tmp_path,
         pose_burst=Bursts(reports(250, 190, 90.0)), home_settle_s=0.0)(tracker=tracker, clock=clock, site=binding.site)
@@ -235,25 +237,85 @@ def _admission(supervisor, store, binding, pose_id):
     return supervisor.prepare(snapshot_version=store.session_version("run-0001"), checkpoint=plan, provider_wait_s=10)
 
 
-def test_with_the_measured_history_drift_every_canningst_region_is_refused_after_takeoff(tmp_path):
-    """The runbook's "What L3 will do with the history profiles": the worst
-    measured drift (0.45 cm/cm) leaves no admissible observation between the
-    start pad and the cube's rear face, so L3 returns without a count."""
-    supervisor, store, link, binding = _airborne_supervisor(tmp_path)
+def _decisions(tmp_path, **kwargs):
+    supervisor, store, link, binding = _airborne_supervisor(tmp_path, **kwargs)
     try:
-        for pose_id, _ in binding.site.pose_visibility:
-            decision = _admission(supervisor, store, binding, pose_id)
-            assert decision.transition == "RETURN_NOW", (pose_id, decision.reason)
+        return {pose_id: _admission(supervisor, store, binding, pose_id)
+                for pose_id, _ in binding.site.pose_visibility}
     finally:
         store.close()
         link.close()
 
 
-def test_a_declared_smaller_drift_admits_the_center_region(tmp_path):
-    supervisor, store, link, binding = _airborne_supervisor(tmp_path, drift_override=0.1)
+CENTER, LEFT, RIGHT = ("center-rear-middle-toward_targets", "left-rear-middle-toward_targets",
+                       "right-rear-middle-toward_targets")
+
+
+def test_the_regenerated_history_profiles_admit_the_center_region_after_takeoff(tmp_path):
+    """Task B2, the runbook's "What L3 will do with the history profiles":
+    with the robust drift (p90 of the nominal legs + 20 %, 0.157 cm/cm) the
+    center observation is admitted at 90 % battery. Left and right stay
+    refused: their out-and-back return ends at the pad, 30 cm from the cube's
+    rear face, and 160 cm of travel without a fix at 0.157 cm/cm alone is
+    25 cm of uncertainty, more than the 18 cm the 12 cm rotation radius
+    leaves there."""
+    decisions = _decisions(tmp_path)
+    assert decisions[CENTER].transition == "CONTINUE", decisions[CENTER].reason
+    for pose_id in (LEFT, RIGHT):
+        assert decisions[pose_id].transition == "RETURN_NOW", (pose_id, decisions[pose_id].reason)
+        assert decisions[pose_id].reason in {"OPTIONAL_PATH_INVALID", "PROJECTED_TERMINATION_PATH_INVALID"}
+    # The reservation is well inside what 90 % leaves above the 20 % floor.
+    assert decisions[CENTER].energy.action_cost_pct <= 50
+
+
+def test_the_old_outlier_drift_is_still_refused_everywhere(tmp_path):
+    """The 0.45 cm/cm leg of the excluded run, declared as the drift: no
+    region is admissible (the supervisor still refuses an absurd drift)."""
+    for pose_id, decision in _decisions(tmp_path, drift_override=0.45).items():
+        assert decision.transition == "RETURN_NOW", (pose_id, decision.reason)
+
+
+def test_at_30_percent_battery_the_mission_is_refused_before_takeoff(tmp_path):
+    import pytest
+    with pytest.raises(ValueError, match="RETURN_ENERGY_UNAVAILABLE"):
+        _decisions(tmp_path, battery=30)
+
+
+def test_takeoff_needs_about_half_a_battery(tmp_path):
+    """The runbook's takeoff figure: a recovery and the whole return above the 20 % floor."""
+    _decisions(tmp_path / "ok", battery=50)
+    with pytest.raises(ValueError, match="RETURN_ENERGY_UNAVAILABLE"):
+        _decisions(tmp_path / "refused", battery=45)
+
+
+@pytest.mark.parametrize("battery, center", [(90, "CONTINUE"), (70, "CONTINUE"), (60, "RETURN_NOW")])
+def test_the_battery_an_observation_needs(tmp_path, battery, center):
+    """The runbook's battery figure: an observation reserves its own worst
+    case, a recovery and the whole return (about 40 % at 0.288 %/s); below
+    about 65 % none is admitted and the aircraft returns."""
+    decision = _decisions(tmp_path, battery=battery)[CENTER]
+    assert decision.transition == center, decision.reason
+
+
+def test_a_geometry_feasible_declared_drift_admits_every_region(tmp_path):
+    """What an operator declaration would need for left/right at CanningSt
+    (the report's "known gaps"): 0.05 cm/cm with the policy's time terms is
+    still refused; 0.05 with 0.02 cm/s and 0.01 deg/s hover drift admits all
+    three."""
+    from sentinel.room import live_session
+    decisions = _decisions(tmp_path / "a", drift_override=0.05)
+    assert decisions[LEFT].transition == "RETURN_NOW"
+    original = live_session.load_flight_binding
+
+    def lighter(**kwargs):
+        from dataclasses import replace
+        binding = original(**kwargs)
+        return replace(binding, drift_profile=replace(binding.drift_profile, xy_drift_cm_s=0.02,
+                                                      heading_drift_deg_s=0.01))
+
+    live_session.load_flight_binding = lighter
     try:
-        decision = _admission(supervisor, store, binding, "center-rear-middle-toward_targets")
-        assert decision.transition == "CONTINUE", decision.reason
+        decisions = _decisions(tmp_path / "b", drift_override=0.05)
     finally:
-        store.close()
-        link.close()
+        live_session.load_flight_binding = original
+    assert all(d.transition == "CONTINUE" for d in decisions.values()), {k: d.reason for k, d in decisions.items()}

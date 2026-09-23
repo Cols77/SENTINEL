@@ -59,8 +59,15 @@ def _synthetic(tmp_path) -> Path:
     return root
 
 
+B2_POLICY_KEYS = ("excluded_runs", "declared_overrides", "robust_drift", "battery_percentile", "min_battery_window_s")
+
+
 def _policy() -> dict:
-    return json.loads(POLICY_PATH.read_text(encoding="utf-8"))
+    """The committed policy without its CanningSt-history-specific Task B2
+    choices (run exclusions, the declared robust drift, the percentile and
+    window rules), so the base derivation rules are tested on their own."""
+    policy = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
+    return {key: value for key, value in policy.items() if key not in B2_POLICY_KEYS}
 
 
 def test_profiles_use_the_worst_observed_burn_drift_and_altitude_plus_the_declared_margins(tmp_path):
@@ -157,6 +164,91 @@ def test_the_committed_profiles_are_exactly_what_the_real_history_derives(tmp_pa
         derived = (tmp_path / name).read_bytes().replace(b"\r\n", b"\n")
         committed = (PROFILES_DIR / name).read_bytes().replace(b"\r\n", b"\n")
         assert derived == committed, name
+
+
+# ---------------------------------------------------------------------------
+# Task B2: robust drift, run exclusions, whole-flight battery windows
+# ---------------------------------------------------------------------------
+
+
+def _timed_run(root: Path, name: str, rows: list[dict], *, takeoff_at: str, first_at: str, land_at: str):
+    trial = root / name
+    trial.mkdir(parents=True)
+    commands = [{"command": "speed 20", "response": "ok", "timestamp": takeoff_at},
+                {"command": "takeoff", "response": "ok", "timestamp": takeoff_at},
+                {"command": "up 20", "response": "ok", "timestamp": first_at},
+                {"command": "right 100", "response": "ok", "timestamp": first_at},
+                {"command": "land", "response": "ok", "timestamp": land_at}]
+    (trial / "run.jsonl").write_text(json.dumps({"mode": "real", "status": "PASS", "commands": commands}) + "\n",
+                                     encoding="utf-8")
+    (trial / "mission.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def test_drift_is_per_centimetre_of_path_since_the_last_fix_vertical_included(tmp_path):
+    root = tmp_path / "trials"
+    _write_trial(root, "t1", [
+        _row("START", fix=[200, 200], battery=90, height=100),
+        _row("A", commanded=[300, 200, 100], error=None, status="UNLOCALISED", battery=88,
+             at="2026-09-22T00:00:10+00:00", height=100),
+        _row("B", commanded=[300, 250, 140], fix=[301, 251], error=19.0, battery=86,
+             at="2026-09-22T00:00:30+00:00", height=140),
+    ])
+    leg, = history_cli.read_history(root).legs
+    # 100 cm to the unlocalised A, then 50 cm forward and 40 cm up to B.
+    assert leg.path_cm == pytest.approx(190.0)
+    assert leg.xy_per_cm == pytest.approx(0.1)
+
+
+def test_excluded_runs_contribute_nothing_and_are_named_in_the_evidence(tmp_path):
+    history = history_cli.read_history(_synthetic(tmp_path))
+    policy = {**_policy(), "excluded_runs": {"t2": "flown below the battery floor"},
+              "robust_drift": {"percentile": 90, "margin_fraction": 0.2}}
+    profiles = history_cli.build_profiles(history, site=canningst_site(), policy=policy)
+    assert "excluded-run:t2" in profiles.drift_profile.evidence_refs
+    assert "wp5-trial:t2" not in profiles.drift_profile.evidence_refs
+    assert profiles.calibration_profile.training_run_ids == ("t1",)
+    assert {"run": "t2", "what": "run", "reason": "flown below the battery floor"} in profiles.measurements["excluded"]
+    robust = profiles.measurements["robust_drift"]
+    ratios = [leg.xy_per_cm for leg in history.legs if leg.trial == "t1"]
+    assert robust["xy_drift_per_cm_percentile"] == pytest.approx(history_cli.percentile(ratios, 90))
+    assert robust["xy_drift_per_cm"] == pytest.approx(robust["xy_drift_per_cm_percentile"] * 1.2)
+    for bad in ({"t2": " "}, {"nope": "reason"}):
+        with pytest.raises(history_cli.HistoryError, match="excluded run|not in the history"):
+            history_cli.build_profiles(history, site=canningst_site(), policy={**_policy(), "excluded_runs": bad})
+
+
+def test_battery_is_the_whole_flight_percentile_and_short_windows_are_dropped_by_name(tmp_path):
+    root = tmp_path / "trials"
+    rows = [_row("START", fix=[250, 190], battery=90, height=100, at="2026-09-22T00:00:06+00:00"),
+            _row("A", commanded=[350, 190, 100], fix=[352, 190], error=4.0, battery=84,
+                 at="2026-09-22T00:00:30+00:00", height=100)]
+    _timed_run(root, "long", rows, takeoff_at="2026-09-22T00:00:00+00:00",
+               first_at="2026-09-22T00:00:05+00:00", land_at="2026-09-22T00:01:05+00:00")
+    _timed_run(root, "short", rows, takeoff_at="2026-09-22T01:00:00+00:00", first_at="2026-09-22T01:00:05+00:00",
+               land_at="2026-09-22T01:00:15+00:00")
+    history = history_cli.read_history(root)
+    assert {w.trial: (w.source, w.elapsed_s) for w in history.battery} == {"long": ("flight", 60.0),
+                                                                            "short": ("flight", 10.0)}
+    policy = {**_policy(), "battery_percentile": 90, "min_battery_window_s": 30}
+    profiles = history_cli.build_profiles(history, site=canningst_site(), policy=policy)
+    # 90 -> 84 over the 60 s flight, plus the 1 % reading step; the 10 s flight is quantization.
+    assert profiles.measurements["worst_battery_percent_per_s"] == pytest.approx((6 + 1.0) / 60)
+    assert any(entry["run"] == "short" and "min_battery_window_s" in entry["reason"]
+               for entry in profiles.measurements["excluded"])
+
+
+@pytest.mark.skipif(not REAL_TRIALS.is_dir(), reason="the recorded WP5 history is not on this machine")
+def test_the_real_history_outlier_is_the_excluded_runs_first_leg_and_the_nominal_p90_is_about_013():
+    history = history_cli.read_history(REAL_TRIALS)
+    worst = max(history.legs, key=lambda leg: leg.drift_cm / leg.distance_cm)
+    assert (worst.trial, worst.waypoint) == ("20260923-122157-reanchor", "FAR_L_HI")
+    assert worst.drift_cm / worst.distance_cm == pytest.approx(0.45, abs=0.005)  # the old straight-line ratio
+    policy = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
+    profiles = history_cli.build_profiles(history, site=canningst_site(), policy=policy)
+    robust = profiles.measurements["robust_drift"]
+    assert robust["xy_drift_per_cm_percentile"] == pytest.approx(0.1312, abs=0.001)
+    assert profiles.drift_profile.xy_drift_per_cm == pytest.approx(robust["xy_drift_per_cm"], abs=1e-6)
+    assert profiles.energy_profile.percent_per_second_upper < 0.3
 
 
 # ---------------------------------------------------------------------------

@@ -99,6 +99,28 @@ def test_integer_battery_increase_is_noise_and_never_lowers_the_calibrated_bound
     assert guard.conservative_percent_per_second == learned
 
 
+def test_a_single_reading_step_over_a_short_window_is_quantization_not_a_burn_rate() -> None:
+    # Task B2: two samples 2 s apart straddling one 1 % reading step used to
+    # teach the guard 0.5 %/s, which then priced every observation at tens of
+    # percent. One step over a short window is the reading's resolution.
+    guard = _guard(percent_per_second_upper=0.1)
+
+    guard.observe(_sample(90, 0), _sample(90, 8))
+    guard.observe(_sample(90, 8), _sample(89, 10))
+
+    assert guard.conservative_percent_per_second == 0.1
+
+
+def test_the_stream_rate_still_learns_a_burn_made_of_single_steps() -> None:
+    # Single steps every 2 s are a real 0.5 %/s burn: the rate over the
+    # stream since its first sample (once that spans the window) learns it.
+    guard = _guard(percent_per_second_upper=0.1)
+    for index in range(11):
+        assert guard.ingest_sample(_sample(90 - index, 2 * index))
+
+    assert guard.conservative_percent_per_second == 0.5
+
+
 def test_observed_burn_can_raise_the_calibrated_bound() -> None:
     guard = _guard(percent_per_second_upper=0.1)
 

@@ -248,9 +248,18 @@ class SafetySupervisor:
         if profile is None:
             return False
         position, heading = pose.position, pose.heading_deg
-        forecast = self._forecast(pose, plan, self.clock() if now is None else now)
-        radius = profile.rotation_radius_cm + max(pose.xy_uncertainty_cm,
-                                                  forecast.projected.xy_uncertainty_cm)
+        # Task B2: each command's swept disk is bounded by the uncertainty
+        # accrued by the *end of that command* (drift only grows between
+        # fixes, so that bounds the whole segment), not by the uncertainty at
+        # the end of the entire plan. The old end-of-plan radius charged the
+        # drift of the whole return (down to the landing) to its first point,
+        # which refused every CanningSt pose 30 cm from a cube face even at
+        # near-zero drift.
+        segment_tracker = copy(self.tracker)
+        segment_now = self.clock() if now is None else now
+        segment_tracker._health = pose
+        accrued = segment_tracker._advance(pose, max(segment_now, pose.propagated_at))
+        segment_now = accrued.propagated_at
         height = profile.max_height_error_cm
         volumes = site.free_space_volumes
         if corridor:
@@ -259,6 +268,14 @@ class SafetySupervisor:
         for command in plan.commands:
             previous = position
             args = dict(command.arguments)
+            if not math.isfinite(command.upper_bound_s) or command.upper_bound_s < 0:
+                return False
+            segment_now += command.upper_bound_s
+            try:
+                accrued = segment_tracker._advance(
+                    segment_tracker._command(segment_tracker._advance(accrued, segment_now), command), segment_now)
+            except (ValueError, KeyError):
+                return False
             if command.kind == "LAND":
                 # assess checks descent separately after localization/reserve
                 # admission, using the full projected landing footprint.
@@ -266,6 +283,7 @@ class SafetySupervisor:
             if command.kind == "TRIM_ALLOWANCE" and args.get("max_rounds", 0):
                 # Trims are conditional commands not exposed by this adapter.
                 return False
+            radius = profile.rotation_radius_cm + max(pose.xy_uncertainty_cm, accrued.xy_uncertainty_cm)
             propagated = self.tracker._command(replace(pose, position=position, heading_deg=heading), command)
             position, heading = propagated.position, propagated.heading_deg
             points = tuple(Position(p.x_cm, p.y_cm, p.z_cm + dz)
