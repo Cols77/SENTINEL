@@ -8,6 +8,7 @@ import {renderCounts} from './counts.mjs';
 import {createChatView} from './chat.mjs';
 import {createControlledLandController,createSafetyView} from './safety.mjs';
 import {createLocalizationView} from './localization.mjs';
+import {createSiteProfileController} from './site-profiles.mjs';
 import {missionMapModel,renderMissionMap} from './mission-map.mjs';
 const root=document.getElementById('app');
 root.classList.add('mission-console');document.title='SENTINEL · Mission Control';
@@ -29,7 +30,10 @@ const audit=el('details',{class:'mission-audit'},[el('summary',{},['Audit log'])
 root.append(top,readinessHost,el('div',{class:'mission-layout'},[chatHost,center,counts]),audit);
 const client=createHttpClient();
 const controller=createController(client,missionContract);
+const profiles=createSiteProfileController(client,()=>controller.refresh());
+profiles.subscribe(()=>{if(snapshot?.session.mode==='LIVE')renderReadiness(toSurveyView(snapshot));});
 let snapshot=null,selection=null,restored=false;
+let profileCatalogueActive=false,profileLockKey=null;
 const landController=createControlledLandController({getSnapshot:()=>snapshot,requestLand:client.request_land});
 const chat=createChatView(chatHost,client,()=>snapshot,{landController});
 const safety=createSafetyView(safetyHost,client,()=>snapshot,{landController});
@@ -49,6 +53,17 @@ function renderReadiness(view){
   el('h2',{id:'live-readiness-title'},['Live readiness']),
   el('p',{id:'live-readiness-state',class:'readiness-state'},[model.label]),
  ];
+ const profileState=profiles.getState();
+ const siteSelect=el('select',{id:'site-profile','aria-describedby':'site-profile-status',disabled:profileState.pending||!profileState.switch_allowed},
+  profileState.profiles.length?profileState.profiles.map(profile=>el('option',{value:profile.id,selected:profile.id===profileState.selected_profile_id,disabled:!profile.enabled},
+   [`${profile.label} · ${profile.enabled?'Available':'Draft'} · ${profile.setup_status}`])):[el('option',{value:''},['Loading site profiles…'])]);
+ siteSelect.addEventListener('change',()=>profiles.select(siteSelect.value));
+ nodes.push(el('div',{class:'site-profile-placard'},[
+  el('span',{class:'site-profile-marker','aria-hidden':'true'},['CAL / 01']),
+  el('label',{for:'site-profile'},['Physical site profile']),siteSelect,
+  el('p',{id:'site-profile-status',role:'status',class:'meta'},[profileState.pending?'Selecting site profile…':profileState.feedback||
+   (profileState.switch_allowed?'Select the calibrated site before the mission begins.':'Site selection locked for this mission.')]),
+ ]));
  if(model.failed.length)nodes.push(el('ul',{class:'readiness-checks'},model.failed.map(check=>
   el('li',{id:`readiness-${check.capability}`},[
    el('strong',{},[capabilityLabels[check.capability]??check.capability]),
@@ -56,8 +71,6 @@ function renderReadiness(view){
    el('p',{},[check.remediation]),
   ]))));
  else nodes.push(el('p',{class:'meta'},['Configuration checks passed. Dispatch still requires proposal approval and bounded preflight.']));
- nodes.push(el('p',{class:'meta'},['Restart Mission Control after changing CLI configuration.']),
-  el('code',{class:'readiness-command'},[model.command_template]));
  replace(readinessHost,nodes);
  return model;
 }
@@ -79,6 +92,10 @@ function select(kind,id){selection={kind,id};evidence.select(toSurveyView(snapsh
 controller.subscribe(state=>{
  if(!state.survey){if(state.error)status.textContent=`Connection unavailable: ${state.error}`;return;}
  snapshot=state.survey;
+ if(profileCatalogueActive&&snapshot.session.mode==='LIVE'){
+  const key=`${snapshot.run.status}:${snapshot.run.phase}:${snapshot.proposal?.id??''}`;
+  if(key!==profileLockKey){profileLockKey=key;void profiles.load();}
+ }
  safety.render(snapshot);localization.render(snapshot);renderMissionMap(mapHost,missionMapModel(snapshot));
  const view=toSurveyView(snapshot);
  const readiness=renderReadiness(view);
@@ -94,5 +111,5 @@ controller.subscribe(state=>{
  if(selection){const ids=selection.kind==='frame'?[selection.id]:supportingSightings(view,selection).map(x=>x.frame_id);if(ids.some(id=>snapshot.evidence.frames.find(f=>f.id===id)?.evidence!=='AVAILABLE')){evidence.clear();selection=null;}}
  if(!restored){restored=true;const saved=localStorage.getItem(`sentinel:${snapshot.session.id}:${snapshot.run.id}:decision`);if(saved){try{decision.restore(JSON.parse(saved));}catch{localStorage.removeItem(`sentinel:${snapshot.session.id}:${snapshot.run.id}:decision`);}}}
 });
-try{const session=await client.session();await controller.open(session.active_run_id);const stop=startPolling(()=>controller.refresh());window.addEventListener('pagehide',()=>{stop();chat.dispose();evidence.dispose();safety.dispose();localization.dispose();});}
+try{const session=await client.session();await controller.open(session.active_run_id);if(session.mode==='LIVE'){profileCatalogueActive=true;profileLockKey=`${snapshot.run.status}:${snapshot.run.phase}:${snapshot.proposal?.id??''}`;await profiles.load();}const stop=startPolling(()=>controller.refresh());window.addEventListener('pagehide',()=>{stop();chat.dispose();evidence.dispose();safety.dispose();localization.dispose();});}
 catch(e){status.textContent='Local runtime unavailable: '+e.message;}

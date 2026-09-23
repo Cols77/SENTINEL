@@ -5,7 +5,13 @@ import {
   createDecisionController,
   canDecide,
   terminalDecisionText,
+  approvalActionCopy,
 } from "../../examples/survey-console/approval.mjs";
+test('approval copy names physical dispatch and paid detection only in Live',()=>{
+ assert.equal(approvalActionCopy('LIVE').label,'Approve & dispatch real flight');
+ assert.match(approvalActionCopy('LIVE').explanation,/immutable proposal.*bounded no-takeoff preflight.*paid detection/i);
+ assert.match(approvalActionCopy('REHEARSAL').explanation,/non-physical/i);
+});
 test('terminal decision text is explicit and cannot imply a conflict',()=>{
  assert.equal(terminalDecisionText('COMPLETE'),'COMPLETE - run is complete; no new dispatch is available.');
  assert.equal(terminalDecisionText('ABORTED'),'ABORTED - run was aborted; no new dispatch is available.');

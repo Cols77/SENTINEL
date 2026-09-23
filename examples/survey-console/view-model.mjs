@@ -30,9 +30,9 @@ export function missionStatusText(view){
 
 export function liveReadinessModel(view){
  const visible=view?.mode==='LIVE';
- if(!visible)return {visible:false,armed:false,label:'',failed:[],command_template:''};
+ if(!visible)return {visible:false,armed:false,label:'',failed:[]};
  const readiness=view?.readiness??{state:'NOT_READY',checks:[],command_template:''};
  const armed=readiness.state==='ACTIVE';
  return {visible:true,armed,label:`LIVE · ${armed?'ACTIVE':'UNARMED'} · ${readiness.state}`,
-  failed:readiness.checks.filter(check=>!check.ready),command_template:readiness.command_template};
+  failed:readiness.checks.filter(check=>!check.ready)};
 }

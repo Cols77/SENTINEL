@@ -57,6 +57,6 @@ test('older schema v3 snapshots fail closed only for Live mode',()=>{
  assert.deepEqual(live.readiness,{state:'NOT_READY',checks:[],command_template:''});
  assert.deepEqual(liveReadinessModel(live),{
   visible:true,armed:false,label:'LIVE · UNARMED · NOT_READY',
-  failed:[],command_template:'',
+  failed:[],
  });
 });

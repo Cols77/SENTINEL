@@ -4,12 +4,14 @@ export function createHttpClient(base='/api/v1',fetchImpl=fetch){
  const runPath=id=>`${base}/runs/${encodeURIComponent(id)}`;
  async function json(url,init,typedConflict=false){
   const response=await fetchImpl(url,init);const body=await response.json();
-  if(!response.ok && !(typedConflict&&response.status===409&&body.status==='CONFLICT'))throw new Error(body.message??'Request failed');
+  if(!response.ok && !(typedConflict&&((response.status===409&&body.status==='CONFLICT')||([422,503].includes(response.status)&&['INVALID','UNAVAILABLE'].includes(body.status)))))throw new Error(body.message??'Request failed');
   return body;
  }
  const post=(url,body,typed=false)=>json(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)},typed);
  return {
   session:()=>json(`${base}/session`),
+  read_site_profiles:()=>json(`${base}/site-profiles`),
+  select_site_profile:profile_id=>json(`${base}/site-profiles/select`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({profile_id})},true),
   async read_survey(id){const s=validateMission(await json(`${runPath(id)}/snapshot`));if(s.run.id!==id)throw Error('Run mismatch');snapshots.set(id,s);return s;},
   read_survey_events:(id,after,limit)=>json(`${runPath(id)}/events?after_sequence=${after}&limit=${limit}`),
   submit_decision:attempt=>post(`${runPath(attempt.run_id)}/decisions`,attempt,true),

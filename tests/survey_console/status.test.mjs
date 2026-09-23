@@ -30,7 +30,7 @@ test('live readiness model identifies unarmed state and lists only failed checks
  assert.equal(notReady.armed,false);
  assert.equal(notReady.label,'LIVE · UNARMED · NOT_READY');
  assert.deepEqual(notReady.failed.map(check=>check.capability),capabilities);
- assert.match(notReady.command_template,/--site <SITE_JSON>/);
+ assert.equal(Object.hasOwn(notReady,'command_template'),false);
 
  const partial=liveReadinessModel(snapshot('READY_TO_PLAN',['planning']));
  assert.deepEqual(partial.failed.map(check=>check.capability),['flight','detection','emergency']);
@@ -44,5 +44,5 @@ test('rehearsal suppresses Live remediation',()=>{
  const model=liveReadinessModel({mode:'REHEARSAL',readiness:snapshot('NOT_READY',[]).readiness});
  assert.equal(model.visible,false);
  assert.deepEqual(model.failed,[]);
- assert.equal(model.command_template,'');
+ assert.equal(Object.hasOwn(model,'command_template'),false);
 });

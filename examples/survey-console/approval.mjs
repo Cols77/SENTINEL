@@ -1,4 +1,9 @@
 import { el, button, replace, meta } from "./dom.mjs";
+export function approvalActionCopy(mode){
+ return mode==='LIVE'
+  ? {label:'Approve & dispatch real flight',explanation:'Approval confirms the immutable proposal, begins bounded no-takeoff preflight, and may start paid detection.'}
+  : {label:'Approve flight',explanation:'Rehearsal is non-physical; approval advances the simulation only.'};
+}
 export function terminalDecisionText(status){return {COMPLETE:'COMPLETE - run is complete; no new dispatch is available.',ABORTED:'ABORTED - run was aborted; no new dispatch is available.',RECOVERY_REQUIRED:'RECOVERY_REQUIRED - reconcile the aircraft before dispatch.'}[status]||null;}
 export function canDecide(s, needsRefresh, decision = "APPROVE") {
   const p = s?.proposal,
@@ -230,12 +235,13 @@ export function renderApproval(
     );
   nodes.push(
     el("div", { class: "decision-buttons" }, [
-      button("Approve flight", onApprove, {
+      button(approvalActionCopy(s.mode).label, onApprove, {
         id: "approve",
         disabled: !approveEnabled,
       }),
       button("Reject", onReject, { id: "reject", disabled: !rejectEnabled }),
     ]),
+    meta(approvalActionCopy(s.mode).explanation),
     meta(s.mode ? "Decision acknowledgement is not flight completion." : "Fixture acknowledgement is not flight dispatch."),
   );
   if (state.attempt) {

@@ -18,6 +18,29 @@ test('binary evidence needs a run-scoped snapshot binding',async()=>{
  assert.equal((await client.read_evidence('r','unknown')).status,'NOT_FOUND');
 });
 
+test('site profile client reads catalogue and posts only the selected id',async()=>{
+ const calls=[];
+ const client=createHttpClient('/api/v1',async(url,init)=>{
+  calls.push([url,init]);
+  return new Response(JSON.stringify({status:'ACKNOWLEDGED',selected_profile_id:'CanningSt'}));
+ });
+ await client.read_site_profiles();
+ await client.select_site_profile('CanningSt');
+ assert.equal(calls[0][0],'/api/v1/site-profiles');
+ assert.equal(calls[1][0],'/api/v1/site-profiles/select');
+ assert.equal(calls[1][1].method,'POST');
+ assert.deepEqual(JSON.parse(calls[1][1].body),{profile_id:'CanningSt'});
+});
+
+test('site profile client retains typed failure bodies',async()=>{
+ for(const [status,type] of [[409,'CONFLICT'],[422,'INVALID'],[503,'UNAVAILABLE']]){
+  const client=createHttpClient('/api/v1',async()=>new Response(JSON.stringify({status:type,reason_code:'MISSION_NOT_IDLE',selected_profile_id:'CanningSt'}),{status}));
+  const result=await client.select_site_profile('Harbor');
+  assert.equal(result.status,type);
+  assert.equal(result.reason_code,'MISSION_NOT_IDLE');
+ }
+});
+
 test('poller schedules only after the outstanding request finishes',async()=>{
  const {startPolling}=await import('../../examples/survey-console/http-client.mjs');
  let resolve;const pending=new Promise(r=>resolve=r);const scheduled=[];
