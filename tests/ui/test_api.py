@@ -449,6 +449,56 @@ def test_profile_select_does_not_block_event_loop(tmp_path, monkeypatch):
         service.close()
 
 
+def test_rejected_profile_content_type_does_not_block_event_loop(
+        tmp_path, monkeypatch):
+    from threading import Event, Thread, Timer
+
+    service = _profile_service(tmp_path)
+    entered = Event()
+    release = Event()
+    responses = []
+    errors = []
+    site_profiles = service.site_profiles
+
+    def blocked_catalogue():
+        entered.set()
+        if not release.wait(timeout=3):
+            raise AssertionError('controlled catalogue read was not released')
+        return site_profiles()
+
+    monkeypatch.setattr(service, 'site_profiles', blocked_catalogue)
+    try:
+        with TestClient(build_app(service, repository_root=Path.cwd())) as client:
+            def reject_profile():
+                try:
+                    responses.append(client.post(
+                        '/api/v1/site-profiles/select',
+                        content='{"profile_id":"Second"}',
+                        headers={'content-type': 'text/plain'}))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            request = Thread(target=reject_profile)
+            request.start()
+            assert entered.wait(timeout=1)
+            watchdog = Timer(1, release.set)
+            watchdog.start()
+            try:
+                session = client.get('/api/v1/session')
+                assert session.status_code == 200
+                assert not release.is_set()
+            finally:
+                release.set()
+                request.join(timeout=3)
+                watchdog.cancel()
+            assert not request.is_alive()
+            assert not errors
+            assert responses and responses[0].status_code == 422
+            assert responses[0].json()['reason_code'] == 'INVALID_PROFILE_REQUEST'
+    finally:
+        service.close()
+
+
 def test_profile_switch_event_failure_preserves_selection_and_closes_candidate(
         tmp_path, monkeypatch):
     from sentinel.ui import live

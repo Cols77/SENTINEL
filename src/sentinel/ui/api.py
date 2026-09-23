@@ -17,7 +17,7 @@ def build_router(service):
         if content_type.split(';', 1)[0].strip().lower() != 'application/json':
             return result(dict(status='INVALID',
                                reason_code='INVALID_PROFILE_REQUEST',
-                               **service.site_profiles()))
+                               **await run_in_threadpool(service.site_profiles)))
         try:
             command = await request.json()
         except ValueError:
