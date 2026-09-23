@@ -12,6 +12,12 @@ from .safety import SafetyRegistry, RunnerSafetyAdapter
 from .models import EvidenceCapability
 from .projection import ProjectionService
 
+_DISPATCH_FAILURES = {
+    'planning': {'POSE_DATABASE_UNAVAILABLE'},
+    'flight': {'LIVE_PREFLIGHT_FAILED'},
+    'emergency': {'INDEPENDENT_EMERGENCY_UNAVAILABLE'},
+}
+
 class MissionControlService:
     def __init__(self, *, config, adapters, readiness=None):
         self.config,self.adapters=config,adapters
@@ -52,11 +58,37 @@ class MissionControlService:
             base_checks = {check.capability: check for check in base.checks}
             for check in readiness.checks:
                 baseline = base_checks[check.capability]
-                if check != baseline:
-                    self._readiness_overlays[check.capability] = (baseline, check)
+                route_current = (check.capability not in {'flight', 'emergency'} or
+                                 readiness.resolved_local_ip == base.resolved_local_ip)
+                if (not check.ready and
+                        check.reason_code in _DISPATCH_FAILURES.get(check.capability, ())
+                        and baseline.ready and route_current):
+                    self._readiness_overlays[check.capability] = (
+                        baseline, base.resolved_local_ip, check)
                 else:
                     self._readiness_overlays.pop(check.capability, None)
-        self.readiness = readiness
+            self._refresh_live_readiness(base)
+        else:
+            self.readiness = readiness
+
+    def _refresh_live_readiness(self, base):
+        from .readiness import LiveReadiness
+        checks = []
+        for check in base.checks:
+            overlay = self._readiness_overlays.get(check.capability)
+            route_current = (check.capability not in {'flight', 'emergency'} or
+                             overlay is not None and
+                             overlay[1] == base.resolved_local_ip)
+            if overlay is not None and overlay[0] == check and route_current:
+                check = overlay[2]
+            elif overlay is not None:
+                self._readiness_overlays.pop(check.capability, None)
+            checks.append(check)
+        state = ('READY_TO_DISPATCH' if all(check.ready for check in checks)
+                 else 'READY_TO_PLAN' if checks[0].ready else 'NOT_READY')
+        self.readiness = LiveReadiness(state, tuple(checks),
+                                       base.command_template,
+                                       base.resolved_local_ip)
 
     def require_run(self, run_id):
         if run_id != self.config.run_id:
@@ -67,20 +99,8 @@ class MissionControlService:
 
     def read_snapshot(self, run_id):
         if self.config.mode == 'LIVE':
-            from .readiness import LiveReadiness, evaluate_live_readiness
-            base = evaluate_live_readiness(self.config)
-            checks = []
-            for check in base.checks:
-                overlay = self._readiness_overlays.get(check.capability)
-                if overlay is not None and overlay[0] == check:
-                    check = overlay[1]
-                elif overlay is not None:
-                    self._readiness_overlays.pop(check.capability, None)
-                checks.append(check)
-            state = ('READY_TO_DISPATCH' if all(check.ready for check in checks)
-                     else 'READY_TO_PLAN' if checks[0].ready else 'NOT_READY')
-            self.readiness = LiveReadiness(state, tuple(checks),
-                                           base.command_template)
+            from .readiness import evaluate_live_readiness
+            self._refresh_live_readiness(evaluate_live_readiness(self.config))
         return self.projection.snapshot(run_id)
 
     def read_events(self, run_id, after_sequence, limit):

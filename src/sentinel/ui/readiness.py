@@ -52,6 +52,7 @@ class LiveReadiness:
     state: ReadinessState
     checks: tuple[ReadinessCheck, ...]
     command_template: str
+    resolved_local_ip: str | None = None
 
     def public(self) -> dict:
         return {
@@ -135,16 +136,18 @@ def discover_local_ipv4(tello_ip: str) -> str | None:
     return None
 
 
-def _network_ready(config: SessionConfig) -> bool:
+def _resolved_local_ipv4(config: SessionConfig) -> str | None:
     if config.local_ip is None:
-        return discover_local_ipv4(config.tello_ip) is not None
+        return discover_local_ipv4(config.tello_ip)
     try:
         local = ipaddress.ip_address(config.local_ip)
         tello = ipaddress.ip_address(config.tello_ip)
-        return (local.version == tello.version == 4 and
-                not local.is_unspecified and not local.is_loopback)
+        if (local.version == tello.version == 4 and
+                not local.is_unspecified and not local.is_loopback):
+            return config.local_ip
     except (TypeError, ValueError):
-        return False
+        pass
+    return None
 
 
 def _flight(network_ready: bool) -> ReadinessCheck:
@@ -233,7 +236,8 @@ def evaluate_live_readiness(config: SessionConfig) -> LiveReadiness:
     # Match the integration CLI: explicit environment values win, otherwise
     # populate missing names from the nearest .env without logging secrets.
     load_env_file()
-    network_ready = _network_ready(config)
+    resolved_local_ip = _resolved_local_ipv4(config)
+    network_ready = resolved_local_ip is not None
     checks = (_planning(config), _flight(network_ready), _detection(config),
               _emergency(network_ready))
     planning_ready = checks[0].ready
@@ -241,4 +245,4 @@ def evaluate_live_readiness(config: SessionConfig) -> LiveReadiness:
         'READY_TO_DISPATCH' if all(check.ready for check in checks) else
         'READY_TO_PLAN' if planning_ready else
         'NOT_READY')
-    return LiveReadiness(state, checks, '')
+    return LiveReadiness(state, checks, '', resolved_local_ip)

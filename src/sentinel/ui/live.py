@@ -124,7 +124,8 @@ class LiveFlight:
         state = ('READY_TO_DISPATCH' if all(check.ready for check in checks)
                  else 'READY_TO_PLAN' if planning_ready else 'NOT_READY')
         self._publish_readiness(
-            LiveReadiness(state, checks, readiness.command_template))
+            LiveReadiness(state, checks, readiness.command_template,
+                          readiness.resolved_local_ip))
 
     def _require(self, readiness, capability):
         check=next(row for row in readiness.checks if row.capability==capability)

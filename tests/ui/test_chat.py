@@ -1,3 +1,5 @@
+from dataclasses import replace
+from pathlib import Path
 from uuid import uuid4
 from sentinel.ui.bootstrap import SessionConfig,build_service
 
@@ -34,13 +36,21 @@ def test_unsupported_request_does_not_choose_nearest_scenario(tmp_path):
 
 
 def test_live_count_request_refuses_before_worker_when_planning_unavailable(tmp_path):
-    svc = build_service(SessionConfig(data_dir=tmp_path, mode='LIVE'))
+    svc = build_service(SessionConfig(
+        data_dir=tmp_path, mode='LIVE',
+        site_path=Path('docs/wp5-flight1-site.json'),
+        tag_map_path=Path('docs/wp5-flight3-map.json'),
+        pose_db=tmp_path / 'pose.sqlite', surface_z_cm=50,
+        start_x_cm=250, start_y_cm=190))
     try:
+        svc.config = replace(svc.config, site_path=tmp_path / 'missing-site.json')
         reply = svc.submit_chat('mission', command(svc, 'count the computers', 'live'))
         assert reply['status'] == 'ACKNOWLEDGED'
         assert reply['kind'] == 'REFUSE'
         assert '--site' in reply['message']
         assert '--tag-map' in reply['message']
+        assert 'Launch template:' not in reply['message']
+        assert 'sentinel mission-control' not in reply['message']
         assert not svc.worker.active
         assert svc.approval.current('mission') is None
     finally:

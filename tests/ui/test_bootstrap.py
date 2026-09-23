@@ -176,6 +176,7 @@ def test_snapshot_refreshes_route_and_provider_facts(live_config, monkeypatch):
             snapshot = service.read_snapshot('mission')
             assert snapshot['schema_version'] == 3
             assert snapshot['readiness']['command_template'] == ''
+            assert 'resolved_local_ip' not in snapshot['readiness']
             return {row['capability']: row for row in snapshot['readiness']['checks']}
 
         assert checks()['flight']['reason_code'] == 'LIVE_NETWORK_CONFIG_REQUIRED'
@@ -238,7 +239,7 @@ def test_dispatch_failure_overlay_clears_when_underlying_route_changes(
                                  'Resolve the no-takeoff preflight failure.')
         service._update_readiness(LiveReadiness(
             'READY_TO_PLAN', tuple(failure if row.capability == 'flight' else row
-                                   for row in base.checks), ''))
+                                   for row in base.checks), '', base.resolved_local_ip))
         def flight():
             return next(row for row in service.read_snapshot('mission')['readiness']['checks']
                         if row['capability'] == 'flight')
@@ -249,6 +250,58 @@ def test_dispatch_failure_overlay_clears_when_underlying_route_changes(
         assert flight()['reason_code'] == 'LIVE_NETWORK_CONFIG_REQUIRED'
         route['address'] = '192.168.10.2'
         assert flight()['ready']
+    finally:
+        service.close()
+
+
+def test_stale_successful_callback_cannot_mask_route_loss(live_config,
+                                                           monkeypatch):
+    from sentinel.ui import readiness
+
+    route = {'address': '192.168.10.2'}
+    monkeypatch.setattr(readiness, 'discover_local_ipv4',
+                        lambda tello_ip: route['address'])
+    service = bootstrap.build_service(replace(live_config, local_ip=None))
+    try:
+        stale = readiness.evaluate_live_readiness(service.config)
+        assert next(row for row in stale.checks if row.capability == 'flight').ready
+        route['address'] = None
+        service._update_readiness(stale)
+        checks = {row['capability']: row for row in
+                  service.read_snapshot('mission')['readiness']['checks']}
+        assert checks['flight']['reason_code'] == 'LIVE_NETWORK_CONFIG_REQUIRED'
+        assert checks['emergency']['reason_code'] == 'LIVE_NETWORK_CONFIG_REQUIRED'
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize('capability,reason_code', [
+    ('flight', 'LIVE_PREFLIGHT_FAILED'),
+    ('emergency', 'INDEPENDENT_EMERGENCY_UNAVAILABLE'),
+])
+def test_dispatch_failure_overlay_clears_when_route_address_changes(
+        live_config, monkeypatch, capability, reason_code):
+    from sentinel.ui import readiness
+    from sentinel.ui.readiness import LiveReadiness, ReadinessCheck
+
+    route = {'address': '192.168.10.2'}
+    monkeypatch.setattr(readiness, 'discover_local_ipv4',
+                        lambda tello_ip: route['address'])
+    service = bootstrap.build_service(replace(live_config, local_ip=None))
+    try:
+        base = readiness.evaluate_live_readiness(service.config)
+        failure = ReadinessCheck(capability, False, reason_code,
+                                 'Restore dispatch capability.')
+        service._update_readiness(LiveReadiness(
+            'READY_TO_PLAN', tuple(failure if row.capability == capability else row
+                                   for row in base.checks), '', base.resolved_local_ip))
+        def selected_check():
+            return next(row for row in service.read_snapshot('mission')['readiness']['checks']
+                        if row['capability'] == capability)
+
+        assert selected_check()['reason_code'] == reason_code
+        route['address'] = '192.168.10.3'
+        assert selected_check()['ready']
     finally:
         service.close()
 

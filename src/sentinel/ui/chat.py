@@ -33,8 +33,7 @@ class ChatService:
                     result=dict(
                         status='ACKNOWLEDGED', kind='REFUSE',
                         message=(f'Planning is unavailable ({planning.reason_code}). '
-                                 f'{planning.remediation} Launch template: '
-                                 f'{svc.readiness.command_template}'))
+                                 f'{planning.remediation}'))
                     svc.store.add_message(
                         run_id,'ASSISTANT',result['message'],status='COMPLETE',
                         snapshot_version=snapshot['run']['version'])
