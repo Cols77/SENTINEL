@@ -1,0 +1,10 @@
+.survey-zone polygon {fill:#1B2733;stroke:#8296A8;stroke-width:.65;vector-effect:non-scaling-stroke}
+.survey-zone[data-status="SURVEYING"] polygon {fill:#213F43;stroke:#47D7C8}
+.survey-zone[data-status="SURVEYED"] polygon {fill:#254C45;stroke:#47D7C8}
+.survey-zone[data-status="HAZARD_PENDING"] polygon {fill:#473B25;stroke:#F2BA55}
+.survey-zone[data-status="BLOCKED"] polygon {fill:#492E35;stroke:#F06565}
+.survey-zone.is-selected polygon {stroke:#F3F6F8;stroke-width:2.5}
+.survey-zone:focus {outline:none}
+.survey-zone:focus-visible polygon {stroke:#47D7C8;stroke-width:3;stroke-dasharray:5 2}
+.zone-name {fill:#F3F6F8;font:4.3px system-ui,sans-serif;pointer-events:none}
+.zone-status {fill:#A9BAC8;font:3px system-ui,sans-serif;pointer-events:none}
