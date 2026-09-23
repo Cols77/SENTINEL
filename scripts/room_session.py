@@ -204,7 +204,7 @@ def _cmd_preview(args: argparse.Namespace) -> int:
             "--consent-db <consent-db-path> --location <location> --date <YYYY-MM-DD> "
             "--i-authorise-paid-calls --profile-file <profile-file-path> "
             "--site <site-path> --assurance <assurance-file-path> "
-            "--clock-domain-id <clock-domain-id>"
+            "--clock-domain-id <clock-domain-id> --run-root <run-artifact-root>"
         )
         print(f"next: {next_command}", file=sys.stderr)
     return 0
@@ -359,49 +359,89 @@ def _cmd_live(
             print(f"refused: {exc}", file=sys.stderr)
             return 2
 
-    # Past every capability/consent/(site) gate. A motors-off connectivity
-    # preflight always runs before takeoff -- proving fresh drone telemetry
-    # and provider reachability concurrently -- whether this is the explicit
-    # diagnostic or the last check before a real flight.
-    result = connectivity.check(
-        drone_probe=drone_probe, provider_probe=provider_probe,
-        max_age_s=args.connectivity_max_age_s, timeout_s=args.connectivity_timeout_s, clock=clock,
-    )
-    if not result.ready:
+    # Fix round 2 (Q2): open the durable run artifact before the connectivity
+    # preflight, not just print its result to stderr -- an operator (or
+    # room_verify_artifact.py, once a run finalizes) must be able to confirm
+    # what a session actually observed, even a session that never flies past
+    # this build's boundary. RunArtifacts.open is idempotent for a run_id
+    # already opened with the same manifest bytes, so a retried invocation
+    # against the same --run-root never conflicts with itself.
+    try:
+        run = artifacts.RunArtifacts.open(args.run_root, manifest, now=now)
+    except (ArtifactError, OSError) as exc:
+        print(f"refused: run artifact could not be opened: {exc}", file=sys.stderr)
+        return 2
+    try:
+        # Past every capability/consent/(site) gate. A motors-off connectivity
+        # preflight always runs before takeoff -- proving fresh drone telemetry
+        # and provider reachability concurrently -- whether this is the explicit
+        # diagnostic or the last check before a real flight.
+        result = connectivity.check(
+            drone_probe=drone_probe, provider_probe=provider_probe,
+            max_age_s=args.connectivity_max_age_s, timeout_s=args.connectivity_timeout_s, clock=clock,
+        )
+        run.append_event("CONNECTIVITY_CHECKED", {
+            "ready": result.ready, "drone_ready": result.drone_ready, "provider_ready": result.provider_ready,
+            "drone_identity": result.drone_identity, "provider_identity": result.provider_identity,
+            "drone_checked_at": result.drone_checked_at, "provider_checked_at": result.provider_checked_at,
+            "drone_error": result.drone_error, "provider_error": result.provider_error,
+            "max_age_s": args.connectivity_max_age_s, "timeout_s": args.connectivity_timeout_s,
+            "check_connectivity_only": bool(args.check_connectivity_only),
+        }, now=now)
+        if not result.ready:
+            print(
+                "refused: connectivity preflight not ready "
+                f"(drone_ready={result.drone_ready}, provider_ready={result.provider_ready}, "
+                f"drone_error={result.drone_error}, provider_error={result.provider_error})",
+                file=sys.stderr,
+            )
+            return 2
         print(
-            "refused: connectivity preflight not ready "
-            f"(drone_ready={result.drone_ready}, provider_ready={result.provider_ready}, "
-            f"drone_error={result.drone_error}, provider_error={result.provider_error})",
+            f"drone_identity={result.drone_identity} drone_checked_at={result.drone_checked_at} "
+            f"provider_identity={result.provider_identity} provider_checked_at={result.provider_checked_at}",
+            file=sys.stderr,
+        )
+        if args.check_connectivity_only:
+            print("CONNECTIVITY_READY")
+            return 0
+
+        # Fix round 2 (Q2): re-check freshness immediately before the point
+        # this build would otherwise dispatch a flight -- time may have
+        # passed between the preflight above (fresh at that instant) and
+        # here (gate evaluation, run-artifact I/O, ...). A preflight that has
+        # since expired must refuse here, not silently ride on a stale
+        # "ready" verdict all the way to takeoff.
+        takeoff_now = clock()
+        drone_expired = (takeoff_now - result.drone_checked_at) > args.connectivity_max_age_s
+        provider_expired = (takeoff_now - result.provider_checked_at) > args.connectivity_max_age_s
+        if drone_expired or provider_expired:
+            run.append_event("CONNECTIVITY_EXPIRED_BEFORE_TAKEOFF", {
+                "drone_checked_at": result.drone_checked_at, "provider_checked_at": result.provider_checked_at,
+                "rechecked_at": takeoff_now, "max_age_s": args.connectivity_max_age_s,
+            }, now=wall_clock())
+            print("refused: connectivity preflight expired before takeoff", file=sys.stderr)
+            return 2
+
+        # Full live flight: this CLI's own scope stops here. SafetySupervisor/
+        # tracker/reserve/recovery bootstrap and the actual controller run loop
+        # are an operator-supplied controller_factory this build does not wire
+        # (see docs/room-agent-live-runbook.md) -- client_factory/jev_factory
+        # default to refuse, so no real client or judgment model is ever
+        # constructed without a caller deliberately overriding both.
+        try:
+            client_factory()
+            jev_factory()
+        except Exception as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
+        print(
+            "refused: full live flight execution is not wired in this build; connectivity passed "
+            "but no controller_factory is available (see docs/room-agent-live-runbook.md)",
             file=sys.stderr,
         )
         return 2
-    print(
-        f"drone_identity={result.drone_identity} drone_checked_at={result.drone_checked_at} "
-        f"provider_identity={result.provider_identity} provider_checked_at={result.provider_checked_at}",
-        file=sys.stderr,
-    )
-    if args.check_connectivity_only:
-        print("CONNECTIVITY_READY")
-        return 0
-
-    # Full live flight: this CLI's own scope stops here. SafetySupervisor/
-    # tracker/reserve/recovery bootstrap and the actual controller run loop
-    # are an operator-supplied controller_factory this build does not wire
-    # (see docs/room-agent-live-runbook.md) -- client_factory/jev_factory
-    # default to refuse, so no real client or judgment model is ever
-    # constructed without a caller deliberately overriding both.
-    try:
-        client_factory()
-        jev_factory()
-    except Exception as exc:
-        print(f"refused: {exc}", file=sys.stderr)
-        return 2
-    print(
-        "refused: full live flight execution is not wired in this build; connectivity passed "
-        "but no controller_factory is available (see docs/room-agent-live-runbook.md)",
-        file=sys.stderr,
-    )
-    return 2
+    finally:
+        run.close()
 
 
 def _cmd_replay(args: argparse.Namespace) -> int:
@@ -483,6 +523,14 @@ def build_parser() -> argparse.ArgumentParser:
     live_parser.add_argument("--check-connectivity-only", action="store_true")
     live_parser.add_argument("--connectivity-max-age-s", type=float, default=5.0)
     live_parser.add_argument("--connectivity-timeout-s", type=float, default=5.0)
+    # The durable run-artifact root (RunArtifacts.open lays out
+    # root/manifest.run_id/{manifest.json, raw.jsonl, session.sqlite3, ...}).
+    # Required for every flight-capable live invocation, including
+    # --check-connectivity-only: fix round 2 (Q2) -- the connectivity
+    # preflight's result must be recorded durably, not only printed to
+    # stderr, so an operator (or room_verify_artifact.py) can later confirm
+    # what a session actually observed before refusing or flying.
+    live_parser.add_argument("--run-root", required=True)
     # Fix round 1 (Q7): live never takes an operator-supplied --now. A
     # flight-capable invocation's wall time (grant expiry) comes only from
     # main()'s injected `wall_clock`, which tests can override but which a

@@ -24,6 +24,20 @@ refuse construction, the same convention `scripts/room_calibrate.py` uses
 for its own executor. Wiring a real flight loop through this CLI is future
 work.
 
+Every live invocation (including `--check-connectivity-only`) requires
+`--run-root`: a `sentinel.room.artifacts.RunArtifacts` directory is opened
+there under `manifest.run_id` before the connectivity preflight runs, and
+the preflight's full result (both paths' readiness, identities,
+`checked_at` timestamps and errors) is recorded as a durable
+`CONNECTIVITY_CHECKED` event -- never only printed to stderr -- so it
+survives the process and can be read back later (e.g. by
+`room_verify_artifact.py --require-event CONNECTIVITY_CHECKED`, once a run
+finalizes). Immediately before the point this build would otherwise
+dispatch a flight, freshness is re-checked against that same recorded
+preflight; one that has since expired refuses with `connectivity preflight
+expired before takeoff` (recorded as `CONNECTIVITY_EXPIRED_BEFORE_TAKEOFF`)
+rather than riding a stale "ready" verdict forward.
+
 ## The count-and-return request
 
 Every example below uses the operator's standard count-and-return request
@@ -88,7 +102,7 @@ Preview also prints, to stderr:
   --authorization-digest ... --capability ... --grant-registry ...
   --consent-db <...> --location <...> --date <...> --i-authorise-paid-calls
   --profile-file <...> --site <...> --assurance <...> --clock-domain-id
-  <...>`, the exact, actually-runnable command to run next (positional
+  <...> --run-root <...>`, the exact, actually-runnable command to run next (positional
   `live`, not a `--mode` flag), once every reported gate is clear and
   `--manifest-out` was given. The `<...>` placeholders are the
   consent/profile/site/assurance evidence files preview does not itself
@@ -110,6 +124,7 @@ python scripts/room_session.py live \
   --grant-registry path/to/registry.json \
   --consent-db path/to/consent.sqlite3 --location <site-name> --date <YYYY-MM-DD> \
   --i-authorise-paid-calls \
+  --run-root path/to/runs \
   --check-connectivity-only
 ```
 
@@ -143,11 +158,13 @@ python scripts/room_session.py live \
   --profile-file path/to/profile.json \
   --site path/to/semantic-site.json \
   --assurance path/to/navigation-assurance.json --assurance path/to/energy-assurance.json \
-  --clock-domain-id <clock-domain-id>
+  --clock-domain-id <clock-domain-id> \
+  --run-root path/to/runs
 ```
 
-Gate order (each one runs before the next; a run-artifact, provider or
-drone client is never constructed until every one of these passes):
+Gate order (each one runs before the next; the run artifact is opened only
+once every one of these passes, and a provider or drone client is never
+constructed until connectivity does too):
 
 1. Manifest authorization: `--manifest`'s bytes parse, and
    `--authorization-digest` matches exactly the digest preview printed for
@@ -169,10 +186,14 @@ drone client is never constructed until every one of these passes):
 6. Site assurance: a current, unexpired `--assurance` record for both
    `NAVIGATION_UNAVAILABLE` and `RETURN_ENERGY_UNAVAILABLE` on `--site`,
    bound to `--clock-domain-id`.
-7. The motors-off connectivity preflight (same as above).
+7. The motors-off connectivity preflight (same as above), recorded as a
+   durable `CONNECTIVITY_CHECKED` event under `--run-root`, then
+   re-checked for freshness immediately before the point this build would
+   otherwise dispatch a flight.
 
-Only after all seven pass does this build reach its own boundary and
-refuse with `full live flight execution is not wired in this build`.
+Only after all seven pass -- and the freshness re-check still holds --
+does this build reach its own boundary and refuse with `full live flight
+execution is not wired in this build`.
 
 ## 4. Replay a frozen fixture
 
@@ -224,7 +245,19 @@ run.
 - Full live flight dispatch (SafetySupervisor/tracker/reserve/recovery
   bootstrap, the actual controller run loop, and real
   `client_factory`/`jev_factory` wiring) is out of scope for this task --
-  see "Scope of this build" above.
+  see "Scope of this build" above. Fix round 2 investigated wiring this in:
+  `RoomController._observation_enabled` (owned by a parallel, in-flight
+  Plan 03 fix; this task may not edit `controller.py`) hard-gates OBSERVE
+  checkpoints to `ExecutionMode.SIMULATION`, so a real-mode session could
+  never actually fly the checkpoints count-and-return depends on even if
+  the rest of the dispatch machinery were built here. Separately, no
+  production factory exists anywhere in this codebase for constructing a
+  `LocalizationTracker`'s drift profile or a `ReserveGuard`'s energy
+  profile from `--profile-file` evidence -- `SafetySupervisor` needs both,
+  and building them from scratch is new architecture, not a CLI wiring
+  task. A run artifact/store and a durably-recorded, freshness-rechecked
+  connectivity preflight are wired (this round); driving
+  `RoomController.run_until_terminal` against a real supervisor is not.
 - The site-assurance gate here is a simplified, standalone re-check of
   `sentinel.room.site`'s per-trigger current-assurance rule; it does not
   go through `SafetySupervisor`'s own clock-domain machinery (there is no

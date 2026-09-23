@@ -270,6 +270,7 @@ def _live_argv(manifest_path, digest, tmp_path, **overrides) -> list[str]:
     args = {
         "--manifest": str(manifest_path), "--authorization-digest": digest,
         "--capability": "count_return", "--grant-registry": str(tmp_path / "registry.json"),
+        "--run-root": str(tmp_path / "runs"),
     }
     args.update(overrides)
     flags = args.pop("__flags__", ["--execute"])
@@ -576,6 +577,116 @@ def test_live_full_flight_refuses_without_a_unique_matching_grant(tmp_path, caps
     err = capsys.readouterr().err
     assert exit_code == 2
     assert "no unique matching" in err or "refused" in err
+
+
+def _run_events(tmp_path, run_root_name, manifest_path):
+    manifest = artifacts.parse_manifest(Path(manifest_path).read_bytes())
+    run = artifacts.RunArtifacts.open(tmp_path / run_root_name, manifest, now=datetime.now(timezone.utc))
+    try:
+        return run.store.events(manifest.run_id)
+    finally:
+        run.close()
+
+
+def test_live_connectivity_only_records_the_preflight_in_a_run_artifact(tmp_path, capsys):
+    manifest_path, digest = _write_manifest(tmp_path)
+    consent = _consent_flags(tmp_path)
+    argv = _live_argv(manifest_path, digest, tmp_path,
+                      **{"__flags__": ["--execute", "--check-connectivity-only", *consent]})
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"))
+    assert exit_code == 0
+    capsys.readouterr()
+    events = _run_events(tmp_path, "runs", manifest_path)
+    checked = [e for e in events if e.event_type == "CONNECTIVITY_CHECKED"]
+    assert len(checked) == 1
+    assert checked[0].payload["ready"] is True
+    assert checked[0].payload["drone_identity"] == "tello-1"
+    assert checked[0].payload["provider_identity"] == "gemini-1"
+    assert checked[0].payload["check_connectivity_only"] is True
+
+
+def test_live_connectivity_only_records_a_not_ready_preflight_too(tmp_path, capsys):
+    manifest_path, digest = _write_manifest(tmp_path)
+    consent = _consent_flags(tmp_path)
+    argv = _live_argv(manifest_path, digest, tmp_path,
+                      **{"__flags__": ["--execute", "--check-connectivity-only", *consent]})
+    exit_code = cli.main(argv)  # default probes refuse -> not ready
+    assert exit_code == 2
+    capsys.readouterr()
+    events = _run_events(tmp_path, "runs", manifest_path)
+    checked = [e for e in events if e.event_type == "CONNECTIVITY_CHECKED"]
+    assert len(checked) == 1
+    assert checked[0].payload["ready"] is False
+
+
+def test_live_full_flight_records_connectivity_before_refusing_at_the_unwired_controller_boundary(tmp_path, capsys):
+    site_sha256, aircraft_id = SITE_SHA256, "aircraft-1"
+    profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
+    profile_hash = calibration.canonical_profile_sha256(profile)
+    profile_path = tmp_path / "profile.json"
+    calibration.write_profile(profile_path, profile)
+    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
+                            profile_sha256s=(profile_hash,))
+    _registry_with_grant(tmp_path, grant)
+    manifest_path, digest = _write_manifest(tmp_path, **{
+        "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
+        "--site-sha256": SITE_SHA256, "--tag-map-sha256": TAG_MAP_SHA256,
+    })
+    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         client_factory=lambda: object(), jev_factory=lambda: object())
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "not wired in this build" in err
+    events = _run_events(tmp_path, "runs", manifest_path)
+    checked = [e for e in events if e.event_type == "CONNECTIVITY_CHECKED"]
+    assert len(checked) == 1
+    assert checked[0].payload["ready"] is True
+    assert checked[0].payload["check_connectivity_only"] is False
+
+
+def test_live_full_flight_refuses_when_connectivity_has_expired_before_takeoff(tmp_path, capsys):
+    site_sha256, aircraft_id = SITE_SHA256, "aircraft-1"
+    profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
+    profile_hash = calibration.canonical_profile_sha256(profile)
+    profile_path = tmp_path / "profile.json"
+    calibration.write_profile(profile_path, profile)
+    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
+                            profile_sha256s=(profile_hash,))
+    _registry_with_grant(tmp_path, grant)
+    manifest_path, digest = _write_manifest(tmp_path, **{
+        "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
+        "--site-sha256": SITE_SHA256, "--tag-map-sha256": TAG_MAP_SHA256,
+    })
+    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
+
+    def forbidden():
+        raise AssertionError("must never construct a client/jev once connectivity has expired before takeoff")
+
+    # `clock` is called once by the site-assurance freshness check and three
+    # more times inside connectivity.check() (started, remaining, final now)
+    # before this fix's own before-takeoff recheck -- the 5th call. The first
+    # four must stay close to real monotonic time (the assurance fixture and
+    # the fake probes below are both stamped against real time.monotonic());
+    # only the 5th jumps far enough past --connectivity-max-age-s (default
+    # 5.0s) to have expired.
+    calls = []
+
+    def clock():
+        value = time.monotonic()
+        calls.append(value)
+        return value + 100.0 if len(calls) >= 5 else value
+
+    exit_code = cli.main(
+        argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+        client_factory=forbidden, jev_factory=forbidden, clock=clock,
+    )
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "expired before takeoff" in err
+    events = _run_events(tmp_path, "runs", manifest_path)
+    expired = [e for e in events if e.event_type == "CONNECTIVITY_EXPIRED_BEFORE_TAKEOFF"]
+    assert len(expired) == 1
 
 
 def test_live_default_client_and_jev_factories_refuse_real_construction(tmp_path, capsys):
