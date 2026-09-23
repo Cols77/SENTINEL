@@ -382,6 +382,37 @@ def test_any_legacy_physical_cli_flag_preserves_compatibility_path(
     assert getattr(config, field) == expected
 
 
+@pytest.mark.parametrize('flag,value', [
+    ('--tag-m', 'operator-map.json'),
+    ('--surface-z', '40'),
+    ('--start-x', '123'),
+])
+def test_abbreviated_legacy_physical_flags_are_rejected(flag, value):
+    from sentinel.ui.__main__ import parse_config
+
+    with pytest.raises(SystemExit) as exc:
+        parse_config(['--mode', 'live', flag, value])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize('argument,field,expected', [
+    ('--site=operator-site.json', 'site_path', Path('operator-site.json')),
+    ('--tag-map=operator-map.json', 'tag_map_path', Path('operator-map.json')),
+    ('--pose-db=operator-pose.sqlite', 'pose_db', Path('operator-pose.sqlite')),
+    ('--pose=off', 'pose_mode', 'off'),
+    ('--surface-z-cm=40', 'surface_z_cm', 40.0),
+    ('--start-x-cm=123', 'start_x_cm', 123),
+    ('--start-y-cm=234', 'start_y_cm', 234),
+])
+def test_full_equals_legacy_flags_preserve_compatibility_path(
+        argument, field, expected):
+    from sentinel.ui.__main__ import parse_config
+
+    config = parse_config(['--mode', 'live', argument])
+    assert config.site_profiles_path is None
+    assert getattr(config, field) == expected
+
+
 def test_complete_legacy_cli_physical_fields_reach_service(tmp_path):
     from sentinel.ui.__main__ import parse_config
 

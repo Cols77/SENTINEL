@@ -7,7 +7,8 @@ from .app import build_app
 
 def parse_config(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    parser=ArgumentParser(description='SENTINEL Mission Control')
+    parser=ArgumentParser(description='SENTINEL Mission Control',
+                          allow_abbrev=False)
     parser.add_argument('--mode',choices=['rehearsal','live'],default='rehearsal')
     parser.add_argument('--host',default='127.0.0.1')
     parser.add_argument('--port',type=int,default=8771)
