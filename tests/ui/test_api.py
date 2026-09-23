@@ -1,6 +1,8 @@
 from pathlib import Path
+from contextlib import closing
 import json
 import shutil
+import sqlite3
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,7 +24,8 @@ def _profile_service(tmp_path):
                     tag_map_path='tags.json', pose_db='pose.sqlite',
                     pose_mode='off', surface_z_cm=50,
                     start_x_cm=250, start_y_cm=190)
-    profiles = [row('First', 'first-site.json'), row('Second', 'second-site.json'),
+    profiles = [row('First', 'first-site.json'),
+                dict(row('Second', 'second-site.json'), local_ip='192.168.10.2'),
                 dict(id='Disabled', label='Disabled', enabled=False,
                      setup_status='Needs setup'),
                 dict(row('Invalid', 'missing-site.json'))]
@@ -35,8 +38,9 @@ def _profile_service(tmp_path):
 
 
 def test_site_profile_catalogue_and_multiple_idle_switches_are_atomic(tmp_path, monkeypatch):
-    from sentinel.ui import live
+    from sentinel.ui import live, readiness
 
+    monkeypatch.setattr(readiness, 'discover_local_ipv4', lambda *_a: None)
     service = _profile_service(tmp_path)
     operational = []
     monkeypatch.setattr(live, 'make_client', lambda *_a: operational.append('drone'))
@@ -62,6 +66,7 @@ def test_site_profile_catalogue_and_multiple_idle_switches_are_atomic(tmp_path, 
             }
             before = client.get('/api/v1/runs/mission/snapshot').json()
             assert validate_snapshot(before) == before
+            assert before['readiness']['checks'][1]['ready'] is False
             prior_flight, prior_feed = service.adapters.flight, service.pose_feed
             changed = client.post('/api/v1/site-profiles/select',
                                   json={'profile_id': 'Second'})
@@ -71,6 +76,11 @@ def test_site_profile_catalogue_and_multiple_idle_switches_are_atomic(tmp_path, 
             assert validate_snapshot(after) == after
             assert after['session']['startup_summary']['site_id'] == 'second-site'
             assert after['mission']['envelope'] != before['mission']['envelope']
+            assert after['mission']['route'] != before['mission']['route']
+            assert max(stop['x'] for stop in after['mission']['route']) > max(
+                stop['x'] for stop in before['mission']['route'])
+            assert after['readiness']['checks'][1]['ready'] is True
+            assert after['readiness']['checks'][3]['ready'] is True
             assert service.runtime.adapters is service.adapters
             assert service.pose_feed is service.adapters.pose_feed
             assert service.adapters.flight is not prior_flight
@@ -79,6 +89,10 @@ def test_site_profile_catalogue_and_multiple_idle_switches_are_atomic(tmp_path, 
             assert service.adapters.flight.on_readiness_update == service._update_readiness
             assert client.post('/api/v1/site-profiles/select',
                                json={'profile_id': 'First'}).status_code == 200
+            restored = client.get('/api/v1/runs/mission/snapshot').json()
+            assert validate_snapshot(restored) == restored
+            assert restored['mission']['route'] == before['mission']['route']
+            assert restored['readiness']['checks'][1]['ready'] is False
             assert client.get('/api/v1/site-profiles').json()['switch_allowed'] is True
             assert [event['type'] for event in service.read_events('mission', 0, 200)] == [
                 'SITE_PROFILE_CHANGED', 'SITE_PROFILE_CHANGED']
@@ -117,9 +131,12 @@ def test_profile_switch_rejects_invalid_selection_without_mutation(tmp_path, bod
 
 @pytest.mark.parametrize('activity', [
     'offer', 'decision_command', 'worker', 'runner', 'runtime',
-    'survey', 'terminal', 'recovery', 'refusal_event',
+    'survey', 'terminal', 'recovery', 'refusal_event', 'artifacts',
+    'pose_artifacts', 'pose_latest', 'pose_health', 'evidence_status',
+    'pose_events',
 ])
 def test_profile_switch_locks_after_any_mission_activity(tmp_path, activity):
+    from sentinel.pose.persistence import ensure_schema
     from sentinel.survey.store import SurveyStore
 
     service = _profile_service(tmp_path)
@@ -144,6 +161,24 @@ def test_profile_switch_locks_after_any_mission_activity(tmp_path, activity):
                 survey.create_run(run, 'count computers')
             finally:
                 survey.connection.close()
+        elif activity == 'artifacts':
+            service.artifacts['frame'] = {'path': tmp_path / 'frame.png'}
+        elif activity == 'pose_artifacts':
+            service.pose_feed.artifacts['pose'] = {'path': tmp_path / 'pose.png'}
+        elif activity == 'pose_latest':
+            service.pose_feed.latest = object()
+        elif activity == 'pose_health':
+            service.pose_feed.health = {'status': 'DEGRADED'}
+        elif activity == 'evidence_status':
+            service.evidence_status['frame'] = 'REVOKED'
+        elif activity == 'pose_events':
+            with closing(sqlite3.connect(service.config.pose_db)) as pose:
+                with pose:
+                    ensure_schema(pose)
+                    pose.execute(
+                        'INSERT INTO pose_events VALUES (?,?,?,?,?,?)',
+                        (run, 1, 'DRONE_POSE_REPORTED', '{}', 'sha',
+                         '2026-09-23T00:00:00+00:00'))
         elif activity in {'terminal', 'recovery'}:
             with service.store.connection(write=True) as conn:
                 conn.execute('UPDATE ui_runs SET status=? WHERE run_id=?',
@@ -152,6 +187,8 @@ def test_profile_switch_locks_after_any_mission_activity(tmp_path, activity):
         else:
             service.store.append_event(run, 'CHAT', {'summary': 'Request refused'})
         with TestClient(build_app(service, repository_root=Path.cwd())) as client:
+            previous = (service.config, service.adapters, service.pose_feed,
+                        service.artifacts, service.evidence_status)
             catalogue = client.get('/api/v1/site-profiles').json()
             assert catalogue['switch_allowed'] is False
             assert catalogue['switch_reason'] == 'MISSION_NOT_IDLE'
@@ -160,6 +197,8 @@ def test_profile_switch_locks_after_any_mission_activity(tmp_path, activity):
             assert response.status_code == 409
             assert response.json()['status'] == 'CONFLICT'
             assert service.config.site_profile_id == 'First'
+            assert (service.config, service.adapters, service.pose_feed,
+                    service.artifacts, service.evidence_status) == previous
             assert all(event['type'] != 'SITE_PROFILE_CHANGED'
                        for event in service.read_events(run, 0, 200))
     finally:
@@ -171,8 +210,11 @@ def test_profile_switch_locks_after_any_mission_activity(tmp_path, activity):
         service.close()
 
 
-def test_profile_switch_rechecks_after_composition_and_closes_candidate(tmp_path, monkeypatch):
+@pytest.mark.parametrize('activity', ['runtime', 'artifacts', 'pose_events'])
+def test_profile_switch_rechecks_after_composition_and_closes_candidate(
+        tmp_path, monkeypatch, activity):
     from sentinel.ui import live
+    from sentinel.pose.persistence import ensure_schema
 
     service = _profile_service(tmp_path)
     original_compose = live.compose
@@ -180,7 +222,17 @@ def test_profile_switch_rechecks_after_composition_and_closes_candidate(tmp_path
     def compose_then_activate(config, readiness=None):
         candidate = original_compose(config, readiness)
         candidates.append(candidate)
-        service.runtime.state[service.config.run_id] = {'phase': 'PROPOSAL'}
+        if activity == 'runtime':
+            service.runtime.state[service.config.run_id] = {'phase': 'PROPOSAL'}
+        elif activity == 'artifacts':
+            service.artifacts['frame'] = {'path': tmp_path / 'frame.png'}
+        else:
+            with closing(sqlite3.connect(service.config.pose_db)) as pose:
+                with pose:
+                    ensure_schema(pose)
+                    pose.execute('INSERT INTO pose_events VALUES (?,?,?,?,?,?)',
+                        (service.config.run_id, 1, 'DRONE_POSE_REPORTED',
+                         '{}', 'sha', '2026-09-23T00:00:00+00:00'))
         return candidate
     monkeypatch.setattr(live, 'compose', compose_then_activate)
     monkeypatch.setattr(live.LiveFlight, 'close',
@@ -194,6 +246,33 @@ def test_profile_switch_rechecks_after_composition_and_closes_candidate(tmp_path
             assert service.adapters is prior
             assert candidates[0].flight.was_closed is True
             assert service.read_events('mission', 0, 200) == []
+    finally:
+        service.close()
+
+
+def test_profile_switch_pose_history_is_run_scoped_and_read_only(tmp_path):
+    from sentinel.pose.persistence import ensure_schema
+
+    service = _profile_service(tmp_path)
+    pose_path = service.config.pose_db
+    try:
+        assert not pose_path.exists()
+        with TestClient(build_app(service, repository_root=Path.cwd())) as client:
+            assert client.get('/api/v1/site-profiles').json()['switch_allowed'] is True
+            assert not pose_path.exists()
+            with closing(sqlite3.connect(pose_path)) as pose:
+                with pose:
+                    pose.execute('CREATE TABLE unrelated (value TEXT)')
+            assert client.get('/api/v1/site-profiles').json()['switch_allowed'] is True
+            with closing(sqlite3.connect(pose_path)) as pose:
+                with pose:
+                    ensure_schema(pose)
+                    pose.execute('INSERT INTO pose_events VALUES (?,?,?,?,?,?)',
+                        ('other-run', 1, 'DRONE_POSE_REPORTED', '{}', 'sha',
+                         '2026-09-23T00:00:00+00:00'))
+            assert client.get('/api/v1/site-profiles').json()['switch_allowed'] is True
+            assert client.post('/api/v1/site-profiles/select',
+                               json={'profile_id': 'Second'}).status_code == 200
     finally:
         service.close()
 

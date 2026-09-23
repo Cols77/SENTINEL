@@ -1,4 +1,5 @@
 """Application service shared by Rehearsal and Live adapter sets."""
+from contextlib import closing
 from io import BytesIO
 from pathlib import Path
 import hashlib
@@ -121,15 +122,34 @@ class MissionControlService:
                             row.get('command_id') is not None
                             for row in self.safety.state.values()):
                     return 'MISSION_NOT_IDLE'
+                if self.artifacts or self.evidence_status:
+                    return 'MISSION_NOT_IDLE'
+                if self.pose_feed is not None:
+                    with self.pose_feed.lock:
+                        if (self.pose_feed.artifacts or
+                                self.pose_feed.latest is not None or
+                                self.pose_feed.health is not None):
+                            return 'MISSION_NOT_IDLE'
                 survey_path = Path(self.runtime.survey_db)
                 if survey_path.is_file():
                     uri = survey_path.resolve().as_uri() + '?mode=ro'
-                    with sqlite3.connect(uri, uri=True, timeout=1.0) as survey:
+                    with closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as survey:
                         exists = survey.execute(
                             "SELECT 1 FROM sqlite_master WHERE type='table' "
                             "AND name='survey_runs'").fetchone()
                         if exists and survey.execute(
                                 'SELECT 1 FROM survey_runs WHERE run_id=? LIMIT 1',
+                                (run_id,)).fetchone():
+                            return 'MISSION_NOT_IDLE'
+                pose_path = self.config.pose_db
+                if pose_path is not None and Path(pose_path).is_file():
+                    uri = Path(pose_path).resolve().as_uri() + '?mode=ro'
+                    with closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as pose:
+                        exists = pose.execute(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name='pose_events'").fetchone()
+                        if exists and pose.execute(
+                                'SELECT 1 FROM pose_events WHERE run_id=? LIMIT 1',
                                 (run_id,)).fetchone():
                             return 'MISSION_NOT_IDLE'
             except (OSError, sqlite3.Error):
