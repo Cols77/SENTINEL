@@ -1,0 +1,74 @@
+{
+  "manifest_version": "perception-evaluation-manifest.v1",
+  "evaluation_pack_id": "ROOM_DOORS_V1",
+  "created_at": "2026-09-23T00:00:00+00:00",
+  "label_schema_revision": "survey-counts-v1",
+  "cases": [
+    {
+      "case_id": "DOORS_0922_FAR_L_HI",
+      "artifact_sha256": "d7fe68f48b5ce8f149c7f8a0492451f3c3d0307b410daaef09c7bf69e6f1f6a6",
+      "label_ref": "labels.json#DOORS_0922_FAR_L_HI",
+      "split": "positive"
+    },
+    {
+      "case_id": "DOORS_0922_FAR_MID_HI",
+      "artifact_sha256": "4ef35f0d320aea241b83a5018a05e974f10a762d4ee78dbc0489f2c5511a43d6",
+      "label_ref": "labels.json#DOORS_0922_FAR_MID_HI",
+      "split": "positive"
+    },
+    {
+      "case_id": "DOORS_0922_FAR_R_HI",
+      "artifact_sha256": "e2df526b435f47222d83028ade0db7399ecbe52b5cdff4ece50d14c6bbaf52e7",
+      "label_ref": "labels.json#DOORS_0922_FAR_R_HI",
+      "split": "positive"
+    },
+    {
+      "case_id": "DOORS_0922_NEAR_L_LO",
+      "artifact_sha256": "1f93400c657c150ac52668a64a420b6675488e09c36be91546c71c06ca13d67b",
+      "label_ref": "labels.json#DOORS_0922_NEAR_L_LO",
+      "split": "positive"
+    },
+    {
+      "case_id": "DOORS_0922_NEAR_R_LO",
+      "artifact_sha256": "99eff4e376286180b7c6078aa05abf0ee158fbb7cacd4f96c6bbfc2399c22481",
+      "label_ref": "labels.json#DOORS_0922_NEAR_R_LO",
+      "split": "positive"
+    },
+    {
+      "case_id": "DOORS_0922_RETURN",
+      "artifact_sha256": "e0c8fde2aa7a58e116380a1a9d70f4c2165e79b90026434ce80c3defcf274e27",
+      "label_ref": "labels.json#DOORS_0922_RETURN",
+      "split": "negative"
+    },
+    {
+      "case_id": "DOORS_0923_FAR_L_HI",
+      "artifact_sha256": "4eff786ca776e0e19db635d021ea204a203bf0359e4b1c90dd93f4a5a4cbeeec",
+      "label_ref": "labels.json#DOORS_0923_FAR_L_HI",
+      "split": "positive"
+    },
+    {
+      "case_id": "DOORS_0923_FAR_MID_HI",
+      "artifact_sha256": "5aaab4a643ee5c53c5c1ae0e314f9c19c3219183b3b3f0ff00cf5fa047d03a2f",
+      "label_ref": "labels.json#DOORS_0923_FAR_MID_HI",
+      "split": "holdout"
+    },
+    {
+      "case_id": "DOORS_0923_FAR_R_HI",
+      "artifact_sha256": "82f2147fefbda90bbed3cf198a8fb12c78b3e3321352fc3de3ef4d349ffa1b0c",
+      "label_ref": "labels.json#DOORS_0923_FAR_R_HI",
+      "split": "negative"
+    },
+    {
+      "case_id": "DOORS_0923_NEAR_L_LO",
+      "artifact_sha256": "5e205d63a17ff5b3eb736d96b37391165949be02ef4f4d961d9d18605c3b5c1f",
+      "label_ref": "labels.json#DOORS_0923_NEAR_L_LO",
+      "split": "holdout"
+    },
+    {
+      "case_id": "DOORS_0923_NEAR_R_LO",
+      "artifact_sha256": "9653138a82d24b9956d11fd4953de7c8807adb72232fd9863c7a86d89a2a58fe",
+      "label_ref": "labels.json#DOORS_0923_NEAR_R_LO",
+      "split": "negative"
+    }
+  ]
+}
