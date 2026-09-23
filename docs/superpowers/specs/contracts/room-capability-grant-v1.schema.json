@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "room-capability-grant-v1.schema.json",
+  "title": "Room-agent capability grant registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "grants"],
+  "properties": {
+    "schema_version": {"const": "room-capability-grant-v1"},
+    "grants": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/grant"}
+    },
+    "trial_bindings": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/trialBinding"}
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullableHash": {"anyOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+    "nullableId": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+    "trialBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["grant_sha256", "trial_protocol", "evidence_destination"],
+      "properties": {
+        "grant_sha256": {"$ref": "#/$defs/hash"},
+        "trial_protocol": {"type": "string", "minLength": 1},
+        "evidence_destination": {"type": "string", "minLength": 1}
+      }
+    },
+    "grant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability", "state", "site_sha256", "aircraft_id", "profile_sha256s",
+        "evidence_ids", "expires_at", "grant_sha256", "acceptance_manifest_sha256"
+      ],
+      "properties": {
+        "capability": {"type": "string", "minLength": 1},
+        "state": {"enum": ["SIMULATION_ONLY", "DISABLED", "TRIAL", "PROMOTED"]},
+        "site_sha256": {"$ref": "#/$defs/nullableHash"},
+        "aircraft_id": {"$ref": "#/$defs/nullableId"},
+        "profile_sha256s": {"type": "array", "items": {"$ref": "#/$defs/hash"}},
+        "evidence_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "expires_at": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "grant_sha256": {"$ref": "#/$defs/hash"},
+        "acceptance_manifest_sha256": {"$ref": "#/$defs/nullableHash"}
+      }
+    }
+  }
+}

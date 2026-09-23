@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "room-session-manifest-v1.schema.json",
+  "title": "Room-agent session authorization manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "created_at", "mode", "code_revision", "code_dirty",
+    "integration_revision", "requested_capability", "capability_grant_sha256",
+    "capability_grant_state", "request_revision", "goal_parser_revision", "site_sha256",
+    "tag_map_sha256", "camera_sha256", "profile_sha256s", "aircraft_id", "firmware_version",
+    "requested_jev_identity", "resolved_jev_identity", "requested_detector_identity",
+    "resolved_detector_identity", "max_duration_s", "max_distance_cm", "max_recovery_attempts",
+    "provider_deadlines", "cost_assumptions", "home_policy", "termination_policy",
+    "consent_references", "trial_protocol", "evidence_destination", "authorization_digest"
+  ],
+  "properties": {
+    "schema_version": {"const": "room-session-manifest-v1"},
+    "run_id": {"$ref": "#/$defs/id"},
+    "created_at": {"type": "string", "minLength": 1},
+    "mode": {"enum": ["preview", "replay", "simulate", "live", "acceptance"]},
+    "code_revision": {"type": "string", "minLength": 1},
+    "code_dirty": {"type": "boolean"},
+    "integration_revision": {"type": "string", "minLength": 1},
+    "requested_capability": {"type": "string", "minLength": 1},
+    "capability_grant_sha256": {"$ref": "#/$defs/hash"},
+    "capability_grant_state": {"enum": ["SIMULATION_ONLY", "DISABLED", "TRIAL", "PROMOTED"]},
+    "request_revision": {"type": "string", "minLength": 1},
+    "goal_parser_revision": {"type": "string", "minLength": 1},
+    "site_sha256": {"$ref": "#/$defs/hash"},
+    "tag_map_sha256": {"$ref": "#/$defs/hash"},
+    "camera_sha256": {"$ref": "#/$defs/hash"},
+    "profile_sha256s": {"type": "array", "items": {"$ref": "#/$defs/hash"}},
+    "aircraft_id": {"$ref": "#/$defs/id"},
+    "firmware_version": {"type": "string", "minLength": 1},
+    "requested_jev_identity": {"type": "string", "minLength": 1},
+    "resolved_jev_identity": {"const": "UNVERIFIED"},
+    "requested_detector_identity": {"type": "string", "minLength": 1},
+    "resolved_detector_identity": {"const": "UNVERIFIED"},
+    "max_duration_s": {"type": "number", "exclusiveMinimum": 0},
+    "max_distance_cm": {"type": "number", "exclusiveMinimum": 0},
+    "max_recovery_attempts": {"type": "integer", "minimum": 0},
+    "provider_deadlines": {
+      "type": "object",
+      "additionalProperties": {"type": "number", "exclusiveMinimum": 0}
+    },
+    "cost_assumptions": {"type": "object"},
+    "home_policy": {"type": "object"},
+    "termination_policy": {"type": "object"},
+    "consent_references": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "trial_protocol": {"type": ["string", "null"]},
+    "evidence_destination": {"type": ["string", "null"]},
+    "authorization_digest": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
