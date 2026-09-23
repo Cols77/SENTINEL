@@ -220,10 +220,12 @@ python scripts/room_session.py live --execute `
    CONNECTIVITY_READY
    ```
 
-   `<reply>` is the Tello's answer to `sdk?`. An SDK 1.3 Tello answers
-   `unknown command: sdk?`, which still proves a live SDK link. The
-   preflight is recorded as a `CONNECTIVITY_CHECKED` event in
-   `runs/$RUN/session.sqlite3`.
+   `<reply>` is normalized from the Tello's answer to `sdk?`: SDK 1.3 does
+   not define that read, so an `unknown command: sdk?` reply -- which still
+   proves a live SDK link -- is recorded as `sdk=unsupported`. A reply that
+   never actually arrived (DJITelloPy's own `Aborting command ...` timeout
+   text) is refused, not recorded as a link. The preflight is recorded as a
+   `CONNECTIVITY_CHECKED` event in `runs/$RUN/session.sqlite3`.
 
 5. Verify the run artifact:
 
@@ -256,6 +258,7 @@ Every refusal exits 2 and prints `refused: ...` on stderr.
 | `drone_error=RouteDiscoveryError: ...` | Windows reports no usable internet default route. | Connect the internet adapter. |
 | `drone_error=TimeoutError: probe did not answer within timeout_s` | The drone did not answer in time: off, asleep, or out of range. | Power-cycle the Tello, rejoin its Wi-Fi, re-run. |
 | `drone_error=LiveStackError: invalid battery telemetry: ...` (or height / SDK reply) | The Tello answered with a malformed reading. | Power-cycle the Tello and re-run. If it repeats, do not fly. |
+| `drone_error=LiveStackError: the drone never answered sdk?: ...` | DJITelloPy's own timeout text ("Aborting command ..."), not an aircraft reply -- `sdk?` never actually arrived. | Power-cycle the Tello and re-run. If it repeats, do not fly. |
 | `connectivity preflight not ready (..., provider_ready=False, ...)` | The provider path failed. `provider_error` says why (rows below). | Fix that cause, then re-run step 4. |
 | `provider_error=LiveStackError: provider reachability needs OPENROUTER_API_KEY to be set` (or `GEMINI_OPENROUTER_MODEL`) | The key or model is not configured. | Set it in the environment or `.env`. |
 | `provider_error=LiveStackError: OpenRouter did not accept OPENROUTER_API_KEY: HTTP <status>` | OpenRouter answered but refused the key (401: invalid key; 402: no credit). | Fix the key or the account. |
@@ -352,6 +355,15 @@ connectivity check" above.
 
 ## 3. The full live count-and-return session
 
+**Emergency stop.** Once every gate passes and the flight stack is built,
+this command prints `EMERGENCY: press E to stop motors immediately.` and
+arms that hotkey (`sentinel.emergency.EmergencyHotkey`, the same one
+`sentinel.cli`'s other real-flight paths use) on the runner's
+`trigger_emergency` for the whole flight, disarming it only after landing or
+on exit. Pressing `E` sends the motor-stop command directly, bypassing the
+executor's own command queue, and latches the flight terminal -- keep the
+terminal window focused so the key reaches it.
+
 ```
 python scripts/room_session.py live \
   --execute --manifest run/manifest.json --authorization-digest <digest> \
@@ -364,8 +376,18 @@ python scripts/room_session.py live \
   --drift-profile path/to/drift-profile.json \
   --energy-profile path/to/energy-profile.json \
   --command-limits path/to/command-limits.json \
-  --run-root path/to/runs
+  --run-root path/to/runs \
+  --connectivity-timeout-s 20 --connectivity-max-age-s 30
 ```
+
+The `--connectivity-timeout-s`/`--connectivity-max-age-s` values match L0's
+tested ones above, not this command's own defaults (5s/5s): the real drone
+probe alone can take close to 20s (adapter selection plus DJITelloPy's
+connect), so the 5s default always refuses a real flight. `before_takeoff`
+re-checks the *same* recorded preflight's age again after collaborator
+construction, supervisor bootstrap and goal compilation, so the max-age
+margin must also cover that gap; time it once on your own hardware rather
+than raising it further blind.
 
 `--drift-profile` is a measured `pose-drift-v1` `DriftProfile` (every
 field required, `validated: true` with evidence refs). `--energy-profile`

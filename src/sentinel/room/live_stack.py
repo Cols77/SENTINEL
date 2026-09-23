@@ -70,6 +70,17 @@ PROVIDER_TIMEOUT_S = 5.0
 DEADLINE_MARGIN_S = 0.25
 #: Time reserved after a tag burst for the altimeter read that completes a fix.
 HEIGHT_READ_SLACK_S = 1.0
+#: refresh() runs inside SafetySupervisor.prepare(), which the watchdog's
+#: monitor thread calls in a loop with a ~10 ms poll (room.supervisor.run_wait)
+#: -- a burst here must return quickly even with no tags in view, so a tagless
+#: refresh never blocks the watchdog anywhere near the full WP5 burst bound
+#: (BURST_MAX_S) that measure_home and LOCALISE use, where thoroughness matters
+#: more than latency.
+REFRESH_BURST_S = 1.5
+#: A drone that never answers ``sdk?`` (DJITelloPy's own timeout text) is not
+#: proof of a live SDK link; SENTINEL prefers to say so plainly.
+SDK_ABORT_PREFIX = "aborting command"
+SDK_UNKNOWN_PREFIX = "unknown command"
 
 
 class LiveStackError(RuntimeError):
@@ -161,9 +172,23 @@ class TelloLink:
             raise LiveStackError(f"invalid height telemetry: {height!r}")
         if not isinstance(sdk, str) or not sdk.strip():
             raise LiveStackError(f"invalid SDK version reply: {sdk!r}")
+        sdk = sdk.strip()
+        if sdk.lower().startswith(SDK_ABORT_PREFIX):
+            # DJITelloPy never answered: this is its own timeout text
+            # ("Aborting command 'sdk?'. Did not receive a response after N
+            # seconds"), not a reply from the aircraft. Accepting it would
+            # both fabricate a live SDK link and, because DJITelloPy never
+            # clears its response queue, risk a late real reply being popped
+            # as the answer to the next command on this shared connection.
+            raise LiveStackError(f"the drone never answered sdk?: {sdk!r}")
+        if sdk.lower().startswith(SDK_UNKNOWN_PREFIX):
+            # SDK 1.3 does not define an sdk? read command; an explicit
+            # "unknown command" reply still proves a live SDK link, so record
+            # that plainly instead of echoing the raw protocol string.
+            sdk = "unsupported"
         checked_at = self._clock()
         tello_ip = getattr(client, "tello_ip", TELLO_IP)
-        return ProbeResult(f"tello {tello_ip} sdk={sdk.strip()} battery={battery}% height={height}cm", checked_at)
+        return ProbeResult(f"tello {tello_ip} sdk={sdk} battery={battery}% height={height}cm", checked_at)
 
     def close(self) -> None:
         self._closed = True
@@ -310,12 +335,28 @@ class _TelloStack:
         self._pad_z_cm = round(site.home.nominal_pose.z_cm)
         self._burst_lock = threading.Lock()
         self._climb_applied = False
+        self._looking_away = False
         self.executor: StepExecutor | None = None
 
     # -- measurements -------------------------------------------------------
     def _height_cm(self) -> int:
         """Altimeter height (relative to the takeoff pad) in the site frame."""
         return self.runner._require_height(self.runner._call(self.client.height_cm)) + self._pad_z_cm
+
+    def _passive_height_cm(self) -> int:
+        """Airborne altitude from the live state stream, issuing no SDK command.
+
+        StepExecutor's documented ``measure_home`` contract is that it "must
+        return data without publishing state or issuing SDK commands"; the
+        explicit ``height?`` read in ``_height_cm`` violates that, so
+        ``measure_home`` uses this passive read instead (the same style
+        ``battery`` already reads in, and never through the runner's SDK call
+        boundary, since no command is sent).
+        """
+        height = self.client.height_cm_from_state()
+        if isinstance(height, bool) or not isinstance(height, int) or height < 0:
+            raise LiveStackError(f"invalid height telemetry: {height!r}")
+        return height + self._pad_z_cm
 
     def _tag_fix(self, duration_s: float) -> _TagFix | None:
         with self._burst_lock:  # one video reader at a time
@@ -328,9 +369,16 @@ class _TelloStack:
                         for report in burst if report.heading_deg is not None)
         if not deltas:
             return None
+        # LocalizationTracker.accept_fix's mapped_joint_tags gate requires at
+        # least two distinct tag IDs as evidence that the fix was *jointly*
+        # triangulated, not merely that different single tags drifted across
+        # the burst. Only a report that itself saw two or more mapped tags is
+        # joint-tag evidence; tag_ids is the union over those reports alone.
+        joint_reports = [report for report in burst if len({obs.tag_id for obs in report.tag_observations}) >= 2]
+        tag_ids = tuple(sorted({obs.tag_id for report in joint_reports for obs in report.tag_observations}))
         return _TagFix(round(result.x_units * CM_PER_UNIT), round(result.y_units * CM_PER_UNIT),
                        result.heading_deg, measured_at, result.spread_p95_cm, deltas[int(0.95 * (len(deltas) - 1))],
-                       tuple(sorted({obs.tag_id for report in burst for obs in report.tag_observations})))
+                       tag_ids)
 
     @staticmethod
     def _within(upper_bound_s: float) -> float:
@@ -371,11 +419,17 @@ class _TelloStack:
         """Tag-pose burst into the tracker, then a timed battery sample.
 
         A burst with no reliable fix is recorded as an estimator failure; no
-        pose is ever assumed.
+        pose is ever assumed. The burst is bounded well below BURST_MAX_S
+        (see REFRESH_BURST_S) because this runs inside the safety watchdog's
+        polling loop: a tagless refresh must not stall it. A failure while
+        the last dispatched command looked away from the canonical heading is
+        recorded as an intentional look, so it never counts as an estimator
+        failure.
         """
-        fix = self._tag_fix(BURST_MAX_S)
+        fix = self._tag_fix(REFRESH_BURST_S)
         if fix is None:
-            self.tracker.note_camera(self.clock(), estimator_failed=True)
+            self.tracker.note_camera(self.clock(), estimator_failed=True,
+                                     intentional_look_away=self._looking_away)
         else:
             z_cm = self._height_cm()
             self._propagate_takeoff_climb()
@@ -384,17 +438,18 @@ class _TelloStack:
         return self.tracker.health, EnergySample(battery, self.clock())
 
     def measure_home(self, definition: HomeDefinition) -> HomeState:
-        """The airborne home: position and heading from tags, height from the altimeter.
+        """The airborne home: position and heading from tags, height from the state stream.
 
-        The altimeter read goes through the runner's client-call boundary,
-        which refuses once the lifecycle is pre-empted, so an abandoned
-        measurement cannot reach the aircraft after landing begins.
+        Returns data only: no SDK command is sent (``_passive_height_cm``),
+        matching StepExecutor's documented ``measure_home`` contract, so an
+        abandoned measurement can never reach the aircraft after landing
+        begins.
         """
         time.sleep(self._home_settle_s)
         fix = self._tag_fix(BURST_MAX_S)
         if fix is None:
             raise LiveStackError("home: no reliable tag fix after takeoff; the home is never assumed")
-        z_cm = self._height_cm()
+        z_cm = self._passive_height_cm()
         return HomeState(Position(fix.x_cm, fix.y_cm, z_cm), fix.heading_deg, definition.route_id, fix.measured_at)
 
     def emergency(self, executor) -> object:
@@ -418,6 +473,14 @@ class _TelloStack:
             if not runner._is_ok(response):
                 raise RuntimeError(f"rotation failed: {response}")
             self._dead_reckon(command)
+            # checkpoint.py's plan_checkpoint gives an intentional look-away
+            # rotation phase="look" and its return rotation phase="restore";
+            # refresh() reads this to stop counting an expected tagless burst
+            # as an estimator failure while the camera is deliberately turned.
+            if args.get("phase") == "look":
+                self._looking_away = True
+            elif args.get("phase") == "restore":
+                self._looking_away = False
             return CommandOutcome()
         if kind == "SET_SPEED":
             response = runner._call(lambda: client.set_speed(args["speed_cm_s"]))
@@ -468,10 +531,15 @@ class TelloFlightStackFactory:
 
     def __init__(self, *, link: TelloLink, tag_map: TagMap | None, run_id: str, run_dir: str | Path,
                  pose_burst: Callable[..., list] | None = None, minimum_battery: int = 40,
-                 home_settle_s: float = SETTLE_S) -> None:
+                 home_settle_s: float = SETTLE_S, max_duration_s: float | None = None) -> None:
         self.link, self.tag_map, self.run_id, self.run_dir = link, tag_map, run_id, Path(run_dir)
         self._pose_burst = pose_burst
         self.minimum_battery, self.home_settle_s = minimum_battery, home_settle_s
+        # The manifest's own declared flight-duration bound: StepExecutor's
+        # deadline enforces it (DEADLINE_EXCEEDED before each command, and it
+        # caps SafetySupervisor._land's landing upper bound). Without it, the
+        # authorized session duration is never actually enforced in flight.
+        self.max_duration_s = max_duration_s
 
     def _default_burst(self):
         if self.tag_map is None:
@@ -495,9 +563,11 @@ class TelloFlightStackFactory:
             route_snapshot_provider=getattr(client, "_sentinel_route_provider", None))
         stack = _TelloStack(client=client, runner=runner, tracker=tracker, clock=clock, site=site, burst=burst,
                             recorder=FrameRecorder(self.run_dir / "captures"), home_settle_s=self.home_settle_s)
-        executor = StepExecutor(runner, clock=clock, measure_home=stack.measure_home,
+        deadline = None if self.max_duration_s is None else clock() + self.max_duration_s
+        executor = StepExecutor(runner, clock=clock, deadline=deadline, measure_home=stack.measure_home,
                                 command_sink=stack.command_sink,
                                 home_measurement_timeout_s=self.home_settle_s + BURST_MAX_S + 2 * HEIGHT_READ_SLACK_S)
         stack.executor = executor
         runner._call(client.stream_on)
-        return FlightStack(executor=executor, refresh=stack.refresh, emergency=stack.emergency, frame_source=client)
+        return FlightStack(executor=executor, refresh=stack.refresh, emergency=stack.emergency, frame_source=client,
+                           trigger_emergency=runner.trigger_emergency)

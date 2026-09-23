@@ -405,6 +405,18 @@ class DjitellopyClient:
             raw_height = self._telemetry(("query_height", "get_height"), "h")
         return self._parse_height_cm(raw_height)
 
+    def height_cm_from_state(self) -> int:
+        """Passive altitude from the state stream, in ``battery``'s own style: sends no SDK command.
+
+        ``height_cm`` deliberately sends an explicit ``height?`` read instead,
+        because the asynchronous state field can transiently report ``-10``
+        while the altitude sensor is not ready. A caller that must not issue
+        an SDK command (``StepExecutor.measure_home``'s documented contract)
+        uses this once the aircraft is already airborne and settled, and
+        accepts that narrower transient risk instead.
+        """
+        return self._parse_height_cm(self._telemetry(("get_height",), "h"))
+
     @staticmethod
     def _parse_height_cm(raw_height: Any) -> int:
         """Normalize cm and basic-Tello decimeter height responses."""

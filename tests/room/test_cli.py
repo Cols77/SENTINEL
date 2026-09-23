@@ -575,6 +575,75 @@ def test_live_full_flight_runs_count_and_return_and_finalizes_a_verifiable_termi
     ) == "run-0001"
 
 
+class _FakeHotkey:
+    """Records construction/start/stop instead of listening for a real keypress."""
+
+    instances: list["_FakeHotkey"] = []
+
+    def __init__(self, on_emergency):
+        self.on_emergency = on_emergency
+        self.started = self.stopped = False
+        _FakeHotkey.instances.append(self)
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_live_full_flight_arms_and_disarms_the_emergency_hotkey_for_the_whole_flight(tmp_path, capsys, monkeypatch):
+    # Q1: every other real-flight path in this codebase arms the operator's
+    # motor-stop hotkey (sentinel.cli's cube-run --real); this proves the
+    # live CLI now does too, for a stack that exposes trigger_emergency, and
+    # disarms it once the flight ends.
+    from sentinel.cube.step_executor import ExecutorState
+
+    _FakeHotkey.instances = []
+    monkeypatch.setattr(cli, "EmergencyHotkey", _FakeHotkey)
+    argv, manifest_path = _flight_setup(tmp_path)
+    base_stack = live_fakes.FlightStackFactory()
+    triggered = []
+
+    def client_factory(**kwargs):
+        built = base_stack(**kwargs)
+
+        def trigger():
+            triggered.append(True)
+            built.executor.state = ExecutorState.TERMINAL
+
+        return replace(built, trigger_emergency=trigger)
+
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         client_factory=client_factory, jev_factory=lambda: live_fakes.PolicyJudge(),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    out, err = capsys.readouterr()
+    assert exit_code == 0, err
+    assert "EMERGENCY: press E to stop motors immediately." in err
+    assert len(_FakeHotkey.instances) == 1
+    hotkey = _FakeHotkey.instances[0]
+    assert hotkey.started is True and hotkey.stopped is True
+    hotkey.on_emergency()  # simulate the operator pressing E
+    assert triggered == [True]
+    assert base_stack.executor.state is ExecutorState.TERMINAL
+
+
+def test_live_full_flight_never_arms_a_hotkey_for_a_stack_with_nothing_to_stop(tmp_path, capsys, monkeypatch):
+    # A fake/replay stack exposes no trigger_emergency: nothing is armed, and
+    # the flight proceeds exactly as before this fix.
+    _FakeHotkey.instances = []
+    monkeypatch.setattr(cli, "EmergencyHotkey", _FakeHotkey)
+    argv, manifest_path = _flight_setup(tmp_path)
+    stack = live_fakes.FlightStackFactory()
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         client_factory=stack, jev_factory=lambda: live_fakes.PolicyJudge(),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    err = capsys.readouterr().err
+    assert exit_code == 0
+    assert "EMERGENCY" not in err
+    assert _FakeHotkey.instances == []
+
+
 def test_live_full_flight_rejected_goal_ledger_finalizes_blocked_without_takeoff(tmp_path, capsys):
     argv, manifest_path = _flight_setup(tmp_path)
     stack = live_fakes.FlightStackFactory()
@@ -758,6 +827,31 @@ def test_live_default_flight_stack_shares_the_probe_connection_and_never_takes_o
     assert checked["drone_identity"].startswith("tello 192.168.10.1 ")
     assert "LIVE_SESSION_REFUSED" in _event_types(events)
     assert not (_run_dir(tmp_path, manifest_path) / "terminal.json").exists()
+
+
+def test_live_default_flight_stack_is_built_with_the_manifests_max_duration_s(tmp_path, capsys, monkeypatch):
+    # S2/Q5: the manifest's own declared flight-duration bound must reach the
+    # default flight stack's StepExecutor deadline.
+    transport = _fake_tello(monkeypatch)
+    tag_map_sha256 = hashlib.sha256(TAG_MAP_FIXTURE.read_bytes()).hexdigest()
+    site = replace(live_fakes.fixture_site(), tag_map_sha256=tag_map_sha256)
+    argv, manifest_path = _flight_setup(tmp_path, site=site)
+    captured = {}
+    real_init = live_stack.TelloFlightStackFactory.__init__
+
+    def spy_init(self, **kwargs):
+        captured.update(kwargs)
+        real_init(self, **kwargs)
+
+    monkeypatch.setattr(live_stack.TelloFlightStackFactory, "__init__", spy_init)
+    manifest = artifacts.parse_manifest(Path(manifest_path).read_bytes())
+    cli.main([*argv, "--tag-map", str(TAG_MAP_FIXTURE)], provider_probe=_fake_probe("gemini-1"),
+             jev_factory=lambda: live_fakes.PolicyJudge(),
+             detector_factory=_fake_collaborator("detector-vendor-y"))
+    capsys.readouterr()
+    assert transport.builds == 1
+    assert captured.get("max_duration_s") == manifest.max_duration_s
+    assert manifest.max_duration_s is not None
 
 
 def test_live_full_flight_refuses_without_a_matching_profile_file(tmp_path, capsys):
@@ -1131,6 +1225,41 @@ def test_runbook_l0_states_prerequisites_expected_output_and_failure_meanings():
         "already exists", "missing gate: capability admission", "--connectivity-only",
     ):
         assert needle in section, needle
+
+
+FULL_FLIGHT_HEADING = "## 3. The full live count-and-return session"
+
+
+def _runbook_full_flight_section() -> str:
+    text = RUNBOOK_PATH.read_text(encoding="utf-8")
+    start = text.index(FULL_FLIGHT_HEADING)
+    end = text.find("\n## ", start + len(FULL_FLIGHT_HEADING))
+    return text[start:] if end == -1 else text[start:end]
+
+
+def _flag_value(text: str, flag: str) -> str | None:
+    import re
+
+    match = re.search(re.escape(flag) + r"\s+(\S+)", text)
+    return match.group(1) if match else None
+
+
+def test_runbook_full_flight_command_uses_l0s_tested_connectivity_timing():
+    # Q6: this command's own argparse defaults (5s/5s) always refuse a real
+    # flight (the real drone probe alone can take close to 20s), so it must
+    # be pinned to L0's tested values above rather than silently drifting
+    # back to them.
+    l0_section, full_flight_section = _runbook_l0_section(), _runbook_full_flight_section()
+    for flag in ("--connectivity-timeout-s", "--connectivity-max-age-s"):
+        l0_value, full_flight_value = _flag_value(l0_section, flag), _flag_value(full_flight_section, flag)
+        assert l0_value is not None, flag
+        assert full_flight_value == l0_value, (flag, l0_value, full_flight_value)
+    parsed = cli.build_parser().parse_args([
+        "live", "--execute", "--manifest", "m", "--authorization-digest", "d",
+        "--capability", "count_return", "--grant-registry", "r", "--run-root", "rr",
+    ])
+    assert str(parsed.connectivity_timeout_s) != _flag_value(full_flight_section, "--connectivity-timeout-s")
+    assert str(parsed.connectivity_max_age_s) != _flag_value(full_flight_section, "--connectivity-max-age-s")
 
 
 def test_default_request_text_matches_the_runbook():

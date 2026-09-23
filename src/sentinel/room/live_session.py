@@ -73,13 +73,18 @@ class FlightStack:
     ``refresh()`` returns the current ``(PoseHealth, EnergySample)`` measured
     from the aircraft; ``emergency(executor)`` performs a forced landing and
     returns its ``TerminalOutcome``; ``frame_source.read_frame(timeout=...)``
-    reads the connected video stream for perception.
+    reads the connected video stream for perception. ``trigger_emergency``,
+    when the stack reaches real hardware, is the operator's direct motor-stop
+    path (``FlightTestRunner.trigger_emergency``): the CLI arms it under the
+    operator's emergency hotkey for the whole flight. It is ``None`` for a
+    stack with nothing to stop (fakes, replay).
     """
 
     executor: object
     refresh: Callable[[], tuple]
     emergency: Callable[[object], TerminalOutcome]
     frame_source: object
+    trigger_emergency: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)

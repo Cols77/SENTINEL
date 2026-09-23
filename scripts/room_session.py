@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from sentinel.emergency import EmergencyHotkey
 from sentinel.room import artifacts, calibration, capabilities, connectivity, live_session, live_stack, replay
 from sentinel.room.artifacts import ArtifactError, ManifestError, SessionManifest
 from sentinel.room.site import ContingencyTrigger, RoomSite, parse_room_site
@@ -68,6 +69,37 @@ SIMULATION_DEFERRED_MESSAGE = "simulation deferred (Plan 06 Task 2)"
 
 class GateError(RuntimeError):
     """A live-mode authorization gate (capability, profile, consent, site) refused."""
+
+
+class _ArmedFlightStackFactory:
+    """Wrap a flight-stack factory to arm the operator's motor-stop hotkey.
+
+    Q1: every other real-flight path in this codebase arms
+    ``EmergencyHotkey(runner.trigger_emergency)`` (``sentinel.cli``'s
+    ``cube-run --real``); nothing in ``sentinel.room`` did, although
+    ``FlightStack.emergency`` is only a forced landing, never the direct
+    motor stop. This arms one for the whole flight, from stack construction
+    until landing/close, whenever the built stack exposes
+    ``trigger_emergency`` (the real Tello stack does; fakes and replay do
+    not, and are left unarmed).
+    """
+
+    def __init__(self, inner: Callable[..., "live_session.FlightStack"]) -> None:
+        self._inner = inner
+        self.hotkey: EmergencyHotkey | None = None
+
+    def __call__(self, **kwargs) -> "live_session.FlightStack":
+        stack = self._inner(**kwargs)
+        trigger = getattr(stack, "trigger_emergency", None)
+        if trigger is not None:
+            print("EMERGENCY: press E to stop motors immediately.", file=sys.stderr)
+            self.hotkey = EmergencyHotkey(trigger)
+            self.hotkey.start()
+        return stack
+
+    def stop(self) -> None:
+        if self.hotkey is not None:
+            self.hotkey.stop()
 
 
 def _refuse_jev() -> object:
@@ -514,23 +546,31 @@ def _cmd_live(
 
         if client_factory is None:
             client_factory = live_stack.TelloFlightStackFactory(
-                link=link, tag_map=tag_map, run_id=manifest.run_id, run_dir=run.root)
+                link=link, tag_map=tag_map, run_id=manifest.run_id, run_dir=run.root,
+                max_duration_s=manifest.max_duration_s)
+        # Q1: arm the operator's motor-stop hotkey for the whole flight, from
+        # stack construction until landing/close (stopped in the finally
+        # below). See _ArmedFlightStackFactory.
+        armed_factory = _ArmedFlightStackFactory(client_factory)
         try:
-            outcome = live_session.run_count_return(
-                store=run.store, manifest=manifest, site=site, drift_profile=drift_profile,
-                energy_profile=energy_profile, limits=limits, calibration_profiles=calibration_profiles,
-                flight_stack_factory=client_factory, judge=judge, detector=detector,
-                assurances=verified_assurances, request_text=DEFAULT_REQUEST_TEXT,
-                frames_dir=run.root / "frames", clock=clock, wall_clock=wall_clock,
-                before_takeoff=before_takeoff,
-            )
-        except live_session.LiveSessionError as exc:
             try:
-                run.append_event("LIVE_SESSION_REFUSED", {"reason": str(exc)}, now=wall_clock())
-            except (ArtifactError, OSError):
-                pass
-            print(f"refused: {exc}", file=sys.stderr)
-            return 2
+                outcome = live_session.run_count_return(
+                    store=run.store, manifest=manifest, site=site, drift_profile=drift_profile,
+                    energy_profile=energy_profile, limits=limits, calibration_profiles=calibration_profiles,
+                    flight_stack_factory=armed_factory, judge=judge, detector=detector,
+                    assurances=verified_assurances, request_text=DEFAULT_REQUEST_TEXT,
+                    frames_dir=run.root / "frames", clock=clock, wall_clock=wall_clock,
+                    before_takeoff=before_takeoff,
+                )
+            except live_session.LiveSessionError as exc:
+                try:
+                    run.append_event("LIVE_SESSION_REFUSED", {"reason": str(exc)}, now=wall_clock())
+                except (ArtifactError, OSError):
+                    pass
+                print(f"refused: {exc}", file=sys.stderr)
+                return 2
+        finally:
+            armed_factory.stop()
         landing = outcome.landing
         try:
             run.finalize({
