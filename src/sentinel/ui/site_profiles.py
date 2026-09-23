@@ -110,6 +110,7 @@ def validate_site_profile(profile: SiteProfile) -> None:
     """Refuse incomplete or geometrically invalid physical configurations."""
     required_paths = (profile.site_path, profile.tag_map_path, profile.pose_db)
     if (any(path is None for path in required_paths) or
+            not isinstance(profile.pose_mode, str) or
             profile.pose_mode not in {'off', 'passive', 'reanchor'} or
             not _valid_surface_height(profile.surface_z_cm) or
             (profile.start_x_cm is None) != (profile.start_y_cm is None) or

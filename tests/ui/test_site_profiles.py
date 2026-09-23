@@ -118,6 +118,15 @@ def test_nonfinite_or_unrepresentable_surface_uses_allowlisted_error(tmp_path):
         load_site_profiles(path).require('Lab')
 
 
+@pytest.mark.parametrize('pose_mode', [[], {}])
+def test_collection_pose_mode_uses_allowlisted_error(tmp_path, pose_mode):
+    from sentinel.ui.site_profiles import load_site_profiles
+
+    path = _registry(tmp_path, [dict(_enabled(), pose_mode=pose_mode)])
+    with pytest.raises(StartupError, match='^SITE_PROFILE_INCOMPLETE$'):
+        load_site_profiles(path).require('Lab')
+
+
 def test_registry_loading_and_startup_gate_do_not_construct_operational_boundaries(
         tmp_path, monkeypatch):
     from sentinel.ui import live
