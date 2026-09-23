@@ -2,12 +2,14 @@
 
 Plan 03 Task 2 adds ``build_observation_candidates``: OBSERVE candidates for
 a room-wide or region count. This is a separate entry point, not a change to
-``build_candidates`` above -- wiring it into a live session behind a
-capability grant is Task 4's job, exactly as ``GoalLedger.physical_objectives``
-already exists without anything yet consuming it for FOLLOW/LAND_NEAR. Until
-that wiring lands, ``build_candidates`` keeps offering only the Plan 01 safe
-kinds (see ``tests/room/test_candidates.py``), and OBSERVE candidates are
-reachable only by calling this function directly.
+``build_candidates`` above, which keeps offering only the Plan 01 safe kinds
+(see ``tests/room/test_candidates.py``); ``RoomController`` adds the
+observation candidates only while its observation capability is enabled.
+
+Plan 03 residual task R (F2) adds the count answer routes that go with
+them: ``count_answer_candidate`` (``ANSWER:COUNTS``, answered from this
+session's own grounded observations) and an explicit incomplete answer for a
+requested region that can no longer be observed.
 """
 import hashlib
 import json
@@ -35,7 +37,14 @@ def can_answer(snapshot: ReadSnapshot) -> bool:
         return False
     if not snapshot.ledger.objectives:
         return False
-    for objective in snapshot.ledger.objectives:
+    return can_answer_objectives(snapshot, snapshot.ledger.objectives)
+
+
+def can_answer_objectives(snapshot: ReadSnapshot, objectives: tuple[GoalObjective, ...]) -> bool:
+    """Whether persisted read facts answer every one of ``objectives``."""
+    if objectives and not snapshot.facts:
+        return False
+    for objective in objectives:
         if objective.kind in (GoalKind.FOLLOW, GoalKind.LAND_NEAR) or objective.relation or objective.qualifier:
             return False
         if objective.terminal_condition not in ("REPORTED", "OBSERVED"):
@@ -102,6 +111,68 @@ def _region_pose_id(scope: str) -> str | None:
     return f"{horizontal}-{depth}-{height}-toward_targets"
 
 
+def count_scope(objective: GoalObjective) -> tuple[str | None, str | None]:
+    """How a COUNT objective's answer is scoped: ``("ROOM", None)`` for a
+    room-wide count, ``("VIEWPOINT", pose_id)`` for a requested semantic
+    region (answered from that region's declared pose), ``(None, None)`` for
+    any scope this session has no count route for."""
+    if objective.spatial_scope == "ROOM":
+        return "ROOM", None
+    pose_id = _region_pose_id(objective.spatial_scope)
+    return ("VIEWPOINT", pose_id) if pose_id is not None else (None, None)
+
+
+def _observed(outcomes: tuple[ToolOutcome, ...], candidate_id: str) -> bool:
+    return any(o.candidate_id == candidate_id and o.code == "OBSERVE_SUCCEEDED" for o in outcomes)
+
+
+def count_objective_ready(objective: GoalObjective, coverage: CoverageProjection,
+                          outcomes: tuple[ToolOutcome, ...]) -> bool:
+    """Whether a COUNT objective can be answered as complete: a room-wide
+    count once declared coverage is complete, a region count once its
+    requested region was actually observed (``OBSERVE_SUCCEEDED``, which the
+    controller records only after verifying pose, capture and authorized
+    perception)."""
+    scope, pose_id = count_scope(objective)
+    if scope == "ROOM":
+        return coverage.complete
+    if scope == "VIEWPOINT":
+        return _observed(outcomes, f"OBSERVE:{objective.objective_id}:{pose_id}")
+    return False
+
+
+def count_answer_candidate(snapshot: ReadSnapshot, coverage: CoverageProjection) -> RoomCandidate | None:
+    """The grounded ``ANSWER:COUNTS`` candidate (Plan 03 residual task R,
+    F2): offered once every pending COUNT objective is ready
+    (``count_objective_ready``) and every other objective is answerable from
+    persisted reads. Its answer is projected from this session's own
+    observations -- never from a legacy survey report. A qualified or
+    relational count ("man", "near the table") is never answered this way:
+    grounded counting cannot substantiate the qualifier."""
+    ledger = snapshot.ledger
+    if snapshot.terminal_state or ledger is None or ledger.status != GoalStatus.PENDING:
+        return None
+    counts = tuple(o for o in ledger.objectives if o.kind == GoalKind.COUNT)
+    if not counts or any(o.relation or o.qualifier or o.terminal_condition not in ("REPORTED", "OBSERVED")
+                         for o in counts):
+        return None
+    if not all(count_objective_ready(o, coverage, snapshot.outcomes) for o in counts):
+        return None
+    others = tuple(o for o in ledger.objectives if o.kind != GoalKind.COUNT)
+    if others and not can_answer_objectives(snapshot, others):
+        return None
+    candidate_id = "ANSWER:COUNTS"
+    observed = sorted(o.event_id for o in snapshot.outcomes if o.code == "OBSERVE_SUCCEEDED")
+    digest = _digest({"candidate_id": candidate_id, "coverage": list(coverage.by_cell_and_class),
+                      "observed": observed, "facts": relevant_hash(CandidateKind.ANSWER, snapshot)})
+    if _answer_suppressed(snapshot.outcomes, candidate_id, digest):
+        return None
+    description = ("Answer every count objective from this session's own grounded observations "
+                   "(confirmed/uncertain objects, people lower bounds and coverage caveats).")
+    return RoomCandidate(candidate_id, CandidateKind.ANSWER, snapshot.state_version, digest, description,
+                         description, coverage.evidence_refs + tuple(observed))
+
+
 def _resolved_position(site: RoomSite, pose_id: str):
     return resolve_pose_id(site, pose_id)
 
@@ -154,13 +225,18 @@ def _observe_candidate(objective: GoalObjective, pose_id: str, description: str,
 
 
 def _incomplete_answer_candidate(objective: GoalObjective, coverage: CoverageProjection,
-                                 outcomes: tuple[ToolOutcome, ...], snapshot_version: int) -> RoomCandidate | None:
+                                 outcomes: tuple[ToolOutcome, ...], snapshot_version: int, *,
+                                 region_pose_id: str | None = None) -> RoomCandidate | None:
     candidate_id = f"ANSWER:{objective.objective_id}:INCOMPLETE"
     digest = _digest({"objective_id": objective.objective_id, "coverage": list(coverage.by_cell_and_class)})
     if _answer_suppressed(outcomes, candidate_id, digest):
         return None
-    description = (f"No legal declared view can resolve objective {objective.objective_id}'s remaining "
-                   f"coverage ({', '.join(coverage.uncovered)}); answer explicitly incomplete rather than loop.")
+    if region_pose_id is None:
+        description = (f"No legal declared view can resolve objective {objective.objective_id}'s remaining "
+                       f"coverage ({', '.join(coverage.uncovered)}); answer explicitly incomplete rather than loop.")
+    else:
+        description = (f"The region requested for objective {objective.objective_id} (declared pose "
+                       f"{region_pose_id}) cannot be observed now; answer explicitly incomplete rather than loop.")
     return RoomCandidate(candidate_id, CandidateKind.ANSWER, snapshot_version, digest, description, description,
                          coverage.evidence_refs)
 
@@ -172,7 +248,11 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
 
     User-requested semantic regions are generated first, in their original
     ordinal order, unconditionally (they were explicitly asked for, so they
-    are never gated on coverage benefit). For a room-wide count, only the
+    are never gated on coverage benefit). A region already observed
+    successfully is never offered again (its answer route is
+    ``count_answer_candidate``); a region that can no longer be offered
+    without having been observed (refused, unresolvable) gets one explicit
+    incomplete-answer candidate instead (residual F2). For a room-wide count, only the
     legal site-declared views (``site.pose_visibility``) that would resolve
     at least one currently-uncovered coverage cell/class pair are offered,
     ordered by descending benefit, then physical cost, then stable pose ID.
@@ -181,8 +261,8 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
     ever existed), gets one explicit incomplete-answer candidate instead of
     silently looping.
 
-    This is a standalone entry point -- not wired into ``build_candidates``
-    or any live session yet; see the module docstring.
+    This stays separate from ``build_candidates``; ``RoomController`` offers
+    it (and ``count_answer_candidate``) only while observation is enabled.
     """
     count_objectives = sorted((o for o in objectives if o.kind == GoalKind.COUNT), key=lambda o: o.ordinal)
     region_candidates: list[RoomCandidate] = []
@@ -190,8 +270,13 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
     for objective in count_objectives:
         pose_id = _region_pose_id(objective.spatial_scope)
         if pose_id is not None:
+            if _observed(outcomes, f"OBSERVE:{objective.objective_id}:{pose_id}"):
+                continue
             description = f"Observe declared pose {pose_id}, the region requested for objective {objective.objective_id}."
             candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version)
+            if candidate is None:
+                candidate = _incomplete_answer_candidate(objective, coverage, outcomes, snapshot_version,
+                                                         region_pose_id=pose_id)
             if candidate is not None:
                 region_candidates.append(candidate)
         elif objective.spatial_scope == "ROOM":

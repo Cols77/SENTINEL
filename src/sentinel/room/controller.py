@@ -12,16 +12,19 @@ import uuid
 from sentinel.jev_choice import assess_choice
 from sentinel.judgment import ChoiceJudge
 from sentinel.cube.energy import ExecutionMode
+from sentinel.cube.localization import LocalizationState
 from sentinel.cube.supervised_wait import SupervisedWait
 from sentinel.cube.step_executor import ExecutorState, TerminalOutcome
 from sentinel.models import Position
 
-from .candidates import build_candidates, build_observation_candidates
-from .coverage import CellObservation, CoverageProjection, project_coverage, render_coverage_note
+from .candidates import build_candidates, build_observation_candidates, count_answer_candidate, count_scope
+from .coverage import CellObservation, CoverageProjection, project_coverage
+from .grounding import CountGeometry, ground_frame, project_objective_count, render_objective_count
 from .ingest import ingest_result
 from .models import CandidateKind, GoalKind, GoalStatus, RoomCandidate, TerminalState
 from .queries import READ_KINDS, ReadFact, ReadQueries, ReadSnapshot, ToolOutcome, relevant_hash, render_answer
 from .semantic import resolve_pose_id
+from .spatial import PoseEvidence, semantic_heading_to_compass_deg
 from .store import RoomStore, VersionConflict
 
 if TYPE_CHECKING:
@@ -75,7 +78,8 @@ class RoomController:
                  executor: Callable[[RoomCandidate, ReadSnapshot], tuple[ReadFact, ...]] | None = None,
                  ingest_pending: Callable[[str], object] | None = None,
                  supervisor=None, flight_executor=None, provider_wait_s: float = 10.0,
-                 resolve_checkpoint=None, perception_capture=None, perception_provider=None):
+                 resolve_checkpoint=None, perception_capture=None, perception_provider=None,
+                 count_geometry: CountGeometry | None = None):
         for value in (act_at, min_margin):
             if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
                 raise ValueError("choice thresholds must be finite probabilities")
@@ -105,6 +109,13 @@ class RoomController:
                              "must be supplied together")
         self.resolve_checkpoint, self.perception_capture = resolve_checkpoint, perception_capture
         self.perception_provider = perception_provider
+        # Residual F2: the camera model and per-class support declarations
+        # grounded counting places static detections with. Optional: without
+        # it every static detection is persisted -- and answered -- as
+        # unplaced, never guessed into a position.
+        if count_geometry is not None and not isinstance(count_geometry, CountGeometry):
+            raise ValueError("count_geometry must be a CountGeometry")
+        self.count_geometry = count_geometry
         self.candidate_builder = candidate_builder if candidate_builder is not None else self._legal_candidates
 
     @property
@@ -124,8 +135,19 @@ class RoomController:
             return ()
         return snapshot.ledger.objectives
 
-    def _coverage(self, snapshot: ReadSnapshot) -> CoverageProjection:
+    def _coverage(self, snapshot: ReadSnapshot, *, pose_id: str | None = None) -> CoverageProjection:
         """Rebuild the coverage projection purely from replayed OBSERVE outcomes.
+
+        With ``pose_id`` (residual F2, a region-scope count), only the cells
+        that pose declares visible, and only observations taken from it, are
+        projected: a viewpoint answer's coverage caveat describes that
+        viewpoint, never the whole room.
+
+        Residual F2: *counts* are now grounded per detection (see
+        ``_count_projections``); *coverage* keeps the "declared view visited"
+        semantic described below -- a cell is resolved by an authorized
+        observation from a pose that declares it visible, not by polygon
+        containment of individual detections.
 
         A pose declares visibility of a set of coverage cells
         (``RoomSite.pose_visibility``); once an OBSERVE checkpoint at that pose
@@ -135,18 +157,11 @@ class RoomController:
         specific cell (that per-detection geometric grounding is future work;
         see the task report). Fix round 1 (finding S2) ratifies this as the
         Task 4/Plan 03 completion semantic explicitly: "region visited =
-        resolved", not per-detection geometric grounding. ``spatial.py``'s
-        ``estimate_detection`` and ``association.py``/``counting.py`` do
-        exist (Task 2), but wiring their per-detection (x, y) estimates into
-        a polygon-containment test against ``CoverageCell.polygon_xy_cm`` --
-        and threading the drone's measured pose, camera model and each
-        class's declared support through this controller's OBSERVE turn to
-        call them -- is controller-level integration Task 4 was never scoped
-        to build (see this module's and the test suite's own "injected
-        collaborators, not real geometry" boundary) and remains out of scope
-        for this fix round. Any later reader of ``coverage.complete``
-        (including Task 5's replay baseline) must treat it as this weaker
-        "region visited" guarantee until that wiring lands.
+        resolved", not per-detection geometric grounding. The per-detection
+        (x, y) estimates grounded counting now persists are *not* tested for
+        containment in ``CoverageCell.polygon_xy_cm``; any reader of
+        ``coverage.complete`` (including Task 5's replay baseline) must treat
+        it as this weaker "region visited" guarantee.
         ``observed_at`` uses the perception result's own measured capture
         time (fix round 1, Q12) when the outcome carries one; only the
         durable ROOM_TOOL_OUTCOME event ID is used as a fallback for outcomes
@@ -165,26 +180,60 @@ class RoomController:
         confirmed the checkpoint reached.
         """
         site = self.supervisor.site
-        cells_by_id = {cell.cell_id: cell for cell in site.coverage_cells}
+        cells = site.coverage_cells
+        if pose_id is not None:
+            visible = set(dict(site.pose_visibility).get(pose_id, ()))
+            cells = tuple(cell for cell in cells if cell.cell_id in visible)
+        cells_by_id = {cell.cell_id: cell for cell in cells}
         declared_views_by_cell: dict[str, list[str]] = {}
-        for pose_id, cell_ids in site.pose_visibility:
+        for declared_pose_id, cell_ids in site.pose_visibility:
             for cell_id in cell_ids:
-                declared_views_by_cell.setdefault(cell_id, []).append(pose_id)
+                declared_views_by_cell.setdefault(cell_id, []).append(declared_pose_id)
         observations = []
         for outcome in snapshot.outcomes:
             if outcome.kind != CandidateKind.OBSERVE.value or outcome.code != "OBSERVE_SUCCEEDED":
                 continue
-            pose_id = outcome.candidate_id.rsplit(":", 1)[-1]
+            observed_pose_id = outcome.candidate_id.rsplit(":", 1)[-1]
+            if pose_id is not None and observed_pose_id != pose_id:
+                continue
             observed_at = outcome.observed_at or outcome.event_id
-            for cell_id in dict(site.pose_visibility).get(pose_id, ()):
+            for cell_id in dict(site.pose_visibility).get(observed_pose_id, ()):
                 cell = cells_by_id.get(cell_id)
                 if cell is None:
                     continue
                 for class_name in cell.required_classes:
-                    observations.append(CellObservation(cell_id, class_name, pose_id, "OBSERVED",
+                    observations.append(CellObservation(cell_id, class_name, observed_pose_id, "OBSERVED",
                                                          observed_at, evidence_refs=(outcome.event_id,)))
-        return project_coverage(site.coverage_cells, tuple(observations),
+        return project_coverage(cells, tuple(observations),
                                 declared_views_by_cell={k: tuple(v) for k, v in declared_views_by_cell.items()})
+
+    def _count_objectives(self, snapshot: ReadSnapshot):
+        return tuple(sorted((o for o in self._observation_objectives(snapshot) if o.kind == GoalKind.COUNT),
+                            key=lambda o: o.ordinal))
+
+    def _count_projections(self, snapshot: ReadSnapshot):
+        """Residual F2: the session COUNT fact -- one grounded
+        ``ObjectiveCount`` per pending COUNT objective, projected purely from
+        the count evidence every ``OBSERVE_SUCCEEDED`` outcome persisted.
+
+        A room-wide objective counts across every observed frame against the
+        room's coverage; a region objective counts only the frames taken
+        from its requested region's declared pose, against that pose's own
+        coverage cells. A scope with no count route contributes nothing."""
+        frames = tuple(o.count_evidence for o in snapshot.outcomes
+                       if o.kind == CandidateKind.OBSERVE.value and o.code == "OBSERVE_SUCCEEDED"
+                       and o.count_evidence is not None)
+        projections = []
+        for objective in self._count_objectives(snapshot):
+            scope, pose_id = count_scope(objective)
+            if scope == "ROOM":
+                projections.append(project_objective_count(objective, frames, self._coverage(snapshot),
+                                                           scope="ROOM"))
+            elif scope == "VIEWPOINT":
+                projections.append(project_objective_count(
+                    objective, tuple(f for f in frames if f.pose_id == pose_id),
+                    self._coverage(snapshot, pose_id=pose_id), scope="VIEWPOINT", pose_id=pose_id))
+        return tuple(projections)
 
     def _closer_unavailable_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
         """Plan 03 Task 3 (closer-inspection viewpoints) is deferred: any goal
@@ -221,25 +270,27 @@ class RoomController:
         return build_observation_candidates(self._observation_objectives(snapshot), self.supervisor.site,
                                             self._coverage(snapshot), snapshot.outcomes, snapshot.state_version)
 
-    def _answer_gated_by_coverage(self, snapshot: ReadSnapshot) -> bool:
-        """Fix round 1 (Q2): once observation is enabled and the site declares
-        coverage cells, a pending COUNT objective cannot be answered through
-        the plain legacy ANSWER candidate (``can_answer`` only checks that
-        *some* READ_COUNTS fact exists, never physical coverage) until this
-        session's declared coverage is actually complete. The only legal
-        route to a terminal answer before that is the explicit
-        ``ANSWER:<objective>:INCOMPLETE`` candidate (see candidates.py)."""
-        if not self._observation_enabled or not self.supervisor.site.coverage_cells:
-            return False
-        if not any(o.kind == GoalKind.COUNT for o in self._observation_objectives(snapshot)):
-            return False
-        return not self._coverage(snapshot).complete
+    def _legacy_count_answer_blocked(self, snapshot: ReadSnapshot) -> bool:
+        """Fix round 1 (Q2) / residual F2: once this session can observe, a
+        pending COUNT objective is never answered through the plain legacy
+        ANSWER candidate (``can_answer`` only checks that *some* READ_COUNTS
+        survey report exists -- a report unrelated to this session's
+        observations that states full-room coverage is unknown). Its only
+        terminal routes are the grounded ``ANSWER:COUNTS`` candidate and the
+        explicit ``ANSWER:<objective>:INCOMPLETE`` candidate."""
+        return self._observation_enabled and bool(self._count_objectives(snapshot))
+
+    def _count_answer_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
+        if not self._observation_enabled:
+            return ()
+        candidate = count_answer_candidate(snapshot, self._coverage(snapshot))
+        return (candidate,) if candidate is not None else ()
 
     def _legal_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
         base = build_candidates(snapshot)
-        if self._answer_gated_by_coverage(snapshot):
+        if self._legacy_count_answer_blocked(snapshot):
             base = tuple(c for c in base if c.kind != CandidateKind.ANSWER)
-        return (*base, *self._observation_candidates(snapshot),
+        return (*base, *self._observation_candidates(snapshot), *self._count_answer_candidates(snapshot),
                *self._closer_unavailable_candidates(snapshot))
 
     def _local_terminal(self, terminal, candidate_id):
@@ -291,7 +342,7 @@ class RoomController:
         ))
 
     def _outcome(self, snapshot, candidate_id, kind, digest, code, *, facts=(), terminal=None, refusal=None,
-                answer=None, observed_at=None):
+                answer=None, observed_at=None, count_evidence=None):
         # Every refusal path, including stale decisions before dispatch, shares
         # the persisted progress rule. Audit-only version changes are not new
         # relevant evidence and cannot create an unbounded invalid-choice loop.
@@ -306,6 +357,8 @@ class RoomController:
             result["answer"] = answer
         if observed_at is not None:
             result["observed_at"] = observed_at
+        if count_evidence is not None:
+            result["count_evidence"] = count_evidence
         return result
 
     def _has_flown(self, session_id: str) -> bool:
@@ -348,7 +401,7 @@ class RoomController:
             return self.supervisor.refresh_failure(self.flight_executor)
 
     def _finalize_terminal(self, session_id, correlation, snapshot, prior, candidate_id, kind, digest, *,
-                           code, requested_terminal, answer=None, facts=()):
+                           code, requested_terminal, answer=None, facts=(), extra=None):
         """Fix round 1 (Q1, Q3, Q11) / fix round 3 (F1): persist a
         Jev-selected (or system-forced) terminal decision. When this session
         has actually flown, a supervisor-owned safe return/landing is
@@ -396,6 +449,7 @@ class RoomController:
                 final_terminal = requested_terminal if landed else TerminalState.ABORTED
             payload = self._outcome(snapshot, candidate_id, kind, digest, code, facts=facts,
                                     terminal=final_terminal, answer=answer)
+            payload.update(extra or {})
             return self._record(snapshot, correlation, payload, prior=prior)
         except Exception:
             payload = self._outcome(snapshot, candidate_id, kind, digest, "TOOL_FAILURE", refusal="TOOL_FAILURE")
@@ -577,22 +631,40 @@ class RoomController:
                 if isinstance(outcome, TurnOutcome):
                     return replace(outcome, event_ids=tuple(e.event_id for e in prior) + outcome.event_ids)
                 payload = self._outcome(snapshot, candidate_id, kind, digest, outcome["code"],
-                                        refusal=outcome.get("refusal"), observed_at=outcome.get("observed_at"))
+                                        refusal=outcome.get("refusal"), observed_at=outcome.get("observed_at"),
+                                        count_evidence=outcome.get("count_evidence"))
                 return self._record(snapshot, correlation, payload, prior=prior)
             elif selected.kind == CandidateKind.ANSWER:
                 # Fix round 1 (Q1, Q3): a terminal answer -- plain or the
                 # explicit ANSWER:<objective>:INCOMPLETE candidate -- requests
                 # a supervisor-owned safe return before it is ever reported as
                 # this session's final word (see _finalize_terminal).
-                if candidate_id.endswith(":INCOMPLETE"):
+                #
+                # Residual F2: both count routes render the session COUNT fact
+                # (``_count_projections``) -- grounded counts from this
+                # session's own observations, each with its scope-worded
+                # coverage caveat -- and persist it on the terminal outcome.
+                # The legacy READ_COUNTS report is never rendered as a count.
+                if candidate_id == "ANSWER:COUNTS" or candidate_id.endswith(":INCOMPLETE"):
+                    projections = self._count_projections(snapshot)
+                    sections = [render_objective_count(p) for p in projections]
+                    facts = tuple(f for f in snapshot.facts if f.kind != CandidateKind.READ_COUNTS)
+                    extra = {"count_projection": [p.to_payload() for p in projections]}
+                    if candidate_id == "ANSWER:COUNTS":
+                        if any(o.kind != GoalKind.COUNT for o in self._observation_objectives(snapshot)) and facts:
+                            sections.append(render_answer(facts))
+                        return self._finalize_terminal(session_id, correlation, snapshot, prior, candidate_id,
+                                                       kind, digest, code="ANSWERED_COUNT",
+                                                       requested_terminal=TerminalState.COMPLETED,
+                                                       answer="\n\n".join(sections), facts=facts, extra=extra)
                     objective_id = candidate_id.removeprefix("ANSWER:").removesuffix(":INCOMPLETE")
-                    note = render_coverage_note(self._coverage(snapshot), scope="ROOM")
-                    incomplete_answer = (f"Objective {objective_id} cannot be completed with the "
-                                         f"declared legal views available in this session. {note}")
+                    incomplete_answer = "\n\n".join((
+                        f"Objective {objective_id} cannot be completed with the declared legal views "
+                        f"available in this session.", *sections))
                     return self._finalize_terminal(session_id, correlation, snapshot, prior, candidate_id, kind,
                                                    digest, code="ANSWERED_INCOMPLETE",
                                                    requested_terminal=TerminalState.INCOMPLETE_RETURNED,
-                                                   answer=incomplete_answer, facts=snapshot.facts)
+                                                   answer=incomplete_answer, facts=facts, extra=extra)
                 answer_text = render_answer(snapshot.facts)
                 return self._finalize_terminal(session_id, correlation, snapshot, prior, candidate_id, kind, digest,
                                                code="ANSWERED", requested_terminal=TerminalState.COMPLETED,
@@ -825,10 +897,40 @@ class RoomController:
             return {"code": "PROVIDER_ERROR", "refusal": "PROVIDER_ERROR"}
         if not ingest_outcome.authorizes_current_state:
             return {"code": "STALE_RESULT", "refusal": "STALE_RESULT"}
+        # Residual F2: ground this frame's detections at the pose the
+        # checkpoint actually measured, now -- the pose, camera model and
+        # support declarations are persisted with the outcome, so later
+        # counts are a pure projection of append-only session state.
+        try:
+            count_evidence = self._ground_observation(resolved, result, request, perception_result)
+        except Exception:
+            return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
         # Fix round 1 (Q12): carry the perception's own measured capture time
         # forward for coverage bookkeeping, never a fabricated timestamp and
         # never the durable event ID (see _coverage).
-        return {"code": "OBSERVE_SUCCEEDED", "observed_at": perception_result.completed_at}
+        return {"code": "OBSERVE_SUCCEEDED", "observed_at": perception_result.completed_at,
+                "count_evidence": count_evidence.to_payload()}
+
+    def _ground_observation(self, resolved, result, request, perception_result):
+        """Residual F2: turn one authorized observation into persisted count
+        evidence. The camera position is the checkpoint's *measured*
+        post-dispatch position (already verified against the declared pose,
+        see ``_measured_pose_matches_declared_pose``) and the tracker's
+        current heading, converted once into the compass convention
+        ``estimate_detection`` uses. A tag-anchored pose is MEASURED; any
+        other pose source is dead-reckoned (COMMANDED, wider covariance); a
+        pose needing recovery or lost is stale, so nothing is placed from it."""
+        health = self.supervisor.tracker.health
+        pose = PoseEvidence(
+            result.pose.x_cm, result.pose.y_cm, result.pose.z_cm,
+            semantic_heading_to_compass_deg(health.heading_deg), 0.0,
+            "MEASURED" if health.source == "mapped_joint_tags" else "COMMANDED",
+            request.captured_at,
+            health.state in (LocalizationState.RECOVERY_REQUIRED, LocalizationState.LOST),
+        )
+        return ground_frame(perception_result.detections, observation_id=request.observation_id,
+                            frame_id=request.frame_id, pose_id=resolved.pose_id, pose=pose,
+                            geometry=self.count_geometry)
 
     def run_until_terminal(self, session_id: str) -> TerminalState:
         while True:

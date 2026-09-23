@@ -16,11 +16,14 @@ requests a supervisor-owned safe return and landing before completing as
 ``ROOM_TOOL_OUTCOME`` record and the one ``PERCEPTION_INGESTED`` record are
 exactly what that live run produced and persisted -- not hand-authored -- so
 the decision records are controller-shaped (real ``state``/``candidates``
-snapshots, real causation_id chaining) rather than synthesized. This fixture
-does not reach a plain (non-incomplete) ``ANSWERED`` count, because that
-route requires this session's own legacy ``READ_COUNTS`` survey adapter
-(``ReadQueries``'s ``survey_store``), which ``replay_fixture`` does not wire
-up; see the readiness report's "Replay: what it is and is not" section.
+snapshots, real causation_id chaining) rather than synthesized.
+
+Plan 03 residual task R (F2): the fixture was regenerated with grounded
+counting wired in. Its OBSERVE outcome persists the frame's count evidence
+(the detection placed on the floor from the measured pose, flagged
+low-confidence), and its terminal answer carries the session COUNT fact
+("computer: 0 confirmed; 1 uncertain") that replay re-derives from that
+evidence and cross-checks.
 
 Task 3 (closer inspection) is deferred; this fixture never exercises a
 closer/validate-by-approach candidate (see the controller ruling at the end
@@ -314,6 +317,68 @@ def test_replay_rejects_an_unauthorized_perception_ingestion(tmp_path):
     mutated[victim] = json.dumps(record)
     manifest_path = _write_mutated(tmp_path, lines=mutated)
     with pytest.raises(ReplayIntegrityError, match="not authorized"):
+        replay_fixture(manifest_path)
+
+
+# --- Residual F2: the recorded COUNT fact is re-derived on replay ----------
+
+def _terminal_index(lines):
+    return next(i for i, line in enumerate(lines) if '"ANSWERED_INCOMPLETE"' in line)
+
+
+def test_golden_fixture_answers_with_a_grounded_count_projection():
+    _, _, lines = _golden()
+    payload = json.loads(lines[_terminal_index(lines)])["payload"]
+    projection, = payload["count_projection"]
+    assert projection["objective_id"] == "g1" and projection["scope"] == "ROOM"
+    computer, = projection["counts"]
+    assert (computer["class_name"], computer["confirmed"], computer["uncertain"]) == ("computer", 0, 1)
+    assert "computer: 0 confirmed; 1 uncertain" in payload["answer"]
+    observe = next(json.loads(line) for line in lines if '"OBSERVE_SUCCEEDED"' in line)
+    assert len(observe["payload"]["count_evidence"]["estimates"]) == 1
+
+
+def test_replay_rejects_a_recorded_count_that_the_observation_evidence_does_not_support(tmp_path):
+    _, _, lines = _golden()
+    mutated = list(lines)
+    victim = _terminal_index(lines)
+    record = json.loads(mutated[victim])
+    counts = record["payload"]["count_projection"][0]["counts"][0]
+    counts["confirmed"], counts["uncertain"] = 1, 0
+    record["payload"]["answer"] = record["payload"]["answer"].replace(
+        "computer: 0 confirmed; 1 uncertain", "computer: 1 confirmed; 0 uncertain")
+    record["event_sha256"] = _resign(record)
+    mutated[victim] = json.dumps(record)
+    manifest_path = _write_mutated(tmp_path, lines=mutated)
+    with pytest.raises(ReplayIntegrityError, match="does not match the counts re-derived"):
+        replay_fixture(manifest_path)
+
+
+def test_replay_rejects_observation_evidence_that_no_longer_supports_the_recorded_count(tmp_path):
+    _, _, lines = _golden()
+    mutated = list(lines)
+    victim = next(i for i, line in enumerate(lines) if '"OBSERVE_SUCCEEDED"' in line)
+    record = json.loads(mutated[victim])
+    record["payload"]["count_evidence"]["estimates"] = []
+    record["payload"]["count_evidence"]["low_confidence_estimate_ids"] = []
+    record["event_sha256"] = _resign(record)
+    mutated[victim] = json.dumps(record)
+    manifest_path = _write_mutated(tmp_path, lines=mutated)
+    with pytest.raises(ReplayIntegrityError, match="does not match the counts re-derived"):
+        replay_fixture(manifest_path)
+
+
+def test_replay_rejects_an_answer_whose_count_section_was_rewritten(tmp_path):
+    _, _, lines = _golden()
+    mutated = list(lines)
+    victim = _terminal_index(lines)
+    record = json.loads(mutated[victim])
+    record["payload"]["answer"] = record["payload"]["answer"].replace(
+        "computer: 0 confirmed; 1 uncertain", "computer: 3 confirmed; 0 uncertain")
+    record["event_sha256"] = _resign(record)
+    mutated[victim] = json.dumps(record)
+    manifest_path = _write_mutated(tmp_path, lines=mutated)
+    with pytest.raises(ReplayIntegrityError, match="does not contain the count section"):
         replay_fixture(manifest_path)
 
 

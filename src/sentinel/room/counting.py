@@ -20,6 +20,7 @@ told apart with certainty.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -56,20 +57,27 @@ class ClassCount:
     #: rendered line carries that caveat instead of reading as a resolved
     #: count.
     not_resolvable_cells: tuple[str, ...] = ()
+    #: Residual F2: detections of this class that were seen but could not be
+    #: placed in room coordinates (support undeclared, off the support
+    #: plane, stale pose, ...). They cannot be associated, so they are never
+    #: counted as objects -- but they are reported, never silently dropped.
+    unplaced: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "evidence_refs", tuple(self.evidence_refs))
         object.__setattr__(self, "not_resolvable_cells", tuple(self.not_resolvable_cells))
         if self.class_name not in SUPPORTED_CLASSES:
             raise ValueError("class count requires a supported class")
-        if self.confirmed < 0 or self.uncertain < 0:
+        if self.confirmed < 0 or self.uncertain < 0 or type(self.unplaced) is not int or self.unplaced < 0:
             raise ValueError("class count values must be non-negative")
 
 
-def _static_class_names(objects, coverage: CoverageProjection, requested_classes: tuple[str, ...]) -> tuple[str, ...]:
+def _static_class_names(objects, coverage: CoverageProjection, requested_classes: tuple[str, ...],
+                        unplaced_by_class: Mapping[str, int]) -> tuple[str, ...]:
     names = {cell_class for _, cell_class, _ in coverage.by_cell_and_class if cell_class != "person"}
     names |= {obj.class_name for obj in objects if obj.class_name != "person"}
     names |= {name for name in requested_classes if name != "person"}
+    names |= {name for name, count in unplaced_by_class.items() if name != "person" and count}
     return tuple(sorted(names))
 
 
@@ -84,11 +92,26 @@ def _not_resolvable_cells(class_name: str, coverage: CoverageProjection) -> tupl
                         and CoverageStatus(status) == CoverageStatus.NOT_RESOLVABLE))
 
 
-def _static_counts(objects, coverage: CoverageProjection, requested_classes: tuple[str, ...]) -> tuple[ClassCount, ...]:
+def _view_count(obj, corroborating_views: Mapping[str, str] | None) -> int:
+    """How many distinct views corroborate ``obj``. Without a
+    ``corroborating_views`` mapping every member view counts; with one, only
+    the member estimates it names do (residual F2: a low-confidence sighting
+    is evidence the object may exist, never a confirming second view)."""
+    if corroborating_views is None:
+        return len(set(obj.member_view_keys))
+    return len({corroborating_views[estimate_id] for estimate_id in obj.member_estimate_ids
+                if estimate_id in corroborating_views})
+
+
+def _static_counts(objects, coverage: CoverageProjection, requested_classes: tuple[str, ...],
+                   corroborating_views: Mapping[str, str] | None = None,
+                   unplaced_by_class: Mapping[str, int] | None = None) -> tuple[ClassCount, ...]:
+    unplaced_by_class = dict(unplaced_by_class or {})
     counts = []
-    for class_name in _static_class_names(objects, coverage, requested_classes):
+    for class_name in _static_class_names(objects, coverage, requested_classes, unplaced_by_class):
         matching = [obj for obj in objects if obj.class_name == class_name]
-        if _not_resolvable(class_name, coverage) and not matching:
+        unplaced = unplaced_by_class.get(class_name, 0)
+        if _not_resolvable(class_name, coverage) and not matching and not unplaced:
             # A NOT_RESOLVABLE verdict with no associated evidence at all is
             # a pure geometry fact: this class can never be resolved here,
             # so an honest zero is reported instead of "0 confirmed".
@@ -105,11 +128,11 @@ def _static_counts(objects, coverage: CoverageProjection, requested_classes: tup
         # distinguishes them when the source estimates carried a view
         # identity; it falls back to capture time for estimates that did
         # not (see association.py).
-        confirmed = [obj for obj in matching if len(set(obj.member_view_keys)) > 1]
-        uncertain = [obj for obj in matching if len(set(obj.member_view_keys)) <= 1]
+        confirmed = [obj for obj in matching if _view_count(obj, corroborating_views) > 1]
+        uncertain = [obj for obj in matching if _view_count(obj, corroborating_views) <= 1]
         evidence = tuple(sorted({ref for obj in matching for ref in obj.evidence_refs}))
         counts.append(ClassCount(class_name, len(confirmed), len(uncertain), "GROUNDED_STATIC", evidence,
-                                 _not_resolvable_cells(class_name, coverage)))
+                                 _not_resolvable_cells(class_name, coverage), unplaced))
     return tuple(counts)
 
 
@@ -124,7 +147,9 @@ def _people_count(people_by_frame: tuple[FramePeople, ...]) -> ClassCount:
 
 
 def project_counts(objects, people_by_frame, coverage: CoverageProjection, *,
-                   requested_classes: tuple[str, ...] = ()) -> tuple[ClassCount, ...]:
+                   requested_classes: tuple[str, ...] = (),
+                   corroborating_views: Mapping[str, str] | None = None,
+                   unplaced_by_class: Mapping[str, int] | None = None) -> tuple[ClassCount, ...]:
     """Static classes from associated objects; people from the single frame
     with the most simultaneously visible detections. Never derives a person
     count from ``objects`` -- people never enter ``associate_static``.
@@ -138,8 +163,15 @@ def project_counts(objects, people_by_frame, coverage: CoverageProjection, *,
     Fix round 3 (F8): the person line is emitted only when "person" was
     actually requested or at least one person frame was actually observed
     -- never manufactured out of nothing for a request that never mentioned
-    people and a session that never saw any."""
-    static = _static_counts(objects, coverage, tuple(requested_classes))
+    people and a session that never saw any.
+
+    Residual F2: ``corroborating_views`` (estimate_id -> view key), when
+    given, restricts which member estimates may count toward an object's
+    "more than one distinct view" confirmation -- the session projection
+    omits low-confidence sightings from it, so uncertain detections stay
+    uncertain however many views repeat them. ``unplaced_by_class`` reports
+    detections that were seen but could not be placed, per class."""
+    static = _static_counts(objects, coverage, tuple(requested_classes), corroborating_views, unplaced_by_class)
     if people_by_frame or "person" in requested_classes:
         return static + (_people_count(people_by_frame),)
     return static
@@ -156,6 +188,10 @@ def _render_line(count: ClassCount) -> str:
             line += f"; {count.uncertain} additional {detail} uncertain"
         return line
     line = f"{count.class_name}: {count.confirmed} confirmed; {count.uncertain} uncertain"
+    if count.unplaced:
+        detail = ("detection could not be placed in room coordinates and is not counted" if count.unplaced == 1
+                  else "detections could not be placed in room coordinates and are not counted")
+        line += f"; {count.unplaced} {detail}"
     if count.not_resolvable_cells:
         line += (f"; not resolvable from the declared views in {', '.join(count.not_resolvable_cells)}, "
                  f"so this class may be undercounted there")

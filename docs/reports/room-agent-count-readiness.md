@@ -31,60 +31,66 @@ until Plan 06 promotes matching pose/energy/site profiles.
   an `OBSERVE` checkpoint at a declared pose completes and its perception
   result is ingested and authorized, every `(cell, class)` pair that pose
   declares visibility of is marked resolved (`RoomController._coverage`,
-  `sentinel.room.coverage.project_coverage`). Wiring per-detection `(x, y)`
-  estimates (`sentinel.room.spatial`) into per-cell polygon containment is
-  explicitly out of scope for this completion semantic (see the Task 4
-  report and `RoomController._coverage`'s own docstring).
-- A plain legacy `ANSWER` is gated off while the site declares coverage cells,
-  a `COUNT` objective is pending, and coverage is not yet complete
-  (`RoomController._answer_gated_by_coverage`); the only route to a terminal
-  answer before that is the explicit `ANSWER:<objective>:INCOMPLETE`
-  candidate, which reports what remains uncovered and still requests a safe
-  return.
-- Grounded counting (`sentinel.room.association.associate_static`,
-  `sentinel.room.counting._static_counts`/`project_counts`) exists as a
-  library: given associated per-session detections, **a single low-confidence
-  sighting classifies as uncertain (`confirmed=0`, `uncertain=1`), never
-  promoted to confirmed** — proven directly by
-  `test_uncertain_detection_stays_uncertain_after_observation`
-  (`tests/room/test_count_return.py`), which builds one such sighting and
-  asserts that classification.
-  **Fix round 1 (Q1) correction:** neither `RoomController`'s live decision
-  path nor the replay fixture actually calls `_static_counts`/`project_counts`
-  today — a session's own grounded per-observation counting is not yet wired
-  into `ANSWER`. The controller's only routes to a terminal answer for a
-  `COUNT` objective are (a) the legacy `READ_COUNTS` survey adapter below, or
-  (b) the explicit `ANSWER:<objective>:INCOMPLETE` candidate reporting
-  uncovered cells; a session's own `READ_OBSERVATIONS` facts render as raw,
-  per-detection historical fields (`class_name=...; confidence_band=...`),
-  never as a confirmed/uncertain count. Wiring `_static_counts` into a live
-  `ANSWER` is out of scope for this plan and is not claimed here.
-- **Fix round 3 (F2) correction:** region-scope `COUNT` objectives (a
-  requested "left/rear/bottom"-style subregion, as opposed to `ROOM`) have
-  **no answer route at all** — `can_answer` only recognizes `ROOM`-scoped
-  facts, and `_incomplete_answer_candidate` is offered only for `ROOM`-scope
-  objectives in `RoomController._legal_candidates`
-  (`sentinel.room.candidates.build_observation_candidates`). Once a
-  region's `OBSERVE` candidate has been attempted (succeeded or refused)
-  and is therefore suppressed, that objective can only end through
-  `ESCALATE`/`NO_LEGAL_CANDIDATES` — never an explicit incomplete answer,
-  and certainly never a rendered count. This fix round intentionally left
-  this unresolved rather than risk a region-scope incomplete-answer route
-  that could misreport a region that actually succeeded as incomplete
-  without the grounded-counting wiring above to tell the two apart; per the
-  finding this correction responds to, **the operator must explicitly
-  re-scope Plan 03 and the demo claim** to "observe-and-return, counts from
-  legacy survey only" (room-wide) if region-scope counting is not wired
-  before the next promotion review.
-- Legacy `READ_COUNTS` (merged multi-view survey reports, sourced from
-  `sentinel.survey`'s `SurveyStore`, not from this session's own detections)
-  is the **only** route through which a plain `ANSWER` can report a numeric
-  confirmed/uncertain count for a `COUNT` objective
-  (`sentinel.room.candidates.can_answer`); it is never conflated with a
-  session's own grounded `READ_OBSERVATIONS` reads. `replay_fixture` does not
-  wire up a `survey_store`, so a fixture that completes through `READ_COUNTS`
-  cannot currently be replayed byte-stably (see "Replay" below); the shipped
-  fixture instead completes through route (b).
+  `sentinel.room.coverage.project_coverage`). The per-detection `(x, y)`
+  estimates grounded counting now persists (below) are **not** tested for
+  containment in a cell's polygon.
+- **Counts are grounded in this session's own observations** (Plan 03
+  residual task R, closing final-review finding F2). Every `OBSERVE_SUCCEEDED`
+  outcome persists the frame's count evidence
+  (`sentinel.room.grounding.ground_frame`): each static detection rayed onto
+  its declared support plane from the checkpoint's *measured* post-dispatch
+  pose (`spatial.estimate_detection`), the frame's people split
+  (high-confidence confirmed, medium/low uncertain) and every detection that
+  could not be placed, with the reason. A terminal count answer projects the
+  session COUNT fact from that append-only evidence
+  (`grounding.project_objective_count`: `association.associate_static`, then
+  `counting.project_counts`) and renders it with `counting.render_count_answer`,
+  including the scope-worded coverage caveat, latest capture and
+  analysed/unanalysed frames. The projection is persisted on the terminal
+  outcome (`count_projection`).
+- Count semantics: a static object is **confirmed** only when seen from more
+  than one distinct view by non-low-confidence sightings; a low-confidence
+  sighting can create or join an object but never confirms it, so uncertain
+  detections stay uncertain (`test_low_confidence_detections_stay_uncertain_in_the_terminal_answer`).
+  People never enter association and are reported as the best single frame's
+  lower bound ("at least N people visible; M additional detections are
+  uncertain"). A detection that cannot be placed -- no count geometry
+  configured, support undeclared for its class, stale pose, frame size not the
+  camera model's, box not on the declared plane -- is reported per class as
+  "could not be placed ... and is not counted", never guessed and never
+  silently dropped. A class whose coverage cells are `NOT_RESOLVABLE` carries
+  that caveat on its own line (residual F8).
+- Placement needs a `CountGeometry` (camera model plus per-class support
+  declarations) supplied to `RoomController`; it is controller configuration,
+  not yet a `RoomSite` field. Without it every static detection is reported
+  unplaced.
+- **Answer routes for a `COUNT` objective, once observation is enabled:**
+  - `ANSWER:COUNTS` (terminal `COMPLETED`, code `ANSWERED_COUNT`): offered
+    only when every pending `COUNT` objective is ready -- a room-wide
+    objective once declared coverage is complete, a region objective
+    (`"left/rear/bottom"`-style scope) once its requested region's `OBSERVE`
+    has succeeded -- and every other objective is answerable from persisted
+    reads. A region answer is `VIEWPOINT`-scoped: it counts only that pose's
+    frames against that pose's own declared cells.
+  - `ANSWER:<objective>:INCOMPLETE` (terminal `INCOMPLETE_RETURNED`): a
+    room-wide objective whose coverage no remaining legal view can improve, or
+    a region objective whose region can no longer be observed (refused or
+    unresolvable) without ever having succeeded. Its answer carries the same
+    grounded count sections, each with its incomplete-coverage caveat.
+  - The plain legacy `ANSWER` is never offered for a pending `COUNT`
+    objective while observation is enabled (`RoomController._legacy_count_answer_blocked`),
+    even when a `READ_COUNTS` survey report has been read
+    (`test_completed_coverage_answers_and_stops_offering_observation`).
+  Both answer routes request a supervisor-owned safe return first.
+- Legacy `READ_COUNTS` (merged multi-view survey reports from
+  `sentinel.survey`'s `SurveyStore`) remains a *read*. It can still complete a
+  `COUNT` objective through the plain `ANSWER` only in a read-only session
+  without observation collaborators (Plan 01's historical-read contract),
+  where it is rendered with its own "full-room coverage ... unknown"
+  uncertainty.
+- `COUNT` objectives with a scope that is neither `ROOM` nor a semantic
+  region (for example a current-view scope) have no count route; they end
+  only through `ESCALATE`/`NO_LEGAL_CANDIDATES`.
 
 ## Safety transitions
 
@@ -108,7 +114,14 @@ every other checkpoint uses, including:
   perception result are each typed refusals that never credit coverage or a
   physical effect that did not actually happen (`test_stale_observation_decision_is_never_dispatched`,
   `test_dispatch_exception_during_observation_is_typed_not_stale_decision`,
-  `test_stale_perception_result_is_refused_and_coverage_not_credited`).
+  `test_stale_perception_result_is_refused_and_coverage_not_credited`);
+- a version conflict raised after an earlier command of the same checkpoint
+  already executed is recorded as `CHECKPOINT_FAILED`, never as a
+  `STALE_DECISION` that would claim nothing was dispatched
+  (`test_version_conflict_after_partial_motion_is_checkpoint_failed_not_stale`);
+- a recorded `LANDED` state projects as `SAFE_LANDED` only when the same
+  record says its completion is known; otherwise `ABORTED`
+  (`test_landed_drone_state_is_safe_only_when_completion_is_known`).
 
 ## Disabled / deferred capabilities
 
@@ -167,23 +180,21 @@ chaining from each turn's outcome back to its own choice attempt.
 The scenario (label `synthetic`, `session_id=session`): a room-wide `COUNT`
 objective for "computer" over a site with two declared coverage cells, only
 one of which has any declared surveyed view at all. One `OBSERVE` checkpoint
-ingests a single low-confidence detection at the one observable cell; a
-`READ_OBSERVATIONS` turn reads it back (still rendered as raw historical
-fields, per the correction above — this fixture does not claim to exercise
-grounded counting); because the second cell can never be resolved by any
-declared view, coverage can never complete, and the only legal route to a
-terminal answer is the explicit `ANSWER:g1:INCOMPLETE` candidate, which names
-the uncovered cell, requests a supervisor-owned safe return, and completes as
-`TerminalState.INCOMPLETE_RETURNED` once the landing is confirmed. This
-fixture does **not** reach a plain (non-incomplete) `ANSWERED` count: that
-route requires the legacy `READ_COUNTS` survey adapter
-(`ReadQueries`'s `survey_store`/`survey_run_id`), and `replay_fixture`
-constructs `ReadQueries` without one, so a `READ_COUNTS`-sourced completion
-cannot currently be reproduced byte-stably by this module. The golden
-fixture's `expected` block is `replay_fixture`'s own output against this one
-frozen trace (computed once, then bound into the manifest), not an
-independently re-derived value — exactly as the previous, hand-authored
-fixture's `expected` block was.
+ingests a single low-confidence computer detection, framed for the measured
+Tello camera model (960x720, 8.6 degrees down) and placed on the floor from
+the checkpoint's measured pose; its outcome persists that grounded count
+evidence. A `READ_OBSERVATIONS` turn reads the raw detection back. Because
+the second cell can never be resolved by any declared view, coverage can
+never complete, and the only legal route to a terminal answer is the explicit
+`ANSWER:g1:INCOMPLETE` candidate, whose answer carries the grounded count
+("computer: 0 confirmed; 1 uncertain") and names the uncovered cell, requests
+a supervisor-owned safe return, and completes as
+`TerminalState.INCOMPLETE_RETURNED` once the landing is confirmed.
+(Regenerated for Plan 03 residual task R; `PROJECTOR_REVISION` is now
+`room-projectors-v2`, since `ReadQueries.project` restores count evidence.)
+The golden fixture's `expected` block is `replay_fixture`'s own output
+against this one frozen trace (computed once, then bound into the manifest),
+not an independently re-derived value.
 
 This proves:
 
@@ -197,9 +208,12 @@ This proves:
   request was never actually authorized against it; a choice attempt whose
   declared snapshot version is stale; a tool outcome whose candidate_id or
   snapshot_version does not match the choice attempt it causally links back
-  to; or a terminal `ANSWERED` outcome whose recorded text does not match
-  what `render_answer` independently renders from the replayed facts — is
-  rejected (`ReplayIntegrityError`), never silently reproduced;
+  to; a terminal `ANSWERED` outcome whose recorded text does not match
+  what `render_answer` independently renders from the replayed facts; or a
+  terminal count answer whose recorded COUNT fact, or the answer section
+  rendered from it, does not match the counts re-derived from the replayed
+  observation evidence — is rejected (`ReplayIntegrityError`), never silently
+  reproduced;
 - the projector code this replay depends on is explicitly version-bound
   (`sentinel.room.replay.PROJECTOR_REVISION`); a fixture bound to a
   different revision is refused rather than silently replayed against code
@@ -207,8 +221,10 @@ This proves:
 
 It does **not** prove: model quality, live provider behavior, real detector
 accuracy, real flight/localization behavior, coverage-cell polygon
-containment against a real site, grounded per-session counting (not
-exercised — see the correction above), or anything about closer inspection,
+containment against a real site, a confirmed (multi-view) count or a
+`COMPLETED` count answer (this fixture's one sighting is single-view and its
+coverage is incomplete; those routes are covered by
+`tests/room/test_count_return.py`), or anything about closer inspection,
 certified landing or following (none of those are exercised). One fixture is
 not a population estimate; it is a regression baseline against silent
 projector drift.
@@ -219,10 +235,14 @@ hashes the raw `ROOM_CHOICE_ATTEMPT`/`ROOM_TOOL_OUTCOME` records exactly as
 the manifest recorded them; it does not recompute the legal candidate set a
 turn actually chose from, or the coverage projection behind an
 `ANSWER:<objective>:INCOMPLETE` outcome's coverage note. `report_sha256`
-independently recomputes and cross-checks only the terminal `ANSWERED` case
-(`render_answer` against the replayed facts, see the correction above); for
-every other terminal code -- including this fixture's own
-`ANSWERED_INCOMPLETE` -- it hashes the recorded answer text as given. So a
+independently recomputes and cross-checks the terminal `ANSWERED` case
+(`render_answer` against the replayed facts) and, since residual task R, the
+*counts* of a terminal count answer (`ANSWERED_COUNT`/`ANSWERED_INCOMPLETE`
+with a `count_projection`): they are re-derived from the replayed
+observation evidence and must match the recorded projection and its rendered
+answer section. The recorded *coverage* rows inside that projection are
+still taken as given, and every other terminal code's answer text is hashed
+as recorded. So a
 regression in `coverage.py`, `candidates.py` or the controller's own
 candidate-legality logic that still happened to reproduce the same recorded
 bytes would not be caught by this replay path. Closing that gap would
@@ -250,18 +270,15 @@ recorded in it.
 - Coverage crediting trusts that a dispatched checkpoint actually reached the
   pose its candidate declared and that its own `CAPTURE` command completed
   (`RoomController._checkpoint_targets_declared_pose`,
-  `RoomController._capture_completed`) — it does not independently verify
-  per-detection geometric placement within a cell.
+  `RoomController._capture_completed`, `_measured_pose_matches_declared_pose`)
+  — it does not test per-detection placement within a cell.
+- Grounded placement uses one support declaration per class (for example,
+  every computer on the floor). A class that rests on different surfaces in
+  one room, or a held object, cannot be placed correctly by it; such
+  detections should be left undeclared so they are reported unplaced.
 - The replay fixture is one generated scenario, not a corpus, and it
-  completes through the `ANSWER:<objective>:INCOMPLETE` route rather than a
-  plain numeric `ANSWERED` count (see "Replay" above for why). Extending
-  `replay_fixture` to wire up a `survey_store` so a `READ_COUNTS`-sourced
-  completion can also be replayed, and adding a corresponding fixture, is
-  future work, not included here.
-- Grounded per-session counting (`counting._static_counts`/`project_counts`)
-  is validated as a unit (`test_uncertain_detection_stays_uncertain_after_observation`)
-  but is not wired into any live or replayed `ANSWER`; see the correction in
-  "Coverage and count semantics" above.
+  completes through the `ANSWER:<objective>:INCOMPLETE` route; the
+  `ANSWER:COUNTS` completion route is exercised by the controller tests only.
 
 ## Evidence
 
@@ -270,6 +287,9 @@ recorded in it.
 - `tests/room/test_count_return.py` (Plan 03 Task 4's full controller/safety
   trajectory suite) for the safety-transition and count-semantics claims
   above.
-- `rtk proxy C:\coding\sentinel\.venv\Scripts\python.exe -m pytest tests/room -q --tb=short -o addopts='' -p no:cacheprovider`
-  — 521 passed at the commit this report ships with (see `task-5-report.md`'s
-  "Fix round 1" section for the exact run this count is from).
+- `tests/room/test_grounding.py` (per-frame grounding and the COUNT
+  projection) and `tests/room/test_count_return.py` tests 25-31 (residual
+  task R: NB1 and the grounded count answer routes).
+- `rtk proxy C:\coding\sentinel\.venv\Scripts\python.exe -m pytest tests/room tests/cube tests/survey/test_live_detect.py tests/survey/test_cube_bridge.py tests/survey/test_loop.py -q --tb=short -o addopts='' -p no:cacheprovider`
+  — 1207 passed at the residual task R commit (see
+  `.superpowers/sdd/2026-09-22-jev-room-agent-03-count-closer-return/task-R-report.md`).

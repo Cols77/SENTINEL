@@ -237,6 +237,33 @@ def test_partially_not_resolvable_zero_is_never_a_confident_zero():
     assert "not resolvable" in line and "cell-2" in line
 
 
+def test_only_corroborating_views_can_confirm_an_object():
+    """Residual F2: when the caller names which estimates may corroborate
+    (low-confidence sightings may not), confirmation needs more than one
+    distinct view among those estimates alone."""
+    objects = associate_static((), (
+        _estimate("e1", x_cm=100.0, y_cm=100.0, captured_at="t0", view_id="pose-A"),
+        _estimate("e2", x_cm=101.0, y_cm=100.0, captured_at="t1", view_id="pose-B"),
+    ))
+    coverage = project_coverage((_PHONE_CELL,), (CellObservation("cell-1", "phone", "p1", "OBSERVED", "t0", ("e",)),))
+    counts = project_counts(objects, (), coverage, corroborating_views={"e1": "pose-A"})
+    phone = next(c for c in counts if c.class_name == "phone")
+    assert (phone.confirmed, phone.uncertain) == (0, 1)
+    counts = project_counts(objects, (), coverage, corroborating_views={"e1": "pose-A", "e2": "pose-B"})
+    phone = next(c for c in counts if c.class_name == "phone")
+    assert (phone.confirmed, phone.uncertain) == (1, 0)
+
+
+def test_unplaced_detections_get_a_line_even_without_objects_or_cells():
+    coverage = project_coverage((), ())
+    counts = project_counts((), (), coverage, unplaced_by_class={"pen": 2})
+    pen = next(c for c in counts if c.class_name == "pen")
+    assert (pen.confirmed, pen.uncertain, pen.unplaced, pen.method) == (0, 0, 2, "GROUNDED_STATIC")
+    text = render_count_answer(counts, coverage, scope="ROOM")
+    assert "pen: 0 confirmed; 0 uncertain; 2 detections could not be placed in room coordinates " \
+           "and are not counted" in text
+
+
 def test_multi_view_objects_are_confirmed_single_view_objects_are_uncertain():
     objects = associate_static((), (
         _estimate("e1", x_cm=100.0, y_cm=100.0, captured_at="t0"),

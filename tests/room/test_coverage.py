@@ -442,12 +442,16 @@ def test_room_scope_produces_an_explicit_incomplete_answer_instead_of_looping():
     assert result[0].evidence_refs == coverage.evidence_refs
 
 
-def test_region_objective_on_a_site_with_no_semantic_frame_gets_no_candidate():
+def test_region_objective_on_a_site_with_no_semantic_frame_gets_only_an_explicit_incomplete_answer():
+    # No OBSERVE candidate can ever resolve the requested region's pose, so
+    # (residual F2) the region objective gets one explicit incomplete answer
+    # rather than no route at all (which could only end in ESCALATE).
     site = _site(semantic_frame=None)
     coverage = project_coverage((), ())
     objective = _objective("g1", 1, "left/front/bottom")
     result = build_observation_candidates((objective,), site, coverage, (), 1)
-    assert result == ()
+    assert [(c.candidate_id, c.kind) for c in result] == [("ANSWER:g1:INCOMPLETE", CandidateKind.ANSWER)]
+    assert "left-front-bottom-toward_targets" in result[0].description
 
 
 def test_unresolvable_declared_pose_is_never_offered_at_zero_cost():

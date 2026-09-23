@@ -12,6 +12,7 @@ import time
 from typing import Literal, TYPE_CHECKING
 
 from .goals import EntityRef, GoalLedger, GoalObjective
+from .grounding import FrameCountEvidence
 from .models import CandidateKind, GoalKind, GoalStatus, RoomSnapshot, TerminalState
 from .store import RoomStore
 
@@ -53,6 +54,10 @@ class ToolOutcome:
     #: OBSERVE_SUCCEEDED outcome (fix round 1, Q12); None for every other
     #: outcome and for outcomes recorded before this field existed.
     observed_at: str | None = None
+    #: The grounded count evidence (placed estimates, people split, unplaced
+    #: detections) an OBSERVE_SUCCEEDED outcome persisted for its frame
+    #: (Plan 03 residual task R, F2); None for every other outcome.
+    count_evidence: FrameCountEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -267,6 +272,7 @@ class ReadQueries:
                     data.get("refusal_code"), tuple(_restore_fact(f) for f in data.get("facts", [])),
                     TerminalState(data["terminal_state"]) if data.get("terminal_state") else None,
                     event.event_id, data.get("observed_at"),
+                    FrameCountEvidence.from_payload(data["count_evidence"]) if data.get("count_evidence") else None,
                 )
                 outcomes.append(outcome)
                 if outcome.terminal_state is not None:

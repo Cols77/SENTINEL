@@ -15,9 +15,11 @@ responsibility, and Task 4 only wires the execution loop around it (see the
 task report for this scoping decision).
 """
 from dataclasses import asdict, replace
+import math
 
 import pytest
 
+from sentinel.camera import CameraModel
 from sentinel.cube.checkpoint import CheckpointPlan
 from sentinel.cube.localization import LocalizationState
 from sentinel.cube.recovery import PoseReport, RecoveryController
@@ -27,10 +29,12 @@ from sentinel.models import Position
 from sentinel.room.controller import RoomController, TurnOutcome
 from sentinel.room.coverage import CoverageCell
 from sentinel.room.goals import GoalLedger, GoalObjective
+from sentinel.room.grounding import CountGeometry
 from sentinel.room.ingest import DetectionEvidence, PerceptionRequest, PerceptionResult, detection_digest
 from sentinel.room.models import CandidateKind, GoalKind, GoalStatus, TerminalState
 from sentinel.room.semantic import resolve_pose_id
 from sentinel.room.site import SemanticFrame
+from sentinel.room.spatial import SupportDeclaration, SupportKind, semantic_heading_to_compass_deg
 from tests.cube.test_localization import fix
 from tests.cube.test_recovery import site as cube_site
 from tests.room.test_controller import Judge
@@ -150,6 +154,41 @@ def make_result(tmp_path, session_id, pose_id, *, confidence_band="high", status
                             "2026-09-23T00:00:01+00:00", (evidence,))
 
 
+POSE_A = "left-rear-bottom-toward_targets"
+POSE_B = "right-front-top-toward_targets"
+T0, T1 = "2026-09-23T00:00:00+00:00", "2026-09-23T00:00:00.500000+00:00"
+LEVEL_CAMERA = CameraModel("test-level", 683.0, 683.0, 480.0, 360.0, 0.0)
+COUNT_GEOMETRY = CountGeometry(LEVEL_CAMERA, (("computer", SupportDeclaration(SupportKind.FLOOR)),
+                                              ("phone", SupportDeclaration(SupportKind.FLOOR))))
+
+
+def grounded_result(tmp_path, site, pose_id, targets, *, captured_at):
+    """A perception result whose detections are real floor objects as seen
+    from ``pose_id``'s declared endpoint: each target is
+    ``(class_name, confidence_band, (x_cm, y_cm) or None)``; a floor target's
+    box is the exact inverse of ``estimate_detection`` for ``LEVEL_CAMERA``,
+    so grounding places it back at that room position. ``None`` (for people)
+    uses a fixed box -- people are never placed."""
+    resolved = resolve_pose_id(site, pose_id)
+    angle = math.radians(semantic_heading_to_compass_deg(resolved.yaw_deg))
+    detections = []
+    for index, (class_name, band, target) in enumerate(targets):
+        if target is None:
+            bbox = (400.0, 300.0, 60.0, 200.0)
+        else:
+            dx, dy = target[0] - resolved.x_cm, target[1] - resolved.y_cm
+            forward = dx * math.sin(angle) + dy * math.cos(angle)
+            lateral = dx * math.cos(angle) - dy * math.sin(angle)
+            u = LEVEL_CAMERA.cx + LEVEL_CAMERA.fx * lateral / forward
+            v = LEVEL_CAMERA.cy + LEVEL_CAMERA.fy * resolved.z_cm / forward
+            bbox = (u - 15.0, v - 40.0, 30.0, 40.0)
+        evidence = DetectionEvidence(f"d{index}", class_name, band, None, "VLM_CONFIDENCE_BAND", bbox,
+                                     "FULL_FRAME_PIXELS", 960, 720, None, "")
+        detections.append(replace(evidence, evidence_sha256=detection_digest(evidence)))
+    base = make_result(tmp_path, SESSION, pose_id)
+    return replace(base, request=replace(base.request, captured_at=captured_at), detections=tuple(detections))
+
+
 class PerceptionRig:
     """Controller-injected observation collaborators, fully test-controlled.
 
@@ -190,10 +229,10 @@ class PerceptionRig:
         return replace(result, request=request)
 
 
-def make_controller(safety, judge, rig=None, *, resolve_checkpoint=None):
+def make_controller(safety, judge, rig=None, *, resolve_checkpoint=None, count_geometry=None):
     supervisor, store, clock, *_ = safety
     executor = Executor(store, clock)
-    kwargs = {}
+    kwargs = {"count_geometry": count_geometry} if count_geometry is not None else {}
     if rig is not None:
         # Fix round 3 (F3): auto-wire the stub executor's reported measured
         # pose to whatever pose each dispatched checkpoint actually declares,
@@ -201,8 +240,8 @@ def make_controller(safety, judge, rig=None, *, resolve_checkpoint=None):
         # under the new measured-pose check. A caller supplying its own
         # ``resolve_checkpoint`` (a negative fixture, or one that never
         # reaches a completed capture) opts out of this wiring.
-        kwargs = dict(resolve_checkpoint=resolve_checkpoint or make_resolve_checkpoint(supervisor, executor=executor),
-                     perception_capture=rig.capture, perception_provider=rig.provide)
+        kwargs.update(resolve_checkpoint=resolve_checkpoint or make_resolve_checkpoint(supervisor, executor=executor),
+                      perception_capture=rig.capture, perception_provider=rig.provide)
     controller = RoomController(store, judge, supervisor=supervisor, flight_executor=executor, **kwargs)
     return controller, executor
 
@@ -455,26 +494,44 @@ def test_battery_forces_return_before_an_unaffordable_observation(safety, tmp_pa
 # --- 8. completed coverage answers, then the observation stops offering -----
 
 def test_completed_coverage_answers_and_stops_offering_observation(safety, tmp_path):
+    """Residual F2: once declared coverage is complete, the COMPLETED route
+    for a session COUNT objective is the grounded count projected from this
+    session's own observations -- never the unrelated legacy READ_COUNTS
+    survey report, even when one is wired in and has been read."""
     supervisor, store, clock, *_ = safety
     supervisor.site = room_site(coverage=True)
     supervisor.validate_bindings = lambda site: None
     set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
     rig = PerceptionRig(store, SESSION)
-    rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
-    rig.set("right-front-top-toward_targets", make_result(tmp_path, SESSION, "right-front-top-toward_targets"))
+    # The same floor computer, seen from both declared poses.
+    rig.set(POSE_A, grounded_result(tmp_path, supervisor.site, POSE_A, (("computer", "high", (100, 600)),),
+                                    captured_at=T0))
+    rig.set(POSE_B, grounded_result(tmp_path, supervisor.site, POSE_B, (("computer", "high", (100, 600)),),
+                                    captured_at=T1))
     from tests.room.test_queries import survey
     legacy, _, _ = survey(tmp_path)
     try:
-        judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets", "OBSERVE:g1:right-front-top-toward_targets",
-                      "READ_COUNTS", "ANSWER")
+        judge = Judge(f"OBSERVE:g1:{POSE_A}", f"OBSERVE:g1:{POSE_B}", "READ_COUNTS", "ANSWER:COUNTS")
         executor = Executor(store, clock)
         controller = RoomController(store, judge, supervisor=supervisor, flight_executor=executor,
                                     survey_store=legacy, survey_run_id="run1",
                                     resolve_checkpoint=make_resolve_checkpoint(supervisor, executor=executor),
-                                    perception_capture=rig.capture, perception_provider=rig.provide)
+                                    perception_capture=rig.capture, perception_provider=rig.provide,
+                                    count_geometry=COUNT_GEOMETRY)
         assert controller.run_until_terminal(SESSION) == TerminalState.COMPLETED
         final_criteria = judge.calls[-1][1]
         assert not any(key.startswith("OBSERVE:") for key in final_criteria)
+        assert "ANSWER" not in final_criteria  # the legacy-report answer is never offered
+        payload = store.events(SESSION)[-1].payload
+        assert payload["code"] == "ANSWERED_COUNT" and payload["terminal_state"] == "COMPLETED"
+        answer = payload["answer"]
+        assert answer.splitlines()[0] == "Objective g1 (room-wide count):"
+        assert "computer: 1 confirmed; 0 uncertain" in answer
+        assert "Coverage for the room is complete" in answer
+        assert "legacy" not in answer and "survey_run" not in answer and "2 confirmed" not in answer
+        projection, = payload["count_projection"]
+        assert projection["objective_id"] == "g1" and projection["scope"] == "ROOM"
+        assert len(projection["frame_ids"]) == 2
         # Fix round 1 (Q1): a terminal answer after this session has actually
         # flown must request a supervisor-owned safe return/landing before
         # the session is reported COMPLETED -- never leave the aircraft
@@ -1093,3 +1150,168 @@ def test_version_conflict_after_partial_motion_is_checkpoint_failed_not_stale(sa
     payload = store.events(SESSION)[-1].payload
     assert payload["code"] == "CHECKPOINT_FAILED" and payload["refusal_code"] == "CHECKPOINT_FAILED"
     assert rig.captures == []
+
+
+# ============================================================================
+# Plan 03 residual task R (2026-09-23): F2 -- grounded counting wired in.
+# ============================================================================
+
+def _outcomes(store):
+    return [e.payload for e in store.events(SESSION) if e.event_type == "ROOM_TOOL_OUTCOME"]
+
+
+# --- 26. each successful observation persists replayable count evidence ----
+
+def test_observe_success_persists_grounded_count_evidence(safety, tmp_path):
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set(POSE_A, grounded_result(tmp_path, supervisor.site, POSE_A,
+                                    (("computer", "high", (100, 600)), ("person", "high", None)), captured_at=T0))
+    controller, executor = make_controller(safety, Judge(f"OBSERVE:g1:{POSE_A}"), rig,
+                                           count_geometry=COUNT_GEOMETRY)
+    assert controller.step(SESSION).accepted
+    payload = store.events(SESSION)[-1].payload
+    assert payload["code"] == "OBSERVE_SUCCEEDED"
+    evidence = payload["count_evidence"]
+    assert evidence["pose_id"] == POSE_A and evidence["captured_at"] == T0
+    estimate, = evidence["estimates"]
+    assert estimate["class_name"] == "computer"
+    assert abs(estimate["x_cm"] - 100) < 1e-6 and abs(estimate["y_cm"] - 600) < 1e-6
+    assert (evidence["people_confirmed"], evidence["people_uncertain"]) == (1, 0)
+    # The projected snapshot restores it as typed, immutable evidence.
+    outcome = controller.queries.project(SESSION).outcomes[-1]
+    assert outcome.count_evidence is not None and outcome.count_evidence.estimates[0].class_name == "computer"
+
+
+# --- 27. region-scope objectives answer with viewpoint-scoped counts -------
+
+def test_region_scope_objectives_answer_with_viewpoint_scoped_grounded_counts(safety, tmp_path):
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "left/rear/bottom"),
+                                count_objective("g2", 2, "right/front/top")))
+    rig = PerceptionRig(store, SESSION)
+    rig.set(POSE_A, grounded_result(tmp_path, supervisor.site, POSE_A, (("computer", "high", (100, 600)),),
+                                    captured_at=T0))
+    rig.set(POSE_B, grounded_result(tmp_path, supervisor.site, POSE_B, (), captured_at=T1))
+
+    def answer(state, criteria):
+        # Both requested regions observed: neither region is offered again,
+        # and the grounded count answer is legal.
+        assert not any(key.startswith("OBSERVE:") for key in criteria)
+        assert "ANSWER" not in criteria
+        return "ANSWER:COUNTS"
+
+    judge = Judge(f"OBSERVE:g1:{POSE_A}", f"OBSERVE:g2:{POSE_B}", answer)
+    controller, executor = make_controller(safety, judge, rig, count_geometry=COUNT_GEOMETRY)
+    assert controller.run_until_terminal(SESSION) == TerminalState.COMPLETED
+    payload = store.events(SESSION)[-1].payload
+    assert payload["code"] == "ANSWERED_COUNT"
+    first, second = payload["answer"].split("\n\n")
+    assert first.splitlines()[0] == f"Objective g1 (count from declared viewpoint {POSE_A}):"
+    assert "computer: 0 confirmed; 1 uncertain" in first and "this viewpoint" in first
+    assert second.splitlines()[0] == f"Objective g2 (count from declared viewpoint {POSE_B}):"
+    assert "computer: 0 confirmed; 0 uncertain" in second and "does not mean none are present" not in second
+    assert "the room" not in payload["answer"]
+    assert [p["scope"] for p in payload["count_projection"]] == ["VIEWPOINT", "VIEWPOINT"]
+    assert "LAND" in executor.calls
+
+
+# --- 28. a region that could not be observed gets an explicit incomplete ---
+
+def test_region_scope_objective_that_cannot_be_observed_answers_incomplete(safety, tmp_path):
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site()
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "left/rear/bottom"),))
+    rig = PerceptionRig(store, SESSION)
+
+    def refuse(candidate, snapshot):
+        return None
+
+    def incomplete(state, criteria):
+        assert f"OBSERVE:g1:{POSE_A}" not in criteria and "ANSWER:COUNTS" not in criteria
+        return "ANSWER:g1:INCOMPLETE"
+
+    judge = Judge(f"OBSERVE:g1:{POSE_A}", incomplete)
+    controller, executor = make_controller(safety, judge, rig, resolve_checkpoint=refuse,
+                                           count_geometry=COUNT_GEOMETRY)
+    assert controller.run_until_terminal(SESSION) == TerminalState.INCOMPLETE_RETURNED
+    payload = store.events(SESSION)[-1].payload
+    assert payload["code"] == "ANSWERED_INCOMPLETE"
+    assert payload["answer"].startswith("Objective g1 cannot be completed")
+    assert f"Objective g1 (count from declared viewpoint {POSE_A}):" in payload["answer"]
+    assert "computer: 0 confirmed; 0 uncertain" in payload["answer"]
+
+
+# --- 29. uncertain detections stay uncertain in the rendered answer --------
+
+def test_low_confidence_detections_stay_uncertain_in_the_terminal_answer(safety, tmp_path):
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set(POSE_A, grounded_result(tmp_path, supervisor.site, POSE_A, (("computer", "low", (100, 600)),),
+                                    captured_at=T0))
+    rig.set(POSE_B, grounded_result(tmp_path, supervisor.site, POSE_B, (("computer", "low", (100, 600)),),
+                                    captured_at=T1))
+    judge = Judge(f"OBSERVE:g1:{POSE_A}", f"OBSERVE:g1:{POSE_B}", "ANSWER:COUNTS")
+    controller, executor = make_controller(safety, judge, rig, count_geometry=COUNT_GEOMETRY)
+    assert controller.run_until_terminal(SESSION) == TerminalState.COMPLETED
+    assert "computer: 0 confirmed; 1 uncertain" in store.events(SESSION)[-1].payload["answer"]
+
+
+# --- 30. without count geometry, detections are reported unplaced ----------
+
+def test_detections_without_count_geometry_are_reported_unplaced_not_zero(safety, tmp_path):
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set(POSE_A, grounded_result(tmp_path, supervisor.site, POSE_A, (("computer", "high", (100, 600)),),
+                                    captured_at=T0))
+    rig.set(POSE_B, grounded_result(tmp_path, supervisor.site, POSE_B, (), captured_at=T1))
+    judge = Judge(f"OBSERVE:g1:{POSE_A}", f"OBSERVE:g1:{POSE_B}", "ANSWER:COUNTS")
+    controller, executor = make_controller(safety, judge, rig)
+    assert controller.run_until_terminal(SESSION) == TerminalState.COMPLETED
+    answer = store.events(SESSION)[-1].payload["answer"]
+    assert ("computer: 0 confirmed; 0 uncertain; 1 detection could not be placed in room coordinates "
+            "and is not counted") in answer
+
+
+# --- 31. the room-wide incomplete answer carries the grounded counts too ---
+
+def test_room_incomplete_answer_carries_grounded_counts_and_the_uncovered_cells(safety, tmp_path):
+    supervisor, store, clock, *_ = safety
+    base = cube_site()
+    frame = SemanticFrame("free", (1.0, 0.0), (0.0, 1.0), "FRONT", ())
+    cells = (
+        CoverageCell("cell1", ((10, 10), (50, 10), (50, 50), (10, 50)), (0, 200), ("computer",)),
+        CoverageCell("cell2", ((150, 150), (190, 150), (190, 190), (150, 190)), (0, 200), ("computer",)),
+    )
+    supervisor.site = replace(base, semantic_frame=frame, coverage_cells=cells,
+                              pose_visibility=((POSE_A, ("cell1",)),))
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set(POSE_A, grounded_result(tmp_path, supervisor.site, POSE_A, (("computer", "high", (100, 600)),),
+                                    captured_at=T0))
+
+    def incomplete(state, criteria):
+        assert "ANSWER:COUNTS" not in criteria
+        return "ANSWER:g1:INCOMPLETE"
+
+    judge = Judge(f"OBSERVE:g1:{POSE_A}", incomplete)
+    controller, executor = make_controller(safety, judge, rig, count_geometry=COUNT_GEOMETRY)
+    assert controller.run_until_terminal(SESSION) == TerminalState.INCOMPLETE_RETURNED
+    payload = store.events(SESSION)[-1].payload
+    assert "Objective g1 (room-wide count):" in payload["answer"]
+    assert "computer: 0 confirmed; 1 uncertain" in payload["answer"]
+    assert "cell2:computer not yet resolved" in payload["answer"]
+    assert payload["count_projection"][0]["coverage"]["complete"] is False

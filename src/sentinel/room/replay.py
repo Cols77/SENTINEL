@@ -30,6 +30,8 @@ import json
 from pathlib import Path
 import tempfile
 
+from .coverage import CoverageProjection
+from .grounding import project_objective_count, render_objective_count
 from .ingest import ingest_result, result_from_dict
 from .models import CapabilityProfile, TerminalState
 from .queries import ReadQueries, render_answer
@@ -41,7 +43,10 @@ from .store import RoomStore, _canonical_json, _canonical_payload, _event_sha256
 #: fixture's manifest binds the revision it was captured against; replay
 #: refuses to run a fixture bound to a different one rather than silently
 #: reproducing a value the current code no longer actually computes.
-PROJECTOR_REVISION = "room-projectors-v1"
+#: v2 (Plan 03 residual task R, F2): ``ReadQueries.project`` restores each
+#: OBSERVE_SUCCEEDED outcome's grounded count evidence, and a terminal
+#: outcome's recorded COUNT fact is re-derived from it on replay.
+PROJECTOR_REVISION = "room-projectors-v2"
 
 _REQUIRED_MANIFEST_KEYS = (
     "session_id", "request_text", "label", "room_schema_revision", "projector_revision", "files", "expected",
@@ -401,7 +406,49 @@ def _render_report(snapshot, records: list[dict]) -> str:
         return rendered
     if not isinstance(recorded_answer, str) or not recorded_answer:
         raise ReplayIntegrityError("terminal outcome carries no recorded answer text")
+    if "count_projection" in payload:
+        _verify_count_projection(snapshot, payload["count_projection"], recorded_answer)
     return recorded_answer
+
+
+def _coverage_from_payload(body: dict) -> CoverageProjection:
+    return CoverageProjection(tuple(tuple(row) for row in body["by_cell_and_class"]), body["complete"],
+                              tuple(body["uncovered"]), tuple(body["evidence_refs"]), body["latest_capture_at"],
+                              body["analysed_frames"], body["unanalysed_frames"])
+
+
+def _verify_count_projection(snapshot, recorded, answer: str) -> None:
+    """Residual F2: a terminal count answer records its COUNT fact -- one
+    grounded projection per objective. Re-derive each objective's counts
+    from the replayed observation evidence (every ``OBSERVE_SUCCEEDED``
+    outcome's persisted ``count_evidence``, restored by
+    ``ReadQueries.project``) and require the recorded projection, and the
+    section of the recorded answer rendered from it, to match exactly. The
+    recorded *coverage* rows are taken as given: re-deriving coverage needs
+    the site binding replay does not have (the F10 limitation, see the
+    readiness report)."""
+    if not isinstance(recorded, list):
+        raise ReplayIntegrityError("terminal outcome carries a malformed count projection")
+    objectives = {o.objective_id: o for o in (snapshot.ledger.objectives if snapshot.ledger else ())}
+    frames = tuple(o.count_evidence for o in snapshot.outcomes
+                   if o.kind == "OBSERVE" and o.code == "OBSERVE_SUCCEEDED" and o.count_evidence is not None)
+    for entry in recorded:
+        try:
+            objective = objectives[entry["objective_id"]]
+            scope, pose_id = entry["scope"], entry["pose_id"]
+            scoped = frames if scope == "ROOM" else tuple(f for f in frames if f.pose_id == pose_id)
+            derived = project_objective_count(objective, scoped, _coverage_from_payload(entry["coverage"]),
+                                              scope=scope, pose_id=pose_id)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ReplayIntegrityError("terminal outcome carries a malformed count projection") from exc
+        if json.loads(_canonical_json(derived.to_payload())) != entry:
+            raise ReplayIntegrityError(
+                f"recorded count projection for objective {entry['objective_id']!r} does not match the counts "
+                "re-derived from the replayed observation evidence")
+        if render_objective_count(derived) not in answer:
+            raise ReplayIntegrityError(
+                f"recorded answer does not contain the count section re-derived for objective "
+                f"{entry['objective_id']!r}")
 
 
 def _sha_bytes(data: bytes) -> str:
