@@ -510,8 +510,10 @@ def test_live_composition_defers_every_operational_boundary(live_config, monkeyp
     monkeypatch.setattr(live, 'make_client', lambda config: calls.append('client'))
     monkeypatch.setattr(live, 'check_emergency_transport',
                         lambda config: calls.append('emergency'))
-    monkeypatch.setattr(live.LiveFlight, '_new_supervisor',
-                        lambda self, option: calls.append('provider'))
+    monkeypatch.setattr(live, 'FlightTestRunner',
+                        lambda *args, **kwargs: calls.append('preflight'))
+    monkeypatch.setattr(live, 'LiveDetectionSupervisor',
+                        lambda **kwargs: calls.append('provider'))
     service = bootstrap.build_service(live_config)
     try:
         service.read_snapshot('mission')
@@ -558,6 +560,12 @@ def test_ready_to_plan_proposal_allows_current_approval_and_rejection(
     calls = []
     monkeypatch.setattr(live, 'make_client',
                         lambda config: calls.append('client'))
+    monkeypatch.setattr(live, 'check_emergency_transport',
+                        lambda config: calls.append('emergency'))
+    monkeypatch.setattr(live, 'FlightTestRunner',
+                        lambda *args, **kwargs: calls.append('preflight'))
+    monkeypatch.setattr(live, 'LiveDetectionSupervisor',
+                        lambda **kwargs: calls.append('provider'))
     monkeypatch.setattr(readiness, 'discover_local_ipv4', lambda tello_ip: None)
     service = bootstrap.build_service(replace(live_config, confirm=False,
                                               local_ip=None))
@@ -595,15 +603,33 @@ def test_ready_to_plan_proposal_allows_current_approval_and_rejection(
         service.close()
 
 
-def test_live_dispatch_preflights_only_after_approval(live_config, monkeypatch):
+def test_live_dispatch_uses_approved_readiness_for_admission(live_config, monkeypatch):
     from sentinel.ui import live
+    from sentinel.ui import readiness
     from sentinel.dry_run import DryRunClient
     calls = []
+    factory_ips = []
+    authorisations = []
     client = DryRunClient()
+    route = {'address': '192.168.10.1'}
+    dispatch_readiness = []
+    evaluate = live.evaluate_live_readiness
+
+    def capture_readiness(config):
+        result = evaluate(config)
+        dispatch_readiness.append(result)
+        return result
+
+    monkeypatch.setattr(readiness, 'discover_local_ipv4',
+                        lambda tello_ip: route['address'])
+    monkeypatch.setattr(live, 'evaluate_live_readiness', capture_readiness)
 
     class Supervisor:
         frames_dir = live_config.data_dir / 'frames'
         cleanup_pending = False
+        def __init__(self, **kwargs):
+            authorisations.append(kwargs['authorised'])
+            calls.append('supervisor-create')
         def start(self):
             calls.append('supervisor-start')
         def finish(self, frames):
@@ -627,26 +653,84 @@ def test_live_dispatch_preflights_only_after_approval(live_config, monkeypatch):
         def preflight(self):
             calls.append('preflight')
 
-    monkeypatch.setattr(live, 'make_client',
-                        lambda config: calls.append('client') or client)
-    monkeypatch.setattr(live, 'check_emergency_transport',
-                        lambda config: calls.append('emergency') or (lambda: 9))
+    def make_client(config):
+        factory_ips.append(('client', config.local_ip))
+        calls.append('client')
+        return client
+
+    def make_emergency(config):
+        factory_ips.append(('emergency', config.local_ip))
+        calls.append('emergency')
+        return lambda: 9
+
+    monkeypatch.setattr(live, 'make_client', make_client)
+    monkeypatch.setattr(live, 'check_emergency_transport', make_emergency)
     monkeypatch.setattr(live, 'FlightTestRunner', Preflight)
     monkeypatch.setattr(live, 'CubeFlight', Bridge)
-    monkeypatch.setattr(live.LiveFlight, '_new_supervisor',
-                        lambda self, option: calls.append('supervisor-create') or Supervisor())
-    service = bootstrap.build_service(live_config)
+    monkeypatch.setattr(live, 'LiveDetectionSupervisor', Supervisor)
+    config = replace(live_config, confirm=False, authorise_paid_calls=False,
+                     local_ip=None)
+    service = bootstrap.build_service(config)
     try:
         assert service.submit_chat('mission', _chat_command(service))['kind'] == 'PROPOSE'
         assert service.approval.changed.wait(2)
         assert calls == []
+        route['address'] = '192.168.10.2'
         assert _approve_current(service)['status'] == 'ACKNOWLEDGED'
         deadline = time.monotonic() + 2
         while 'preflight' not in calls and time.monotonic() < deadline:
             time.sleep(0.01)
+        assert 'preflight' in calls
+        deadline = time.monotonic() + 2
+        while service.worker.active and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not service.worker.active
         assert calls[:3] == ['emergency', 'client', 'preflight']
         assert calls.index('supervisor-create') > calls.index('preflight')
         assert calls.index('supervisor-start') > calls.index('supervisor-create')
+        assert calls.index('flight') > calls.index('supervisor-start')
+        assert factory_ips == [
+            ('emergency', '192.168.10.2'), ('client', '192.168.10.2')]
+        assert len(dispatch_readiness) == 1
+        assert dispatch_readiness[0].resolved_local_ip == '192.168.10.2'
+        assert service.config.local_ip is None
+        assert service.config.confirm is False
+        assert service.config.authorise_paid_calls is False
+        assert authorisations == [True]
+    finally:
+        service.close()
+
+
+def test_live_rejection_does_not_construct_operational_boundaries(live_config,
+                                                                   monkeypatch):
+    from sentinel.ui import live
+
+    calls = []
+    monkeypatch.setattr(live, 'check_emergency_transport',
+                        lambda config: calls.append('emergency'))
+    monkeypatch.setattr(live, 'make_client',
+                        lambda config: calls.append('client'))
+    monkeypatch.setattr(live, 'FlightTestRunner',
+                        lambda *args, **kwargs: calls.append('preflight'))
+    monkeypatch.setattr(live, 'LiveDetectionSupervisor',
+                        lambda **kwargs: calls.append('provider'))
+    service = bootstrap.build_service(
+        replace(live_config, confirm=False, authorise_paid_calls=False))
+    try:
+        assert service.submit_chat('mission', _chat_command(service))['kind'] == 'PROPOSE'
+        assert service.approval.changed.wait(2)
+        offer = service.approval.current('mission')
+        result = service.submit_decision('mission', dict(
+            session_id=service.session_id, run_id='mission',
+            proposal_id=offer['id'], proposal_sha256=offer['sha256'],
+            expected_version=offer['decision_version'], decision='REJECT',
+            command_id='reject', correlation_id='corr', attempt_id='reject-attempt',
+            idempotency_key='reject-key'))
+        assert result['status'] == 'REJECTED'
+        deadline = time.monotonic() + 2
+        while service.worker.active and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert calls == []
     finally:
         service.close()
 
@@ -800,6 +884,12 @@ def test_invalid_profile_and_consent_refuse_at_dispatch_before_client(
     from sentinel.ui import live
     calls = []
     monkeypatch.setattr(live, 'make_client', lambda config: calls.append('client'))
+    monkeypatch.setattr(live, 'check_emergency_transport',
+                        lambda config: calls.append('emergency'))
+    monkeypatch.setattr(live, 'FlightTestRunner',
+                        lambda *args, **kwargs: calls.append('preflight'))
+    monkeypatch.setattr(live, 'LiveDetectionSupervisor',
+                        lambda **kwargs: calls.append('provider'))
     config = replace(live_config, confirm=False, authorise_paid_calls=False)
     if change == 'consent':
         config = replace(config, location='other')

@@ -1,5 +1,5 @@
 """Live boundaries for the same survey service; never substitutes replay adapters."""
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 import socket
 import sqlite3
@@ -154,7 +154,7 @@ class LiveFlight:
             consent_db=config.survey_db or config.data_dir / 'survey.sqlite',
             location=config.location, date=config.consent_date,
             tiles=getattr(config, 'detect_tiles', 'none'),
-            authorised=getattr(config, 'authorise_paid_calls', False))
+            authorised=True)
 
     def detection_for(self, frame, classes):
         """Read the follower's exact-frame cache; never call the provider."""
@@ -172,9 +172,11 @@ class LiveFlight:
         self._require(readiness,'flight')
         self._require(readiness,'detection')
         self._require(readiness,'emergency')
+        dispatch_config = replace(
+            config, local_ip=readiness.resolved_local_ip)
         self._prepare_pose_store()
         try:
-            sender=check_emergency_transport(config)
+            sender=check_emergency_transport(dispatch_config)
         except Exception as exc:
             self._record_failure(
                 'emergency', 'INDEPENDENT_EMERGENCY_UNAVAILABLE',
@@ -188,7 +190,7 @@ class LiveFlight:
         supervisor = None
         try:
             try:
-                client=make_client(config)
+                client=make_client(dispatch_config)
                 FlightTestRunner(client,'real',envelope=self.site.envelope()).preflight()
             except Exception as exc:
                 self._record_failure(
