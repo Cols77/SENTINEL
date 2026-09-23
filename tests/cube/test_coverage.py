@@ -11,9 +11,11 @@ ROOT = Path(__file__).resolve().parents[2]
 CALIBRATION = json.loads((ROOT / "calibration/tag-map-calibrated.json").read_text())["camera_calibration"]
 FLIGHT2 = json.loads((ROOT / "docs/wp5-flight2-site.json").read_text())
 
-#: The altitude bias at which the model reproduces the flights below (ground takeoffs, tags
-#: tape-measured at 53 cm): `height?` read this much low (tags cut off at the frame bottom).
-CALIBRATED_BIAS_CM = 18
+#: The height offset at which the model reproduces the flights below, fitted together with
+#: coverage.HOVER_PITCH_DOWN_DEG (7 deg): the drone flies this far above the altitude the runner
+#: tracks. Confirmed on 2026-09-23 by the tags, by a range-free pixel reading and by the operator's
+#: tape (~120 cm at a commanded 70). The site files carry the same number.
+CALIBRATED_BIAS_CM = 45
 
 
 def _model(doc=FLIGHT2, **changes):
@@ -34,9 +36,41 @@ FLIGHT2_MODEL = _model(altitude_bias_cm=CALIBRATED_BIAS_CM)
     ("L_FAR 09-22: localised", (215, 205), {OK}),
     ("HOME 09-21: localised every run", (250, 250), {OK}),
     ("LEFT_FAR 09-21: localised", (220, 215), {OK}),
+    ("FAR_L_HI 09-23: localised at 135 cm commanded", (190, 145), {OK, MARGINAL}),
+    ("FAR_MID_HI 09-23: localised, 1.2 cm", (250, 145), {OK, MARGINAL}),
 ])
 def test_the_guard_reproduces_the_flights(name, xy, allowed):
-    assert FLIGHT2_MODEL.verdict(*xy, 100).level in allowed, name
+    z = 135 if "09-23" in name else 100
+    model = _model(altitude_bias_cm=CALIBRATED_BIAS_CM) if "09-23" not in name else _flight3()
+    assert model.verdict(*xy, z).level in allowed, name
+
+
+def _flight3():
+    return CoverageModel(parse_site(json.loads((ROOT / "docs/wp5-flight3-site.json").read_text())),
+                         CALIBRATION)
+
+
+def test_the_height_offset_and_the_hover_pitch_are_calibrated_as_a_pair():
+    """Neither is identifiable alone: a higher drone and a more downward camera trade off. The
+    pair is what the flights fix -- with the site's 45 cm but no hover tilt, four 09-22 stops that
+    localised every run come out BLIND."""
+    from sentinel.cube import coverage as coverage_module
+    original = coverage_module.HOVER_PITCH_DOWN_DEG
+    coverage_module.HOVER_PITCH_DOWN_DEG = 0.0
+    try:
+        flat = _model(altitude_bias_cm=CALIBRATED_BIAS_CM)
+        assert flat.verdict(250, 250, 100).level == BLIND        # HOME, which never failed
+    finally:
+        coverage_module.HOVER_PITCH_DOWN_DEG = original
+    assert _model(altitude_bias_cm=CALIBRATED_BIAS_CM).verdict(250, 250, 100).level != BLIND
+
+
+def test_a_flight_can_re_check_its_stops_from_the_height_it_measured():
+    model = _flight3()
+    assert model.height_offset_cm == 45
+    higher = model.measured(90.0)
+    assert higher.height_offset_cm == 90 and model.height_offset_cm == 45
+    assert higher.verdict(250, 145, 135).level == BLIND          # 90 cm higher loses the tags
 
 
 def test_without_the_bias_the_model_would_have_passed_the_blind_stop():

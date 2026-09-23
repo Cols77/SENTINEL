@@ -1,6 +1,6 @@
 {
   "schema_version": "cube-site-v1",
-  "_comment": "2026-09-22: the cube moved back from the tag door. Commanded area 1.6-2.6 m from the tags (y 140-240), x 185-315, z 60-140 (above 100 only the far half keeps the tags in view: the guard refuses the rest; above ~140 the whole cube is blind with tags at 53 cm); the near-door row lost the tags on 09-22. Inset 40 cm so legs may fly at 50 cm/s (35 cm travel after land). Same footprint as flight2's cube or smaller. Ground takeoff (takeoff_z_cm 0). altitude_bias_cm 18: the tags are tape-measured at 53 cm, so height? reads ~18 cm low (the value the 09-21/22 flights calibrate). Fly with the tag map generated from this file: docs/wp5-flight3-map.json (sentinel cube-site-map). Check with: sentinel cube-layout-check --coverage.",
+  "_comment": "2026-09-22: the cube moved back from the tag door. Commanded area 1.6-2.6 m from the tags (y 140-240), x 185-315, z 60-140 (above 100 only the far half keeps the tags in view: the guard refuses the rest; above ~140 the whole cube is blind with tags at 53 cm); the near-door row lost the tags on 09-22. Inset 40 cm so legs may fly at 50 cm/s (35 cm travel after land). Same footprint as flight2's cube or smaller. Ground takeoff (takeoff_z_cm 0). See _bias_comment for altitude_bias_cm. Fly with the tag map generated from this file: docs/wp5-flight3-map.json (sentinel cube-site-map). Check with: sentinel cube-layout-check --coverage.",
   "line_y_m": 4.0,
   "stands": [
     {
@@ -33,5 +33,6 @@
     "max_z_cm": 140
   },
   "takeoff_z_cm": 0,
-  "altitude_bias_cm": 18
+  "altitude_bias_cm": 45,
+  "_bias_comment": "2026-09-23: the drone flies 30-50 cm above the altitude the runner tracks -- by the tags, by a range-free pixel-elevation reading, and by the operator's tape (~120 cm at a commanded 70). 45 is the planning figure, fitted together with coverage.HOVER_PITCH_DOWN_DEG = 5 deg against every 09-21/22/23 stop; the two trade off and only the pair is identifiable. Each flight calibrates its own offset from its first fix (cube.mission), so this is a starting point, not the truth of a flight."
 }

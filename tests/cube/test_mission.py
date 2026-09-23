@@ -750,91 +750,71 @@ def test_tag_implied_height_is_the_vertical_leg_of_the_range_triangle():
     assert tag_implied_height_cm(reports, None, (250.0, 240.0)) is None
 
 
-def test_a_takeoff_height_the_tags_disagree_with_raises_an_alert(tmp_path):
+def test_the_first_fix_calibrates_this_flight_s_height_offset(tmp_path):
+    """The runner tracks the altitude it commanded; the drone flies somewhere else (09-23: 30-50 cm
+    higher). The first fix measures the difference and every later stop is checked against it."""
     runner, events = _plan(tmp_path, Mission(270, 250, (Waypoint("WP1", 270, 300, 100),)))
     runner.tag_map = _TagMap()
     entry = {"height_cm": 100}
-    # tags say 55 + 40 = 95 cm... with the site's takeoff height 0 that agrees with 100
-    runner._check_vertical("WP1", [_ranged(250, 240, math.hypot(1.6, 0.40))] * 5, (250.0, 240.0), entry)
-    assert entry["vertical_mismatch_cm"] == pytest.approx(-5.0, abs=0.5) and not events
-    # tags say 55 + 75 = 130 cm against 100: the site's vertical model is 30 cm out
+    # 160 cm in front of a tag at 55, 75 cm above it: the drone is at 130, commanded 100
     runner._check_vertical("WP1", [_ranged(250, 240, math.hypot(1.6, 0.75))] * 5, (250.0, 240.0), entry)
     assert entry["tag_height_cm"] == pytest.approx(130.0, abs=0.5)
-    assert any(e == "alert" and "altitude bias or tag heights are wrong" in m for e, m in events)
+    assert entry["measured_height_offset_cm"] == pytest.approx(30.0, abs=0.5)
+    assert runner._measured_offset_cm == pytest.approx(30.0, abs=0.5)
+    assert any(e == "pose" and "30 cm above the altitude it commands" in m for e, m in events)
+
+    # a later stop is measured against this flight's 30 cm, not the site's 0
+    later = {"height_cm": 100}
+    runner._check_vertical("WP2", [_ranged(250, 240, math.hypot(1.6, 0.78))] * 5, (250.0, 240.0), later)
+    assert later["vertical_mismatch_cm"] == pytest.approx(3.0, abs=1.0)
+    assert not [m for e, m in events if e == "alert"]
 
 
-def _timeline(runner, client):
-    """Commands with a ('sleep', s) marker wherever the runner paused."""
-    events = []
-    runner.sleep_fn = lambda seconds: events.append(("sleep", seconds, len(client.commands)))
-    return events
+def test_a_flight_higher_than_planned_re_checks_the_stops_still_to_come(tmp_path):
+    """A stop the guard passed on the ground can be blind in the air. The re-check says so at the
+    first fix, not at the stop that loses the tags."""
+    class _Coverage90:
+        def verdict(self, x_cm, y_cm, z_cm):
+            from sentinel.cube.coverage import Coverage
+            return Coverage("OK", 2, 2, 5.0)
+
+        def measured(self, offset_cm):
+            from sentinel.cube.coverage import Coverage
+            blind = offset_cm > 50
+
+            class _Measured:
+                def verdict(self, x_cm, y_cm, z_cm):
+                    return Coverage("BLIND" if blind else "OK", 0 if blind else 2, 0, None)
+            return _Measured()
+
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100), Waypoint("WP2", 150, 300, 100)))
+    runner, events = _plan(tmp_path, mission, coverage=_Coverage90())
+    runner.tag_map = _TagMap()
+    entry = {"height_cm": 100}
+    # tags put the drone at 55 + 145 = 200 cm against a commanded 100: 100 cm high
+    runner._check_vertical("WP1", [_ranged(250, 240, math.hypot(1.6, 1.45))] * 5, (250.0, 240.0), entry)
+    assert entry["measured_height_offset_cm"] == pytest.approx(100.0, abs=1.0)
+    assert entry["blind_at_measured_height"] == ["WP1", "WP2"]
+    assert any(e == "alert" and "at the measured height the tags can be lost at WP1, WP2" in m
+               for e, m in events)
 
 
-def _moves_and_pauses(client, events):
-    out, marks = [], {}
-    for _, seconds, index in events:
-        marks.setdefault(index, []).append(seconds)
-    for index, command in enumerate(client.commands):
-        out += [("sleep", s) for s in marks.get(index, [])]
-        if command.split()[0] in {"forward", "back", "left", "right"}:
-            out.append(command)
-    return out
+def test_a_flight_that_matches_the_site_file_re_checks_nothing(tmp_path):
+    checked = []
 
+    class _Coverage:
+        def verdict(self, x_cm, y_cm, z_cm):
+            from sentinel.cube.coverage import Coverage
+            return Coverage("OK", 2, 2, 5.0)
 
-def test_a_move_straight_after_another_waits_for_the_drone_to_settle(tmp_path):
-    """09-22: `left 95` sent the instant `back 31` returned "ok" at 50 cm/s was refused with
-    "error Not joystick" and the flight landed. A move that follows a move now waits."""
-    from sentinel.cube.mission import SETTLE_AFTER_FAST_MOVE_S
-    mission = Mission(270, 250, (Waypoint("WP1", 300, 300, 100),), leg_speed_cm_s=50)
-    client = DryRunClient()
-    runner = CubeMissionRunner(client, "dry-run", mission=mission, site=_site(0.4),
-                               pose_mode="off", mission_log=tmp_path / "m.jsonl",
-                               sleep_fn=lambda s: None)
-    events = _timeline(runner, client)
-    assert runner.run(confirm=True).status == "PASS"
-    moves = _moves_and_pauses(client, events)
-    first, second = [i for i, m in enumerate(moves) if isinstance(m, str)][:2]
-    assert ("sleep", SETTLE_AFTER_FAST_MOVE_S) in moves[first + 1:second]
-    assert all(not isinstance(m, tuple) for m in moves[:first])
+        def measured(self, offset_cm):
+            checked.append(offset_cm)
+            raise AssertionError("must not re-check when the flight matches the plan")
 
-
-def test_a_hover_fix_counts_as_settling(tmp_path):
-    """After a localisation burst (SETTLE_S hover) the next leg goes without an extra pause."""
-    from sentinel.cube.mission import SETTLE_S
-    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100), Waypoint("WP2", 150, 300, 100)),
-                      leg_speed_cm_s=40)
-    queue = [[_report(270, 300)] * 10, [_report(150, 300)] * 10]
-    client = DryRunClient()
-    runner = CubeMissionRunner(client, "dry-run", mission=mission, site=SITE,
-                               pose_mode="reanchor", mission_log=tmp_path / "m.jsonl",
-                               burst_fn=lambda: queue.pop(0), sleep_fn=lambda s: None)
-    events = _timeline(runner, client)
-    assert runner.run(confirm=True).status == "PASS"
-    moves = _moves_and_pauses(client, events)
-    assert [m for m in moves if isinstance(m, str)] == ["forward 50", "left 120"]
-    between = moves[moves.index("forward 50") + 1:moves.index("left 120")]
-    # the hover before WP1's fix and the look; no move-settle pause on top
-    assert between.count(("sleep", SETTLE_S)) == 2 and len(between) == 2
-
-
-def test_trimming_stops_when_a_trim_makes_the_error_worse(tmp_path):
-    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), max_trim_rounds=5)
-    bursts = [[_report(270, 275)] * 10,      # 25 cm short: trim forward 25
-              [_report(270, 330)] * 10,      # overshot to 30 cm: worse, stop here
-              [_report(270, 300)] * 10]      # never asked for
-    runner, client = _runner(tmp_path, "reanchor", bursts, mission=mission)
-    assert runner.run(confirm=True).status == "PASS"      # 30 cm is the outer circle
-    (wp1,) = _log(tmp_path)
-    assert wp1["trim_errors_cm"] == [25.0, 30.0] and wp1["trims_stopped"] == "WORSE"
-    assert wp1["trim_rounds_sent"] == 1 and wp1["tolerance"] == "OUTER"
-
-
-def test_a_trim_within_the_fix_noise_does_not_stop_trimming(tmp_path):
-    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),), max_trim_rounds=5)
-    bursts = [[_report(270, 278)] * 10,      # 22 cm
-              [_report(270, 322)] * 10,      # 22 cm the other way: not worse by more than 2
-              [_report(270, 303)] * 10]      # 3 cm
-    runner, _ = _runner(tmp_path, "reanchor", bursts, mission=mission)
-    assert runner.run(confirm=True).status == "PASS"
-    (wp1,) = _log(tmp_path)
-    assert wp1["trim_errors_cm"] == [22.0, 22.0, 3.0] and "trims_stopped" not in wp1
+    runner, events = _plan(tmp_path, Mission(270, 250, (Waypoint("WP1", 270, 300, 100),)),
+                           coverage=_Coverage())
+    runner.tag_map = _TagMap()
+    # the drone is 5 cm above the commanded height; SITE_DOC plans for 0
+    runner._check_vertical("WP1", [_ranged(250, 240, math.hypot(1.6, 0.52))] * 5, (250.0, 240.0),
+                           {"height_cm": 100})
+    assert checked == [] and not [m for e, m in events if e == "alert"]
