@@ -1,6 +1,24 @@
-"""Plan 01 admits only persisted reads and deterministic conversational actions."""
-from .models import CandidateKind, GoalKind, GoalStatus, RoomCandidate
-from .queries import READ_KINDS, ReadSnapshot, relevant_hash
+"""Plan 01 admits only persisted reads and deterministic conversational actions.
+
+Plan 03 Task 2 adds ``build_observation_candidates``: OBSERVE candidates for
+a room-wide or region count. This is a separate entry point, not a change to
+``build_candidates`` above -- wiring it into a live session behind a
+capability grant is Task 4's job, exactly as ``GoalLedger.physical_objectives``
+already exists without anything yet consuming it for FOLLOW/LAND_NEAR. Until
+that wiring lands, ``build_candidates`` keeps offering only the Plan 01 safe
+kinds (see ``tests/room/test_candidates.py``), and OBSERVE candidates are
+reachable only by calling this function directly.
+"""
+import hashlib
+import json
+import math
+
+from .coverage import CoverageProjection
+from .goals import GoalObjective
+from .models import CandidateKind, GoalKind, GoalStatus, PhysicalCost, RoomCandidate
+from .queries import READ_KINDS, ReadSnapshot, ToolOutcome, relevant_hash
+from .semantic import SemanticPose, resolve_pose_id
+from .site import RoomSite
 
 _DESCRIPTIONS = {
     CandidateKind.READ_DRONE: "Read the last persisted drone telemetry with its timestamp.",
@@ -59,3 +77,144 @@ def build_candidates(snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
                                         _DESCRIPTIONS[kind], _DESCRIPTIONS[kind],
                                         tuple(f.fact_id for f in snapshot.facts) if kind == CandidateKind.ANSWER else ()))
     return tuple(candidates)
+
+
+def _digest(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                     ensure_ascii=True).encode("utf-8")).hexdigest()
+
+
+def _region_pose_id(scope: str) -> str | None:
+    """The pose_id a user-requested "h/d/z" region resolves to, or None for
+    a scope this function does not generate a region view for (ROOM,
+    CURRENT_VIEW, or anything malformed). Deliberately reproduces
+    ``semantic._pose_id``'s format without importing that private name;
+    ``tests/room/test_coverage.py`` cross-checks it against the real
+    resolver."""
+    parts = scope.split("/")
+    if len(parts) != 3:
+        return None
+    horizontal, depth, height = parts
+    try:
+        SemanticPose(horizontal, depth, height)
+    except ValueError:
+        return None
+    return f"{horizontal}-{depth}-{height}-toward_targets"
+
+
+def _resolved_position(site: RoomSite, pose_id: str):
+    return resolve_pose_id(site, pose_id)
+
+
+def _uncovered_cell_ids(coverage: CoverageProjection) -> set[str]:
+    return {entry.split(":", 1)[0] for entry in coverage.uncovered}
+
+
+def _benefit(cell_ids, coverage: CoverageProjection) -> int:
+    """How many currently-uncovered (cell, class) pairs a view over these
+    cells would newly resolve, per the coverage snapshot passed in -- this
+    is a single-call estimate, not a rolling simulation across the other
+    candidates generated alongside it."""
+    return sum(1 for entry in coverage.uncovered if entry.split(":", 1)[0] in cell_ids)
+
+
+def _observe_suppressed(outcomes: tuple[ToolOutcome, ...], candidate_id: str, digest: str) -> bool:
+    return any(o.candidate_id == candidate_id and o.relevant_state_sha256 == digest
+               and (o.refusal_code is not None or o.code == "OBSERVE_SUCCEEDED")
+               for o in outcomes)
+
+
+def _answer_suppressed(outcomes: tuple[ToolOutcome, ...], candidate_id: str, digest: str) -> bool:
+    return any(o.candidate_id == candidate_id and o.relevant_state_sha256 == digest and o.refusal_code is not None
+               for o in outcomes)
+
+
+def _observe_digest(objective_id: str, pose_id: str, coverage: CoverageProjection) -> str:
+    return _digest({"objective_id": objective_id, "pose_id": pose_id, "coverage": list(coverage.by_cell_and_class)})
+
+
+def _observe_candidate(objective: GoalObjective, pose_id: str, description: str, site: RoomSite,
+                       coverage: CoverageProjection, outcomes: tuple[ToolOutcome, ...],
+                       snapshot_version: int) -> RoomCandidate | None:
+    candidate_id = f"OBSERVE:{objective.objective_id}:{pose_id}"
+    digest = _observe_digest(objective.objective_id, pose_id, coverage)
+    if _observe_suppressed(outcomes, candidate_id, digest):
+        return None
+    resolved = _resolved_position(site, pose_id)
+    if resolved is None:
+        # A pose that fails to resolve (malformed ID, or no semantic frame)
+        # is never offered as a candidate -- defaulting its physical cost to
+        # zero would let an unresolvable declared view sort ahead of every
+        # legitimate one in the benefit/cost/ID ordering.
+        return None
+    home = site.home.nominal_pose
+    distance_cm = math.hypot(resolved.x_cm - home.x_cm, resolved.y_cm - home.y_cm)
+    return RoomCandidate(candidate_id, CandidateKind.OBSERVE, snapshot_version, digest, description, description,
+                         coverage.evidence_refs, (), PhysicalCost(distance_cm=distance_cm, requires_airborne=True))
+
+
+def _incomplete_answer_candidate(objective: GoalObjective, coverage: CoverageProjection,
+                                 outcomes: tuple[ToolOutcome, ...], snapshot_version: int) -> RoomCandidate | None:
+    candidate_id = f"ANSWER:{objective.objective_id}:INCOMPLETE"
+    digest = _digest({"objective_id": objective.objective_id, "coverage": list(coverage.by_cell_and_class)})
+    if _answer_suppressed(outcomes, candidate_id, digest):
+        return None
+    description = (f"No legal declared view can resolve objective {objective.objective_id}'s remaining "
+                   f"coverage ({', '.join(coverage.uncovered)}); answer explicitly incomplete rather than loop.")
+    return RoomCandidate(candidate_id, CandidateKind.ANSWER, snapshot_version, digest, description, description,
+                         coverage.evidence_refs)
+
+
+def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: RoomSite,
+                                 coverage: CoverageProjection, outcomes: tuple[ToolOutcome, ...],
+                                 snapshot_version: int) -> tuple[RoomCandidate, ...]:
+    """OBSERVE candidates for COUNT objectives.
+
+    User-requested semantic regions are generated first, in their original
+    ordinal order, unconditionally (they were explicitly asked for, so they
+    are never gated on coverage benefit). For a room-wide count, only the
+    legal site-declared views (``site.pose_visibility``) that would resolve
+    at least one currently-uncovered coverage cell/class pair are offered,
+    ordered by descending benefit, then physical cost, then stable pose ID.
+    A room-wide objective coverage still leaves incomplete, with nothing
+    left able to improve it (every useful view already suppressed, or none
+    ever existed), gets one explicit incomplete-answer candidate instead of
+    silently looping.
+
+    This is a standalone entry point -- not wired into ``build_candidates``
+    or any live session yet; see the module docstring.
+    """
+    count_objectives = sorted((o for o in objectives if o.kind == GoalKind.COUNT), key=lambda o: o.ordinal)
+    region_candidates: list[RoomCandidate] = []
+    room_objectives: list[GoalObjective] = []
+    for objective in count_objectives:
+        pose_id = _region_pose_id(objective.spatial_scope)
+        if pose_id is not None:
+            description = f"Observe declared pose {pose_id}, the region requested for objective {objective.objective_id}."
+            candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version)
+            if candidate is not None:
+                region_candidates.append(candidate)
+        elif objective.spatial_scope == "ROOM":
+            room_objectives.append(objective)
+
+    room_candidates: list[RoomCandidate] = []
+    for objective in room_objectives:
+        scored: list[tuple[int, RoomCandidate]] = []
+        for pose_id, cell_ids in sorted(site.pose_visibility):
+            benefit = _benefit(set(cell_ids), coverage)
+            if benefit <= 0:
+                continue
+            description = (f"Observe declared pose {pose_id}: resolves {benefit} currently unresolved "
+                           f"coverage cell/class pair(s) for objective {objective.objective_id}.")
+            candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version)
+            if candidate is not None:
+                scored.append((benefit, candidate))
+        scored.sort(key=lambda item: (-item[0], item[1].physical_cost.distance_cm, item[1].candidate_id))
+        objective_candidates = [candidate for _, candidate in scored]
+        if not objective_candidates and not coverage.complete:
+            fallback = _incomplete_answer_candidate(objective, coverage, outcomes, snapshot_version)
+            if fallback is not None:
+                objective_candidates = [fallback]
+        room_candidates.extend(objective_candidates)
+
+    return tuple(region_candidates) + tuple(room_candidates)

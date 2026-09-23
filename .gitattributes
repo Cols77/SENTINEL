@@ -1,3 +1,10 @@
 # Binary perception captures are versioned through Git LFS.
 fixtures/perception/**/*.h264 filter=lfs diff=lfs merge=lfs -text
 fixtures/perception/**/*.mp4 filter=lfs diff=lfs merge=lfs -text
+
+# The room-agent replay fixture's manifest binds each file's exact sha256
+# (sentinel.room.replay); autocrlf line-ending translation would silently
+# corrupt that binding on checkout, so these are checked out byte-for-byte.
+fixtures/room_agent/v1/events.jsonl -text
+fixtures/room_agent/v1/manifest.json -text
+fixtures/room_agent/v1/frame-1.png -text -diff

@@ -49,6 +49,10 @@ class ToolOutcome:
     facts: tuple[ReadFact, ...] = ()
     terminal_state: TerminalState | None = None
     event_id: str = ""
+    #: The perception result's own measured capture time for an
+    #: OBSERVE_SUCCEEDED outcome (fix round 1, Q12); None for every other
+    #: outcome and for outcomes recorded before this field existed.
+    observed_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -237,6 +241,20 @@ class ReadQueries:
         goal_revision = 0
         rejected = False
         outcomes = []
+        # Fix round 1 (Q1, Q9): walk events in their durable sequence order and
+        # let the chronologically LAST terminal signal win, whether it comes
+        # from a physical landing/abort or from a Jev-decided ROOM_TOOL_OUTCOME
+        # -- rather than always preferring a flight-derived terminal
+        # regardless of order. Before this fix round, a flight terminal event
+        # always latched ``supervisor._terminal`` and so always short-circuited
+        # any later turn before another outcome could be recorded; the only
+        # sequence that can now put an outcome after a flight terminal is the
+        # controller's own request-safe-return-then-report flow
+        # (``_finalize_terminal``), where the later, Jev-decided terminal is
+        # exactly the one that must be reported. A terminal drone event
+        # requires ``completion_known`` for SAFE_LANDED -- an SDK-uncertain
+        # completion is never projected as a confirmed safe landing.
+        chronological_terminal = None
         for event in events:
             data = event.payload
             if event.event_type == "GOAL_LEDGER_ACCEPTED":
@@ -244,23 +262,27 @@ class ReadQueries:
             elif event.event_type == "GOAL_COMPILE_REJECTED":
                 rejected = True
             elif event.event_type == "ROOM_TOOL_OUTCOME":
-                outcomes.append(ToolOutcome(
+                outcome = ToolOutcome(
                     data["candidate_id"], data["kind"], data["relevant_state_sha256"], data["code"],
                     data.get("refusal_code"), tuple(_restore_fact(f) for f in data.get("facts", [])),
                     TerminalState(data["terminal_state"]) if data.get("terminal_state") else None,
-                    event.event_id,
-                ))
+                    event.event_id, data.get("observed_at"),
+                )
+                outcomes.append(outcome)
+                if outcome.terminal_state is not None:
+                    chronological_terminal = outcome.terminal_state
+            elif event.event_type == "DRONE_STATE_RECORDED" and isinstance(data.get("state"), dict):
+                measured = data["state"]
+                if measured.get("terminal_state"):
+                    chronological_terminal = (
+                        TerminalState.SAFE_LANDED
+                        if measured["terminal_state"] == "LANDED" and measured.get("completion_known")
+                        else TerminalState.ABORTED)
+                elif (measured.get("action_progress") == "COMMAND_COMPLETION_UNKNOWN"
+                      or measured.get("flight_state") in {"TERMINAL", "CLOSED"}):
+                    chronological_terminal = TerminalState.ABORTED
         drone_events = [e for e in events if e.event_type == "DRONE_STATE_RECORDED"
                         and isinstance(e.payload.get("state"), dict)]
-        flight_terminal = None
-        if drone_events:
-            measured = drone_events[-1].payload["state"]
-            if measured.get("terminal_state"):
-                flight_terminal = (TerminalState.SAFE_LANDED if measured["terminal_state"] == "LANDED"
-                                   else TerminalState.ABORTED)
-            elif (measured.get("action_progress") == "COMMAND_COMPLETION_UNKNOWN"
-                  or measured.get("flight_state") in {"TERMINAL", "CLOSED"}):
-                flight_terminal = TerminalState.ABORTED
         snapshot = ReadSnapshot(
             session_id=session_id, state_version=session["state_version"], goal_revision=goal_revision,
             pose_revision=sum(any(k in e.payload.get("state", {}) for k in ("x_cm", "y_cm", "z_cm", "heading_deg")) for e in drone_events),
@@ -268,7 +290,7 @@ class ReadQueries:
             home_revision=0, coverage_revision=0, static_evidence_revision=len(sources),
             target_revision=0, landing_zone_revision=0, tool_outcome_revision=len(outcomes),
             request_text=session["request_text"], ledger=ledger, sources=sources, facts=(),
-            outcomes=tuple(outcomes), terminal_state=flight_terminal or next((o.terminal_state for o in reversed(outcomes) if o.terminal_state), None),
+            outcomes=tuple(outcomes), terminal_state=chronological_terminal,
             compile_rejected=rejected, source_failures=failures,
         )
         facts = {}

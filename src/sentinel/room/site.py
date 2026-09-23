@@ -20,6 +20,7 @@ from sentinel.cube.recovery import (
     RecoveryEnvironment, RecoveryVolume, contains_disk, normalize_mapped_heading_tag_ids,
 )
 from sentinel.models import Position
+from sentinel.room.coverage import CoverageCell
 
 
 def _polygon(points):
@@ -147,6 +148,59 @@ def _evidence_refs(values) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _unit_axis(axis) -> bool:
+    return (len(axis) == 2 and all(math.isfinite(v) for v in axis)
+            and math.isclose(math.hypot(axis[0], axis[1]), 1.0, rel_tol=1e-6, abs_tol=1e-6))
+
+
+def _is_right_handed(axis_u, axis_v) -> bool:
+    """True iff (axis_u, axis_v) is a right-handed orthonormal pair.
+
+    In this codebase's CCW-from-+x heading convention, a mirrored (left-handed)
+    frame silently inverts every left/right and look=left/right meaning: the
+    drone's declared "right" is its actual left. Orthogonality and unit length
+    alone do not exclude a mirror; the cross product must also be +1, not -1.
+    """
+    cross = axis_u[0] * axis_v[1] - axis_u[1] * axis_v[0]
+    return math.isclose(cross, 1.0, abs_tol=1e-6)
+
+
+@dataclass(frozen=True)
+class SemanticFrame:
+    """A declared 3-axis vocabulary (left/right, rear/front, bottom/top) for one envelope.
+
+    Landmarks and axes are surveyed once, alongside the rest of the site, and
+    are the sole source of truth for semantic pose resolution (see
+    sentinel.room.semantic). This class only validates its own internal
+    consistency; RoomSite.validate() checks that envelope_volume_id resolves
+    to a declared free-space volume -- never a forbidden or corridor volume.
+    """
+    envelope_volume_id: str
+    left_to_right_axis_xy: tuple[float, float]
+    rear_to_front_axis_xy: tuple[float, float]
+    target_side: Literal["FRONT"]
+    landmarks: tuple[tuple[str, Position], ...]
+
+    def __post_init__(self):
+        if not self.envelope_volume_id:
+            raise ValueError("semantic frame needs an envelope volume")
+        if self.target_side != "FRONT":
+            raise ValueError("semantic frame target side must be FRONT")
+        if not _unit_axis(self.left_to_right_axis_xy) or not _unit_axis(self.rear_to_front_axis_xy):
+            raise ValueError("semantic frame axes must be normalized unit vectors")
+        dot = (self.left_to_right_axis_xy[0] * self.rear_to_front_axis_xy[0]
+               + self.left_to_right_axis_xy[1] * self.rear_to_front_axis_xy[1])
+        if not math.isclose(dot, 0.0, abs_tol=1e-6):
+            raise ValueError("semantic frame axes must be orthogonal")
+        if not _is_right_handed(self.left_to_right_axis_xy, self.rear_to_front_axis_xy):
+            raise ValueError("semantic frame axes must be right-handed, not mirrored")
+        landmark_ids = [landmark_id for landmark_id, _ in self.landmarks]
+        if any(not landmark_id for landmark_id in landmark_ids):
+            raise ValueError("landmark needs an identity")
+        if len(set(landmark_ids)) != len(landmark_ids):
+            raise ValueError("duplicate landmark identity")
+
+
 @dataclass(frozen=True)
 class RoomSite:
     site_id: str
@@ -159,6 +213,15 @@ class RoomSite:
     home: HomeDefinition
     terminal_contingencies: tuple[TerminalContingency, ...]
     clearance_provenance: str
+    semantic_frame: SemanticFrame | None = None
+    #: Bounded regions a room-wide count must resolve to be complete (Plan 03
+    #: Task 2). Never required for a site with no declared semantic frame.
+    coverage_cells: tuple[CoverageCell, ...] = ()
+    #: Declared visibility: which coverage cell IDs are legally observable
+    #: from a given semantic pose_id. A fixture-declared matrix rather than a
+    #: calibrated frustum/occlusion model -- see the task report. Sorted by
+    #: pose_id; each pose's cell IDs are sorted and unique.
+    pose_visibility: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     def validate(self, *, real_mode: bool = True) -> None:
         if not self.site_id or not self.clearance_provenance.strip() or not self.free_space_volumes:
@@ -188,30 +251,170 @@ class RoomSite:
             raise ValueError("duplicate terminal contingency identity")
         if real_mode and {entry.trigger for entry in self.terminal_contingencies} != set(ContingencyTrigger):
             raise ValueError("real mode requires both condition-specific terminal contingencies")
+        if self.semantic_frame is not None:
+            frame = self.semantic_frame
+            envelope_matches = [v for v in self.free_space_volumes if v.volume_id == frame.envelope_volume_id]
+            if not envelope_matches:
+                raise ValueError("semantic frame envelope must be a declared free-space volume")
+            envelope_volume = envelope_matches[0]
+            # Matches adapt_recovery_environment, which drops any free-space volume
+            # that overlaps a forbidden one: a semantic envelope must not either,
+            # or every pose resolved inside it could land in a no-fly volume.
+            if any(_overlaps(envelope_volume, forbidden) for forbidden in self.forbidden_volumes):
+                raise ValueError("semantic frame envelope overlaps a forbidden volume")
+            if not _is_axis_aligned_rectangle(envelope_volume.polygon_xy_cm,
+                    frame.left_to_right_axis_xy, frame.rear_to_front_axis_xy):
+                raise ValueError("semantic frame envelope must be an axis-aligned rectangle")
+            for landmark_id, position in frame.landmarks:
+                if not any(_contains(volume, position) for volume in self.free_space_volumes):
+                    raise ValueError(f"landmark {landmark_id!r} outside surveyed free space")
+                if any(_contains(volume, position) for volume in self.forbidden_volumes):
+                    raise ValueError(f"landmark {landmark_id!r} inside a forbidden volume")
+        cell_ids = [cell.cell_id for cell in self.coverage_cells]
+        if len(set(cell_ids)) != len(cell_ids):
+            raise ValueError("duplicate coverage cell identity")
+        for cell in self.coverage_cells:
+            # Fix round 3 (F7): a coverage cell declares where objects are
+            # *observed* (e.g. floor- or table-height), not where the
+            # aircraft may *fly* -- free_space_volumes is the flight
+            # envelope, which is routinely a different height band (a hover
+            # altitude) than the objects a cell describes. Confusing the two
+            # forced every coverage cell into the flight altitude band.
+            # Require only that the cell's horizontal footprint lies within
+            # the surveyed room's footprint: every corner is checked at each
+            # candidate volume's own mid-height, so its (already-validated)
+            # z-band trivially contains it and only the XY polygon
+            # containment is actually being tested. Mirrors the landing-zone
+            # swept-containment pattern below: every corner must lie in the
+            # *same* volume's horizontal footprint, not each independently in
+            # some volume or other -- free_space_volumes may be several
+            # disjoint polygons, and a cell whose corners each land in a
+            # different one can still cross unsurveyed ground in its
+            # interior.
+            corners_xy = cell.polygon_xy_cm
+            if not any(all(_contains(volume, Position(x, y, sum(volume.z_interval_cm) / 2))
+                          for x, y in corners_xy) for volume in self.free_space_volumes):
+                raise ValueError(f"coverage cell {cell.cell_id!r} escapes surveyed free space")
+            # A forbidden volume entirely inside the cell's interior, touching
+            # none of its corners, must still be caught -- an AABB overlap
+            # check (as used for the semantic envelope above) catches that
+            # where a corners-only check cannot.
+            if any(_aabb_overlap(cell.polygon_xy_cm, cell.z_band_cm, forbidden.polygon_xy_cm, forbidden.z_interval_cm)
+                   for forbidden in self.forbidden_volumes):
+                raise ValueError(f"coverage cell {cell.cell_id!r} enters a forbidden volume")
+        pose_ids = [pose_id for pose_id, _ in self.pose_visibility]
+        if len(set(pose_ids)) != len(pose_ids):
+            raise ValueError("duplicate declared pose visibility identity")
+        for pose_id, visible_cell_ids in self.pose_visibility:
+            if not pose_id or not visible_cell_ids or len(set(visible_cell_ids)) != len(visible_cell_ids):
+                raise ValueError(f"invalid declared visibility for pose {pose_id!r}")
+            if not set(visible_cell_ids) <= set(cell_ids):
+                raise ValueError(f"pose {pose_id!r} declares visibility of an unknown coverage cell")
+            if not _declared_pose_resolves(self, pose_id):
+                raise ValueError(f"pose {pose_id!r} does not resolve to a declared, in-envelope semantic pose")
 
 
 def _contains(volume, position):
     return contains_disk(RecoveryVolume(volume.volume_id, volume.polygon_xy_cm, volume.z_interval_cm), position, 0)
 
 
-def _overlaps(a, b):
+def volume_contains(volume: Volume3D, position: Position) -> bool:
+    """Public containment check, reused by sentinel.room.semantic for endpoint validation."""
+    return _contains(volume, position)
+
+
+def _aabb_overlap(poly_a, z_a, poly_b, z_b) -> bool:
     """Conservative AABB overlap; never use a volume that might contain a hazard."""
-    if a.z_interval_cm[1] < b.z_interval_cm[0] or b.z_interval_cm[1] < a.z_interval_cm[0]:
+    if z_a[1] < z_b[0] or z_b[1] < z_a[0]:
         return False
     for axis in (0, 1):
-        if max(point[axis] for point in a.polygon_xy_cm) < min(point[axis] for point in b.polygon_xy_cm):
+        if max(point[axis] for point in poly_a) < min(point[axis] for point in poly_b):
             return False
-        if max(point[axis] for point in b.polygon_xy_cm) < min(point[axis] for point in a.polygon_xy_cm):
+        if max(point[axis] for point in poly_b) < min(point[axis] for point in poly_a):
             return False
     return True
 
 
+def _overlaps(a, b):
+    return _aabb_overlap(a.polygon_xy_cm, a.z_interval_cm, b.polygon_xy_cm, b.z_interval_cm)
+
+
+def _declared_pose_resolves(site: "RoomSite", pose_id: str) -> bool:
+    """True iff ``pose_id`` parses as a canonical semantic pose and actually
+    resolves against this site's declared semantic frame.
+
+    Imported lazily: ``sentinel.room.semantic`` imports ``RoomSite`` from
+    this module, so a module-level import here would be circular. By the
+    time ``validate()`` runs (always after this module has fully loaded),
+    that import is safe.
+    """
+    from sentinel.room.semantic import SemanticPose, resolve_semantic_pose
+
+    parts = pose_id.split("-")
+    if len(parts) != 4:
+        return False
+    horizontal, depth, height, look = parts
+    try:
+        resolve_semantic_pose(site, SemanticPose(horizontal, depth, height, look))
+        return True
+    except ValueError:
+        return False
+
+
+def _is_axis_aligned_rectangle(polygon, axis_u, axis_v) -> bool:
+    """True iff polygon is exactly the rectangle spanned by axis_u/axis_v.
+
+    axis_u/axis_v must already be validated unit length and orthogonal.
+    Semantic pose resolution places each region at a fraction of the
+    envelope's axis-projected bounding box (see
+    sentinel.room.semantic._axis_extent); for any convex envelope that is
+    not itself that box, some fractional placements land outside the actual
+    polygon while still being advertised as resolvable model-facing pose_ids.
+    Requiring the envelope to equal its own axis-aligned bounding box makes
+    every canonical pose resolvable by construction.
+    """
+    if len(polygon) != 4:
+        return False
+    origin = polygon[0]
+
+    def project(point):
+        dx, dy = point[0] - origin[0], point[1] - origin[1]
+        return (round(dx * axis_u[0] + dy * axis_u[1], 6), round(dx * axis_v[0] + dy * axis_v[1], 6))
+
+    projected = [project(point) for point in polygon]
+    if len(set(projected)) != 4:
+        return False
+    u_values = sorted({point[0] for point in projected})
+    v_values = sorted({point[1] for point in projected})
+    if len(u_values) != 2 or len(v_values) != 2:
+        return False
+    expected = {(u, v) for u in u_values for v in v_values}
+    return set(projected) == expected
+
+
 def room_site_document(site: RoomSite) -> dict:
-    return json.loads(json.dumps({"schema_version": "room-site-base-v1", **asdict(site)}, allow_nan=False))
+    fields_dict = asdict(site)
+    if fields_dict.get("semantic_frame") is None:
+        fields_dict.pop("semantic_frame", None)
+    # A site with no declared coverage cells/visibility (every site that
+    # predates Plan 03 Task 2, and any current one that simply has none
+    # declared) must keep exactly the document -- and therefore digest --
+    # it had before these fields existed, the same way semantic_frame is
+    # already popped above. Otherwise every calibration_hashes/site_sha256
+    # binding computed against an unchanged site (see supervisor.py) fails
+    # validate_bindings for a site that did not actually change.
+    if not fields_dict.get("coverage_cells"):
+        fields_dict.pop("coverage_cells", None)
+    if not fields_dict.get("pose_visibility"):
+        fields_dict.pop("pose_visibility", None)
+    return json.loads(json.dumps({"schema_version": "room-site-base-v1", **fields_dict}, allow_nan=False))
 
 
-def _keys(doc, cls):
-    if not isinstance(doc, dict) or set(doc) != {field.name for field in fields(cls)}:
+def _keys(doc, cls, optional=()):
+    if not isinstance(doc, dict):
+        raise ValueError(f"incorrect {cls.__name__} contract fields")
+    names = {field.name for field in fields(cls)}
+    if set(doc) - names or (names - set(optional)) - set(doc):
         raise ValueError(f"incorrect {cls.__name__} contract fields")
     return doc
 
@@ -221,11 +424,17 @@ def parse_room_site(doc: dict, *, real_mode: bool = True) -> RoomSite:
     try:
         if doc.get("schema_version") != "room-site-base-v1":
             raise ValueError("unsupported room site version")
-        raw = _keys({key: value for key, value in doc.items() if key != "schema_version"}, RoomSite)
+        raw = _keys({key: value for key, value in doc.items() if key != "schema_version"}, RoomSite,
+                    optional=("semantic_frame", "coverage_cells", "pose_visibility"))
 
         def volume(item):
             item = _keys(item, Volume3D)
             return Volume3D(item["volume_id"], tuple(tuple(p) for p in item["polygon_xy_cm"]), tuple(item["z_interval_cm"]))
+
+        def coverage_cell(item):
+            item = _keys(item, CoverageCell)
+            return CoverageCell(item["cell_id"], tuple(tuple(p) for p in item["polygon_xy_cm"]),
+                                tuple(item["z_band_cm"]), tuple(item["required_classes"]))
 
         def position(item):
             return Position(**_keys(item, Position))
@@ -241,6 +450,12 @@ def parse_room_site(doc: dict, *, real_mode: bool = True) -> RoomSite:
                 "kind": ContingencyKind(item["kind"]), "landing_polygon_xy_cm": tuple(tuple(p) for p in item["landing_polygon_xy_cm"]),
                 "z_band_cm": tuple(item["z_band_cm"])})
 
+        def semantic_frame(item):
+            item = _keys(item, SemanticFrame)
+            return SemanticFrame(item["envelope_volume_id"],
+                tuple(item["left_to_right_axis_xy"]), tuple(item["rear_to_front_axis_xy"]),
+                item["target_side"], tuple((entry[0], position(entry[1])) for entry in item["landmarks"]))
+
         home = _keys(raw["home"], HomeDefinition)
         result = RoomSite(**{**raw,
             "free_space_volumes": tuple(volume(item) for item in raw["free_space_volumes"]),
@@ -248,7 +463,12 @@ def parse_room_site(doc: dict, *, real_mode: bool = True) -> RoomSite:
             "corridors": tuple(volume(item) for item in raw["corridors"]),
             "routes": tuple(route(item) for item in raw["routes"]),
             "home": HomeDefinition(**{**home, "nominal_pose": position(home["nominal_pose"])}),
-            "terminal_contingencies": tuple(contingency(item) for item in raw["terminal_contingencies"])})
+            "terminal_contingencies": tuple(contingency(item) for item in raw["terminal_contingencies"]),
+            **({"semantic_frame": semantic_frame(raw["semantic_frame"])} if "semantic_frame" in raw else {}),
+            **({"coverage_cells": tuple(coverage_cell(item) for item in raw["coverage_cells"])}
+               if "coverage_cells" in raw else {}),
+            **({"pose_visibility": tuple((pose_id, tuple(cells)) for pose_id, cells in raw["pose_visibility"])}
+               if "pose_visibility" in raw else {})})
         result.validate(real_mode=real_mode)
         return result
     except (KeyError, TypeError, AttributeError, OverflowError) as exc:
