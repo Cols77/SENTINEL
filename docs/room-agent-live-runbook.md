@@ -7,25 +7,43 @@ only (Plan 05 tracker/following is deferred); the CLI's built-in help
 
 ## Scope of this build
 
-`scripts/room_session.py live` gates a session all the way through
-manifest authorization, capability admission, matching calibration
-profiles, provider/filming consent, site assurance and a motors-off
-connectivity preflight -- and stops there. **Actual autonomous flight
-dispatch (a goal-ledger bootstrap, SafetySupervisor/tracker/reserve/
-recovery bootstrap and the controller run loop) is not wired in this
-build.** `--check-connectivity-only` is the one live sub-mode that runs end
-to end: it proves the aircraft and the perception provider both answer,
-fresh, motors off, and exits. Every other live invocation, once every gate
-and the connectivity preflight pass, actually constructs the flight client,
-the judgment model and the detector (`client_factory`/`jev_factory`/
-`detector_factory` -- three Python-level hooks a caller would override to
-wire in real ones; every default refuses construction, the same convention
-`scripts/room_calibrate.py` uses for its own executor) and durably records
-the jev's and detector's own reported identity (`IDENTITY_RESOLVED`,
-fix round 3) before refusing with `full live flight execution is not wired
-in this build` -- by design, not as a bug: this task never launches a real
-flight. Wiring a real flight loop through this CLI is future work; see
-"Known follow-ups" for exactly what that needs.
+`scripts/room_session.py live` runs one bounded count-and-return session
+per invocation, with no per-action prompts. It checks manifest
+authorization, capability admission, matching calibration profiles,
+provider/filming consent, site assurance and the flight calibration
+evidence. Then it runs a motors-off connectivity preflight and composes the
+session (`sentinel.room.live_session.run_count_return`):
+
+1. Jev and the detector are constructed, and their reported identities are
+   recorded (`IDENTITY_RESOLVED`).
+2. A `LocalizationTracker` and `ReserveGuard` are built from the measured
+   `--drift-profile`/`--energy-profile` files, and a REAL-mode
+   `SafetySupervisor` from those plus `--command-limits`.
+3. The flight stack comes from `client_factory(tracker=, clock=, site=)`.
+4. The verified site assurances are adopted into the supervisor's clock
+   domain.
+5. The goal ledger is compiled (`GoalCompiler`, recorded as
+   `GOAL_LEDGER_ACCEPTED`).
+6. Connectivity freshness is re-checked (`TAKEOFF_AUTHORIZED`), then
+   `SafetySupervisor.start` takes off.
+7. `RoomController.run_until_terminal` runs the session, which ends with the
+   supervisor's safe return and landing.
+8. `terminal.json`/`summary.json` are finalized.
+
+The Python-level hooks `client_factory`/`jev_factory`/`detector_factory`
+and the two connectivity probes are how real hardware and models are
+supplied. Every default refuses construction (the
+`scripts/room_calibrate.py` convention), so the CLI alone never flies
+anything, and no test in this repository does either.
+
+**What a REAL-mode session can count today.** `RoomController` offers
+OBSERVE checkpoints only in `ExecutionMode.SIMULATION`
+(`_observation_enabled`, owned by Plan 03). A real session therefore takes
+off, reads, finds no count evidence, returns home, lands and reports
+`BLOCKED` (Jev asks for clarification). It does not answer a count. The
+composition is complete: once that controller gate admits promoted real
+profiles, the same invocation flies OBSERVE checkpoints through the
+already-wired `sentinel.room.wiring` collaborators. See "Known follow-ups".
 
 Every live invocation (including `--check-connectivity-only`) requires
 `--run-root`: a `sentinel.room.artifacts.RunArtifacts` directory is opened
@@ -35,11 +53,18 @@ the preflight's full result (both paths' readiness, identities,
 `CONNECTIVITY_CHECKED` event -- never only printed to stderr -- so it
 survives the process and can be read back later (e.g. by
 `room_verify_artifact.py --require-event CONNECTIVITY_CHECKED`, once a run
-finalizes). Immediately before the point this build would otherwise
-dispatch a flight, freshness is re-checked against that same recorded
-preflight; one that has since expired refuses with `connectivity preflight
-expired before takeoff` (recorded as `CONNECTIVITY_EXPIRED_BEFORE_TAKEOFF`)
-rather than riding a stale "ready" verdict forward.
+finalizes). Freshness is re-checked against that same recorded preflight
+immediately before `SafetySupervisor.start`, after supervisor bootstrap and
+goal compilation. A preflight that has since expired refuses takeoff with
+`connectivity preflight expired before takeoff` (recorded as
+`CONNECTIVITY_EXPIRED_BEFORE_TAKEOFF`). A fresh one is recorded as
+`TAKEOFF_AUTHORIZED` with both identities and timestamps.
+
+The run's store session is created with the standard request text and the
+grant registry's flight-capable grants for this manifest's capability,
+site and aircraft. `SafetySupervisor` reads its grants there. Reopening a
+run with a different grant binding refuses, so a registry change after a
+connectivity diagnostic needs a new `run_id`.
 
 ## The count-and-return request
 
@@ -105,7 +130,8 @@ Preview also prints, to stderr:
   --authorization-digest ... --capability ... --grant-registry ...
   --consent-db <...> --location <...> --date <...> --i-authorise-paid-calls
   --profile-file <...> --site <...> --assurance <...> --clock-domain-id
-  <...> --run-root <...>`, the exact, actually-runnable command to run next (positional
+  <...> --drift-profile <...> --energy-profile <...> --command-limits <...>
+  --run-root <...>`, the exact, actually-runnable command to run next (positional
   `live`, not a `--mode` flag), once every reported gate is clear and
   `--manifest-out` was given. The `<...>` placeholders are the
   consent/profile/site/assurance evidence files preview does not itself
@@ -131,8 +157,9 @@ python scripts/room_session.py live \
   --check-connectivity-only
 ```
 
-This is the sole capability-grant exemption in this build: it does not
-check the grant registry or calibration profiles, but it still requires
+This is the sole capability-grant exemption in this build: it admits no
+grant and checks no calibration profile (it only loads `--grant-registry` to
+bind the run's session row, and an empty registry is fine), but it still requires
 the manifest's own authorization digest and recorded provider/filming
 consent. It prints `CONNECTIVITY_READY` and exits `0` only when both the
 drone telemetry probe and the provider reachability probe answer fresh
@@ -148,10 +175,7 @@ so `python scripts/room_session.py ... --check-connectivity-only` alone
 (no code-level override) always refuses too. That is deliberate: nothing
 in this repository wires a real probe on its own.
 
-## 3. The full live gate chain (never reaches flight in this build)
-
-Add the flight-capable gates to run the rest of the authorization chain
-(everything short of actual flight):
+## 3. The full live count-and-return session
 
 ```
 python scripts/room_session.py live \
@@ -162,8 +186,26 @@ python scripts/room_session.py live \
   --site path/to/semantic-site.json \
   --assurance path/to/navigation-assurance.json --assurance path/to/energy-assurance.json \
   --clock-domain-id <clock-domain-id> \
+  --drift-profile path/to/drift-profile.json \
+  --energy-profile path/to/energy-profile.json \
+  --command-limits path/to/command-limits.json \
   --run-root path/to/runs
 ```
+
+`--drift-profile` is a measured `pose-drift-v1` `DriftProfile` (every
+field required, `validated: true` with evidence refs). `--energy-profile`
+is a measured `EnergyProfile` with `execution_scope: PROMOTED` for this site
+and aircraft. `--command-limits` overrides `CommandLimits` fields; the
+defaults apply when it is omitted. The registry needs **two** grants for
+the capability:
+
+- the admission grant, bound to the manifest's `profile_sha256s`;
+- the flight-calibration grant that `SafetySupervisor.validate_bindings`
+  checks, bound to `sentinel.room.supervisor.calibration_hashes(energy,
+  drift, limits, site)` for exactly these files and `--site`.
+
+Without the second grant, live refuses before takeoff with `flight
+calibration refused: capability does not match ...`.
 
 Gate order (each one runs before the next; the run artifact is opened only
 once every one of these passes, and a provider or drone client is never
@@ -189,16 +231,20 @@ constructed until connectivity does too):
 6. Site assurance: a current, unexpired `--assurance` record for both
    `NAVIGATION_UNAVAILABLE` and `RETURN_ENERGY_UNAVAILABLE` on `--site`,
    bound to `--clock-domain-id`.
-7. The motors-off connectivity preflight (same as above), recorded as a
-   durable `CONNECTIVITY_CHECKED` event under `--run-root`, then
-   re-checked for freshness immediately before the point this build would
-   otherwise dispatch a flight.
+7. Flight calibration evidence: `--drift-profile` and `--energy-profile`
+   (and optional `--command-limits`) load and validate.
+8. The motors-off connectivity preflight (same as above), recorded as a
+   durable `CONNECTIVITY_CHECKED` event under `--run-root`.
 
-Only after all seven pass -- and the freshness re-check still holds -- does
-this build construct the flight client, the judgment model and the
-detector, durably record the jev's and detector's own reported identity,
-and then reach its own boundary and refuse with `full live flight
-execution is not wired in this build`.
+After the preflight, the session follows the steps in "Scope of this
+build". Any refusal before takeoff is recorded as `LIVE_SESSION_REFUSED`,
+exits `2` and leaves no `terminal.json`, so the run can be retried. Once the
+controller reaches a terminal state, or the goal ledger ends the session on
+the ground, live finalizes `terminal.json` (`state`, `took_off`,
+`ledger_status`, landing state and `completed_at`) and `summary.json`. It
+then prints `{"run_id": ..., "terminal_state": ...}` and exits `0`. After
+takeoff, an unexpected failure in the session loop triggers the
+supervisor's forced landing and is finalized as `ABORTED`.
 
 ## 4. Replay a frozen fixture
 
@@ -247,48 +293,30 @@ run.
 
 ## Known follow-ups
 
-- Full live flight dispatch (a goal-ledger bootstrap, SafetySupervisor/
-  tracker/reserve/recovery bootstrap, and the actual controller run loop)
-  is out of scope for this task -- see "Scope of this build" above. Fix
-  round 2 investigated wiring this in and fix round 3 re-verified it at a
-  finer grain; both are still blocked by three independent gaps, none of
-  them a CLI wiring fix:
-  1. `RoomController._observation_enabled` (owned by a parallel, in-flight
-     Plan 03 fix; this task may not edit `controller.py`) hard-gates
-     OBSERVE checkpoints to `ExecutionMode.SIMULATION`, and
-     `tests/room/test_count_return.py::test_real_mode_never_offers_observation_candidate`
-     pins that off for `ExecutionMode.REAL` as a regression test owned by
-     that same fix. A real-mode session could fly and land but could never
-     actually fly the checkpoints count-and-return's counting depends on,
-     even if every other gap below were closed here.
-  2. No production factory exists anywhere in this codebase for
-     constructing a `LocalizationTracker`'s drift profile or a
-     `ReserveGuard`'s energy profile from `--profile-file` evidence --
-     `SafetySupervisor` needs both, `DriftProfile` alone has ~25 measured
-     drift/recovery/burst-spread constants this room's `CalibrationProfile`
-     (a battery bound plus sampled pose-envelope points) was never designed
-     to carry or derive, and `DriftProfile` is constructed nowhere in this
-     repository outside `tests/cube/test_localization.py`'s own unit
-     fixture. Inventing those constants without real measurement would be
-     an unreviewed, unsafe, implementer-alone decision for a real flight.
-  3. `sentinel.room.goals.GoalCompiler.compile` needs an already-
-     `create_session`-ed store row and a `sentinel.room.models.RoomSnapshot`
-     to turn `DEFAULT_REQUEST_TEXT` into the `GoalLedger`
-     `RoomController` actually runs against -- no production call site
-     anywhere in this repository builds either; every existing controller
-     test (`tests/room/test_count_return.py`, `test_supervisor.py`, ...)
-     injects a pre-built `GoalLedger` directly through a private test
-     helper instead.
-  A run artifact/store, a durably-recorded, freshness-rechecked
-  connectivity preflight, and (fix round 3) real client/jev/detector
-  construction with durably-recorded resolved identities are wired;
-  driving `RoomController.run_until_terminal` against a real supervisor and
-  a real goal ledger is not. Each of the three gaps above needs its own
-  scoped design/operator ruling before a future round can close it.
-- The site-assurance gate here is a simplified, standalone re-check of
-  `sentinel.room.site`'s per-trigger current-assurance rule; it does not
-  go through `SafetySupervisor`'s own clock-domain machinery (there is no
-  live supervisor in this build to own one).
+- **Real-mode counting.** `RoomController._observation_enabled` (Plan 03,
+  `controller.py`, pinned by
+  `tests/room/test_count_return.py::test_real_mode_never_offers_observation_candidate`)
+  offers OBSERVE only in SIMULATION. Until Plan 03 opens it for promoted
+  real profiles, a live session returns and lands safely but ends `BLOCKED`
+  without a count. Opening it needs no change here.
+- **Production flight stack.** No module yet builds the real
+  `live_session.FlightStack` from a connected Tello: the `StepExecutor`
+  over the client, the tag-pose `refresh()` that feeds the session's
+  `LocalizationTracker`, the emergency landing and the frame source.
+  `client_factory` defaults to refuse until one exists.
+- **In-flight site assurance.** The verified `--assurance` records are
+  adopted with their original monotonic window. Each contingency's
+  `max_assurance_age_ms` (from the site survey) must cover the flight, or
+  the supervisor lands on expiry. No live assurance observer renews them
+  mid-flight.
+- **Flight-valid site.** `fixtures/room_agent/v1/semantic-site.json`'s home
+  route ends at (250, 190), not over its pad (250, 140), so
+  `SafetySupervisor` refuses to start from it (`TERMINATION_PATH_INVALID`).
+  It is a replay fixture, not a flight site; a real `--site` must end its
+  home route over the pad.
+- The CLI's site-assurance gate is a standalone re-check of
+  `sentinel.room.site`'s per-trigger current-assurance rule. The supervisor
+  then re-checks the adopted copies itself on every admission.
 - `--cost-assumptions-json`/`--home-policy-json`/`--termination-policy-json`
   accept arbitrary JSON objects; this CLI does not itself validate their
   contents beyond what the manifest schema requires.

@@ -16,28 +16,20 @@ tests never do either. Every gate below (manifest authorization, capability
 admission, matching profiles, consent, site assurance, connectivity) is
 checked and enforced *before* any of those factories is ever called.
 
-Fix round 3 (Q2): once client/jev/detector are constructed, the jev's and
-detector's own reported ``.identity`` are durably recorded via
-``RunArtifacts.record_resolved_identity`` -- the manifest itself always
-declares ``resolved_jev_identity``/``resolved_detector_identity`` as
-``"UNVERIFIED"`` (``artifacts.SessionManifest`` refuses any other value at
-construction time; see ``preview``), so a run's *actual* resolved identity
-only ever lives in this durable, append-only event log, never in
-manifest.json. This build still stops one boundary short of actually
-flying: driving ``RoomController.run_until_terminal`` needs (1) a
-goal-ledger bootstrap (``sentinel.room.goals.GoalCompiler.compile`` needs a
-``RoomSnapshot`` and an already-``create_session``-ed store row -- no
-production call site anywhere in this repository builds either; every
-existing controller test injects a pre-built ``GoalLedger`` directly) and
-(2) a ``SafetySupervisor`` built with a real ``LocalizationTracker``/
-``ReserveGuard`` (their ``DriftProfile``/``EnergyProfile`` need measured
-drift/recovery/reserve constants this room's ``CalibrationProfile`` --
-``--profile-file``'s battery bound plus sampled pose-envelope points --
-does not carry; ``DriftProfile`` is constructed nowhere in this repository
-outside ``tests/cube/test_localization.py``'s own unit fixture). Neither is
-a CLI wiring task; see ``docs/room-agent-live-runbook.md``'s "Known
-follow-ups" for the full accounting, including why a real-mode session
-could not fly count-and-return's OBSERVE checkpoints today regardless.
+Fix round 4 (Q2): one ``live`` invocation authorizes and runs the bounded
+count-and-return session. After every gate and a ready preflight, Jev and
+the detector are constructed and their reported ``.identity`` durably
+recorded (``IDENTITY_RESOLVED``; the manifest always declares them
+``"UNVERIFIED"``). ``sentinel.room.live_session.run_count_return`` then
+builds the tracker/reserve from the measured ``--drift-profile``/
+``--energy-profile`` files, the flight stack from ``client_factory``, the
+REAL-mode ``SafetySupervisor``, the goal ledger (``GoalCompiler``) and the
+``sentinel.room.wiring`` observation collaborators. It re-checks
+connectivity freshness (``TAKEOFF_AUTHORIZED``), takes off through
+``SafetySupervisor.start`` and drives ``RoomController.run_until_terminal``.
+This CLI then finalizes ``terminal.json``. Whether a REAL-mode session may
+fly OBSERVE checkpoints is decided by the controller alone; see
+``docs/room-agent-live-runbook.md``.
 """
 from __future__ import annotations
 
@@ -49,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from sentinel.room import artifacts, calibration, capabilities, connectivity, replay
+from sentinel.room import artifacts, calibration, capabilities, connectivity, live_session, replay
 from sentinel.room.artifacts import ArtifactError, ManifestError, SessionManifest
 from sentinel.room.site import ContingencyTrigger, RoomSite, parse_room_site
 from sentinel.survey.live_detect import LiveDetectRefused, check_gates as check_consent_gates
@@ -90,10 +82,10 @@ def _refuse_provider_probe() -> "connectivity.ProbeResult":
     )
 
 
-def _refuse_client() -> object:
+def _refuse_client(**_bindings) -> "live_session.FlightStack":
     raise RuntimeError(
         "live flight requires an injected client_factory; this build never constructs a "
-        "real Tello/provider client on its own"
+        "real Tello flight stack on its own"
     )
 
 
@@ -234,17 +226,21 @@ def _cmd_preview(args: argparse.Namespace) -> int:
             "--consent-db <consent-db-path> --location <location> --date <YYYY-MM-DD> "
             "--i-authorise-paid-calls --profile-file <profile-file-path> "
             "--site <site-path> --assurance <assurance-file-path> "
-            "--clock-domain-id <clock-domain-id> --run-root <run-artifact-root>"
+            "--clock-domain-id <clock-domain-id> --drift-profile <drift-profile-path> "
+            "--energy-profile <energy-profile-path> --command-limits <command-limits-path> "
+            "--run-root <run-artifact-root>"
         )
         print(f"next: {next_command}", file=sys.stderr)
     return 0
 
 
-def _check_profiles(manifest: SessionManifest, profile_files: list[str], *, grant_state: str) -> None:
+def _check_profiles(manifest: SessionManifest, profile_files: list[str], *, grant_state: str) -> tuple:
+    """Verify every declared profile has an admissible file; return the loaded profiles."""
     declared = set(manifest.profile_sha256s)
     if not declared:
-        return
+        return ()
     seen = set()
+    loaded = []
     for path in profile_files:
         try:
             profile = calibration.load_profile(path)
@@ -256,9 +252,11 @@ def _check_profiles(manifest: SessionManifest, profile_files: list[str], *, gran
         if not calibration.admissible_for(profile, grant_state=grant_state):
             raise GateError(f"profile {digest} (state {profile.state}) is not admissible for grant state {grant_state!r}")
         seen.add(digest)
+        loaded.append(profile)
     missing = declared - seen
     if missing:
         raise GateError(f"no --profile-file supplied for declared profile_sha256(s): {sorted(missing)}")
+    return tuple(loaded)
 
 
 def _load_assurance(path: str):
@@ -280,7 +278,13 @@ def _load_assurance(path: str):
 
 def _check_site_assurance(site_path: str | None, assurance_paths: list[str], *,
                           manifest: SessionManifest, clock_domain_id: str | None,
-                          now_monotonic_ms: int) -> None:
+                          now_monotonic_ms: int) -> tuple[RoomSite, tuple]:
+    """Verify --site against the manifest and every trigger's assurance.
+
+    Returns the parsed site and the uniquely current assurance per trigger --
+    the exact evidence the live session later adopts into its supervisor's
+    clock domain (``live_session.adopt_assurances``).
+    """
     if site_path is None:
         raise GateError("--site is required to verify site assurance before a live flight")
     if not clock_domain_id:
@@ -299,6 +303,7 @@ def _check_site_assurance(site_path: str | None, assurance_paths: list[str], *,
             "--site does not match the manifest's bound site_sha256/tag_map_sha256"
         )
     assurances = tuple(_load_assurance(path) for path in assurance_paths)
+    verified = []
     for trigger in ContingencyTrigger:
         entries = [entry for entry in site.terminal_contingencies if entry.trigger == trigger]
         entries_by_id = {entry.contingency_id: entry for entry in entries}
@@ -320,13 +325,29 @@ def _check_site_assurance(site_path: str | None, assurance_paths: list[str], *,
                 current.append(assurance)
         if len(current) != 1:
             raise GateError(f"site assurance for trigger {trigger.value} is missing, expired or not uniquely current")
+        verified.extend(current)
+    return site, tuple(verified)
+
+
+def _load_flight_calibration(args: argparse.Namespace):
+    """The measured drift/energy evidence and calibrated command limits the
+    SafetySupervisor flies with. Never synthesized: a missing or malformed
+    file refuses before any run artifact, provider or client exists."""
+    if not args.drift_profile or not args.energy_profile:
+        raise GateError("--drift-profile and --energy-profile are required for a flight-capable live session")
+    try:
+        return (live_session.load_drift_profile(args.drift_profile),
+                live_session.load_energy_profile(args.energy_profile),
+                live_session.load_command_limits(args.command_limits))
+    except live_session.LiveSessionError as exc:
+        raise GateError(str(exc)) from exc
 
 
 def _cmd_live(
     args: argparse.Namespace, *,
     drone_probe: Callable[[], connectivity.ProbeResult],
     provider_probe: Callable[[], connectivity.ProbeResult],
-    client_factory: Callable[[], object],
+    client_factory: Callable[..., "live_session.FlightStack"],
     jev_factory: Callable[[], object],
     detector_factory: Callable[[], object],
     clock: Callable[[], float],
@@ -369,36 +390,44 @@ def _cmd_live(
         print(f"refused: {exc}", file=sys.stderr)
         return 2
 
+    # The grant registry is loaded in both sub-modes: its matching grants bind
+    # the run's session row (the SafetySupervisor reads them there). Loading
+    # it is not admission -- connectivity-only still admits nothing.
+    try:
+        registry = capabilities.load_registry(args.grant_registry)
+    except (capabilities.GrantRegistryError, OSError) as exc:
+        print(f"refused: grant registry could not be loaded: {exc}", file=sys.stderr)
+        return 2
     if not args.check_connectivity_only:
         try:
-            registry = capabilities.load_registry(args.grant_registry)
             winning_grant = capabilities.admit_live(registry, manifest=manifest, now=now)
-        except (capabilities.GrantRegistryError, OSError) as exc:
+        except capabilities.GrantRegistryError as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 2
         try:
-            _check_profiles(manifest, args.profile_file, grant_state=winning_grant.state)
+            calibration_profiles = _check_profiles(manifest, args.profile_file, grant_state=winning_grant.state)
             # Fix round 1 (Q6): site-assurance freshness is a monotonic-clock-domain
             # comparison (assured_monotonic_ms/expires_monotonic_ms) -- evaluate it
             # against the injected monotonic `clock`, the same one connectivity below
             # uses, never wall-clock epoch milliseconds (a different clock domain
             # entirely; a real monotonic assurance would never compare sanely against it).
-            _check_site_assurance(args.site, args.assurance, manifest=manifest,
-                                  clock_domain_id=args.clock_domain_id,
-                                  now_monotonic_ms=int(clock() * 1000))
+            site, verified_assurances = _check_site_assurance(
+                args.site, args.assurance, manifest=manifest, clock_domain_id=args.clock_domain_id,
+                now_monotonic_ms=int(clock() * 1000))
+            drift_profile, energy_profile, limits = _load_flight_calibration(args)
         except GateError as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 2
 
     # Fix round 2 (Q2): open the durable run artifact before the connectivity
-    # preflight, not just print its result to stderr -- an operator (or
-    # room_verify_artifact.py, once a run finalizes) must be able to confirm
-    # what a session actually observed, even a session that never flies past
-    # this build's boundary. RunArtifacts.open is idempotent for a run_id
-    # already opened with the same manifest bytes, so a retried invocation
-    # against the same --run-root never conflicts with itself.
+    # preflight, not just print its result to stderr. RunArtifacts.open is
+    # idempotent for a run_id already opened with the same manifest bytes and
+    # capability binding, so a connectivity-only diagnostic followed by the
+    # flight on the same manifest share one run.
     try:
-        run = artifacts.RunArtifacts.open(args.run_root, manifest, now=now)
+        run = artifacts.RunArtifacts.open(
+            args.run_root, manifest, now=now, request_text=DEFAULT_REQUEST_TEXT,
+            capabilities=live_session.session_capabilities(registry, manifest))
     except (ArtifactError, OSError) as exc:
         print(f"refused: run artifact could not be opened: {exc}", file=sys.stderr)
         return 2
@@ -436,36 +465,11 @@ def _cmd_live(
             print("CONNECTIVITY_READY")
             return 0
 
-        # Fix round 2 (Q2): re-check freshness immediately before the point
-        # this build would otherwise dispatch a flight -- time may have
-        # passed between the preflight above (fresh at that instant) and
-        # here (gate evaluation, run-artifact I/O, ...). A preflight that has
-        # since expired must refuse here, not silently ride on a stale
-        # "ready" verdict all the way to takeoff.
-        takeoff_now = clock()
-        drone_expired = (takeoff_now - result.drone_checked_at) > args.connectivity_max_age_s
-        provider_expired = (takeoff_now - result.provider_checked_at) > args.connectivity_max_age_s
-        if drone_expired or provider_expired:
-            run.append_event("CONNECTIVITY_EXPIRED_BEFORE_TAKEOFF", {
-                "drone_checked_at": result.drone_checked_at, "provider_checked_at": result.provider_checked_at,
-                "rechecked_at": takeoff_now, "max_age_s": args.connectivity_max_age_s,
-            }, now=wall_clock())
-            print("refused: connectivity preflight expired before takeoff", file=sys.stderr)
-            return 2
-
-        # Fix round 3 (Q2): connectivity passed. Every collaborator this CLI
-        # can itself construct -- flight client, judgment model, detector --
-        # is now actually constructed (still only ever a real one if a
-        # caller deliberately overrides that factory's refuse-by-default),
-        # and the jev's/detector's own reported identity is durably recorded
-        # (never only implied by the manifest's request) before this build's
-        # own boundary: driving RoomController.run_until_terminal needs a
-        # goal-ledger bootstrap and a real SafetySupervisor tracker/reserve
-        # that exist nowhere in this repository outside hand-built test
-        # fixtures -- see this module's own docstring and
-        # docs/room-agent-live-runbook.md's "Known follow-ups".
+        # Fix round 3/4 (Q2): past every gate and a ready preflight. Jev and
+        # the detector are constructed (only ever real if a caller overrides
+        # the refuse-by-default factories) and their own reported identities
+        # are durably recorded before anything can fly.
         try:
-            client_factory()
             judge = jev_factory()
             detector = detector_factory()
         except Exception as exc:
@@ -479,20 +483,62 @@ def _cmd_live(
                           file=sys.stderr)
                     return 2
                 run.record_resolved_identity(role=role, resolved=identity, observed_at=now)
-            run.append_event("LIVE_EXECUTION_NOT_WIRED", {
-                "reason": "full live flight execution is not wired in this build",
-                "missing": ["goal_ledger_bootstrap", "safety_supervisor_tracker_reserve"],
-            }, now=wall_clock())
         except (ArtifactError, OSError) as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 2
-        print(
-            "refused: full live flight execution is not wired in this build; connectivity, client, jev "
-            "and detector construction all passed but no goal-ledger bootstrap or SafetySupervisor "
-            "tracker/reserve construction is available (see docs/room-agent-live-runbook.md)",
-            file=sys.stderr,
-        )
-        return 2
+
+        def before_takeoff() -> None:
+            # Fix round 2/4 (Q2): the preflight was fresh when it ran; the
+            # supervisor bootstrap and goal compilation have run since. Re-check
+            # it immediately before supervisor.start and refuse takeoff on a
+            # preflight that has since expired -- never ride a stale verdict.
+            takeoff_now = clock()
+            drone_expired = (takeoff_now - result.drone_checked_at) > args.connectivity_max_age_s
+            provider_expired = (takeoff_now - result.provider_checked_at) > args.connectivity_max_age_s
+            if drone_expired or provider_expired:
+                run.append_event("CONNECTIVITY_EXPIRED_BEFORE_TAKEOFF", {
+                    "drone_checked_at": result.drone_checked_at,
+                    "provider_checked_at": result.provider_checked_at,
+                    "rechecked_at": takeoff_now, "max_age_s": args.connectivity_max_age_s,
+                }, now=wall_clock())
+                raise live_session.LiveSessionError("connectivity preflight expired before takeoff")
+            run.append_event("TAKEOFF_AUTHORIZED", {
+                "drone_identity": result.drone_identity, "provider_identity": result.provider_identity,
+                "drone_checked_at": result.drone_checked_at, "provider_checked_at": result.provider_checked_at,
+                "rechecked_at": takeoff_now, "max_age_s": args.connectivity_max_age_s,
+            }, now=wall_clock())
+
+        try:
+            outcome = live_session.run_count_return(
+                store=run.store, manifest=manifest, site=site, drift_profile=drift_profile,
+                energy_profile=energy_profile, limits=limits, calibration_profiles=calibration_profiles,
+                flight_stack_factory=client_factory, judge=judge, detector=detector,
+                assurances=verified_assurances, request_text=DEFAULT_REQUEST_TEXT,
+                frames_dir=run.root / "frames", clock=clock, wall_clock=wall_clock,
+                before_takeoff=before_takeoff,
+            )
+        except live_session.LiveSessionError as exc:
+            try:
+                run.append_event("LIVE_SESSION_REFUSED", {"reason": str(exc)}, now=wall_clock())
+            except (ArtifactError, OSError):
+                pass
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
+        landing = outcome.landing
+        try:
+            run.finalize({
+                "state": outcome.terminal_state.value,
+                "completed_at": landing.completed_at if landing is not None else None,
+                "landing_state": landing.state if landing is not None else None,
+                "landing_reason": landing.reason if landing is not None else None,
+                "took_off": outcome.took_off, "ledger_status": outcome.ledger_status, "reason": outcome.reason,
+            }, now=wall_clock())
+        except (ArtifactError, OSError) as exc:
+            print(f"error: session ended {outcome.terminal_state.value} but terminal.json could not be "
+                  f"finalized: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({"run_id": manifest.run_id, "terminal_state": outcome.terminal_state.value}))
+        return 0
     finally:
         run.close()
 
@@ -573,6 +619,12 @@ def build_parser() -> argparse.ArgumentParser:
     live_parser.add_argument("--site", default=None)
     live_parser.add_argument("--assurance", action="append", default=[])
     live_parser.add_argument("--clock-domain-id", default=None)
+    # Fix round 4 (Q2): the SafetySupervisor's measured calibration evidence.
+    # Required for a flight-capable session (not for --check-connectivity-only);
+    # the flight-calibration grant binds calibration_hashes of exactly these.
+    live_parser.add_argument("--drift-profile", default=None)
+    live_parser.add_argument("--energy-profile", default=None)
+    live_parser.add_argument("--command-limits", default=None)
     live_parser.add_argument("--check-connectivity-only", action="store_true")
     live_parser.add_argument("--connectivity-max-age-s", type=float, default=5.0)
     live_parser.add_argument("--connectivity-timeout-s", type=float, default=5.0)
@@ -607,12 +659,15 @@ def main(
     argv: list[str] | None = None, *,
     drone_probe: Callable[[], connectivity.ProbeResult] = _refuse_drone_probe,
     provider_probe: Callable[[], connectivity.ProbeResult] = _refuse_provider_probe,
-    client_factory: Callable[[], object] = _refuse_client,
+    client_factory: Callable[..., "live_session.FlightStack"] = _refuse_client,
     jev_factory: Callable[[], object] = _refuse_jev,
     detector_factory: Callable[[], object] = _refuse_detector,
     clock: Callable[[], float] = time.monotonic,
     wall_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> int:
+    """``client_factory(tracker=..., clock=..., site=...)`` returns the connected
+    ``live_session.FlightStack``; it is called only after every gate, the
+    preflight, and Jev/detector identity recording."""
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.mode == "live":

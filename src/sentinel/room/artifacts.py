@@ -23,6 +23,7 @@ from .store import RoomStore
 # duplicating the blocklist here) keeps one definition of "forbidden payload"
 # in the codebase instead of two that could silently drift apart.
 from .store import _canonical_json as _store_canonical_json
+from .store import _json_value as _store_json_value
 from .store import _reject_forbidden_payload as _store_reject_forbidden_payload
 
 SCHEMA_VERSION = "room-session-manifest-v1"
@@ -353,7 +354,15 @@ class RunArtifacts:
         self._closed = False
 
     @classmethod
-    def open(cls, root: str | Path, manifest: SessionManifest, *, now: datetime) -> "RunArtifacts":
+    def open(cls, root: str | Path, manifest: SessionManifest, *, now: datetime,
+             request_text: str | None = None, capabilities: CapabilityProfile | None = None) -> "RunArtifacts":
+        """Open (or reopen) one run's directory and store.
+
+        ``request_text``/``capabilities`` bind the store's session row when it
+        is first created (a live session's SafetySupervisor reads its grants
+        from that row). Reopening with a *different* capability binding
+        refuses: a run's authorization never changes after it first opened.
+        """
         run_dir = Path(root) / manifest.run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "frames").mkdir(parents=True, exist_ok=True)
@@ -369,11 +378,24 @@ class RunArtifacts:
             atomic_write_bytes(manifest_path, manifest_bytes)
         store = RoomStore.open(run_dir / "session.sqlite3")
         try:
-            store.session_version(manifest.run_id)
-        except KeyError:
-            store.create_session(
-                manifest.run_id, f"room-agent session {manifest.run_id}", CapabilityProfile(()),
-            )
+            try:
+                store.session_version(manifest.run_id)
+            except KeyError:
+                store.create_session(
+                    manifest.run_id,
+                    request_text if request_text is not None else f"room-agent session {manifest.run_id}",
+                    capabilities if capabilities is not None else CapabilityProfile(()),
+                )
+            else:
+                if capabilities is not None and _stored_capability_json(store, manifest.run_id) != \
+                        _store_canonical_json(_store_json_value(capabilities)):
+                    raise ArtifactError(
+                        f"run {manifest.run_id!r} was already opened with a different capability binding; "
+                        "preview a new run_id"
+                    )
+        except BaseException:
+            store.close()
+            raise
         stored_events = store.events(manifest.run_id)
         next_sequence = len(stored_events) + 1
         # Rebuild resolved-identity state from the durable event log on every
@@ -391,6 +413,10 @@ class RunArtifacts:
     def append_event(self, event_type: str, payload: Mapping[str, object], *, now: datetime) -> RawEvent:
         payload = dict(payload)
         reject_forbidden(payload)
+        # A live session's controller/supervisor append to the same store
+        # session directly; re-derive the next sequence from the durable
+        # ledger so this run's own events never reuse a position.
+        self._resync_sequence()
         sequence_no = self._next_sequence
         event_id = f"{self.manifest.run_id}:{sequence_no:012d}"
         # Commit to the store FIRST. It is the durable, trigger-protected,
@@ -425,6 +451,9 @@ class RunArtifacts:
             payload=payload, recorded_at=recorded_at,
         )
 
+    def _resync_sequence(self) -> None:
+        self._next_sequence = max(self._next_sequence, len(self.store.events(self.manifest.run_id)) + 1)
+
     def record_resolved_identity(self, *, role: str, resolved: str, observed_at: datetime) -> RawEvent:
         if role not in {"jev", "detector"}:
             raise ArtifactError(f"unknown identity role {role!r}")
@@ -451,6 +480,7 @@ class RunArtifacts:
         reject_forbidden(terminal_document)
         terminal_bytes = canonical_bytes(terminal_document)
         terminal_path = self.root / "terminal.json"
+        self._resync_sequence()
         if terminal_path.exists():
             existing_bytes = terminal_path.read_bytes()
             if existing_bytes == terminal_bytes:
@@ -483,6 +513,14 @@ class RunArtifacts:
         if not self._closed:
             self.store.close()
             self._closed = True
+
+
+def _stored_capability_json(store: RoomStore, session_id: str) -> str:
+    """The session row's capability binding, exactly as create_session stored it."""
+    with store._lock:
+        row = store.connection.execute(
+            "SELECT capability_json FROM room_sessions WHERE session_id = ?", (session_id,)).fetchone()
+    return row[0]
 
 
 def _replay_resolved_identities(stored_events) -> dict:

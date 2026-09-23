@@ -707,3 +707,56 @@ def test_write_manifest_refuses_what_parse_manifest_would_refuse(tmp_path):
     artifacts.write_manifest(out, manifest)
     assert out.read_bytes() == manifest.canonical_bytes()
     assert artifacts.parse_manifest(out.read_bytes()) == manifest
+
+
+# ---------------------------------------------------------------------------
+# Fix round 4 (Q2): the live session shares the run's store session
+# ---------------------------------------------------------------------------
+
+
+def _grant_profile(label="flight"):
+    from sentinel.room.models import CapabilityGrant, CapabilityProfile, canonical_grant_sha256
+
+    grant = CapabilityGrant("count_return", "PROMOTED", _hash("site"), "aircraft-1", (_hash(label),),
+                            ("ev-1",), "2099-01-01T00:00:00+00:00", "")
+    return CapabilityProfile((dataclasses.replace(grant, grant_sha256=canonical_grant_sha256(grant)),))
+
+
+def test_open_binds_request_text_and_capabilities_into_a_new_session_row(tmp_path):
+    profile = _grant_profile()
+    run = artifacts.RunArtifacts.open(tmp_path, _manifest(), now=NOW, request_text="count and return",
+                                      capabilities=profile)
+    try:
+        row = run.store.connection.execute(
+            "SELECT request_text, capability_json FROM room_sessions WHERE session_id = ?",
+            (run.manifest.run_id,)).fetchone()
+        assert row[0] == "count and return"
+        assert json.loads(row[1])["grants"][0]["capability"] == "count_return"
+    finally:
+        run.close()
+    # Reopening with the same binding is idempotent.
+    artifacts.RunArtifacts.open(tmp_path, _manifest(), now=NOW, capabilities=profile).close()
+
+
+def test_open_refuses_a_different_capability_binding_for_an_existing_run(tmp_path):
+    artifacts.RunArtifacts.open(tmp_path, _manifest(), now=NOW, capabilities=_grant_profile("a")).close()
+    with pytest.raises(artifacts.ArtifactError, match="different capability binding"):
+        artifacts.RunArtifacts.open(tmp_path, _manifest(), now=NOW, capabilities=_grant_profile("b"))
+
+
+def test_sequence_and_summary_count_events_appended_directly_to_the_store(tmp_path):
+    # The controller/supervisor append to the same store session directly;
+    # the run's own next event and summary.json must count them, or
+    # room_verify_artifact's event_count check refuses a genuine run.
+    run = _open_run(tmp_path)
+    run.append_event("A", {"i": 1}, now=NOW)
+    run_id = run.manifest.run_id
+    run.store.append_event(session_id=run_id, expected_version=run.store.session_version(run_id),
+                           event_type="FOREIGN", payload={"i": 2}, correlation_id="c", causation_id=None,
+                           idempotency_key="foreign-1")
+    event = run.append_event("A", {"i": 3}, now=NOW)
+    assert event.sequence_no == 3
+    run.finalize({"state": "BLOCKED"}, now=NOW)
+    summary = json.loads((tmp_path / run_id / "summary.json").read_text(encoding="utf-8"))
+    assert summary["event_count"] == len(run.store.events(run_id)) == 3
+    run.close()

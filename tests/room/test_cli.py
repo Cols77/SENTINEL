@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +22,7 @@ import pytest
 import scripts.room_session as cli
 from sentinel.room import artifacts, calibration, capabilities, connectivity
 from sentinel.room.models import CapabilityGrant, canonical_grant_sha256
+from tests.room import test_live_session as live_fakes
 
 FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "room_agent" / "v1"
 SITE_PATH = FIXTURE_DIR / "semantic-site.json"
@@ -429,7 +430,7 @@ def _assurance_file(tmp_path, *, name, contingency_id, clock_domain_id):
     return path
 
 
-def _full_gate_argv(tmp_path, manifest_path, digest, *, grant, profile_path, extra_flags=()):
+def _full_gate_argv(tmp_path, manifest_path, digest, *, grant, profile_path, extra_flags=(), site_path=SITE_PATH):
     consent = _consent_flags(tmp_path)
     nav = _assurance_file(tmp_path, name="nav", contingency_id="NAVIGATION_UNAVAILABLE", clock_domain_id="cd-1")
     energy = _assurance_file(tmp_path, name="energy", contingency_id="RETURN_ENERGY_UNAVAILABLE", clock_domain_id="cd-1")
@@ -437,116 +438,242 @@ def _full_gate_argv(tmp_path, manifest_path, digest, *, grant, profile_path, ext
         manifest_path, digest, tmp_path,
         **{
             "__flags__": [
-                "--execute", *consent, "--profile-file", str(profile_path), "--site", str(SITE_PATH),
+                "--execute", *consent, "--profile-file", str(profile_path), "--site", str(site_path),
                 "--assurance", str(nav), "--assurance", str(energy), "--clock-domain-id", "cd-1", *extra_flags,
             ],
         },
     )
 
 
-def test_live_full_flight_gates_pass_then_refuses_at_the_unwired_controller_boundary(tmp_path, capsys):
-    site_sha256, aircraft_id = SITE_SHA256, "aircraft-1"
-    profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
+def _flight_setup(tmp_path, *, flight_grant=True, calibration_flags=True):
+    """Every file a flight-capable live invocation binds to: the admission
+    grant (manifest profile hashes), the flight-calibration grant the
+    SafetySupervisor itself verifies (calibration_hashes of the drift/energy/
+    limits files and the site), the calibration profile, the drift/energy/
+    limits evidence files, and a manifest bound to the fixture site."""
+    site = live_fakes.fixture_site()
+    site_path = live_fakes.write_site(tmp_path / "site.json")
+    aircraft_id = live_fakes.AIRCRAFT_ID
+    profile = _promoted_profile(site_sha256=site.cube_site_sha256, aircraft_id=aircraft_id)
     profile_hash = calibration.canonical_profile_sha256(profile)
     profile_path = tmp_path / "profile.json"
     calibration.write_profile(profile_path, profile)
-    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
-                            profile_sha256s=(profile_hash,))
-    _registry_with_grant(tmp_path, grant)
+    admission = _promoted_grant(capability="count_return", site_sha256=site.cube_site_sha256,
+                                aircraft_id=aircraft_id, profile_sha256s=(profile_hash,))
+    grants = (admission, live_fakes.flight_grant(site)) if flight_grant else (admission,)
+    registry = capabilities.GrantRegistry(schema_version=capabilities.SCHEMA_VERSION, grants=grants)
+    capabilities.write_registry(tmp_path / "registry.json", registry)
+    drift_path, energy_path, limits_path = tmp_path / "drift.json", tmp_path / "energy.json", tmp_path / "limits.json"
+    drift_path.write_text(json.dumps(asdict(live_fakes.drift_profile())), encoding="utf-8")
+    energy_path.write_text(json.dumps(asdict(live_fakes.energy_profile(site))), encoding="utf-8")
+    limits_path.write_text(json.dumps({"trim_rounds": 0, "localise": False}), encoding="utf-8")
     manifest_path, digest = _write_manifest(tmp_path, **{
-        "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
-        "--site-sha256": SITE_SHA256, "--tag-map-sha256": TAG_MAP_SHA256,
+        "--capability-grant-sha256": admission.grant_sha256, "--profile": [profile_hash],
+        "--site-sha256": site.cube_site_sha256, "--tag-map-sha256": site.tag_map_sha256,
     })
-    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
+    extra = (["--drift-profile", str(drift_path), "--energy-profile", str(energy_path),
+              "--command-limits", str(limits_path)] if calibration_flags else [])
+    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=admission, profile_path=profile_path,
+                           extra_flags=extra, site_path=site_path)
+    return argv, manifest_path
+
+
+def _run_dir(tmp_path, manifest_path):
+    return tmp_path / "runs" / artifacts.parse_manifest(Path(manifest_path).read_bytes()).run_id
+
+
+def _event_types(events):
+    return [event.event_type for event in events]
+
+
+def test_live_full_flight_runs_count_and_return_and_finalizes_a_verifiable_terminal(tmp_path, capsys):
+    # Fix round 4 (Q2): one invocation authorizes the bounded session. After
+    # every gate and the connectivity preflight, live builds the run artifact
+    # and store, the SafetySupervisor (tracker/reserve/limits from the
+    # --drift-profile/--energy-profile/--command-limits evidence files), the
+    # flight stack, Jev and the detector, compiles the goal ledger, takes off,
+    # drives RoomController.run_until_terminal and finalizes terminal.json --
+    # which room_verify_artifact.py then verifies end to end.
+    import scripts.room_verify_artifact as verify_cli
+
+    argv, manifest_path = _flight_setup(tmp_path)
+    stack = live_fakes.FlightStackFactory()
+    judge = live_fakes.PolicyJudge("jev-vendor-x")
     exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
-                         client_factory=lambda: object(), jev_factory=_fake_collaborator("jev-vendor-x"),
+                         client_factory=stack, jev_factory=lambda: judge,
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    out, err = capsys.readouterr()
+    assert exit_code == 0, err
+    assert stack.executor.calls[0] == "TAKEOFF"
+    assert stack.executor.calls[-1] == "LAND"
+    assert not stack.emergencies
+    assert "goal_family" in judge.names and "room_action" in judge.names
+    run_dir = _run_dir(tmp_path, manifest_path)
+    terminal = json.loads((run_dir / "terminal.json").read_text(encoding="utf-8"))
+    assert terminal["took_off"] is True
+    assert terminal["ledger_status"] == "PENDING"
+    assert terminal["landing_state"] == "LANDED" and terminal["completed_at"]
+    # RoomController._observation_enabled (Plan 03-owned) offers OBSERVE only
+    # in SIMULATION mode, so a REAL-mode session has no count evidence: Jev
+    # reads, finds none, and the controller returns home, lands, and reports
+    # BLOCKED. When that gate opens for promoted profiles, this becomes an
+    # answered count -- the composition here does not change.
+    assert terminal["state"] == "BLOCKED"
+    assert json.loads(out.strip().splitlines()[-1]) == {"run_id": "run-0001", "terminal_state": terminal["state"]}
+    events = _run_events(tmp_path, "runs", manifest_path)
+    types = _event_types(events)
+    # Preflight -> identities -> ledger -> fresh-connectivity takeoff authorization -> flight.
+    assert types.index("CONNECTIVITY_CHECKED") < types.index("IDENTITY_RESOLVED")
+    assert types.index("IDENTITY_RESOLVED") < types.index("GOAL_LEDGER_ACCEPTED")
+    assert types.index("GOAL_LEDGER_ACCEPTED") < types.index("TAKEOFF_AUTHORIZED")
+    assert types.index("TAKEOFF_AUTHORIZED") < types.index("SAFETY_ASSESSED")
+    takeoff = events[types.index("TAKEOFF_AUTHORIZED")].payload
+    assert takeoff["drone_identity"] == "tello-1" and takeoff["provider_identity"] == "gemini-1"
+    resolved = {e.payload["role"]: e.payload["resolved"] for e in events if e.event_type == "IDENTITY_RESOLVED"}
+    assert resolved == {"jev": "jev-vendor-x", "detector": "detector-vendor-y"}
+    assert verify_cli.verify(
+        manifest_path=run_dir / "manifest.json", expect_terminal=terminal["state"],
+        expect_capability="count_return",
+        require_event=("CONNECTIVITY_CHECKED", "TAKEOFF_AUTHORIZED", "GOAL_LEDGER_ACCEPTED", "DRONE_STATE_RECORDED"),
+    ) == "run-0001"
+
+
+def test_live_full_flight_rejected_goal_ledger_finalizes_blocked_without_takeoff(tmp_path, capsys):
+    argv, manifest_path = _flight_setup(tmp_path)
+    stack = live_fakes.FlightStackFactory()
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         client_factory=stack, jev_factory=lambda: live_fakes.PolicyJudge(clarify=True),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    capsys.readouterr()
+    assert exit_code == 0
+    assert stack.executor.calls == []
+    terminal = json.loads((_run_dir(tmp_path, manifest_path) / "terminal.json").read_text(encoding="utf-8"))
+    assert terminal["state"] == "BLOCKED"
+    assert terminal["took_off"] is False
+    assert "TAKEOFF_AUTHORIZED" not in _event_types(_run_events(tmp_path, "runs", manifest_path))
+
+
+def test_live_full_flight_refuses_before_takeoff_without_a_flight_calibration_grant(tmp_path, capsys):
+    # The admission grant alone (manifest profile hashes) is not enough: the
+    # SafetySupervisor independently requires a grant bound to the exact
+    # drift/energy/limits/site calibration it flies with.
+    argv, manifest_path = _flight_setup(tmp_path, flight_grant=False)
+    stack = live_fakes.FlightStackFactory()
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         client_factory=stack, jev_factory=lambda: live_fakes.PolicyJudge(),
                          detector_factory=_fake_collaborator("detector-vendor-y"))
     err = capsys.readouterr().err
     assert exit_code == 2
-    assert "not wired in this build" in err
-
-
-def test_live_full_flight_records_resolved_jev_and_detector_identity_before_the_boundary(tmp_path, capsys):
-    # Fix round 3 (Q2): the manifest's own resolved_jev_identity/
-    # resolved_detector_identity are always "UNVERIFIED" (SessionManifest
-    # refuses any other value); the *actual* resolved identity only ever
-    # lives in the run artifact's durable IDENTITY_RESOLVED event log.
-    site_sha256, aircraft_id = SITE_SHA256, "aircraft-1"
-    profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
-    profile_hash = calibration.canonical_profile_sha256(profile)
-    profile_path = tmp_path / "profile.json"
-    calibration.write_profile(profile_path, profile)
-    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
-                            profile_sha256s=(profile_hash,))
-    _registry_with_grant(tmp_path, grant)
-    manifest_path, digest = _write_manifest(tmp_path, **{
-        "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
-        "--site-sha256": SITE_SHA256, "--tag-map-sha256": TAG_MAP_SHA256,
-    })
-    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
-    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
-                         client_factory=lambda: object(), jev_factory=_fake_collaborator("jev-vendor-x"),
-                         detector_factory=_fake_collaborator("detector-vendor-y"))
-    assert exit_code == 2
-    capsys.readouterr()
+    assert "capability does not match" in err
+    assert stack.executor.calls == []
+    assert not (_run_dir(tmp_path, manifest_path) / "terminal.json").exists()
     events = _run_events(tmp_path, "runs", manifest_path)
-    resolved = {e.payload["role"]: e.payload["resolved"] for e in events if e.event_type == "IDENTITY_RESOLVED"}
-    assert resolved == {"jev": "jev-vendor-x", "detector": "detector-vendor-y"}
-    not_wired = [e for e in events if e.event_type == "LIVE_EXECUTION_NOT_WIRED"]
-    assert len(not_wired) == 1
-    assert set(not_wired[0].payload["missing"]) == {"goal_ledger_bootstrap", "safety_supervisor_tracker_reserve"}
+    assert "LIVE_SESSION_REFUSED" in _event_types(events)
+
+
+def test_live_full_flight_refuses_without_drift_and_energy_evidence_files(tmp_path, capsys):
+    argv, _ = _flight_setup(tmp_path, calibration_flags=False)
+
+    def forbidden():
+        raise AssertionError("must never reach connectivity without flight calibration evidence")
+
+    exit_code = cli.main(argv, drone_probe=forbidden, provider_probe=forbidden)
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "--drift-profile" in err
+
+
+def test_live_full_flight_emergency_lands_when_the_session_loop_fails_after_takeoff(tmp_path, capsys, monkeypatch):
+    from sentinel.room.controller import RoomController
+
+    def broken(self, session_id):
+        raise RuntimeError("controller crashed mid-flight")
+
+    monkeypatch.setattr(RoomController, "run_until_terminal", broken)
+    argv, manifest_path = _flight_setup(tmp_path)
+    stack = live_fakes.FlightStackFactory()
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         client_factory=stack, jev_factory=lambda: live_fakes.PolicyJudge(),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    capsys.readouterr()
+    assert exit_code == 0
+    assert stack.executor.calls[0] == "TAKEOFF"
+    assert stack.emergencies == [True]
+    terminal = json.loads((_run_dir(tmp_path, manifest_path) / "terminal.json").read_text(encoding="utf-8"))
+    assert terminal["state"] == "ABORTED"
+    assert terminal["took_off"] is True
+
+
+def test_live_full_flight_takeoff_failure_on_the_ground_is_a_refusal(tmp_path, capsys):
+    argv, manifest_path = _flight_setup(tmp_path)
+    stack = live_fakes.FlightStackFactory(start_error=RuntimeError("motors did not arm"))
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         client_factory=stack, jev_factory=lambda: live_fakes.PolicyJudge(),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "takeoff refused" in err
+    assert stack.emergencies == []
+    assert not (_run_dir(tmp_path, manifest_path) / "terminal.json").exists()
+
+
+def test_live_full_flight_takeoff_failure_while_airborne_forces_a_landing(tmp_path, capsys):
+    # executor.start raising after the aircraft left the ground must never be
+    # reported as a mere refusal: the supervisor's forced landing runs and the
+    # run is finalized ABORTED.
+    argv, manifest_path = _flight_setup(tmp_path)
+    stack = live_fakes.FlightStackFactory(start_error=RuntimeError("home measurement timed out"),
+                                          airborne_before_error=True)
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         client_factory=stack, jev_factory=lambda: live_fakes.PolicyJudge(),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    capsys.readouterr()
+    assert exit_code == 0
+    assert stack.emergencies == [True]
+    terminal = json.loads((_run_dir(tmp_path, manifest_path) / "terminal.json").read_text(encoding="utf-8"))
+    assert terminal["state"] == "ABORTED"
+    assert terminal["took_off"] is True
+    assert terminal["reason"] == "START_FAILED"
 
 
 def test_live_full_flight_refuses_when_the_constructed_jev_has_no_identity(tmp_path, capsys):
-    site_sha256, aircraft_id = SITE_SHA256, "aircraft-1"
-    profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
-    profile_hash = calibration.canonical_profile_sha256(profile)
-    profile_path = tmp_path / "profile.json"
-    calibration.write_profile(profile_path, profile)
-    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
-                            profile_sha256s=(profile_hash,))
-    _registry_with_grant(tmp_path, grant)
-    manifest_path, digest = _write_manifest(tmp_path, **{
-        "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
-        "--site-sha256": SITE_SHA256, "--tag-map-sha256": TAG_MAP_SHA256,
-    })
-    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
-    # jev's identity is checked (and refused) before detector's, in the same
-    # order both are constructed and then validated -- so no IDENTITY_RESOLVED
-    # event is ever recorded for either role, even though detector_factory
-    # itself is still constructed alongside client/jev (all three are cheap,
-    # side-effect-free construction checks; only what they *report* differs).
+    argv, manifest_path = _flight_setup(tmp_path)
+    stack = live_fakes.FlightStackFactory()
+    # jev's identity is checked (and refused) before detector's, so no
+    # IDENTITY_RESOLVED event is ever recorded for either role, and nothing
+    # flies.
     exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
-                         client_factory=lambda: object(), jev_factory=lambda: object(),
+                         client_factory=stack, jev_factory=lambda: object(),
                          detector_factory=_fake_collaborator("detector-vendor-y"))
     err = capsys.readouterr().err
     assert exit_code == 2
     assert "no nonblank string .identity" in err
+    assert stack.calls == []
     events = _run_events(tmp_path, "runs", manifest_path)
     assert not [e for e in events if e.event_type == "IDENTITY_RESOLVED"]
 
 
 def test_live_full_flight_default_detector_factory_refuses(tmp_path, capsys):
-    # Fix round 3 (Q2): detector_factory now defaults to refuse, the same
-    # convention client_factory/jev_factory already use.
-    site_sha256, aircraft_id = SITE_SHA256, "aircraft-1"
-    profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
-    profile_hash = calibration.canonical_profile_sha256(profile)
-    profile_path = tmp_path / "profile.json"
-    calibration.write_profile(profile_path, profile)
-    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
-                            profile_sha256s=(profile_hash,))
-    _registry_with_grant(tmp_path, grant)
-    manifest_path, digest = _write_manifest(tmp_path, **{
-        "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
-        "--site-sha256": SITE_SHA256, "--tag-map-sha256": TAG_MAP_SHA256,
-    })
-    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
+    argv, _ = _flight_setup(tmp_path)
+    stack = live_fakes.FlightStackFactory()
     exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
-                         client_factory=lambda: object(), jev_factory=_fake_collaborator("jev-vendor-x"))
+                         client_factory=stack, jev_factory=lambda: live_fakes.PolicyJudge())
     err = capsys.readouterr().err
     assert exit_code == 2
     assert "requires an injected detector_factory" in err
+    assert stack.calls == []
+
+
+def test_live_full_flight_default_client_factory_refuses_before_takeoff(tmp_path, capsys):
+    argv, manifest_path = _flight_setup(tmp_path)
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         jev_factory=lambda: live_fakes.PolicyJudge(),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "requires an injected client_factory" in err
+    assert not (_run_dir(tmp_path, manifest_path) / "terminal.json").exists()
+    assert "LIVE_SESSION_REFUSED" in _event_types(_run_events(tmp_path, "runs", manifest_path))
 
 
 def test_live_full_flight_refuses_without_a_matching_profile_file(tmp_path, capsys):
@@ -713,26 +840,14 @@ def test_live_connectivity_only_records_a_not_ready_preflight_too(tmp_path, caps
     assert checked[0].payload["ready"] is False
 
 
-def test_live_full_flight_records_connectivity_before_refusing_at_the_unwired_controller_boundary(tmp_path, capsys):
-    site_sha256, aircraft_id = SITE_SHA256, "aircraft-1"
-    profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
-    profile_hash = calibration.canonical_profile_sha256(profile)
-    profile_path = tmp_path / "profile.json"
-    calibration.write_profile(profile_path, profile)
-    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
-                            profile_sha256s=(profile_hash,))
-    _registry_with_grant(tmp_path, grant)
-    manifest_path, digest = _write_manifest(tmp_path, **{
-        "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
-        "--site-sha256": SITE_SHA256, "--tag-map-sha256": TAG_MAP_SHA256,
-    })
-    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
+def test_live_full_flight_records_connectivity_before_takeoff(tmp_path, capsys):
+    argv, manifest_path = _flight_setup(tmp_path)
     exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
-                         client_factory=lambda: object(), jev_factory=_fake_collaborator("jev-vendor-x"),
+                         client_factory=live_fakes.FlightStackFactory(),
+                         jev_factory=lambda: live_fakes.PolicyJudge(),
                          detector_factory=_fake_collaborator("detector-vendor-y"))
-    err = capsys.readouterr().err
-    assert exit_code == 2
-    assert "not wired in this build" in err
+    capsys.readouterr()
+    assert exit_code == 0
     events = _run_events(tmp_path, "runs", manifest_path)
     checked = [e for e in events if e.event_type == "CONNECTIVITY_CHECKED"]
     assert len(checked) == 1
@@ -741,65 +856,33 @@ def test_live_full_flight_records_connectivity_before_refusing_at_the_unwired_co
 
 
 def test_live_full_flight_refuses_when_connectivity_has_expired_before_takeoff(tmp_path, capsys):
-    site_sha256, aircraft_id = SITE_SHA256, "aircraft-1"
-    profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
-    profile_hash = calibration.canonical_profile_sha256(profile)
-    profile_path = tmp_path / "profile.json"
-    calibration.write_profile(profile_path, profile)
-    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
-                            profile_sha256s=(profile_hash,))
-    _registry_with_grant(tmp_path, grant)
-    manifest_path, digest = _write_manifest(tmp_path, **{
-        "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
-        "--site-sha256": SITE_SHA256, "--tag-map-sha256": TAG_MAP_SHA256,
-    })
-    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
-
-    def forbidden():
-        raise AssertionError("must never construct a client/jev once connectivity has expired before takeoff")
-
-    # `clock` is called once by the site-assurance freshness check and three
-    # more times inside connectivity.check() (started, remaining, final now)
-    # before this fix's own before-takeoff recheck -- the 5th call. The first
-    # four must stay close to real monotonic time (the assurance fixture and
-    # the fake probes below are both stamped against real time.monotonic());
-    # only the 5th jumps far enough past --connectivity-max-age-s (default
-    # 5.0s) to have expired.
-    calls = []
+    # The freshness recheck runs immediately before supervisor.start (after
+    # collaborator construction, supervisor bootstrap and goal compilation),
+    # not merely right after the preflight. The clock jumps 100s once the
+    # flight stack has been built -- well past --connectivity-max-age-s.
+    argv, manifest_path = _flight_setup(tmp_path)
+    stack = live_fakes.FlightStackFactory()
 
     def clock():
-        value = time.monotonic()
-        calls.append(value)
-        return value + 100.0 if len(calls) >= 5 else value
+        return time.monotonic() + (100.0 if stack.calls else 0.0)
 
-    exit_code = cli.main(
-        argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
-        client_factory=forbidden, jev_factory=forbidden, clock=clock,
-    )
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         client_factory=stack, jev_factory=lambda: live_fakes.PolicyJudge(),
+                         detector_factory=_fake_collaborator("detector-vendor-y"), clock=clock)
     err = capsys.readouterr().err
     assert exit_code == 2
     assert "expired before takeoff" in err
+    assert stack.calls and stack.executor.calls == []
     events = _run_events(tmp_path, "runs", manifest_path)
-    expired = [e for e in events if e.event_type == "CONNECTIVITY_EXPIRED_BEFORE_TAKEOFF"]
-    assert len(expired) == 1
+    assert len([e for e in events if e.event_type == "CONNECTIVITY_EXPIRED_BEFORE_TAKEOFF"]) == 1
+    assert "TAKEOFF_AUTHORIZED" not in _event_types(events)
+    assert not (_run_dir(tmp_path, manifest_path) / "terminal.json").exists()
 
 
-def test_live_default_client_and_jev_factories_refuse_real_construction(tmp_path, capsys):
-    site_sha256, aircraft_id = SITE_SHA256, "aircraft-1"
-    profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
-    profile_hash = calibration.canonical_profile_sha256(profile)
-    profile_path = tmp_path / "profile.json"
-    calibration.write_profile(profile_path, profile)
-    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
-                            profile_sha256s=(profile_hash,))
-    _registry_with_grant(tmp_path, grant)
-    manifest_path, digest = _write_manifest(tmp_path, **{
-        "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
-        "--site-sha256": SITE_SHA256, "--tag-map-sha256": TAG_MAP_SHA256,
-    })
-    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
-    # No drone_probe/provider_probe/client_factory/jev_factory overrides at all:
-    # every one of this build's defaults must refuse before anything real is reached.
+def test_live_default_factories_refuse_real_construction(tmp_path, capsys):
+    argv, _ = _flight_setup(tmp_path)
+    # No probe/client/jev/detector overrides at all: every one of this
+    # build's defaults must refuse before anything real is reached.
     exit_code = cli.main(argv)
     err = capsys.readouterr().err
     assert exit_code == 2
