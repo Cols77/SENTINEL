@@ -237,15 +237,50 @@ def _benefit(cell_ids, coverage: CoverageProjection) -> int:
     return sum(1 for entry in coverage.uncovered if entry.split(":", 1)[0] in cell_ids)
 
 
+#: Refusals decided by the choice gate itself (``assess_choice`` and the
+#: provider call), not by the world: Jev was unsure, malformed or
+#: unreachable, while the action stays physically possible. Task 4b item 1:
+#: they must not burn an OBSERVE or grounded ANSWER candidate for the rest of
+#: the session (live 2026-09-24: center refused at 0.44 was never offered
+#: again). A repeat of the same refusal on an unchanged digest still ends
+#: the session through the controller's persisted NO_PROGRESS rule.
+CONFIDENCE_GATE_REFUSALS = frozenset({
+    "LOW_CONFIDENCE", "THIN_MARGIN", "MALFORMED_ANSWER", "ILLEGAL_OR_MALFORMED",
+    "MISSING_OR_NON_MAX_SELECTION", "PROVIDER_ERROR",
+})
+
+
+def _burns(outcome: ToolOutcome) -> bool:
+    """Whether a refused outcome suppresses its candidate: physical, tool
+    and supervisor refusals do; confidence-gate refusals do not."""
+    return outcome.refusal_code is not None and outcome.refusal_code not in CONFIDENCE_GATE_REFUSALS
+
+
 def _observe_suppressed(outcomes: tuple[ToolOutcome, ...], candidate_id: str, digest: str) -> bool:
     return any(o.candidate_id == candidate_id and o.relevant_state_sha256 == digest
-               and (o.refusal_code is not None or o.code == "OBSERVE_SUCCEEDED")
+               and (_burns(o) or o.code == "OBSERVE_SUCCEEDED")
                for o in outcomes)
 
 
 def _answer_suppressed(outcomes: tuple[ToolOutcome, ...], candidate_id: str, digest: str) -> bool:
-    return any(o.candidate_id == candidate_id and o.relevant_state_sha256 == digest and o.refusal_code is not None
+    return any(o.candidate_id == candidate_id and o.relevant_state_sha256 == digest and _burns(o)
                for o in outcomes)
+
+
+def _resolves_text(pose_id: str, site: RoomSite, coverage: CoverageProjection) -> str:
+    """``resolves 2 unexplored cell/class pairs (left-strip: computer, phone)``
+    for the cells ``site.pose_visibility`` declares this pose can see."""
+    cells = {cell for declared, cell_ids in site.pose_visibility if declared == pose_id for cell in cell_ids}
+    by_cell: dict[str, list[str]] = {}
+    for entry in sorted(coverage.uncovered):
+        cell_id, _, class_name = entry.partition(":")
+        if cell_id in cells:
+            by_cell.setdefault(cell_id, []).append(class_name)
+    count = sum(len(classes) for classes in by_cell.values())
+    if not count:
+        return "resolves no unexplored cell/class pair"
+    detail = "; ".join(f"{cell_id}: {', '.join(classes)}" for cell_id, classes in by_cell.items())
+    return f"resolves {count} unexplored cell/class pair{'' if count == 1 else 's'} ({detail})"
 
 
 def _observe_digest(objective_id: str, pose_id: str, coverage: CoverageProjection) -> str:
@@ -268,6 +303,9 @@ def _observe_candidate(objective: GoalObjective, pose_id: str, description: str,
         return None
     home = site.home.nominal_pose
     distance_cm = math.hypot(resolved.x_cm - home.x_cm, resolved.y_cm - home.y_cm)
+    # Task 4b item 2: what this view resolves and roughly how far it is, so
+    # Jev has a reason to prefer one region over an otherwise identical one.
+    description = f"{description.rstrip('.')}: {_resolves_text(pose_id, site, coverage)}; about {distance_cm:.0f} cm from home."
     return RoomCandidate(candidate_id, CandidateKind.OBSERVE, snapshot_version, digest, description, description,
                          coverage.evidence_refs, (), PhysicalCost(distance_cm=distance_cm, requires_airborne=True))
 
@@ -446,7 +484,8 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
                     if candidate is not None:
                         region_candidates.append(candidate)
                 continue
-            description = f"Observe declared pose {pose_id}, the region requested for objective {objective.objective_id}."
+            description = (f"Observe declared pose {pose_id}, the region requested "
+                           f"(objective {objective.objective_id}).")
             candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version)
             if candidate is None:
                 candidate = _incomplete_answer_candidate(objective, coverage, outcomes, snapshot_version,
@@ -463,8 +502,7 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
             benefit = _benefit(set(cell_ids), coverage)
             if benefit <= 0:
                 continue
-            description = (f"Observe declared pose {pose_id}: resolves {benefit} currently unresolved "
-                           f"coverage cell/class pair(s) for objective {objective.objective_id}.")
+            description = f"Observe declared pose {pose_id} (objective {objective.objective_id})."
             candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version)
             if candidate is not None:
                 scored.append((benefit, candidate))

@@ -338,7 +338,9 @@ def test_final_inconsistency_discards_tentative_ledger(tmp_path):
     (RuntimeError("provider unavailable"), 2),
     ({"value": "NEXT_OBJECTIVE:c1", "confidence": 0.1, "probabilities": {"NEXT_OBJECTIVE:c1": 0.99}}, 2),
     ({"value": "NEXT_OBJECTIVE:c1", "probabilities": {"NEXT_OBJECTIVE:c1": 0.51, "DONE": 0.49}}, 1),
-    ({"value": "arbitrary command", "probabilities": {"arbitrary command": 0.99}}, 1),
+    # Task 4b item 4: a malformed or illegal reply is re-asked once too.
+    ({"value": "arbitrary command", "probabilities": {"arbitrary command": 0.99}}, 2),
+    ({"value": "NEXT_OBJECTIVE:c1"}, 2),
 ])
 def test_provider_failure_and_gate_rejection_are_audited_without_defaults(tmp_path, response, asked):
     request = "Follow him"
@@ -347,6 +349,22 @@ def test_provider_failure_and_gate_rejection_are_audited_without_defaults(tmp_pa
     assert ledger.status == GoalStatus.CLARIFICATION_REQUIRED
     assert ledger.physical_objectives == ()
     assert_audit(store, judge, ledger, accepted=False)
+
+
+def test_a_reply_missing_probabilities_is_reasked_once_and_can_recover(tmp_path):
+    """Task 4b item 4: live target_classes came back MALFORMED once; the
+    compiler re-asks it once with feedback on the reply's shape."""
+    request = "Count phones"
+    script = objective("c1", "COUNT", "phone") + FINISH
+    malformed_at = script.index(("target_classes", "CLASS:phone"))
+    script.insert(malformed_at, ("target_classes", {"value": "CLASS:phone"}))
+    compiler, judge, store = setup(tmp_path, request, script)
+    ledger = compiler.compile("session-1", request, snapshot())
+    assert ledger.status == GoalStatus.PENDING
+    assert ledger.objectives[0].target_classes == ("phone",)
+    first, second = [call for call in judge.calls if call[0] == "target_classes"]
+    assert "unusable (ILLEGAL_OR_MALFORMED)" in second[3] and "unusable" not in first[3]
+    assert_audit(store, judge, ledger)
 
 
 @pytest.mark.parametrize("selection", ["DONE", "NEXT_OBJECTIVE:c2"])

@@ -151,6 +151,9 @@ def _named_classes(text: str) -> tuple[str, ...]:
 #: A below-gate lean toward a real label is re-asked once (``reasks``).
 GOAL_ACT_AT = 0.50
 
+#: Reply-shape refusals from ``assess_choice``, re-asked once (Task 4b item 4).
+_MALFORMED_OUTCOMES = ("MALFORMED_ANSWER", "ILLEGAL_OR_MALFORMED", "MISSING_OR_NON_MAX_SELECTION")
+
 
 class GoalCompiler:
     def __init__(
@@ -298,13 +301,21 @@ class _Compilation:
                 break
             # Re-ask once only when the model leaned to a real label but below the gate
             # (or the provider failed); an explicit CLARIFICATION/UNSUPPORTED stands.
-            retryable = provider_error is not None or (
+            # Task 4b item 4: a malformed reply (e.g. no probabilities) is re-asked
+            # once as well, with feedback on the reply's shape.
+            malformed = assessment.outcome in _MALFORMED_OUTCOMES
+            retryable = provider_error is not None or malformed or (
                 assessment.outcome == "LOW_CONFIDENCE" and assessment.selected_label not in _SAFE)
             if assessment.final_label not in _SAFE or not retryable:
                 break
-            instruction = (instruction + " A previous answer for " + name + " leaned to "
-                           + str(assessment.selected_label) + " without enough confidence; "
-                           "re-read the request and answer again.")
+            if malformed:
+                instruction = (instruction + " A previous answer for " + name + " was unusable ("
+                               + assessment.outcome + "); reply with one listed label as value, a "
+                               "probability for every listed label (the chosen one the highest) and a confidence.")
+            else:
+                instruction = (instruction + " A previous answer for " + name + " leaned to "
+                               + str(assessment.selected_label) + " without enough confidence; "
+                               "re-read the request and answer again.")
         if assessment.final_label in _SAFE:
             raise _Rejected(provider_error or assessment.outcome, GoalStatus(assessment.final_label))
         self.accepted_choices.append({

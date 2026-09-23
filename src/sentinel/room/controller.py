@@ -52,6 +52,9 @@ _MAX_RETURN_ATTEMPTS = 5
 _POSE_POSITION_TOLERANCE_CM = 5.0
 _POSE_HEADING_TOLERANCE_DEG = 5.0
 
+#: Task 4b item 4: reply-shape refusals re-asked once, like a provider error.
+_MALFORMED_OUTCOMES = ("MALFORMED_ANSWER", "ILLEGAL_OR_MALFORMED", "MISSING_OR_NON_MAX_SELECTION")
+
 
 def _heading_within_tolerance(a_deg: float, b_deg: float, tolerance_deg: float = _POSE_HEADING_TOLERANCE_DEG) -> bool:
     """Fix round 3 (F6): compare headings modularly, never by exact equality
@@ -560,7 +563,14 @@ class RoomController:
         base = build_candidates(snapshot)
         if self._legacy_count_answer_blocked(snapshot):
             base = tuple(c for c in base if c.kind != CandidateKind.ANSWER)
-        return (*base, *self._observation_candidates(snapshot), *self._count_answer_candidates(snapshot),
+        observations = self._observation_candidates(snapshot)
+        if any(c.kind == CandidateKind.OBSERVE for c in observations):
+            # Task 4b item 3: while a physical observation is legal, historical
+            # reads only dilute Jev's probability (0.07-0.11 each, live
+            # 2026-09-24); no grounded answer route needs a read first. They
+            # come back once no OBSERVE is left.
+            base = tuple(c for c in base if c.kind not in READ_KINDS)
+        return (*base, *observations, *self._count_answer_candidates(snapshot),
                *self._closer_unavailable_candidates(snapshot), *self._reanchor_candidates(snapshot))
 
     def _local_terminal(self, terminal, candidate_id):
@@ -868,16 +878,22 @@ class RoomController:
             return self._preempted(session_id, self.supervisor.last_preemption)
         assessment, provider_error, act_at = asked
         reask = None
-        if (policy.reask_once and not provider_error
-                and assessment.outcome in ("LOW_CONFIDENCE", "THIN_MARGIN")):
+        malformed = provider_error is not None or assessment.outcome in _MALFORMED_OUTCOMES
+        if policy.reask_once and (malformed or assessment.outcome in ("LOW_CONFIDENCE", "THIN_MARGIN")):
             # Task V2: one re-ask with the refusal as feedback, never a loop.
-            feedback = {"refused_choice": assessment.selected_label, "refusal": assessment.outcome,
+            # Task 4b item 4: a malformed/illegal reply or a provider error is
+            # re-asked once too, with feedback on the reply's shape.
+            refusal = "PROVIDER_ERROR" if provider_error else assessment.outcome
+            note = ("Your previous reply could not be used (" + refusal + "). Reply with one legal action "
+                    "label as value, a probability for every legal label (the chosen one the highest) and a "
+                    "confidence; this is the last ask this turn.") if malformed else (
+                    "Your previous choice was refused: below the acceptance threshold for its "
+                    "kind. Choose once more from the same legal actions. Repeat it only if you "
+                    "are confident it is the right next action; this is the last ask this turn.")
+            feedback = {"refused_choice": assessment.selected_label, "refusal": refusal,
                         "confidence": assessment.confidence, "required_confidence": act_at,
                         "margin": assessment.margin, "required_margin": policy.min_margin,
-                        "acceptance_thresholds": policy.as_config(),
-                        "note": ("Your previous choice was refused: below the acceptance threshold for its "
-                                 "kind. Choose once more from the same legal actions. Repeat it only if you "
-                                 "are confident it is the right next action; this is the last ask this turn.")}
+                        "acceptance_thresholds": policy.as_config(), "note": note}
             reask = {"first_assessment": audit(assessment), "first_act_at": act_at, "feedback": feedback}
             asked = ask({**state, "previous_refusal": feedback})
             if asked is None:

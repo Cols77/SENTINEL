@@ -128,10 +128,63 @@ def test_a_terminal_clarify_keeps_the_strict_bar(room):
     assert outcome.accepted and outcomes(room)[-1] == ("READ_DRONE", "READ_SUCCEEDED")
 
 
-def test_provider_errors_are_not_reasked(room):
+def test_a_provider_error_is_reasked_once_then_refused(room):
+    """Task 4b item 4: a provider error gets the one re-ask too."""
     goal(room)
     drone(room)
-    judge = Judge(RuntimeError("provider down"))
+    judge = Judge(RuntimeError("provider down"), RuntimeError("provider down"))
     outcome = RoomController(room, judge, acceptance=AcceptancePolicy()).step("s1")
-    assert not outcome.accepted and len(judge.calls) == 1
+    assert not outcome.accepted and len(judge.calls) == 2
+    assert judge.calls[1][0]["previous_refusal"]["refusal"] == "PROVIDER_ERROR"
     assert outcomes(room)[-1][1] == "PROVIDER_ERROR"
+
+
+def test_a_provider_error_then_a_good_reply_is_accepted(room):
+    goal(room)
+    drone(room)
+    judge = Judge(RuntimeError("provider down"), lambda state, criteria: spread(criteria, "READ_DRONE", .7))
+    outcome = RoomController(room, judge, acceptance=AcceptancePolicy()).step("s1")
+    assert outcome.accepted and len(judge.calls) == 2
+    assert attempts(room)[-1]["provider_error"] is None
+    assert outcomes(room)[-1] == ("READ_DRONE", "READ_SUCCEEDED")
+
+
+@pytest.mark.parametrize("bad,code", [
+    ("not a mapping", "MALFORMED_ANSWER"),
+    ({"value": "TAKEOFF", "probabilities": {"TAKEOFF": .99}}, "ILLEGAL_OR_MALFORMED"),
+    ({"value": "READ_DRONE"}, "ILLEGAL_OR_MALFORMED"),
+    ({"value": "READ_DRONE", "probabilities": {"READ_DRONE": .2, "CLARIFY": .7}}, "MISSING_OR_NON_MAX_SELECTION"),
+])
+def test_a_malformed_reply_is_reasked_once_with_shape_feedback(room, bad, code):
+    goal(room)
+    drone(room)
+    class Raw(Judge):
+        """Returns non-mapping replies verbatim (the base Judge asserts labels)."""
+        def choice(self, state, instruction, *, criteria, name):
+            if not self.calls:
+                self.calls.append((state, dict(criteria)))
+                self.responses.pop(0)
+                return bad
+            return super().choice(state, instruction, criteria=criteria, name=name)
+    judge = Raw(None, lambda state, criteria: spread(criteria, "READ_DRONE", .7))
+    outcome = RoomController(room, judge, acceptance=AcceptancePolicy()).step("s1")
+    assert outcome.accepted and len(judge.calls) == 2
+    feedback = judge.calls[1][0]["previous_refusal"]
+    assert feedback["refusal"] == code and "probability" in feedback["note"]
+    assert attempts(room)[-1]["reask"]["first_assessment"]["outcome"] == code
+
+
+def test_a_malformed_reply_is_reasked_only_once(room):
+    goal(room)
+    drone(room)
+    illegal = {"value": "TAKEOFF", "probabilities": {"TAKEOFF": .99}}
+    judge = Judge(illegal, illegal)
+    outcome = RoomController(room, judge, acceptance=AcceptancePolicy()).step("s1")
+    assert not outcome.accepted and len(judge.calls) == 2
+    assert outcomes(room)[-1] == ("JEV", "ILLEGAL_OR_MALFORMED")
+
+
+def test_the_strict_policy_still_never_reasks_a_malformed_reply(room):
+    goal(room)
+    judge = Judge({"value": "TAKEOFF", "probabilities": {"TAKEOFF": .99}})
+    assert not RoomController(room, judge).step("s1").accepted and len(judge.calls) == 1
