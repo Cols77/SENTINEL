@@ -1,0 +1,19 @@
+{
+  "expected": {
+    "decision_stream_sha256": "bd038f332b70fa35a38296638f6726396db2192490695aa0b94111b078ec98de",
+    "final_snapshot_sha256": "e721ceb8c0354708753825b094c47e0b4fcdc55eb6c6c77924524ce3b147de9f",
+    "report_sha256": "45ec10cd757595c68ece3492fa4d88cfbc3af32231d48e4b3ce0352fa6f4d4bc",
+    "terminal_state": "COMPLETED"
+  },
+  "files": {
+    "events.jsonl": "6f4744e6d84422358db1d092d1399c723fcd36af67dffbd4f0d2da54e8aa0f5f",
+    "frame-1.png": "f981061ee1e9c9fe8d53e290cc5b1cad9aabeebfe0ee5ff3377ef3cdcdf869c3"
+  },
+  "fixture_id": "room-agent-count-and-return-v1",
+  "label": "synthetic",
+  "projector_revision": "room-projectors-v1",
+  "request_text": "Count the computers in the room, then return.",
+  "room_schema_revision": 6,
+  "schema_version": 1,
+  "session_id": "room-agent-replay-001"
+}

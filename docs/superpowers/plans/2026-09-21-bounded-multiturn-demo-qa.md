@@ -12,6 +12,28 @@
 
 ---
 
+## Amendment (2026-09-23, Plan 03 Task 5)
+
+This plan's `room_id`/pose read packets (`src/sentinel/coordinator/demo_context.py`'s
+`read_room_counts`/`read_latest_drone_pose`, File map above) predate the Plan 03
+agentic room agent (`docs/superpowers/plans/2026-09-22-jev-room-agent-03-count-closer-return.md`).
+Plan 03 now owns grounded, evidence-typed room-count and drone-pose reads
+through `sentinel.room.queries.ReadQueries` (`READ_COUNTS`/`READ_OBSERVATIONS`/
+`READ_DRONE`, with `render_answer` for wording) -- see
+`src/sentinel/room/queries.py` and `tests/room/test_queries.py`. This demo-QA
+plan's own room/drone answers must be implemented against `sentinel.room.queries`
+rather than a second, independently maintained read path; a future task
+against this plan should route `DemoContext`'s room-count/pose reads (and
+`render_count_answer`/`render_pose_answer`) through `ReadQueries`/`render_answer`
+instead of duplicating count-interval or pose-freshness logic here.
+
+This amendment does not implement that change and does not mark any task
+below complete -- every task in this plan (1 through 7) remains outstanding
+exactly as tracked by its own checkboxes. It records the disposition so a
+later worker does not build a second, divergent room/drone read path.
+
+---
+
 ## File map
 
 - Create `src/sentinel/coordinator/request_intent.py`: deterministic, demo-scoped request classification and explicit constraint gaps.
