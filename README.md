@@ -33,7 +33,7 @@ Pick **Room agent (Jev adaptive)** in the *Architecture* selector, choose a run 
 
   Scenario (a) spreads phones and computers over three regions, with one low-confidence phone. Scenario (b) yaws the aircraft away from the tags after the second observation, so the recovery's mapped-tag yaw scan runs before the mission resumes.
 
-- **Live** (real Tello, real detector, real Jev) runs `scripts/room_session.py live` with all of its gates. First prepare the L3 inputs with [the runbook](docs/room-agent-live-runbook.md): the TRIAL grant (`room_capability.py issue-trial`), the manifest preview, and the two site assurances. The assurances are valid for 30 minutes. Then write a pack and start Mission Control with it:
+- **Live** (real Tello, real detector, real Jev) runs `scripts/room_session.py live` with all of its gates. **Morning flight:** follow [the one-page checklist](docs/room-agent-morning-flight.md); `python scripts/room_live_prepare.py --run-root runs [--local-ip 192.168.10.2] [--consent-confirmed]` prepares the consent, registry, TRIAL grant, manifest, assurances and pack in one offline command and prints the launch command (`--room-live-config runs/live.pack.json`). By hand instead: first prepare the L3 inputs with [the runbook](docs/room-agent-live-runbook.md): the TRIAL grant (`room_capability.py issue-trial`), the manifest preview, and the two site assurances. The assurances are valid for 30 minutes. Then write a pack and start Mission Control with it:
 
   ```powershell
   @{ manifest = "runs/$RUN.manifest.json"; authorization_digest = $DIGEST; grant_registry = "runs/registry.json"
