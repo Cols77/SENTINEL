@@ -87,9 +87,14 @@ _BATTERY_LANDING_FLOOR_PERCENT = 15.0
 
 # Pose envelope combination buckets. A holdout leg's wall-clock timing will not land on
 # the exact float a training leg happened to report, so the envelope key rounds each
-# dimension to a fixed bucket before matching -- still "only sampled combinations, no
-# interpolation" (a holdout combination outside every trained bucket is still refused),
-# just without demanding bit-identical timing between two flights of the "same" leg.
+# dimension to a fixed bucket before matching. Matching itself is dominance, not
+# equality (see `envelope_bound_for`): a query is inside the envelope if some sampled
+# bucket combination is at least as demanding on every dimension (distance, time,
+# |yaw|), never an interpolation or extrapolation beyond the sampled maximums. This
+# still tolerates the same sub-bucket wall-clock jitter the bucketing always did,
+# while no longer requiring a query's bucket to equal one trained bucket combination
+# exactly -- a real flight's (distance, time, yaw) rarely reproduces a calibration
+# leg on all three dimensions at once, even when it is well within what was sampled.
 _DISTANCE_BUCKET_CM = 5.0
 _TIME_BUCKET_S = 0.5
 _YAW_BUCKET_DEG = 5.0
@@ -971,6 +976,32 @@ def _pose_envelope_key(distance_cm: float, elapsed_s: float, yaw_deg: float) -> 
     )
 
 
+def envelope_bound_for(
+    envelope: Sequence[PoseEnvelopePoint], *, distance_cm: float, time_s: float, yaw_deg: float,
+) -> float | None:
+    """The conservative drift bound (cm) admissible for a query point, or ``None`` if
+    no sampled combination in *envelope* dominates it.
+
+    The query is bucketed the same way training samples are (absorbing wall-clock/
+    reading jitter, not changing what "dominates" means), then a sampled point
+    ``p`` dominates it when ``p.distance_cm >= distance_cm``, ``p.time_s >= time_s``
+    and ``abs(p.yaw_deg) >= abs(yaw_deg)`` -- every dimension of that sample is at
+    least as demanding as the query. The bound returned is the worst (largest) drift
+    among every dominating sample, never an average and never an interpolation. A
+    query that exceeds every sampled combination's maximum in even one dimension
+    dominates nothing and is refused (``None``): this fails closed, it never
+    extrapolates beyond what was actually sampled.
+    """
+    distance_b, time_b, yaw_b = _pose_envelope_key(distance_cm, time_s, abs(yaw_deg))
+    dominating = [
+        point.drift_cm for point in envelope
+        if point.distance_cm >= distance_b and point.time_s >= time_b and abs(point.yaw_deg) >= yaw_b
+    ]
+    if not dominating:
+        return None
+    return max(dominating)
+
+
 def _pose_envelope_from_trials(trials: Sequence[CalibrationTrial]) -> tuple[PoseEnvelopePoint, ...]:
     # Only samples from a reanchor leg carry a ground-truth-anchored drift measurement
     # (see `record`); other legs' samples have drift_cm == None and are not evidence
@@ -1087,13 +1118,14 @@ def _validate_flight_holdout(candidate: CalibrationProfile, holdout_trials: Sequ
             raise CalibrationError(
                 f"holdout trial {trial.run_id!r} exceeded the candidate's conservative battery bound"
             )
-    envelope = {(point.distance_cm, point.time_s, point.yaw_deg): point.drift_cm for point in candidate.pose_envelope}
     for trial in tag_free:
         for sample in trial.samples:
             if sample.drift_cm is None:
                 continue
-            key = _pose_envelope_key(sample.distance_cm, sample.elapsed_s, sample.yaw_deg)
-            bound = envelope.get(key)
+            bound = envelope_bound_for(
+                candidate.pose_envelope, distance_cm=sample.distance_cm,
+                time_s=sample.elapsed_s, yaw_deg=sample.yaw_deg,
+            )
             if bound is None or sample.drift_cm > bound:
                 raise CalibrationError(f"holdout trial {trial.run_id!r} exceeded the candidate's pose envelope")
 

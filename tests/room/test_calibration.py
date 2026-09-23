@@ -908,6 +908,22 @@ def test_promote_refuses_holdout_pose_drift_beyond_the_candidate_envelope(tmp_pa
         )
 
 
+def test_promote_accepts_a_holdout_pose_query_dominated_by_but_not_equal_to_training(tmp_path):
+    # The holdout leg drifts less (3 cm, not the training 5 cm triangle) at the same
+    # nominal timing/yaw: a strictly less-demanding combination than what training
+    # sampled. The old exact-bucket-combo lookup happened to admit this only because
+    # every dimension still landed in training's bucket; this test pins the dominance
+    # behaviour explicitly (a *smaller* measured drift than the trained bound) rather
+    # than relying on incidental bucket equality.
+    candidate_path, _, training_index_path = _fit_candidate(tmp_path)
+    holdout_index_path = _holdout_index(tmp_path, tag_free_kwargs={"drift_cm": 3.0})
+    promoted = _promote(
+        tmp_path, candidate_path=candidate_path, training_index_path=training_index_path,
+        holdout_index_path=holdout_index_path,
+    )
+    assert promoted.state == "PROMOTED"
+
+
 def test_promote_refuses_a_holdout_combination_never_sampled_during_training(tmp_path):
     candidate_path, _, training_index_path = _fit_candidate(tmp_path)
     # A very different clock -> the tag-free leg's elapsed time buckets to 6.0s, not
@@ -1031,6 +1047,76 @@ def test_promote_refuses_a_candidate_with_an_inflated_battery_margin(tmp_path):
             tmp_path, candidate_path=inflated_path, training_index_path=training_index_path,
             holdout_index_path=holdout_index_path,
         )
+
+
+# ---------------------------------------------------------------------------
+# envelope_bound_for: dominance-based pose-envelope lookup (Plan 06 Task 4 pre-fix,
+# controller ruling 2026-09-23). The old lookup required a query's (distance, time,
+# yaw) bucket to exactly match a trained bucket combination on all three dimensions
+# at once, so real flights whose yaw/timing did not exactly reproduce a calibration
+# leg were always refused. The fix: a query is inside the envelope if some sampled
+# combination dominates it (distance >= query, time >= query, |yaw| >= |query|,
+# after the same bucketing used to build the envelope); the bound is the worst
+# drift among every dominating sample; a query beyond every sampled maximum in any
+# one dimension is never admitted (no extrapolation).
+# ---------------------------------------------------------------------------
+
+
+def test_envelope_bound_for_admits_an_exact_match():
+    envelope = (calibration.PoseEnvelopePoint(distance_cm=0.0, time_s=5.0, yaw_deg=90.0, drift_cm=5.0),)
+    bound = calibration.envelope_bound_for(envelope, distance_cm=0.0, time_s=5.0, yaw_deg=90.0)
+    assert bound == pytest.approx(5.0)
+
+
+def test_envelope_bound_for_admits_a_query_dominated_by_a_sampled_combination():
+    # The old exact-combo match would refuse this: no trained point at
+    # (distance=50, time=3.0, yaw=30), but a trained point covering a strictly more
+    # demanding combination exists, so the query is conservatively admitted.
+    envelope = (calibration.PoseEnvelopePoint(distance_cm=100.0, time_s=5.0, yaw_deg=90.0, drift_cm=8.0),)
+    bound = calibration.envelope_bound_for(envelope, distance_cm=50.0, time_s=3.0, yaw_deg=30.0)
+    assert bound == pytest.approx(8.0)
+
+
+def test_envelope_bound_for_refuses_a_query_beyond_the_sampled_distance_maximum():
+    envelope = (calibration.PoseEnvelopePoint(distance_cm=100.0, time_s=5.0, yaw_deg=90.0, drift_cm=8.0),)
+    assert calibration.envelope_bound_for(envelope, distance_cm=150.0, time_s=3.0, yaw_deg=30.0) is None
+
+
+def test_envelope_bound_for_refuses_a_query_beyond_the_sampled_time_maximum():
+    envelope = (calibration.PoseEnvelopePoint(distance_cm=100.0, time_s=5.0, yaw_deg=90.0, drift_cm=8.0),)
+    assert calibration.envelope_bound_for(envelope, distance_cm=50.0, time_s=6.0, yaw_deg=30.0) is None
+
+
+def test_envelope_bound_for_refuses_a_query_beyond_the_sampled_yaw_maximum():
+    envelope = (calibration.PoseEnvelopePoint(distance_cm=100.0, time_s=5.0, yaw_deg=90.0, drift_cm=8.0),)
+    assert calibration.envelope_bound_for(envelope, distance_cm=50.0, time_s=3.0, yaw_deg=100.0) is None
+
+
+def test_envelope_bound_for_uses_the_worst_drift_among_all_dominating_samples():
+    envelope = (
+        calibration.PoseEnvelopePoint(distance_cm=100.0, time_s=5.0, yaw_deg=90.0, drift_cm=8.0),
+        calibration.PoseEnvelopePoint(distance_cm=100.0, time_s=10.0, yaw_deg=90.0, drift_cm=3.0),
+    )
+    bound = calibration.envelope_bound_for(envelope, distance_cm=10.0, time_s=1.0, yaw_deg=10.0)
+    assert bound == pytest.approx(8.0)  # never the smaller, never an average
+
+
+def test_envelope_bound_for_empty_envelope_admits_nothing():
+    assert calibration.envelope_bound_for((), distance_cm=0.0, time_s=0.0, yaw_deg=0.0) is None
+
+
+def test_envelope_bound_for_treats_yaw_as_an_absolute_magnitude():
+    envelope = (calibration.PoseEnvelopePoint(distance_cm=0.0, time_s=5.0, yaw_deg=90.0, drift_cm=5.0),)
+    bound = calibration.envelope_bound_for(envelope, distance_cm=0.0, time_s=5.0, yaw_deg=-45.0)
+    assert bound == pytest.approx(5.0)
+
+
+def test_envelope_bound_for_absorbs_sub_bucket_jitter_like_the_old_lookup():
+    # 5.2s still buckets to the same 5.0s combination as training (regression: the
+    # dominance rewrite must not lose the jitter tolerance the bucketing already gave).
+    envelope = (calibration.PoseEnvelopePoint(distance_cm=0.0, time_s=5.0, yaw_deg=90.0, drift_cm=5.0),)
+    bound = calibration.envelope_bound_for(envelope, distance_cm=0.0, time_s=5.2, yaw_deg=90.0)
+    assert bound == pytest.approx(5.0)
 
 
 # ---------------------------------------------------------------------------
