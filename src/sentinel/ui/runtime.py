@@ -220,6 +220,15 @@ class SurveyRuntime:
         store=SurveyStore.open(self.survey_db)
         try:
             facts = SurveyReadModel(store).read(run_id)
+            if not self.adapters.options:
+                empty_results = dict(counts={}, class_counts=[], uncertain_objects=[],
+                                     unanalysed=0, flights_used=0,
+                                     flown_option_ids=[])
+                if facts is None:
+                    return dict(run=None, sweeps=[], frames=[], sightings=[], objects=[],
+                                counts={}, report=None, results=empty_results)
+                facts['results'] = empty_results
+                return facts
             if facts is None:
                 return dict(run=None, sweeps=[], frames=[], sightings=[], objects=[],
                             counts={}, report=None,

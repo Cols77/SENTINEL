@@ -13,8 +13,9 @@ from .models import EvidenceCapability
 from .projection import ProjectionService
 
 class MissionControlService:
-    def __init__(self, *, config, adapters):
+    def __init__(self, *, config, adapters, readiness=None):
         self.config,self.adapters=config,adapters
+        self.readiness=readiness
         self.store=UIStore.open(config.ui_db or config.data_dir/'ui.sqlite')
         try:
             self.session_id=self.store.read_run(config.run_id)['session_id']
@@ -25,6 +26,8 @@ class MissionControlService:
         self.store.ensure_run(self.session_id,config.run_id,config.mode)
         self.registry=SafetyRegistry()
         self.safety=RunnerSafetyAdapter(self.registry,(lambda:9) if config.mode=='REHEARSAL' else adapters.emergency_sender,self.session_id,self._audit_safety)
+        if config.mode == 'LIVE' and hasattr(adapters.flight, 'on_emergency_ready'):
+            adapters.flight.on_emergency_ready=self.safety.admit_emergency_sender
         self.runtime=SurveyRuntime(config.survey_db or config.data_dir/'survey.sqlite',self.store,adapters,self.approval,self.registry)
         self.worker=MissionWorker(self.runtime.execute)
         self.projection=ProjectionService(self)

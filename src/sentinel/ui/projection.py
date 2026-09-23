@@ -76,6 +76,19 @@ class ProjectionService:
                 if s['safety'][action]['available'] and s['safety'][action]['status']=='UNAVAILABLE':
                     s['safety'][action].update(status='IDLE',reason=None)
             options={o.option_id:o for o in svc.adapters.options}
+            if not options:
+                s['mission'].update(route=[],envelope=None,
+                                    flights=dict(used=0,max=2))
+                s['evidence']['provider'].update(
+                    name=svc.adapters.detector_name,
+                    model=svc.adapters.detector_model,
+                    source_kind=svc.adapters.source_kind)
+                s['legal_actions']=[
+                    dict(action=a,enabled=e,reasons=[] if e else ['Unavailable in current state'])
+                    for a,e in [('CHAT',True),('APPROVE',False),('REJECT',False),
+                                ('LAND',False),('EMERGENCY',False)]]
+                validate_snapshot(s)
+                return svc.store.publish_snapshot(run_id,s)
             chosen=options.get(offer['candidate']['arguments']['option_id']) if offer else None
             last=facts['sweeps'][-1] if facts['sweeps'] else None
             last_option=options[last['option_id']] if last else None

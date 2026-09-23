@@ -1,6 +1,7 @@
 from dataclasses import FrozenInstanceError, replace
 import json
 from pathlib import Path
+import time
 import pytest
 from sentinel.ui import bootstrap
 from sentinel.ui.models import validate_snapshot
@@ -43,52 +44,143 @@ def live_config(tmp_path, monkeypatch):
         authorise_paid_calls=True,
         location='lab',consent_date='2026-09-21',local_ip='192.168.10.2',surface_z_cm=50,start_x_cm=250,start_y_cm=190)
 
-@pytest.mark.parametrize('field,value', [('confirm',False),('site_path',None),('tag_map_path',None),('pose_db',None),('location',None),('consent_date',None),('detector_name','replay'),('provider_profile',None),('local_ip',None),('surface_z_cm',None)])
-def test_live_failure_never_constructs_rehearsal(live_config,monkeypatch,field,value):
-    calls=[]
-    monkeypatch.setattr(bootstrap,'build_rehearsal_adapters',lambda *a:calls.append(a))
-    with pytest.raises(bootstrap.StartupError):bootstrap.build_service(replace(live_config,**{field:value}))
-    assert calls==[]
-
-def test_live_requires_explicit_paid_call_authorisation_before_preflight(live_config, monkeypatch):
+def test_bare_live_host_is_inert_and_never_falls_back(tmp_path, monkeypatch):
     from sentinel.ui import live
-    monkeypatch.setattr(live, 'make_client', lambda c: pytest.fail('must refuse before preflight'))
-    with pytest.raises(bootstrap.StartupError, match='PAID_CALL_AUTH'):
-        bootstrap.build_service(replace(live_config, authorise_paid_calls=False))
-
-def test_live_composition_no_flight_and_restart_requires_recovery(live_config,monkeypatch):
-    from sentinel.ui import live
-    from sentinel.dry_run import DryRunClient
-    clients=[]
-    def factory(config):
-        client=DryRunClient();clients.append(client);return client
-    monkeypatch.setattr(live,'make_client',factory)
-    monkeypatch.setattr(live,'check_emergency_transport',lambda c:lambda:9)
-    service=bootstrap.build_service(live_config)
+    calls = []
+    monkeypatch.setattr(bootstrap, 'build_rehearsal_adapters',
+                        lambda *args: calls.append(('rehearsal', args)))
+    monkeypatch.setattr(live, 'make_client',
+                        lambda config: calls.append(('client', config)))
+    monkeypatch.setattr(live, 'check_emergency_transport',
+                        lambda config: calls.append(('emergency', config)))
+    service = bootstrap.build_service(
+        bootstrap.SessionConfig(data_dir=tmp_path, mode='LIVE'))
     try:
-        snapshot=service.read_snapshot('mission');validate_snapshot(snapshot)
-        assert snapshot['run']['status']=='ACTIVE'
-        assert snapshot['source']['kind']=='LIVE'
-        assert 'test-secret' not in json.dumps(snapshot)
-        assert service.adapters.flight.__class__.__name__=='LiveFlight'
-        assert service.adapters.flight.coverage is not None
-        assert service.safety.sender is not None
+        snapshot = service.read_snapshot('mission')
+        validate_snapshot(snapshot)
+        assert service.session()['mode'] == 'LIVE'
+        assert snapshot['source']['kind'] == 'LIVE'
+        assert snapshot['mission']['route'] == []
+        assert snapshot['mission']['envelope'] is None
         assert not service.worker.active
-        assert all('takeoff' not in c.commands for c in clients)
-    finally:service.close()
-    service=bootstrap.build_service(live_config)
-    try:assert service.read_snapshot('mission')['run']['status']=='RECOVERY_REQUIRED'
-    finally:service.close()
-    with pytest.raises(FrozenInstanceError):live_config.mode='REHEARSAL'
+        assert calls == []
+    finally:
+        service.close()
 
-def test_preflight_failure_no_fallback(live_config,monkeypatch):
+
+def _chat_command(service, text='count the computers'):
+    return dict(session_id=service.session_id, run_id='mission', command_id='chat',
+                correlation_id='corr', idempotency_key='chat-key',
+                expected_version=service.store.read_run('mission')['decision_version'],
+                text=text)
+
+
+def _approve_current(service):
+    assert service.approval.changed.wait(2)
+    offer = service.approval.current('mission')
+    return service.submit_decision('mission', dict(
+        session_id=service.session_id, run_id='mission', proposal_id=offer['id'],
+        proposal_sha256=offer['sha256'], expected_version=offer['decision_version'],
+        decision='APPROVE', command_id='approve', correlation_id='corr',
+        attempt_id='attempt', idempotency_key='approve-key'))
+
+
+def test_live_composition_defers_every_operational_boundary(live_config, monkeypatch):
+    from sentinel.ui import live
+    calls = []
+    monkeypatch.setattr(live, 'make_client', lambda config: calls.append('client'))
+    monkeypatch.setattr(live, 'check_emergency_transport',
+                        lambda config: calls.append('emergency'))
+    monkeypatch.setattr(live.LiveFlight, '_new_supervisor',
+                        lambda self, option: calls.append('provider'))
+    service = bootstrap.build_service(live_config)
+    try:
+        service.read_snapshot('mission')
+        assert calls == []
+        assert service.adapters.source_kind == 'LIVE'
+        assert service.adapters.flight.__class__.__name__ == 'LiveFlight'
+        assert service.adapters.flight.coverage is not None
+        assert service.safety.sender is None
+    finally:
+        service.close()
+    with pytest.raises(FrozenInstanceError):
+        live_config.mode = 'REHEARSAL'
+
+
+def test_live_dispatch_refuses_before_client_without_flight_confirmation(live_config,
+                                                                          monkeypatch):
+    from sentinel.ui import live
+    calls = []
+    monkeypatch.setattr(live, 'make_client', lambda config: calls.append('client'))
+    monkeypatch.setattr(live, 'check_emergency_transport',
+                        lambda config: calls.append('emergency'))
+    service = bootstrap.build_service(replace(live_config, confirm=False))
+    try:
+        assert service.submit_chat('mission', _chat_command(service))['kind'] == 'PROPOSE'
+        assert calls == []
+        assert _approve_current(service)['status'] == 'ACKNOWLEDGED'
+        deadline = time.monotonic() + 2
+        while service.worker.active and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert calls == []
+    finally:
+        service.close()
+
+
+def test_live_dispatch_preflights_only_after_approval(live_config, monkeypatch):
     from sentinel.ui import live
     from sentinel.dry_run import DryRunClient
-    def low_battery(c):
-        client=DryRunClient();client.battery=lambda:1;return client
-    monkeypatch.setattr(live,'make_client',low_battery)
-    monkeypatch.setattr(live,'check_emergency_transport',lambda c:lambda:9)
-    with pytest.raises(bootstrap.StartupError,match='PREFLIGHT'):bootstrap.build_service(live_config)
+    calls = []
+    client = DryRunClient()
+
+    class Supervisor:
+        frames_dir = live_config.data_dir / 'frames'
+        cleanup_pending = False
+        def start(self):
+            calls.append('supervisor-start')
+        def finish(self, frames):
+            from sentinel.survey.live_detect import DetectionCache
+            return DetectionCache('mission', ())
+        def close(self):
+            return True
+
+    class Bridge:
+        start_x_cm = live_config.start_x_cm
+        start_y_cm = live_config.start_y_cm
+        def __init__(self, **kwargs):
+            pass
+        def fly(self, option):
+            calls.append('flight')
+            return []
+
+    class Preflight:
+        def __init__(self, *args, **kwargs):
+            pass
+        def preflight(self):
+            calls.append('preflight')
+
+    monkeypatch.setattr(live, 'make_client',
+                        lambda config: calls.append('client') or client)
+    monkeypatch.setattr(live, 'check_emergency_transport',
+                        lambda config: calls.append('emergency') or (lambda: 9))
+    monkeypatch.setattr(live, 'FlightTestRunner', Preflight)
+    monkeypatch.setattr(live, 'CubeFlight', Bridge)
+    monkeypatch.setattr(live.LiveFlight, '_new_supervisor',
+                        lambda self, option: calls.append('supervisor-create') or Supervisor())
+    service = bootstrap.build_service(live_config)
+    try:
+        assert service.submit_chat('mission', _chat_command(service))['kind'] == 'PROPOSE'
+        assert service.approval.changed.wait(2)
+        assert calls == []
+        assert _approve_current(service)['status'] == 'ACKNOWLEDGED'
+        deadline = time.monotonic() + 2
+        while 'preflight' not in calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert calls[:3] == ['emergency', 'client', 'preflight']
+        assert calls.index('supervisor-create') > calls.index('preflight')
+        assert calls.index('supervisor-start') > calls.index('supervisor-create')
+    finally:
+        service.close()
 
 
 def test_cli_config_and_root_dispatch(monkeypatch):
@@ -103,22 +195,50 @@ def test_cli_config_and_root_dispatch(monkeypatch):
     assert calls==[['--mode','rehearsal']]
 
 
-def test_invalid_profile_and_consent_refuse_before_client(live_config,monkeypatch):
+@pytest.mark.parametrize('change', ['consent', 'profile'])
+def test_invalid_profile_and_consent_refuse_at_dispatch_before_client(
+        live_config, monkeypatch, change):
     from sentinel.ui import live
-    monkeypatch.setattr(live,'make_client',lambda c:pytest.fail('must refuse before connecting'))
-    with pytest.raises(bootstrap.StartupError,match='CONSENT'):
-        bootstrap.build_service(replace(live_config,location='other'))
-    profile=json.loads(live_config.provider_profile.read_text());profile['approval_status']='UNAPPROVED'
-    live_config.provider_profile.write_text(json.dumps(profile))
-    with pytest.raises(bootstrap.StartupError,match='PROFILE'):bootstrap.build_service(live_config)
+    calls = []
+    monkeypatch.setattr(live, 'make_client', lambda config: calls.append('client'))
+    config = live_config
+    if change == 'consent':
+        config = replace(config, location='other')
+    else:
+        profile = json.loads(config.provider_profile.read_text())
+        profile['approval_status'] = 'UNAPPROVED'
+        config.provider_profile.write_text(json.dumps(profile))
+    service = bootstrap.build_service(config)
+    try:
+        assert service.submit_chat('mission', _chat_command(service))['kind'] == 'PROPOSE'
+        assert _approve_current(service)['status'] == 'ACKNOWLEDGED'
+        deadline = time.monotonic() + 2
+        while service.worker.active and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert calls == []
+    finally:
+        service.close()
 
 
-def test_independent_transport_failure_refuses_startup(live_config,monkeypatch):
+def test_independent_transport_failure_is_deferred_to_dispatch(live_config, monkeypatch):
     from sentinel.ui import live
-    monkeypatch.setattr(live,'make_client',lambda c:pytest.fail('must refuse before connecting'))
-    def fail(c):raise OSError('interface missing')
-    monkeypatch.setattr(live,'check_emergency_transport',fail)
-    with pytest.raises(bootstrap.StartupError,match='EMERGENCY'):bootstrap.build_service(live_config)
+    calls = []
+    monkeypatch.setattr(live, 'make_client', lambda config: calls.append('client'))
+    def fail(config):
+        calls.append('emergency')
+        raise OSError('interface missing')
+    monkeypatch.setattr(live, 'check_emergency_transport', fail)
+    service = bootstrap.build_service(live_config)
+    try:
+        assert calls == []
+        assert service.submit_chat('mission', _chat_command(service))['kind'] == 'PROPOSE'
+        assert _approve_current(service)['status'] == 'ACKNOWLEDGED'
+        deadline = time.monotonic() + 2
+        while service.worker.active and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert calls == ['emergency']
+    finally:
+        service.close()
 
 
 def test_rehearsal_restart_cannot_acknowledge_an_orphaned_offer(tmp_path):
@@ -130,8 +250,14 @@ def test_rehearsal_restart_cannot_acknowledge_an_orphaned_offer(tmp_path):
         assert restarted.read_snapshot('mission')['run']['status']=='ABORTED'
         assert restarted.approval.current('mission') is None
     finally:restarted.close()
-def test_live_coverage_mismatch_is_startup_error_before_flight(live_config, monkeypatch):
-    from sentinel.ui import live
-    monkeypatch.setattr(live, 'check_tag_map_matches_site', lambda *args: (_ for _ in ()).throw(ValueError('mismatch')))
-    with pytest.raises(bootstrap.StartupError, match='INVALID_LIVE_SITE_OR_COVERAGE'):
-        live.validate_config(live_config)
+def test_live_coverage_mismatch_composes_inert_planning(live_config, monkeypatch):
+    from sentinel.ui import readiness
+    monkeypatch.setattr(readiness, 'check_tag_map_matches_site',
+                        lambda *args: (_ for _ in ()).throw(ValueError('mismatch')))
+    service = bootstrap.build_service(live_config)
+    try:
+        assert service.readiness.state == 'NOT_READY'
+        assert service.adapters.options == ()
+        assert service.adapters.source_kind == 'LIVE'
+    finally:
+        service.close()

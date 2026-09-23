@@ -36,13 +36,13 @@ class SessionConfig:
 
 
 def validate_live_startup(config):
-    from .live import validate_config
-    validate_config(config)
+    from .readiness import evaluate_live_readiness
+    return evaluate_live_readiness(config)
 
 
-def build_live_adapters(config):
+def build_live_adapters(config, readiness=None):
     from .live import compose
-    return compose(config)
+    return compose(config, readiness=readiness)
 
 
 def build_service(config):
@@ -51,9 +51,10 @@ def build_service(config):
         raise StartupError('LOCALHOST_REQUIRED')
     if config.mode == 'REHEARSAL':
         adapters=build_rehearsal_adapters(config.scenario_path,config.artifact_root or config.data_dir/'images')
+        readiness=None
     elif config.mode == 'LIVE':
-        validate_live_startup(config)
-        adapters=build_live_adapters(config)
+        readiness=validate_live_startup(config)
+        adapters=build_live_adapters(config,readiness)
     else:
         raise StartupError('INVALID_MODE')
-    return MissionControlService(config=config,adapters=adapters)
+    return MissionControlService(config=config,adapters=adapters,readiness=readiness)

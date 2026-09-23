@@ -31,3 +31,17 @@ def test_unsupported_request_does_not_choose_nearest_scenario(tmp_path):
         assert not svc.worker.active
     finally:
         svc.close()
+
+
+def test_live_count_request_refuses_before_worker_when_planning_unavailable(tmp_path):
+    svc = build_service(SessionConfig(data_dir=tmp_path, mode='LIVE'))
+    try:
+        reply = svc.submit_chat('mission', command(svc, 'count the computers', 'live'))
+        assert reply['status'] == 'ACKNOWLEDGED'
+        assert reply['kind'] == 'REFUSE'
+        assert '--site' in reply['message']
+        assert '--tag-map' in reply['message']
+        assert not svc.worker.active
+        assert svc.approval.current('mission') is None
+    finally:
+        svc.close()

@@ -27,6 +27,20 @@ class ChatService:
         try:
             reply=self.session.respond(command['text'],snapshot)
             if reply.kind=='PROPOSE':
+                planning = next((check for check in (svc.readiness.checks if svc.readiness else ())
+                                 if check.capability == 'planning'), None)
+                if planning is not None and not planning.ready:
+                    result=dict(
+                        status='ACKNOWLEDGED', kind='REFUSE',
+                        message=(f'Planning is unavailable ({planning.reason_code}). '
+                                 f'{planning.remediation} Launch template: '
+                                 f'{svc.readiness.command_template}'))
+                    svc.store.add_message(
+                        run_id,'ASSISTANT',result['message'],status='COMPLETE',
+                        snapshot_version=snapshot['run']['version'])
+                    svc.store.append_event(
+                        run_id,'CHAT',{'summary':'Unavailable Live planning request refused'})
+                    return svc.store.settle_command(command['command_id'],result)
                 row=svc.store.read_run(run_id)
                 if row['status']!='ACTIVE' or svc.registry.closing or svc.registry.emergency.is_set() or row['decision_version']!=command['expected_version']:
                     result=conflict

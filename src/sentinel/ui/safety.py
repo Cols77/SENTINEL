@@ -70,6 +70,13 @@ class RunnerSafetyAdapter:
         self._audit_pool = ThreadPoolExecutor(max_workers=1,thread_name_prefix='sentinel-safety-audit')
         self.state = {name: dict(available=False,status='UNAVAILABLE',reason='No active runner',command_id=None) for name in ('land','emergency')}
 
+    def admit_emergency_sender(self, sender):
+        """Publish an independently initialized transport at dispatch time."""
+        with self._lock:
+            self.sender = sender
+            self.state['emergency'].update(
+                available=True, status='IDLE', reason=None, command_id=None)
+
     def _claim(self, action, scope, identity):
         if set(identity) != {'command_id','correlation_id','idempotency_key'} or any(not isinstance(v,str) or not v for v in identity.values()):
             raise ValueError('INVALID_COMMAND_IDENTITY')

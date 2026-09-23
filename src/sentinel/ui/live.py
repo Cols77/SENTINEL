@@ -1,22 +1,15 @@
 """Live boundaries for the same survey service; never substitutes replay adapters."""
 from dataclasses import asdict
-from datetime import date
-import ipaddress
-import json
-import math
-import os
 from pathlib import Path
 import socket
 import sqlite3
 from threading import RLock
 from PIL import Image
-from jsonschema import validate
 from sentinel.camera import TELLO_MEASURED
 from sentinel.cube.site import load_site
 from sentinel.pose.tagmap import load_tag_map
 from sentinel.pose.persistence import ensure_schema
 from sentinel.runner import FlightTestRunner
-from sentinel.survey.consent import consent_policy
 from sentinel.survey.cube_bridge import CubeFlight, envelope_from_site
 from sentinel.cube.coverage import CoverageModel, check_tag_map_matches_site
 from sentinel.survey.live_detect import DetectionCache, LiveDetectionSupervisor
@@ -24,57 +17,14 @@ from sentinel.survey.options import generate_options
 from sentinel.survey.proposer import RuleProposer
 from sentinel.survey.store import SurveyStore
 from .bootstrap import StartupError
+from .readiness import evaluate_live_readiness
 from .scenarios import ScenarioAdapters
 from .pose_projection import project_pose
 
 
 def validate_config(config):
-    if not config.confirm:raise StartupError('LIVE_CONFIRM_REQUIRED')
-    if not getattr(config, 'authorise_paid_calls', False):raise StartupError('LIVE_PAID_CALL_AUTH_REQUIRED')
-    for name in ('site_path','tag_map_path','pose_db','provider_profile','location','consent_date','local_ip'):
-        if not getattr(config,name):raise StartupError(f'LIVE_{name.upper()}_REQUIRED')
-    if config.detector_name not in {'gemini','moondream'}:raise StartupError('LIVE_PROVIDER_REQUIRED')
-    if config.pose_mode not in {'off','passive','reanchor'}:raise StartupError('INVALID_POSE_MODE')
-    if config.pose_mode=='reanchor' and not config.sr063_amended:raise StartupError('SR063_AMENDMENT_REQUIRED')
-    if (config.start_x_cm is None)!=(config.start_y_cm is None):raise StartupError('BOTH_START_COORDINATES_REQUIRED')
-    if config.pose_mode=='off' and config.start_x_cm is None:raise StartupError('MEASURED_START_REQUIRED')
-    if config.surface_z_cm is None or not math.isfinite(config.surface_z_cm) or config.surface_z_cm<0:
-        raise StartupError('MEASURED_SURFACE_REQUIRED')
-    try:
-        address=ipaddress.ip_address(config.local_ip)
-        if address.version!=4 or address.is_unspecified or address.is_loopback:raise ValueError()
-        ipaddress.IPv4Address(config.tello_ip)
-        date.fromisoformat(config.consent_date)
-        site=load_site(config.site_path)
-        tag_map=load_tag_map(str(config.tag_map_path))
-        check_tag_map_matches_site(tag_map, site, tolerance_cm=5.0)
-        CoverageModel(site, tag_map.doc['camera_calibration'])
-        env=envelope_from_site(site,300)
-        generate_options(env,TELLO_MEASURED)
-        if config.start_x_cm is not None and not (env.min_x_cm<=config.start_x_cm<=env.max_x_cm and env.min_y_cm<=config.start_y_cm<=env.max_y_cm):
-            raise ValueError('start outside envelope')
-        if config.surface_z_cm>=env.min_z_cm:raise ValueError('surface must be below survey')
-    except Exception as exc:raise StartupError('INVALID_LIVE_SITE_OR_COVERAGE') from exc
-    prefix=config.detector_name.upper()
-    if not os.environ.get(prefix+'_API_KEY') or not os.environ.get(prefix+'_MODEL'):
-        raise StartupError('LIVE_PROVIDER_ENV_REQUIRED')
-    try:
-        profile=json.loads(config.provider_profile.read_text())
-        root=Path(__file__).resolve().parents[3]
-        validate(profile,json.loads((root/'docs/superpowers/specs/contracts/provider-profile-v1.schema.json').read_text()))
-        if profile['approval_status']!='APPROVED' or profile['provider']!=config.detector_name or profile['model']!=os.environ[prefix+'_MODEL']:
-            raise ValueError('profile does not match selected provider')
-    except Exception as exc:raise StartupError('APPROVED_PROVIDER_PROFILE_REQUIRED') from exc
-    db=config.survey_db or config.data_dir/'survey.sqlite'
-    if not db.is_file():raise StartupError('CONSENT_DATABASE_REQUIRED')
-    store=SurveyStore.open(db)
-    try:consent_policy(store,config.location,config.consent_date)
-    except Exception as exc:raise StartupError('RECORDED_CONSENT_REQUIRED') from exc
-    finally:store.connection.close()
-    try:
-        config.pose_db.parent.mkdir(parents=True,exist_ok=True)
-        with sqlite3.connect(config.pose_db) as conn:ensure_schema(conn)
-    except Exception as exc:raise StartupError('POSE_DATABASE_UNAVAILABLE') from exc
+    """Compatibility helper returning public readiness without admission."""
+    return evaluate_live_readiness(config)
 
 
 def make_client(config):
@@ -125,6 +75,26 @@ class LivePoseFeed:
     def close(self):pass
 
 
+class DeferredLiveDetector:
+    """Provider-shaped boundary that cannot make a call in the host process."""
+    def detect(self, *_args, **_kwargs):
+        raise StartupError('LIVE_DETECTION_NOT_ADMITTED')
+
+
+class InertLiveFlight:
+    """Fail-closed boundary used while local planning configuration is absent."""
+    def __init__(self, reason_code):
+        self.reason_code=reason_code
+        self.artifacts={}
+        self.on_emergency_ready=None
+
+    def fly(self, _option):
+        raise StartupError(self.reason_code)
+
+    def close(self):
+        pass
+
+
 class LiveFlight:
     def __init__(self,config,site,tag_map,pose_feed,supervisor_factory=None,coverage=None):
         self.config,self.site,self.tag_map,self.pose_feed=config,site,tag_map,pose_feed
@@ -136,6 +106,20 @@ class LiveFlight:
         self._detection_cache = None
         self._supervisor = None
         self._supervisors = []
+        self.on_emergency_ready = None
+
+    def _require(self, readiness, capability):
+        check=next(row for row in readiness.checks if row.capability==capability)
+        if not check.ready:
+            raise StartupError(check.reason_code)
+
+    def _prepare_pose_store(self):
+        try:
+            self.config.pose_db.parent.mkdir(parents=True,exist_ok=True)
+            with sqlite3.connect(self.config.pose_db) as conn:
+                ensure_schema(conn)
+        except Exception as exc:
+            raise StartupError('POSE_DATABASE_UNAVAILABLE') from exc
 
     def _new_supervisor(self, option):
         if self.supervisor_factory is not None:
@@ -159,18 +143,35 @@ class LiveFlight:
 
     def fly(self,option):
         config=self.config
-        supervisor = self._new_supervisor(option)
-        self._supervisor = supervisor
-        self._supervisors.append(supervisor)
-        # This is deliberately before client creation and before CubeFlight's
-        # runner.  The first saved frame can therefore be consumed while the
-        # drone is in flight, without coupling follower health to navigation.
-        supervisor.start()
+        readiness=evaluate_live_readiness(config)
+        self._require(readiness,'planning')
+        self._require(readiness,'flight')
+        self._require(readiness,'detection')
+        self._require(readiness,'emergency')
+        self._prepare_pose_store()
+        try:
+            sender=check_emergency_transport(config)
+        except Exception as exc:
+            raise StartupError('INDEPENDENT_EMERGENCY_UNAVAILABLE') from exc
+        if self.on_emergency_ready is not None:
+            self.on_emergency_ready(sender)
         client = None
         conn = None
         frames = None
+        supervisor = None
         try:
             client=make_client(config)
+            try:
+                FlightTestRunner(client,'real',envelope=self.site.envelope()).preflight()
+            except Exception as exc:
+                raise StartupError('LIVE_PREFLIGHT_FAILED') from exc
+            # Provider/consent admission and preflight both precede the
+            # supervised provider process. No provider session exists during
+            # host composition, polling, or approval review.
+            supervisor = self._new_supervisor(option)
+            self._supervisor = supervisor
+            self._supervisors.append(supervisor)
+            supervisor.start()
             conn=sqlite3.connect(config.pose_db)
             def register(runner):
                 if self.observer is None and self.registry:
@@ -208,11 +209,12 @@ class LiveFlight:
                 # A flight exception still reaches this drain.  Timeout/kill
                 # is bounded and represented in DetectionCache, never raised
                 # into the controlled-landing path.
-                try:
-                    self._detection_cache = supervisor.finish(frames)
-                except Exception as exc:
-                    self._detection_cache = DetectionCache(
-                        self.run_id, (), 'SUPERVISOR_ERROR', f'{type(exc).__name__}: {exc}')
+                if supervisor is not None:
+                    try:
+                        self._detection_cache = supervisor.finish(frames)
+                    except Exception as exc:
+                        self._detection_cache = DetectionCache(
+                            self.run_id, (), 'SUPERVISOR_ERROR', f'{type(exc).__name__}: {exc}')
 
     def close(self):
         remaining = []
@@ -236,29 +238,28 @@ def report_writer(results):
     return ' '.join(rows)
 
 
-def compose(config):
-    site=load_site(config.site_path);tag_map=load_tag_map(str(config.tag_map_path))
-    try:sender=check_emergency_transport(config)
-    except Exception as exc:raise StartupError('INDEPENDENT_EMERGENCY_UNAVAILABLE') from exc
-    client=None
-    try:
-        client=make_client(config)
-        FlightTestRunner(client,'real',envelope=site.envelope()).preflight()
-    except Exception as exc:raise StartupError('LIVE_PREFLIGHT_FAILED') from exc
-    finally:
-        if client is not None:client.close()
-    # Coverage is an operational guard and must be admitted before any flight.
-    try:
-        coverage = CoverageModel.from_files(site, config.tag_map_path)
-        check_tag_map_matches_site(tag_map, site, tolerance_cm=5.0)
-    except Exception as exc:
-        raise StartupError('LIVE_COVERAGE_REQUIRED') from exc
-    from sentinel.survey.providers.gemini import GeminiDetector
-    from sentinel.survey.providers.moondream import MoondreamDetector
-    cls={'gemini':GeminiDetector,'moondream':MoondreamDetector}[config.detector_name]
-    prefix=config.detector_name.upper()
-    detector=cls(api_key=os.environ[prefix+'_API_KEY'],model=os.environ[prefix+'_MODEL'],session=HttpSession())
+def compose(config, readiness=None):
+    """Compose only local planning boundaries; operational admission is deferred."""
+    readiness=readiness or evaluate_live_readiness(config)
+    planning=next(check for check in readiness.checks
+                  if check.capability=='planning')
+    detector=DeferredLiveDetector()
+    if not planning.ready:
+        return ScenarioAdapters(
+            (),RuleProposer(),InertLiveFlight(planning.reason_code),detector,
+            report_writer,TELLO_MEASURED,'LIVE',None,None,
+            None,None,'F',
+            detector_name=config.detector_name,detector_model='unavailable')
+
+    site=load_site(config.site_path)
+    tag_map=load_tag_map(str(config.tag_map_path))
+    coverage=CoverageModel.from_files(site,config.tag_map_path)
+    check_tag_map_matches_site(tag_map,site,tolerance_cm=5.0)
     feed=LivePoseFeed(config.data_dir/'pose-images',site)
-    return ScenarioAdapters(generate_options(envelope_from_site(site,300),TELLO_MEASURED),RuleProposer(),
-        LiveFlight(config,site,tag_map,feed,coverage=coverage),detector,report_writer,TELLO_MEASURED,'LIVE',sender,feed,config.location,config.consent_date,'F',
-        detector_name=config.detector_name, detector_model=os.environ[prefix+'_MODEL'])
+    flight=LiveFlight(config,site,tag_map,feed,coverage=coverage)
+    model='configured' if config.detector_name in {'gemini','moondream'} else 'unavailable'
+    return ScenarioAdapters(
+        generate_options(envelope_from_site(site,300),TELLO_MEASURED),
+        RuleProposer(),flight,detector,report_writer,TELLO_MEASURED,
+        'LIVE',None,feed,None,None,'F',
+        detector_name=config.detector_name,detector_model=model)
