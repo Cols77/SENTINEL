@@ -89,12 +89,19 @@ class _ArmedFlightStackFactory:
     not, and are left unarmed).
     """
 
-    def __init__(self, inner: Callable[..., "live_session.FlightStack"]) -> None:
+    def __init__(self, inner: Callable[..., "live_session.FlightStack"],
+                 on_stack: Callable[..., "live_session.FlightStack"] | None = None) -> None:
         self._inner = inner
+        self._on_stack = on_stack
         self.hotkey: EmergencyHotkey | None = None
 
     def __call__(self, **kwargs) -> "live_session.FlightStack":
         stack = self._inner(**kwargs)
+        if self._on_stack is not None:
+            # Mission Control's room-agent mode: observe the built stack (its
+            # executor for a controlled Land, its motor stop for Emergency)
+            # and may wrap its recovery burst for display; never replaces it.
+            stack = self._on_stack(stack, **kwargs) or stack
         trigger = getattr(stack, "trigger_emergency", None)
         if trigger is not None:
             print("EMERGENCY: press E to stop motors immediately.", file=sys.stderr)
@@ -430,6 +437,8 @@ def _cmd_live(
     detector_factory: Callable[[], object],
     clock: Callable[[], float],
     wall_clock: Callable[[], datetime],
+    request_text: str = DEFAULT_REQUEST_TEXT,
+    on_stack: Callable[..., "live_session.FlightStack"] | None = None,
 ) -> int:
     try:
         _check_capability_available(args.capability)
@@ -511,7 +520,7 @@ def _cmd_live(
     # flight on the same manifest share one run.
     try:
         run = artifacts.RunArtifacts.open(
-            args.run_root, manifest, now=now, request_text=DEFAULT_REQUEST_TEXT,
+            args.run_root, manifest, now=now, request_text=request_text,
             capabilities=live_session.session_capabilities(registry, manifest))
     except (ArtifactError, OSError) as exc:
         print(f"refused: run artifact could not be opened: {exc}", file=sys.stderr)
@@ -616,14 +625,14 @@ def _cmd_live(
         # Q1: arm the operator's motor-stop hotkey for the whole flight, from
         # stack construction until landing/close (stopped in the finally
         # below). See _ArmedFlightStackFactory.
-        armed_factory = _ArmedFlightStackFactory(client_factory)
+        armed_factory = _ArmedFlightStackFactory(client_factory, on_stack=on_stack)
         try:
             try:
                 outcome = live_session.run_count_return(
                     store=run.store, manifest=manifest, site=site, drift_profile=drift_profile,
                     energy_profile=energy_profile, limits=limits, calibration_profiles=calibration_profiles,
                     flight_stack_factory=armed_factory, judge=judge, detector=detector,
-                    assurances=verified_assurances, request_text=DEFAULT_REQUEST_TEXT,
+                    assurances=verified_assurances, request_text=request_text,
                     frames_dir=run.root / "frames", clock=clock, wall_clock=wall_clock,
                     before_takeoff=before_takeoff, acceptance=acceptance,
                 )
@@ -796,6 +805,8 @@ def main(
     detector_factory: Callable[[], object] = _default_detector,
     clock: Callable[[], float] = time.monotonic,
     wall_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    request_text: str = DEFAULT_REQUEST_TEXT,
+    on_stack: Callable[..., "live_session.FlightStack"] | None = None,
 ) -> int:
     """``client_factory(tracker=..., clock=..., site=...)`` returns the connected
     ``live_session.FlightStack``; it is called only after every gate, the
@@ -806,7 +817,8 @@ def main(
     if args.mode == "live":
         return _cmd_live(args, drone_probe=drone_probe, provider_probe=provider_probe,
                          client_factory=client_factory, jev_factory=jev_factory,
-                         detector_factory=detector_factory, clock=clock, wall_clock=wall_clock)
+                         detector_factory=detector_factory, clock=clock, wall_clock=wall_clock,
+                         request_text=request_text, on_stack=on_stack)
     return args.func(args)
 
 

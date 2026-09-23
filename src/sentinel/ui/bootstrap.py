@@ -35,6 +35,8 @@ class SessionConfig:
     sr063_amended: bool = False
     site_profiles_path: Path | None = None
     site_profile_id: str = 'CanningSt'
+    # Task C: the operator's room-agent live pack (room_session.py live inputs).
+    room_live_config: Path | None = None
 
 
 def validate_live_startup(config):

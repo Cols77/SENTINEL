@@ -33,6 +33,8 @@ def parse_config(argv=None):
     parser.add_argument('--start-x-cm',type=int)
     parser.add_argument('--start-y-cm',type=int)
     parser.add_argument('--sr063-amended',action='store_true')
+    parser.add_argument('--room-live-config',dest='room_live_config',type=Path,
+                        help='Room agent Live pack (JSON): manifest, digest, grant registry, consent, assurances')
     args=vars(parser.parse_args(argv));args['mode']=args['mode'].upper()
     legacy_physical_flags = ('--site', '--tag-map', '--pose-db', '--pose',
                              '--surface-z-cm', '--start-x-cm', '--start-y-cm')
