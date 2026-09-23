@@ -137,7 +137,14 @@ class SafetySupervisor:
             raise
 
     def _validate_bindings(self, site: RoomSite) -> None:
-        self.reserve.profile.validate_for_execution(mode=self.mode,
+        # Task B item 6: a CALIBRATION-scope energy profile (derived from
+        # recorded flights, never promoted) is legal in REAL mode only inside
+        # a TRIAL acceptance run; its site/aircraft binding is still checked,
+        # and the grant admitted below must then be that TRIAL grant.
+        calibration_scope = (self.mode == ExecutionMode.REAL and self.acceptance_manifest is not None
+                             and self.reserve.profile.execution_scope == "CALIBRATION")
+        self.reserve.profile.validate_for_execution(
+            mode=ExecutionMode.CALIBRATION if calibration_scope else self.mode,
             site_sha256=site.cube_site_sha256, aircraft_id=self.aircraft_id)
         profile = self.tracker.profile
         if profile is None or not profile.validated or not profile.evidence_refs:
@@ -166,7 +173,7 @@ class SafetySupervisor:
                 capability=self.capability, site_sha256=site.cube_site_sha256, aircraft_id=self.aircraft_id,
                 profile_sha256s=binding, now=now, session_id=self.session_id,
                 acceptance_manifest=self.acceptance_manifest)), None)
-        if admitted is None:
+        if admitted is None or (calibration_scope and admitted.state != "TRIAL"):
             self.admitted_grant = None
             raise ValueError("capability does not match session/site/aircraft/calibrations")
         self.admitted_grant = admitted

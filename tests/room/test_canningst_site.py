@@ -132,3 +132,59 @@ def test_the_canningst_tag_map_binds_to_the_sites_hash_in_either_line_ending(tmp
         live_stack.load_bound_tag_map(edited, expected_sha256=site.tag_map_sha256)
     # The two wall tags face the aircraft at the canonical heading (90 deg, +y).
     assert live_stack.mapped_heading_tag_ids(tag_map) == ((90.0, (0, 2)),)
+
+
+def test_canningst_takeoff_is_admitted_under_one_trial_grant_with_the_history_profiles(tmp_path):
+    """Items 4-6 composed: the committed history profiles, one TRIAL grant
+    bound to exactly them (FlightBinding.sha256s) inside its acceptance run,
+    and the real stack's pad anchoring -- the supervisor validates its own
+    bindings (no stub) and admits takeoff."""
+    from dataclasses import replace
+    from sentinel.room import calibration, live_session
+    from sentinel.room.live_session import acceptance_manifest_for
+    from sentinel.room.models import CapabilityGrant, canonical_grant_sha256
+    profiles = ROOT / "fixtures" / "room_agent" / "v1" / "profiles"
+    binding = live_session.load_flight_binding(
+        site_path=SITE_PATH, drift_profile_path=profiles / "canningst-drift.json",
+        energy_profile_path=profiles / "canningst-energy.json",
+        command_limits_path=profiles / "canningst-command-limits.json",
+        profile_paths=(profiles / "canningst-flight-profile.json",))
+    assert binding.energy_profile.execution_scope == "CALIBRATION"
+    assert calibration.admissible_for(binding.calibration_profiles[0], grant_state="TRIAL")
+
+    class Manifest:
+        mode, run_id, requested_capability = "acceptance", "run-0001", "count_return"
+
+    acceptance = acceptance_manifest_for(Manifest())
+    grant = CapabilityGrant("count_return", "TRIAL", binding.site.cube_site_sha256,
+                            binding.energy_profile.aircraft_id, binding.sha256s, (),
+                            "2099-01-01T00:00:00+00:00", "", acceptance.manifest_sha256)
+    grant = replace(grant, grant_sha256=canonical_grant_sha256(grant))
+    clock = time.monotonic
+    tracker = LocalizationTracker(binding.drift_profile, clock=clock, real_mode=True)
+    transport = FakeTransport(battery=90)
+    link = live_stack.TelloLink(build_client=transport, clock=clock)
+    stack = live_stack.TelloFlightStackFactory(
+        link=link, tag_map=None, run_id="run-0001", run_dir=tmp_path,
+        pose_burst=Bursts(reports(250, 190, 90.0)), home_settle_s=0.0)(tracker=tracker, clock=clock, site=binding.site)
+    store = RoomStore.open(tmp_path / "room.sqlite3")
+    try:
+        store.create_session("run-0001", "request", CapabilityProfile((grant,)))
+        supervisor = SafetySupervisor(
+            store=store, session_id="run-0001", site=binding.site, tracker=tracker,
+            reserve=ReserveGuard(binding.energy_profile, clock), limits=binding.limits,
+            aircraft_id=binding.energy_profile.aircraft_id, mode=ExecutionMode.REAL, refresh=stack.refresh,
+            emergency=stack.emergency, clock=clock, wall_clock=lambda: datetime(2026, 9, 23, tzinfo=timezone.utc),
+            capability="count_return", acceptance_manifest=acceptance,
+            profile_sha256s=binding.calibration_sha256s)
+        for assurance in live_fakes.operator_assurances("run-0001", binding.site,
+                                                        clock_domain_id=supervisor.clock_domain_id):
+            store.append_contingency_assurance(assurance, expected_version=store.session_version("run-0001"))
+        supervisor.validate_bindings(binding.site)
+        assert supervisor.admitted_grant == grant
+        stack.refresh()
+        supervisor.start(stack.executor)
+        assert stack.executor.state == ExecutorState.AIRBORNE
+    finally:
+        store.close()
+        link.close()

@@ -810,7 +810,7 @@ def test_dispatch_exception_during_observation_is_typed_not_stale_decision(safet
 # --- 18. REAL mode never offers an OBSERVE candidate -----------------------
 
 def bind_real_mode(safety, *, grant_capability="count_return", grant_state="PROMOTED",
-                   session_capability="count_return", acceptance=None, validate=True):
+                   session_capability="count_return", acceptance=None, validate=True, energy=None):
     """Put the fixture supervisor in REAL mode under one real, hash-bound grant.
 
     The grant is bound to ``calibration_hashes`` of exactly the PROMOTED
@@ -827,7 +827,7 @@ def bind_real_mode(safety, *, grant_capability="count_return", grant_state="PROM
     from sentinel.room.supervisor import calibration_hashes
     supervisor, store, clock, *_ = safety
     site = room_site(coverage=True)
-    energy = EnergyProfile("energy", site.cube_site_sha256, "aircraft", .01, 1, 20, 2, "PROMOTED")
+    energy = energy or EnergyProfile("energy", site.cube_site_sha256, "aircraft", .01, 1, 20, 2, "PROMOTED")
     supervisor.site, supervisor.reserve = site, ReserveGuard(energy, clock)
     supervisor.mode, supervisor.capability = ExecutionMode.REAL, session_capability
     manifest = None
