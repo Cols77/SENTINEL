@@ -1,5 +1,21 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {createChatSubmissionController,terminalChatResponse} from '../../examples/survey-console/chat.mjs';
+import {createHttpClient} from '../../examples/survey-console/http-client.mjs';
+test('untyped HTTP 500 keeps chat attempt identity for retry',async()=>{
+ const snapshot={session:{id:'session-1'},run:{id:'run-1',status:'ACTIVE',decision_version:4}};
+ const attempts=[];let calls=0,input='survey the site';
+ const client=createHttpClient('/api/v1',async(url,init)=>{
+  attempts.push(JSON.parse(init.body));
+  return new Response(JSON.stringify(++calls===1?{message:'Internal failure'}:{status:'ACKNOWLEDGED',message:'accepted'}),{status:calls===1?500:200});
+ });
+ const controller=createChatSubmissionController({getSnapshot:()=>snapshot,setInput:text=>{input=text;},client,identity:()=>({command_id:'cmd-1',correlation_id:'cmd-1',idempotency_key:'cmd-1'})});
+ await controller.submit(input);
+ assert.equal(input,'survey the site');
+ await controller.submit(input);
+ assert.equal(input,'');
+ assert.equal(attempts.length,2);
+ assert.equal(attempts[0].command_id,attempts[1].command_id);
+});
 test('terminal and recovery statuses produce explicit non-dispatch responses',()=>{
  assert.equal(terminalChatResponse('COMPLETE'),'COMPLETE - run is complete; no new dispatch is available.');
  assert.equal(terminalChatResponse('ABORTED'),'ABORTED - run was aborted; no new dispatch is available.');

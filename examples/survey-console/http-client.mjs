@@ -4,7 +4,8 @@ export function createHttpClient(base='/api/v1',fetchImpl=fetch){
  const runPath=id=>`${base}/runs/${encodeURIComponent(id)}`;
  async function json(url,init,typedConflict=false){
   const response=await fetchImpl(url,init);const body=await response.json();
-  if(!response.ok && !(typedConflict&&({409:'CONFLICT',422:'INVALID',503:'UNAVAILABLE'}[response.status]===body.status)))throw new Error(body.message??'Request failed');
+  const expectedTypedStatus={409:'CONFLICT',422:'INVALID',503:'UNAVAILABLE'}[response.status];
+  if(!response.ok && !(typedConflict&&expectedTypedStatus!==undefined&&expectedTypedStatus===body.status))throw new Error(body.message??'Request failed');
   return body;
  }
  const post=(url,body,typed=false)=>json(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)},typed);

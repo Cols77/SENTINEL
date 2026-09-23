@@ -48,6 +48,12 @@ test('typed failures require the exact HTTP status and body pair',async()=>{
  }
 });
 
+test('unmapped HTTP 500 never becomes a typed profile or chat result',async()=>{
+ const client=createHttpClient('/api/v1',async()=>new Response(JSON.stringify({message:'Internal failure'}),{status:500}));
+ await assert.rejects(client.select_site_profile('Harbor'),/Internal failure/);
+ await assert.rejects(client.submit_chat('run-1',{text:'survey'}),/Internal failure/);
+});
+
 test('poller schedules only after the outstanding request finishes',async()=>{
  const {startPolling}=await import('../../examples/survey-console/http-client.mjs');
  let resolve;const pending=new Promise(r=>resolve=r);const scheduled=[];
