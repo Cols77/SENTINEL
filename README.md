@@ -12,6 +12,14 @@ Text chat remains the primary control path. On browsers that expose speech recog
 
 See [Mission Control setup and Live prerequisites](examples/survey-console/README.md), [the HTTP contract](examples/survey-console/contract.md), and [verification handoff](docs/handoffs/2026-09-21-mission-control.md). Live hardware readiness has not been established by software tests.
 
+To start Live Mission Control with the configured Canning St physical site profile:
+
+```sh
+sentinel mission-control --mode live --site-profile CanningSt --data-dir artifacts/local-live
+```
+
+Live startup refuses before binding unless the selected profile is enabled and physically valid. The profile selector can switch profiles while the session is pristine; after mission activity or evidence, it locks. See the setup guide for readiness, provider, consent, and calibration details.
+
 ## V0 demonstration loop
 
 ```text

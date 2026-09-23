@@ -18,46 +18,25 @@ The clean scenario yields one confirmed synthetic computer. Pass `--scenario fix
 
 Land interrupts normal sequencing and requests controlled landing. Hold Emergency for 1.2 seconds to latch the session and all active runners, then use the independent transport. Both are simulated in Rehearsal. Acknowledgement is not proof of physical landing or motor stop.
 
-## Live startup
+## Live startup and site profiles
 
-A bare Live host now starts its localhost UI in an explicit `NOT_READY`, unarmed state. Opening,
-refreshing, polling, asking for status, and reading evidence do not connect to a drone or provider.
-The readiness panel names missing CLI flags and environment-variable names, but never displays
-secret values. Missing or invalid Live configuration never selects a Rehearsal fallback.
-
-Start the inert UI first if configuration is not yet assembled:
+Start Live with the selected physical site profile:
 
 ```sh
-uv run sentinel mission-control --mode live --data-dir artifacts/live-session
+sentinel mission-control --mode live --site-profile CanningSt --data-dir artifacts/local-live
 ```
 
-The panel's launch template is guidance, not evidence of hardware readiness. Restart Mission
-Control after changing CLI configuration. A fully configured launch still remains unarmed:
+The default registry is `config/mission-control-sites.v1.json`; use `--site-profiles PATH` for another registry. Entry paths are resolved relative to the registry file. Live refuses before binding if the selected profile is missing, disabled, incomplete, or fails site/coverage validation. `CanningSt` is the current enabled profile. `Demo` is intentionally disabled until its venue is measured and calibrated. Add another venue by adding a registry entry with an ID, label, enabled/setup status, and validated site, tag-map, pose database/mode, and surface-height fields; pose mode `off` also requires start coordinates. This is data-only configuration.
 
-```sh
-export OPENROUTER_API_KEY='...'
-export GEMINI_OPENROUTER_MODEL='google/gemini-2.5-flash'
-uv run sentinel mission-control --mode live --confirm \
-  --data-dir artifacts/live-session \
-  --survey-db /absolute/path/to/consented-survey.sqlite \
-  --site /absolute/path/to/site.json \
-  --tag-map /absolute/path/to/tag-map.json \
-  --pose-db /absolute/path/to/pose.sqlite --pose passive \
-  --detector gemini-openrouter --provider-profile /absolute/path/to/approved-profile.json \
-  --i-authorise-paid-calls \
-  --location lecture-room --consent-date YYYY-MM-DD \
-  --local-ip 192.168.10.2 --surface-z-cm 50
-```
+The Live-only profile selector is available while the session is pristine and idle. Any mission activity or evidence locks it. A permitted switch applies atomically in the running host without a restart, and does not construct a drone, provider, or transport. Readiness refreshes by polling, discovers the network route, and displays current blockers only. Opening or polling the page does not connect to a drone or provider.
 
-Supply actual measured configuration. `--pose off` also requires `--start-x-cm` and `--start-y-cm`; both coordinates must lie inside the selected envelope. Reanchor retains the existing `--sr063-amended` gate. The default Live detector matches the integration branch: Gemini through OpenRouter. Mission Control loads missing environment names from the nearest `.env`, so the repository-root `OPENROUTER_API_KEY` and `GEMINI_OPENROUTER_MODEL` are discovered from an isolated worktree without displaying their values. The provider profile must conform to `provider-profile.v1`, be approved, and match `gemini-openrouter` plus that model. Direct Gemini remains available with `GEMINI_API_KEY` and `GEMINI_MODEL`; Moondream uses `MOONDREAM_API_KEY` and `MOONDREAM_MODEL`. Consent must already be recorded for that exact location/date in the survey database; the host does not record it on the operator's behalf. Configuration readiness enables proposal planning only; it does not arm the aircraft.
+The Mission Control browser projection is schema v3: route coverage and return-leg facts, commanded/measured freshness, capture detection progression, public proposer provenance, and explicit COMPLETE/ABORTED/RECOVERY_REQUIRED terminal states are rendered from validated backend facts. Live detection starts in a separate supervised process before capture, binds cached results to run/sweep/path/hash identity, and never repeats a provider call during survey ingestion. Detector failure is an explicit analysis gap and does not take over flight control.
 
-The Mission Control browser projection is schema v3: route coverage and return-leg facts, commanded/measured freshness, capture detection progression, public proposer provenance, and explicit COMPLETE/ABORTED/RECOVERY_REQUIRED terminal states are rendered from validated backend facts. Live detection starts in a separate supervised process before capture, binds cached results to run/sweep/path/hash identity, and never repeats a provider call during survey ingestion. Detector failure is an explicit analysis gap and does not take over flight control. Paid calls remain refused without `--i-authorise-paid-calls`.
+Explicitly approving a Live proposal confirms dispatch of a real flight and starts bounded preflight. Detector paid-call authorization is implicit only for that approved Mission Control dispatch. Standalone `live_detect`, survey, and cube commands retain their explicit `--i-authorise-paid-calls` requirement. Provider profile approval and recorded filming consent remain dispatch gates. `OPENROUTER_API_KEY` and `GEMINI_OPENROUTER_MODEL` load from the environment or nearest `.env`; secret values are never shown. The provider profile must match the selected provider/model, and consent must already be recorded for the exact location/date. The host does not record consent on the operator's behalf.
 
-Live uses two phases. Host composition creates only the persistent session, public projection, local planning facts, and inert/deferred boundaries. After an immutable proposal is explicitly approved, dispatch separately checks `--confirm`, initializes the independent Emergency transport, creates the drone client, and runs the bounded no-takeoff preflight. Detection is admitted separately and cannot start until provider configuration, `--i-authorise-paid-calls`, and recorded consent all pass. Approval is therefore distinct from flight confirmation, preflight, provider authorization, and consent.
+The Live adapter uses `CubeFlight`, the measured Tello camera model, real provider perception, and the existing F rules proposer only after those gates admit the corresponding capability. Land is unavailable without an active runner; Emergency is unavailable until its independent transport is initialized. The bounded chat supports computer-count requests and status; when planning is unavailable, count requests return actionable refusal text without starting the worker. Pose evidence comes from the runner's real localization bursts, so it can honestly age between bursts. Voice cannot approve or reject a proposal or trigger Emergency. The exact controlled-Land phrase and cancellable three-second countdown are unchanged. Restarted interrupted Live sessions require recovery and cannot dispatch again automatically. Reconcile the aircraft and previous run before starting a new session.
 
-The Live adapter uses `CubeFlight`, the measured Tello camera model, real provider perception, and the existing F rules proposer only after those gates admit the corresponding capability. Land is unavailable without an active runner; Emergency is unavailable until its independent transport is initialized. The bounded chat supports computer-count requests and status; when planning is unavailable, count requests return actionable refusal text without starting the worker. Pose evidence comes from the runner's real localization bursts, so it can honestly age between bursts. Restarted interrupted Live sessions require recovery and cannot dispatch again automatically. Start a new session only after the operator has reconciled the aircraft and previous run.
-
-All hardware operation, measured calibration and actual landing/emergency outcomes remain subject to physical verification. Automated acceptance uses injected clients only.
+Physical flight, demo/site calibration, manual microphone behavior, provider performance, and actual landing/emergency outcomes require supervised hardware validation. Automated acceptance uses injected clients only.
 
 ## Verify
 
@@ -68,7 +47,7 @@ uv run python scripts/ui_assets/check_assets.py
 node scripts/ui_assets/verify_mission_control.cjs
 ```
 
-The browser verifier starts and stops four real local backends with separate temporary data directories. It requires Playwright/Chromium in the tooling environment; no frontend build is needed. Acceptance covers bare-Live `NOT_READY` guidance and refusal, clean count, approved uncertain follow-up, missing analysis, approval reload/reconciliation, production survey/report/evidence, stale-to-fresh localization, deterministic browser speech, independent safety controls, 1440×900, 1920×1080 and narrow layouts, reduced motion, and local-only traffic. Artifacts go under ignored `artifacts/mission-control/`.
+The browser verifier starts and stops four real local backends with separate temporary data directories. It requires Playwright/Chromium in the tooling environment; no frontend build is needed. Acceptance covers Live readiness guidance and refusal, clean count, approved uncertain follow-up, missing analysis, approval reload/reconciliation, production survey/report/evidence, stale-to-fresh localization, deterministic browser speech, independent safety controls, 1440×900, 1920×1080 and narrow layouts, reduced motion, and local-only traffic. Artifacts go under ignored `artifacts/mission-control/`.
 
 ## Retained fixture regression surface
 

@@ -6,6 +6,15 @@ merge commit `15be1e6573eb1dc2c309f6b2e4faf7cfdc1c4faa`; no force-push or histor
 rewrite is required. Integration behavior remains authoritative for survey,
 flight, coverage, proposer, localization, and live detection.
 
+## Live site-profile workflow delivery
+
+The implementation was delivered across commits `cef6fd5` through `763ab64`, from the required
+physical-profile startup gate through registry/switch hardening, readiness refresh, approval-time
+dispatch admission, and browser selector recovery fixes. It adds a versioned data registry with
+CanningSt enabled and Demo disabled, idle-only atomic Live switching, route-aware current readiness,
+and explicit proposal approval as real-flight dispatch authorization. Mission Control alone admits
+the paid detector call after approved dispatch; standalone authorization gates remain in place.
+
 ## Delivered
 
 - Typed optional mission observations with no-op compatibility for existing callers: runner
@@ -32,11 +41,12 @@ flight, coverage, proposer, localization, and live detection.
   independent Emergency checks. New snapshots emit the extension; validators retain support for
   older v3 fixtures that omit it. Public remediation names flags and environment-variable names
   without exposing their values.
-- Two-phase Live composition: a bare `--mode live` host serves the localhost console unarmed with
-  empty options and no drone/provider/transport construction. Planning configuration is local-only;
-  confirmation, Emergency initialization, drone creation/preflight, provider authorization,
-  paid-call authorization, and recorded consent stay at their capability boundaries. No failure
-  selects Rehearsal adapters.
+- Live startup resolves and validates the selected physical site profile before binding. Host
+  composition creates the local session and planning projection without constructing a drone,
+  provider, or transport. Idle-only site switches are atomic and do not restart the host. Explicit
+  proposal approval confirms real dispatch and starts bounded preflight; provider profile and
+  recorded consent remain dispatch gates, while paid-call authorization is admitted only for an
+  approved Mission Control dispatch. No failure selects Rehearsal adapters.
 - The browser renders route coverage and return-to-start, separate commanded and measured markers,
   exact pose images with AprilTag polygons/IDs, fresh/aging/stale localization, detection gaps,
   authoritative counts, evidence linkage, reports, and terminal recovery guidance.
@@ -62,23 +72,42 @@ approve it explicitly. Use a fresh data directory for every rehearsal. The uncer
 missing-analysis inputs are selected with `--scenario fixtures/mission-control/uncertain-followup.json`
 and `--scenario fixtures/mission-control/missing-analysis.json`.
 
-For Live readiness guidance without touching hardware or a provider:
+Start Live with the configured Canning St physical profile:
 
 ```sh
-uv run sentinel mission-control --mode live --data-dir artifacts/live-session
+sentinel mission-control --mode live --site-profile CanningSt --data-dir artifacts/local-live
 ```
 
-The browser opens as `LIVE · UNARMED · NOT_READY`. Status chat remains available; count requests
-are refused before worker start until planning configuration is valid. Restart after changing CLI
-configuration. An approved proposal still requires independent `--confirm`, no-takeoff preflight,
-Emergency transport, provider/paid-call admission, and recorded-consent checks at dispatch.
+The default registry is `config/mission-control-sites.v1.json`; `--site-profiles PATH` selects an
+alternate registry, and entry paths are relative to that registry. Live refuses before binding if
+the selected profile is missing, disabled, incomplete, or physically mismatched. CanningSt is the
+current enabled profile; Demo remains disabled until venue calibration. Add a venue by adding a
+validated registry entry with its site, tag map, pose configuration, and measured surface height;
+pose mode `off` also requires start coordinates. This is data-only configuration.
+
+The Live-only selector is usable while the session is pristine/idle and locks after any mission
+activity or evidence. A switch applies atomically in the running host, with no restart and no drone,
+provider, or transport construction. Readiness refreshes by polling, discovers the network route,
+and reports current blockers only. The provider profile and exact-location/date filming consent
+remain dispatch gates. `OPENROUTER_API_KEY` and `GEMINI_OPENROUTER_MODEL` load from the environment
+or nearest `.env`; secret values are never shown.
+
+Explicitly approving a proposal confirms and dispatches the real flight, beginning bounded
+preflight. Paid detector authorization is implicit only for this approved Mission Control dispatch;
+standalone `live_detect`, survey, and cube commands still require `--i-authorise-paid-calls`.
+Voice cannot approve or reject proposals or trigger Emergency. The exact controlled-Land phrase and
+cancellable three-second countdown are unchanged. Physical flight, demo calibration, manual
+microphone behavior, and provider performance remain hardware-validation limits.
 
 See [setup and Live prerequisites](../../examples/survey-console/README.md) and the
 [schema-v3 contract](../../examples/survey-console/contract.md).
 
 ## Verification
 
-Final verification on 2026-09-23:
+The figures below are the earlier integration verification and predate the live site-profile
+workflow. Final verification for the profile changes is recorded by the final coordinator at handoff.
+
+Earlier integration verification on 2026-09-23:
 
 | Check | Result |
 |---|---|

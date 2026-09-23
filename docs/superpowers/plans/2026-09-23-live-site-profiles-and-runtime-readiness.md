@@ -23,7 +23,7 @@
 - Modify `examples/survey-console/http-client.mjs`: typed profile catalogue and switch calls.
 - Modify `examples/survey-console/mission-app.mjs`: profile selector, actual blockers only, and live approval wording.
 - Modify `examples/survey-console/approval.mjs`: state that Live approval dispatches the real flight.
-- Modify `examples/survey-console/view-model.mjs`: remove the obsolete command-template view field.
+- Modify `examples/survey-console/view-model.mjs`: retain the schema-v3 empty `command_template` compatibility field in the projection contract; the browser UI does not render it.
 - Modify `examples/survey-console/console.css`: restrained selector/status styling with narrow-layout support.
 - Modify `README.md` and `examples/survey-console/README.md`: named-profile launch and calibration workflow.
 - Test in `tests/ui/test_site_profiles.py`, `tests/ui/test_bootstrap.py`, `tests/ui/test_api.py`, `tests/ui/test_mission_worker.py`, `tests/survey_console/http-client.test.mjs`, `tests/survey_console/status.test.mjs`, and `tests/survey_console/approval.test.mjs`.
@@ -149,7 +149,7 @@ Implement `discover_local_ipv4(tello_ip: str) -> str | None` with a UDP socket r
 
 - [ ] **Step 4: Make readiness describe current facts**
 
-Remove `LiveReadiness.command_template` and `_command_template`. `_flight` checks only the current network route; `_detection` checks provider selection/env/profile/consent but not `authorise_paid_calls`; `_emergency` uses the same discovered route. Keep one active reason per capability and never include secret values.
+Keep the schema-v3 `command_template` field as an empty compatibility field; remove the generated launch-template value and never render the field in the UI. `_flight` checks only the current network route; `_detection` checks provider selection/env/profile/consent but not `authorise_paid_calls`; `_emergency` uses the same discovered route. Keep one active reason per capability and never include secret values.
 
 - [ ] **Step 5: Refresh on every snapshot**
 
