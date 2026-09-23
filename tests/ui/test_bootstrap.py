@@ -211,6 +211,10 @@ def test_invalid_profile_and_consent_refuse_at_dispatch_before_client(
     service = bootstrap.build_service(config)
     try:
         assert service.submit_chat('mission', _chat_command(service))['kind'] == 'PROPOSE'
+        assert service.approval.changed.wait(2)
+        snapshot = service.read_snapshot('mission')
+        assert snapshot['proposal']['eligibility']['consent'] is False
+        assert snapshot['proposal']['disabled_reasons']
         assert _approve_current(service)['status'] == 'ACKNOWLEDGED'
         deadline = time.monotonic() + 2
         while service.worker.active and time.monotonic() < deadline:

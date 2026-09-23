@@ -21,7 +21,7 @@ async function waitFor(check, message, timeoutMs = 15000) {
   throw new Error(message);
 }
 
-async function startHost(scenario = null) {
+async function startHost(scenario = null, mode = 'rehearsal') {
   if (suppliedBase) {
     base = suppliedBase;
     return;
@@ -37,12 +37,13 @@ async function startHost(scenario = null) {
     ? path.resolve('.venv/Scripts/python.exe')
     : path.resolve('.venv/bin/python');
   const args = ['-m', 'sentinel.ui', '--data-dir', dataDir, '--port', String(port)];
+  if (mode === 'live') args.push('--mode', 'live');
   if (scenario) args.push('--scenario', path.resolve(scenario));
   server = spawn(python, args, { stdio: 'ignore' });
   await waitFor(async () => {
     try { return (await fetch(`${base}/api/v1/session`)).ok; }
     catch { return false; }
-  }, `Test host did not start for ${scenario || 'clean scenario'}`);
+  }, `Test host did not start for ${mode === 'live' ? 'bare Live' : scenario || 'clean scenario'}`);
 }
 
 async function stopHost() {
@@ -221,6 +222,52 @@ async function verifyVoiceIntegration(page, chatRequests) {
     bounded: true,
     unavailable: true,
   });
+}
+
+async function verifyBareLiveScenario(browser, errors, external) {
+  await startHost(null, 'live');
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  page.setDefaultTimeout(5000);
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('request', request => {
+    if (!request.url().startsWith(`${base}/`) && !request.url().startsWith('blob:')) external.push(request.url());
+  });
+  try {
+    await page.goto(`${base}/console/`);
+    await page.getByText('LIVE · UNARMED · NOT_READY', { exact: true }).first().waitFor();
+    const panel = page.locator('#live-readiness');
+    assert.equal(await panel.isVisible(), true);
+    assert.equal(await panel.locator('.readiness-checks > li').count(), 4);
+    assert.match(await panel.locator('.readiness-command').innerText(), /--site <SITE_JSON>/);
+    assert.doesNotMatch(await panel.innerText(), /API_KEY=/);
+
+    const input = page.getByRole('textbox', { name: 'Mission request' });
+    await input.fill('status');
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    await page.getByText(/Snapshot \d+: request\./).waitFor();
+    await input.fill('count the computers');
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    await page.getByText(/Planning is unavailable \(LIVE_PLANNING_CONFIG_REQUIRED\)/).waitFor();
+
+    const snapshot = await currentSnapshot();
+    assert.equal(snapshot.proposal, null);
+    assert.deepEqual(snapshot.mission.route, []);
+    assert.equal(snapshot.readiness.state, 'NOT_READY');
+    for (const id of ['land-now', 'emergency-stop']) {
+      const control = page.locator(`#${id}`);
+      assert.equal(await control.isDisabled(), true);
+      const describedBy = await control.getAttribute('aria-describedby');
+      assert.ok(describedBy);
+      assert.ok(await page.locator(`#${describedBy}`).count());
+    }
+    for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    }
+  } finally {
+    await page.close();
+    await stopHost();
+  }
 }
 
 async function verifyCleanScenario(browser, errors, external) {
@@ -439,12 +486,13 @@ async function verifyMissingAnalysisScenario(browser, errors, external) {
   try {
     await verifyCleanScenario(browser, errors, external);
     if (!suppliedBase) {
+      await verifyBareLiveScenario(browser, errors, external);
       await verifyUncertainScenario(browser, errors, external);
       await verifyMissingAnalysisScenario(browser, errors, external);
     }
     assert.deepEqual(errors, []);
     assert.deepEqual(external, []);
-    console.log('PASS real-host clean, uncertain-follow-up and missing-analysis scenarios; voice, safety, evidence, schema v3, three viewports and local-only traffic');
+    console.log('PASS real-host clean, bare-Live readiness, uncertain-follow-up and missing-analysis scenarios; voice, safety, evidence, schema v3, three viewports and local-only traffic');
   } finally {
     await browser.close();
     await stopHost();

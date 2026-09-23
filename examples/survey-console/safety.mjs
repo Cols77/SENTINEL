@@ -26,7 +26,7 @@ export function createHoldAction(send,{schedule=setTimeout,cancel=clearTimeout}=
 }
 
 export function createSafetyView(host,client,getSnapshot,{landController:providedLandController}={}){
- const status=el('span',{role:'status','aria-live':'polite',class:'safety-status'});
+ const status=el('span',{id:'safety-status',role:'status','aria-live':'polite',class:'safety-status'});
  let emergencyPending=false,emergencyAttempt=null;
  const identity=()=>{const id=crypto.randomUUID();return {command_id:id,correlation_id:id,idempotency_key:id};};
  const landController=providedLandController||createControlledLandController({getSnapshot,requestLand:client.request_land,identity,onStatus:text=>{status.textContent=text;}});
@@ -39,13 +39,20 @@ export function createSafetyView(host,client,getSnapshot,{landController:provide
   catch{status.textContent='Emergency outcome unknown. Use the terminal or physical fallback.';}
   finally{emergencyPending=false;}
  }
- const landButton=button('Land now',land,{id:'land-now',disabled:true});
- const emergencyButton=button('Hold to stop motors',null,{id:'emergency-stop',class:'emergency-control',disabled:true,'aria-label':'Emergency motor stop: hold for 1.2 seconds'});
+ const landButton=button('Land now',land,{id:'land-now',disabled:true,'aria-describedby':'safety-status'});
+ const emergencyButton=button('Hold to stop motors',null,{id:'emergency-stop',class:'emergency-control',disabled:true,'aria-label':'Emergency motor stop: hold for 1.2 seconds','aria-describedby':'safety-status'});
  const hold=createHoldAction(emergency);
  emergencyButton.addEventListener('pointerdown',e=>{if(e.button!==0)return;emergencyButton.setPointerCapture(e.pointerId);hold.begin();});
  for(const event of ['pointerup','pointercancel','lostpointercapture','blur'])emergencyButton.addEventListener(event,()=>hold.cancel());
  emergencyButton.addEventListener('keydown',e=>{if([' ','Enter'].includes(e.key)){e.preventDefault();if(!e.repeat)hold.begin();}});
  emergencyButton.addEventListener('keyup',()=>hold.cancel());
  host.append(landButton,emergencyButton,status);
- return {landController,render(s){landButton.disabled=landController.isPending()||!isLandLegal(s);emergencyButton.disabled=emergencyPending||!s.safety.emergency.available;if(!s.safety.emergency.available)status.textContent='Emergency transport unavailable · use terminal or physical fallback';},dispose(){hold.cancel();unsubscribeLand?.();}};
+ return {landController,render(s){
+  landButton.disabled=landController.isPending()||!isLandLegal(s);
+  emergencyButton.disabled=emergencyPending||!s.safety.emergency.available;
+  const unavailable=[];
+  if(!isLandLegal(s))unavailable.push('Controlled Land unavailable until a flight runner is active');
+  if(!s.safety.emergency.available)unavailable.push('Emergency transport unavailable · use terminal or physical fallback');
+  if(unavailable.length)status.textContent=unavailable.join('. ');
+ },dispose(){hold.cancel();unsubscribeLand?.();}};
 }

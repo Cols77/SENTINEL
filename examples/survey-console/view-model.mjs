@@ -27,3 +27,12 @@ export function missionStatusText(view){
  const age=Number.isFinite(localization.age_ms)?`${Math.round(localization.age_ms)} ms old`:'no observation age';
  return `Flights ${flights.used??0}/${flights.max??0} · Sweep ${sweep.status??'PLANNED'} · Stops ${completed}/${stops.length} · Localization ${localization.status??'UNAVAILABLE'} · ${age}`;
 }
+
+export function liveReadinessModel(view){
+ const visible=view?.mode==='LIVE';
+ if(!visible)return {visible:false,armed:false,label:'',failed:[],command_template:''};
+ const readiness=view?.readiness??{state:'NOT_READY',checks:[],command_template:''};
+ const armed=readiness.state==='ACTIVE';
+ return {visible:true,armed,label:`LIVE · ${armed?'ACTIVE':'UNARMED'} · ${readiness.state}`,
+  failed:readiness.checks.filter(check=>!check.ready),command_template:readiness.command_template};
+}

@@ -110,7 +110,11 @@ class ProjectionService:
                 proposer_mode = s['decision']['mode']
                 proposer_source = s['decision']['source']
                 escalation_reason = offer['candidate'].get('escalation_reason')
-                s['proposal']=dict(id=offer['id'],sha256=offer['sha256'],option_id=option.option_id,stops=[stop_view(option,i) for i in range(len(option.stops))],range_m=option.range_cm/100,altitude_m=option.z_cm/100,extent_m=option.viewed_width_cm/100,duration_s=option.estimated_seconds,resolvable_classes=list(option.resolvable_classes),proposer=dict(mode=proposer_mode,source=proposer_source,escalation_reason=escalation_reason),justification=offer['candidate'].get('description',''),escalation_reason=escalation_reason,guardrail_disagreements=[],target_object_ids=offer['candidate'].get('arguments',{}).get('addresses',[]),eligibility=dict(consent=True,envelope=True,preflight=True,current=True),disabled_reasons=[],run_id=run_id,decision_version=offer['decision_version'],correlation_id=offer['correlation_id'])
+                readiness_checks = ({check.capability:check for check in svc.readiness.checks}
+                                    if svc.readiness is not None else {})
+                unavailable = [check for check in readiness_checks.values()
+                               if not check.ready]
+                s['proposal']=dict(id=offer['id'],sha256=offer['sha256'],option_id=option.option_id,stops=[stop_view(option,i) for i in range(len(option.stops))],range_m=option.range_cm/100,altitude_m=option.z_cm/100,extent_m=option.viewed_width_cm/100,duration_s=option.estimated_seconds,resolvable_classes=list(option.resolvable_classes),proposer=dict(mode=proposer_mode,source=proposer_source,escalation_reason=escalation_reason),justification=offer['candidate'].get('description',''),escalation_reason=escalation_reason,guardrail_disagreements=[],target_object_ids=offer['candidate'].get('arguments',{}).get('addresses',[]),eligibility=dict(consent=readiness_checks.get('detection').ready if readiness_checks else True,envelope=readiness_checks.get('planning').ready if readiness_checks else True,preflight=readiness_checks.get('flight').ready if readiness_checks else True,current=True),disabled_reasons=[check.remediation for check in unavailable],run_id=run_id,decision_version=offer['decision_version'],correlation_id=offer['correlation_id'])
             operational = state.get('stops', {})
             route_options=[]
             for sweep in facts['sweeps']:
