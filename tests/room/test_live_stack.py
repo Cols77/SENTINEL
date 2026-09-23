@@ -313,16 +313,27 @@ def test_site_envelope_refuses_a_site_without_a_semantic_frame():
 # ---------------------------------------------------------------------------
 
 
-def build_stack(tmp_path, *, bursts=None, transport=None):
+def build_stack(tmp_path, *, bursts=None, transport=None, clock=time.monotonic):
     transport = transport or FakeTransport()
     site = live_fakes.fixture_site()
-    tracker = LocalizationTracker(live_fakes.drift_profile(), clock=time.monotonic, real_mode=True)
-    link = live_stack.TelloLink(build_client=transport, clock=time.monotonic)
+    tracker = LocalizationTracker(live_fakes.drift_profile(), clock=clock, real_mode=True)
+    link = live_stack.TelloLink(build_client=transport, clock=clock)
     factory = live_stack.TelloFlightStackFactory(
         link=link, tag_map=None, run_id="run-0001", run_dir=tmp_path, pose_burst=bursts or Bursts(),
         home_settle_s=0.0)
-    stack = factory(tracker=tracker, clock=time.monotonic, site=site)
+    stack = factory(tracker=tracker, clock=clock, site=site)
     return stack, transport.tello, tracker, site, link
+
+
+class FrozenClock:
+    """A monotonic clock that moves only when a test moves it: a command's
+    supervised deadline can never pass merely because the machine is busy."""
+
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
 
 
 def _inner(stack):
@@ -553,7 +564,11 @@ def test_read_telemetry_vertical_sends_the_exact_height_read(tmp_path):
 
 
 def test_settle_sends_no_sdk_command(tmp_path):
-    stack, tello, tracker, site, _ = build_stack(tmp_path)
+    # Task B2: on the real clock a 0.05 s SETTLE deadline could pass while the
+    # supervised worker thread waited for a busy CPU (DEADLINE_EXCEEDED once
+    # under load). The frozen clock makes the deadline a pure function of
+    # the test; the production deadline logic is unchanged.
+    stack, tello, tracker, site, _ = build_stack(tmp_path, clock=FrozenClock())
     stack.refresh()
     stack.executor.start(site.home)
     stack.refresh()
