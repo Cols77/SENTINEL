@@ -305,6 +305,35 @@ async function verifyCleanScenario(browser, errors, external) {
     });
     assert.equal(independentSafety, true, 'Emergency must remain available during a pending Land request');
     await requestMission(page);
+    const readyToPlanDecisionControls = await page.evaluate(async () => {
+      const { renderApproval } = await import('/console/approval.mjs');
+      const { createHttpClient } = await import('/console/http-client.mjs');
+      const { toSurveyView } = await import('/console/view-model.mjs');
+      const client = createHttpClient();
+      const session = await client.session();
+      const view = toSurveyView(await client.read_survey(session.active_run_id));
+      view.mode = 'LIVE';
+      view.readiness = { state: 'READY_TO_PLAN', checks: [], command_template: '' };
+      view.proposal.eligibility.consent = null;
+      view.proposal.eligibility.preflight = null;
+      view.proposal.disabled_reasons = [];
+      const host = document.createElement('div');
+      document.body.append(host);
+      renderApproval(host, view, {
+        attempt: null, result: null, pending: false, error: null,
+        detached: false, history: [],
+      }, { onApprove() {}, onReject() {}, onRetry() {} }, false);
+      const controls = {
+        approveDisabled: host.querySelector('#approve').disabled,
+        rejectDisabled: host.querySelector('#reject').disabled,
+      };
+      host.remove();
+      return controls;
+    });
+    assert.deepEqual(readyToPlanDecisionControls, {
+      approveDisabled: false,
+      rejectDisabled: false,
+    });
     const proposed = await currentSnapshot();
     assert.equal(proposed.schema_version, 3);
     await page.reload();

@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+import sqlite3
 from typing import Literal, TYPE_CHECKING
 
 from jsonschema import validate
@@ -16,10 +17,8 @@ from sentinel.camera import TELLO_MEASURED
 from sentinel.cube.coverage import CoverageModel, check_tag_map_matches_site
 from sentinel.cube.site import load_site
 from sentinel.pose.tagmap import load_tag_map
-from sentinel.survey.consent import consent_policy
 from sentinel.survey.cube_bridge import envelope_from_site
 from sentinel.survey.options import generate_options
-from sentinel.survey.store import SurveyStore
 
 if TYPE_CHECKING:
     from .bootstrap import SessionConfig
@@ -141,6 +140,17 @@ def _flight(config: SessionConfig) -> ReadinessCheck:
     return _check('flight', True, '', '')
 
 
+def _has_recorded_consent_readonly(database_path: Path, location: str,
+                                   consent_date: str) -> bool:
+    uri = database_path.resolve().as_uri() + '?mode=ro'
+    with sqlite3.connect(uri, uri=True, timeout=1.0) as connection:
+        row = connection.execute(
+            'SELECT 1 FROM filming_consent '
+            'WHERE location = ? AND consent_date = ?',
+            (location, consent_date)).fetchone()
+    return row is not None
+
+
 def _detection(config: SessionConfig) -> ReadinessCheck:
     if config.detector_name not in {'gemini', 'moondream'}:
         return _check(
@@ -186,15 +196,17 @@ def _detection(config: SessionConfig) -> ReadinessCheck:
         return _check(
             'detection', False, 'CONSENT_DATABASE_REQUIRED',
             'Supply --survey-db containing recorded consent for the location and date.')
-    store = SurveyStore.open(survey_db)
     try:
-        consent_policy(store, config.location, config.consent_date)
-    except Exception:
+        recorded = _has_recorded_consent_readonly(
+            survey_db, config.location, config.consent_date)
+    except (OSError, sqlite3.Error):
+        return _check(
+            'detection', False, 'CONSENT_DATABASE_UNREADABLE',
+            'Check that --survey-db is a readable SQLite consent database.')
+    if not recorded:
         return _check(
             'detection', False, 'RECORDED_CONSENT_REQUIRED',
             'Record consent for the exact --location and --consent-date before dispatch.')
-    finally:
-        store.connection.close()
     return _check('detection', True, '', '')
 
 

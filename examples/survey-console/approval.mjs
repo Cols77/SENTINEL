@@ -1,19 +1,17 @@
 import { el, button, replace, meta } from "./dom.mjs";
 export function terminalDecisionText(status){return {COMPLETE:'COMPLETE - run is complete; no new dispatch is available.',ABORTED:'ABORTED - run was aborted; no new dispatch is available.',RECOVERY_REQUIRED:'RECOVERY_REQUIRED - reconcile the aircraft before dispatch.'}[status]||null;}
-export function canDecide(s, needsRefresh) {
+export function canDecide(s, needsRefresh, decision = "APPROVE") {
   const p = s?.proposal,
     e = p?.eligibility;
-  return Boolean(
+  const current = Boolean(
     p &&
       s.status === "ACTIVE" &&
       s.freshness === "FRESH" &&
       !needsRefresh &&
-      e?.current === true &&
-      e.consent === true &&
-      e.envelope === true &&
-      e.preflight === true &&
-      p.disabled_reasons.length === 0,
+      e?.current === true,
   );
+  if (!current || decision === "REJECT") return current;
+  return e.envelope === true && p.disabled_reasons.length === 0;
 }
 function matches(s, a) {
   return Boolean(
@@ -23,8 +21,8 @@ function matches(s, a) {
       s.proposal?.sha256 === a.proposal_sha256,
   );
 }
-function newAttemptAllowed(s, state, needsRefresh) {
-  if (!canDecide(s, needsRefresh) || state.pending) return false;
+function newAttemptAllowed(s, state, needsRefresh, decision = "APPROVE") {
+  if (!canDecide(s, needsRefresh, decision) || state.pending) return false;
   if (!state.attempt) return true;
   if (!state.result || state.result.status === "IN_DOUBT") return false;
   if (state.result.status === "CONFLICT")
@@ -104,7 +102,7 @@ export function createDecisionController(
     async submit(decision) {
       if (
         !["APPROVE", "REJECT"].includes(decision) ||
-        !newAttemptAllowed(survey, state, needsRefresh)
+        !newAttemptAllowed(survey, state, needsRefresh, decision)
       )
         return;
       const id = newId();
@@ -222,7 +220,8 @@ export function renderApproval(
         meta(`Proposed flight: ${s.flights.used + 1} of ${s.flights.max}`),
       );
   } else nodes.push(meta("No current proposal"));
-  const enabled = newAttemptAllowed(s, state, needsRefresh);
+  const approveEnabled = newAttemptAllowed(s, state, needsRefresh, "APPROVE");
+  const rejectEnabled = newAttemptAllowed(s, state, needsRefresh, "REJECT");
   if (needsRefresh || s?.freshness === "STALE")
     nodes.push(
       el("p", { class: "warning" }, [
@@ -233,9 +232,9 @@ export function renderApproval(
     el("div", { class: "decision-buttons" }, [
       button("Approve flight", onApprove, {
         id: "approve",
-        disabled: !enabled,
+        disabled: !approveEnabled,
       }),
-      button("Reject", onReject, { id: "reject", disabled: !enabled }),
+      button("Reject", onReject, { id: "reject", disabled: !rejectEnabled }),
     ]),
     meta(s.mode ? "Decision acknowledgement is not flight completion." : "Fixture acknowledgement is not flight dispatch."),
   );

@@ -66,11 +66,10 @@ test("unknown transport outcome retries the exact same attempt", async () => {
   assert.deepEqual(calls[0], calls[1]);
   assert.equal(d.getState().result.status, "ACKNOWLEDGED");
 });
-test("stale unknown and missing eligibility block both decisions", async () => {
+test("stale, non-current and terminal proposals block both decisions", async () => {
   for (const mutate of [
     (s) => (s.freshness = "STALE"),
-    (s) => (s.proposal.eligibility.consent = null),
-    (s) => (s.proposal.eligibility.preflight = false),
+    (s) => (s.proposal.eligibility.current = false),
     (s) => (s.status = "ABORTED"),
     (s) => (s.proposal = null),
   ]) {
@@ -87,6 +86,44 @@ test("stale unknown and missing eligibility block both decisions", async () => {
     assert.equal(calls, 0);
   }
   assert.equal(canDecide(snapshot(), true), false);
+});
+test("invalid planning blocks approval but a current proposal remains rejectable", async () => {
+  const s = snapshot();
+  s.proposal.eligibility.envelope = false;
+  s.proposal.disabled_reasons = ["Planning unavailable"];
+  assert.equal(canDecide(s, false, "APPROVE"), false);
+  assert.equal(canDecide(s, false, "REJECT"), true);
+  const calls = [];
+  const d = createDecisionController({
+    submit_decision: async attempt => {
+      calls.push(attempt);
+      return result(attempt, "REJECTED");
+    },
+  });
+  d.update(s, false);
+  await d.submit("APPROVE");
+  await d.submit("REJECT");
+  assert.deepEqual(calls.map(attempt => attempt.decision), ["REJECT"]);
+});
+test("READY_TO_PLAN permits approval and rejection before later admission", async () => {
+  for (const decision of ["APPROVE", "REJECT"]) {
+    const s = snapshot();
+    s.proposal.eligibility.consent = null;
+    s.proposal.eligibility.preflight = null;
+    s.proposal.disabled_reasons = [];
+    assert.equal(canDecide(s, false), true);
+    const calls = [];
+    const d = createDecisionController({
+      submit_decision: async attempt => {
+        calls.push(attempt);
+        return result(attempt, decision === "APPROVE" ? "ACKNOWLEDGED" : "REJECTED");
+      },
+    }, () => `${decision.toLowerCase()}-attempt`);
+    d.update(s, false);
+    await d.submit(decision);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].decision, decision);
+  }
 });
 test("proposal replacement never inherits pending or acknowledged approval", async () => {
   let finish;

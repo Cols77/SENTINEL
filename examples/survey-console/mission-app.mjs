@@ -68,7 +68,7 @@ function describeReadiness(model){
   const reason=capabilities.find(capability=>failed.has(capability));
   control.setAttribute('aria-describedby',reason?`readiness-${reason}`:fallback);
  };
- describe('approve',['planning','flight','detection'],'decision-heading');
+ describe('approve',['planning'],'decision-heading');
  describe('reject',['planning'],'decision-heading');
  describe('land',['flight'],'safety-status');
  describe('land-now',['flight'],'safety-status');

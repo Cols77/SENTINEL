@@ -80,7 +80,26 @@ class UIStore:
             row = conn.execute('SELECT * FROM ui_runs WHERE run_id=?', (run_id,)).fetchone()
             if row['session_id'] != session_id or row['mode'] != mode:
                 raise CommandConflict('RUN_IDENTITY_CONFLICT')
+            if row['status'] == 'IDLE_CLOSED':
+                conn.execute("UPDATE ui_runs SET status='ACTIVE' WHERE run_id=?",
+                             (run_id,))
         return self.read_run(run_id)
+
+    def mark_idle_live_closed(self, run_id):
+        """Record a graceful unarmed close without weakening crash recovery."""
+        with self.connection(write=True) as conn:
+            row = conn.execute(
+                'SELECT mode,status FROM ui_runs WHERE run_id=?',
+                (run_id,)).fetchone()
+            offered = conn.execute(
+                'SELECT 1 FROM ui_offers WHERE run_id=? LIMIT 1',
+                (run_id,)).fetchone()
+            if (row is None or row['mode'] != 'LIVE' or
+                    row['status'] != 'ACTIVE' or offered is not None):
+                return False
+            conn.execute("UPDATE ui_runs SET status='IDLE_CLOSED' WHERE run_id=?",
+                         (run_id,))
+            return True
 
     def read_run(self, run_id):
         with self.connection() as conn:

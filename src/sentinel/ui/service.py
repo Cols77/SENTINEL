@@ -119,6 +119,10 @@ class MissionControlService:
     def close(self):
         if not self.closed:
             self.closed=True
+            graceful_idle_live = (
+                self.config.mode == 'LIVE' and not self.worker.active and
+                self.registry.get(self.config.run_id) is None and
+                self.approval.current(self.config.run_id) is None)
             runners=self.registry.stop_admission()
             for runner in runners:
                 if not self.registry.emergency.is_set():
@@ -135,4 +139,6 @@ class MissionControlService:
             if flight_close is not None:
                 flight_close()
             self.safety.close()
+            if graceful_idle_live:
+                self.store.mark_idle_live_closed(self.config.run_id)
             if self.pose_feed:self.pose_feed.close()

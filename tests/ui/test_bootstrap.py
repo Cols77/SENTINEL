@@ -1,6 +1,7 @@
 from dataclasses import FrozenInstanceError, replace
 import json
 from pathlib import Path
+import sqlite3
 import time
 import pytest
 from sentinel.ui import bootstrap
@@ -68,6 +69,67 @@ def test_bare_live_host_is_inert_and_never_falls_back(tmp_path, monkeypatch):
         service.close()
 
 
+def test_invalid_consent_database_is_failed_readiness_without_file_mutation(
+        live_config):
+    consent_db = live_config.data_dir / 'invalid-consent.sqlite'
+    consent_db.write_bytes(b'not a sqlite database')
+    before_bytes = consent_db.read_bytes()
+    before_mtime = consent_db.stat().st_mtime_ns
+
+    service = bootstrap.build_service(
+        replace(live_config, survey_db=consent_db))
+    try:
+        snapshot = service.read_snapshot('mission')
+        detection = next(check for check in snapshot['readiness']['checks']
+                         if check['capability'] == 'detection')
+        assert detection['ready'] is False
+        assert detection['reason_code'] == 'CONSENT_DATABASE_UNREADABLE'
+        assert snapshot['readiness']['state'] == 'READY_TO_PLAN'
+    finally:
+        service.close()
+
+    assert consent_db.read_bytes() == before_bytes
+    assert consent_db.stat().st_mtime_ns == before_mtime
+    assert not Path(str(consent_db) + '-wal').exists()
+    assert not Path(str(consent_db) + '-shm').exists()
+
+
+def test_live_consent_inspection_preserves_existing_bytes_mtime_and_schema(
+        live_config):
+    consent_db = live_config.data_dir / 'minimal-consent.sqlite'
+    with sqlite3.connect(consent_db) as conn:
+        conn.execute('CREATE TABLE filming_consent('
+                     'location TEXT NOT NULL, consent_date TEXT NOT NULL, '
+                     'recorded_by TEXT NOT NULL, '
+                     'PRIMARY KEY(location, consent_date))')
+        conn.execute('INSERT INTO filming_consent VALUES (?,?,?)',
+                     ('lab', '2026-09-21', 'operator'))
+
+    def schema_rows():
+        uri = consent_db.resolve().as_uri() + '?mode=ro'
+        with sqlite3.connect(uri, uri=True) as conn:
+            return conn.execute(
+                "SELECT type,name,sql FROM sqlite_schema "
+                "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").fetchall()
+
+    before_bytes = consent_db.read_bytes()
+    before_mtime = consent_db.stat().st_mtime_ns
+    before_schema = schema_rows()
+    service = bootstrap.build_service(
+        replace(live_config, survey_db=consent_db))
+    try:
+        snapshot = service.read_snapshot('mission')
+        detection = next(check for check in snapshot['readiness']['checks']
+                         if check['capability'] == 'detection')
+        assert detection['ready'] is True
+    finally:
+        service.close()
+
+    assert schema_rows() == before_schema
+    assert consent_db.read_bytes() == before_bytes
+    assert consent_db.stat().st_mtime_ns == before_mtime
+
+
 def _chat_command(service, text='count the computers'):
     return dict(session_id=service.session_id, run_id='mission', command_id='chat',
                 correlation_id='corr', idempotency_key='chat-key',
@@ -119,6 +181,52 @@ def test_live_dispatch_refuses_before_client_without_flight_confirmation(live_co
         assert service.submit_chat('mission', _chat_command(service))['kind'] == 'PROPOSE'
         assert calls == []
         assert _approve_current(service)['status'] == 'ACKNOWLEDGED'
+        deadline = time.monotonic() + 2
+        while service.worker.active and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert calls == []
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize('decision,expected_status', [
+    ('APPROVE', 'ACKNOWLEDGED'),
+    ('REJECT', 'REJECTED'),
+])
+def test_ready_to_plan_proposal_allows_current_approval_and_rejection(
+        live_config, monkeypatch, decision, expected_status):
+    from sentinel.ui import live
+
+    calls = []
+    monkeypatch.setattr(live, 'make_client',
+                        lambda config: calls.append('client'))
+    service = bootstrap.build_service(replace(live_config, confirm=False))
+    try:
+        assert service.submit_chat(
+            'mission', _chat_command(service))['kind'] == 'PROPOSE'
+        snapshot = service.read_snapshot('mission')
+        assert snapshot['readiness']['state'] == 'READY_TO_PLAN'
+        assert snapshot['proposal']['eligibility'] == {
+            'consent': None,
+            'envelope': True,
+            'preflight': None,
+            'current': True,
+        }
+        assert snapshot['proposal']['disabled_reasons'] == []
+        legal = {row['action']: row['enabled']
+                 for row in snapshot['legal_actions']}
+        assert legal['APPROVE'] is True
+        assert legal['REJECT'] is True
+
+        offer = service.approval.current('mission')
+        result = service.submit_decision('mission', dict(
+            session_id=service.session_id, run_id='mission',
+            proposal_id=offer['id'], proposal_sha256=offer['sha256'],
+            expected_version=offer['decision_version'], decision=decision,
+            command_id=f'{decision.lower()}-command', correlation_id='corr',
+            attempt_id=f'{decision.lower()}-attempt',
+            idempotency_key=f'{decision.lower()}-key'))
+        assert result['status'] == expected_status
         deadline = time.monotonic() + 2
         while service.worker.active and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -256,8 +364,8 @@ def test_invalid_profile_and_consent_refuse_at_dispatch_before_client(
         assert service.submit_chat('mission', _chat_command(service))['kind'] == 'PROPOSE'
         assert service.approval.changed.wait(2)
         snapshot = service.read_snapshot('mission')
-        assert snapshot['proposal']['eligibility']['consent'] is False
-        assert snapshot['proposal']['disabled_reasons']
+        assert snapshot['proposal']['eligibility']['consent'] is None
+        assert snapshot['proposal']['disabled_reasons'] == []
         assert _approve_current(service)['status'] == 'ACKNOWLEDGED'
         deadline = time.monotonic() + 2
         while service.worker.active and time.monotonic() < deadline:
@@ -297,6 +405,43 @@ def test_rehearsal_restart_cannot_acknowledge_an_orphaned_offer(tmp_path):
         assert restarted.read_snapshot('mission')['run']['status']=='ABORTED'
         assert restarted.approval.current('mission') is None
     finally:restarted.close()
+
+
+def test_graceful_idle_bare_live_restart_remains_active(tmp_path):
+    config = bootstrap.SessionConfig(data_dir=tmp_path, mode='LIVE')
+    service = bootstrap.build_service(config)
+    assert service.read_snapshot('mission')['run']['status'] == 'ACTIVE'
+    service.close()
+
+    restarted = bootstrap.build_service(config)
+    try:
+        snapshot = restarted.read_snapshot('mission')
+        assert snapshot['run']['status'] == 'ACTIVE'
+        assert snapshot['readiness']['state'] == 'NOT_READY'
+        assert restarted.approval.current('mission') is None
+    finally:
+        restarted.close()
+
+
+def test_live_restart_with_interrupted_proposal_requires_recovery(live_config):
+    from sentinel.ui.approval import ApprovalBroker
+    from sentinel.ui.store import UIStore
+
+    store = UIStore.open(live_config.data_dir / 'ui.sqlite')
+    store.ensure_run('interrupted-session', 'mission', 'LIVE')
+    ApprovalBroker(store).offer(
+        'mission', {'arguments': {'option_id': 'RAIL_A'},
+                    'description': 'Interrupted proposal'}, 'corr')
+
+    restarted = bootstrap.build_service(live_config)
+    try:
+        assert (restarted.read_snapshot('mission')['run']['status'] ==
+                'RECOVERY_REQUIRED')
+        assert restarted.approval.current('mission') is None
+    finally:
+        restarted.close()
+
+
 def test_live_coverage_mismatch_composes_inert_planning(live_config, monkeypatch):
     from sentinel.ui import readiness
     monkeypatch.setattr(readiness, 'check_tag_map_matches_site',

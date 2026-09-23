@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {validateMission} from '../../examples/survey-console/mission-contract.mjs';
-import {toSurveyView} from '../../examples/survey-console/view-model.mjs';
+import {liveReadinessModel,toSurveyView} from '../../examples/survey-console/view-model.mjs';
 const fixture=JSON.parse(readFileSync(new URL('../../fixtures/mission-control/contract-v2.json',import.meta.url)));
 test('strict public contract rejects unknown and cross-run fields',()=>{
  assert.equal(validateMission(fixture),fixture);
@@ -44,7 +44,19 @@ test('schema v3 readiness is optional, closed and ordered',()=>{
  }
 });
 
-test('older schema v3 snapshots receive a safe readiness default',()=>{
- const view=toSurveyView(validateMission(structuredClone(fixture)));
- assert.deepEqual(view.readiness,{state:'ACTIVE',checks:[],command_template:''});
+test('older schema v3 snapshots fail closed only for Live mode',()=>{
+ const rehearsal=toSurveyView(validateMission(structuredClone(fixture)));
+ assert.deepEqual(rehearsal.readiness,{state:'ACTIVE',checks:[],command_template:''});
+ assert.equal(liveReadinessModel(rehearsal).visible,false);
+
+ const legacyLive=structuredClone(fixture);
+ legacyLive.session.mode='LIVE';
+ legacyLive.source.mode='LIVE';
+ legacyLive.source.kind='LIVE';
+ const live=toSurveyView(validateMission(legacyLive));
+ assert.deepEqual(live.readiness,{state:'NOT_READY',checks:[],command_template:''});
+ assert.deepEqual(liveReadinessModel(live),{
+  visible:true,armed:false,label:'LIVE · UNARMED · NOT_READY',
+  failed:[],command_template:'',
+ });
 });

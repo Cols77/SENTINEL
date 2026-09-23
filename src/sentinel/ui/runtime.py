@@ -1,4 +1,6 @@
 """Shared execution of the production survey loop; boundary adapters select mode."""
+from pathlib import Path
+import sqlite3
 from threading import RLock
 from sentinel.survey.store import SurveyStore
 from sentinel.survey.loop import run_survey, get_results
@@ -217,26 +219,40 @@ class SurveyRuntime:
         return {'mode': mode, 'source': {'F':'RULES','E':'AGENT','J':'JUDGE'}[mode], 'escalation_reason': None}
 
     def facts(self, run_id):
-        store=SurveyStore.open(self.survey_db)
+        empty_results = dict(counts={}, class_counts=[], uncertain_objects=[],
+                             unanalysed=0, flights_used=0,
+                             flown_option_ids=[])
+        empty = dict(run=None, sweeps=[], frames=[], sightings=[], objects=[],
+                     counts={}, report=None, results=empty_results)
+        database_path = Path(self.survey_db)
+        if not database_path.is_file():
+            return empty
+        store = None
         try:
+            uri = database_path.resolve().as_uri() + '?mode=ro'
+            connection = sqlite3.connect(uri, uri=True, timeout=1.0)
+            connection.row_factory = sqlite3.Row
+            store = SurveyStore(connection)
             facts = SurveyReadModel(store).read(run_id)
             if not self.adapters.options:
-                empty_results = dict(counts={}, class_counts=[], uncertain_objects=[],
-                                     unanalysed=0, flights_used=0,
-                                     flown_option_ids=[])
                 if facts is None:
-                    return dict(run=None, sweeps=[], frames=[], sightings=[], objects=[],
-                                counts={}, report=None, results=empty_results)
+                    return empty
                 facts['results'] = empty_results
                 return facts
             if facts is None:
-                return dict(run=None, sweeps=[], frames=[], sightings=[], objects=[],
-                            counts={}, report=None,
-                            results=get_results(store, run_id, self.adapters.options))
+                return {**empty,
+                        'results': get_results(store, run_id,
+                                               self.adapters.options)}
             # Browser schema v3 still consumes derived decision facts. The
             # backend read model remains the sole source for stored entities;
             # this compatibility view contains only computed review values.
             facts['results'] = get_results(store, run_id, self.adapters.options)
             return facts
+        except (OSError, sqlite3.Error):
+            if (self.adapters.source_kind == 'LIVE' and
+                    run_id not in self.state):
+                return empty
+            raise
         finally:
-            store.connection.close()
+            if store is not None:
+                store.connection.close()
