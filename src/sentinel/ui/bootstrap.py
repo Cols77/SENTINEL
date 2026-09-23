@@ -33,6 +33,8 @@ class SessionConfig:
     start_x_cm: int | None = None
     start_y_cm: int | None = None
     sr063_amended: bool = False
+    site_profiles_path: Path | None = None
+    site_profile_id: str = 'CanningSt'
 
 
 def validate_live_startup(config):
@@ -53,6 +55,20 @@ def build_service(config):
         adapters=build_rehearsal_adapters(config.scenario_path,config.artifact_root or config.data_dir/'images')
         readiness=None
     elif config.mode == 'LIVE':
+        from .site_profiles import (SiteProfile, apply_site_profile,
+                                    load_site_profiles, validate_site_profile)
+        if config.site_profiles_path is not None:
+            profile = load_site_profiles(config.site_profiles_path).require(
+                config.site_profile_id)
+            config = apply_site_profile(config, profile)
+        else:
+            validate_site_profile(SiteProfile(
+                id='Legacy', label='Legacy', enabled=True,
+                setup_status='Ready', site_path=config.site_path,
+                tag_map_path=config.tag_map_path, pose_db=config.pose_db,
+                pose_mode=config.pose_mode, surface_z_cm=config.surface_z_cm,
+                start_x_cm=config.start_x_cm, start_y_cm=config.start_y_cm,
+                local_ip=config.local_ip))
         readiness=validate_live_startup(config)
         adapters=build_live_adapters(config,readiness)
     else:

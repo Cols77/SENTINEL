@@ -14,6 +14,8 @@ def parse_config(argv=None):
     for flag in ('artifact-root','ui-db','survey-db','pose-db','provider-profile'):
         parser.add_argument('--'+flag,type=Path)
     parser.add_argument('--site',dest='site_path',type=Path)
+    parser.add_argument('--site-profiles',dest='site_profiles_path',type=Path)
+    parser.add_argument('--site-profile',dest='site_profile_id',default='CanningSt')
     parser.add_argument('--tag-map',dest='tag_map_path',type=Path)
     parser.add_argument('--pose',dest='pose_mode',choices=['off','passive','reanchor'],default='off')
     parser.add_argument('--detector',dest='detector_name',
@@ -29,6 +31,9 @@ def parse_config(argv=None):
     parser.add_argument('--start-y-cm',type=int)
     parser.add_argument('--sr063-amended',action='store_true')
     args=vars(parser.parse_args(argv));args['mode']=args['mode'].upper()
+    if args['mode'] == 'LIVE' and args['site_profiles_path'] is None:
+        args['site_profiles_path'] = (Path(__file__).resolve().parents[3] /
+                                     'config/mission-control-sites.v1.json')
     if args['detector_name'] is None:
         args['detector_name']='gemini-openrouter' if args['mode']=='LIVE' else 'scripted'
     return SessionConfig(**args)

@@ -5,7 +5,6 @@ import sqlite3
 import time
 import pytest
 from sentinel.ui import bootstrap
-from sentinel.ui.models import validate_snapshot
 from sentinel.survey.store import SurveyStore
 from sentinel.survey.consent import record_consent
 
@@ -72,7 +71,7 @@ def live_config(tmp_path, monkeypatch):
         authorise_paid_calls=True,
         location='lab',consent_date='2026-09-21',local_ip='192.168.10.2',surface_z_cm=50,start_x_cm=250,start_y_cm=190)
 
-def test_bare_live_host_is_inert_and_never_falls_back(tmp_path, monkeypatch):
+def test_bare_live_host_refuses_before_adapter_construction(tmp_path, monkeypatch):
     from sentinel.ui import live
     calls = []
     monkeypatch.setattr(bootstrap, 'build_rehearsal_adapters',
@@ -81,19 +80,11 @@ def test_bare_live_host_is_inert_and_never_falls_back(tmp_path, monkeypatch):
                         lambda config: calls.append(('client', config)))
     monkeypatch.setattr(live, 'check_emergency_transport',
                         lambda config: calls.append(('emergency', config)))
-    service = bootstrap.build_service(
-        bootstrap.SessionConfig(data_dir=tmp_path, mode='LIVE'))
-    try:
-        snapshot = service.read_snapshot('mission')
-        validate_snapshot(snapshot)
-        assert service.session()['mode'] == 'LIVE'
-        assert snapshot['source']['kind'] == 'LIVE'
-        assert snapshot['mission']['route'] == []
-        assert snapshot['mission']['envelope'] is None
-        assert not service.worker.active
-        assert calls == []
-    finally:
-        service.close()
+    with pytest.raises(bootstrap.StartupError,
+                       match='^SITE_PROFILE_INCOMPLETE$'):
+        bootstrap.build_service(
+            bootstrap.SessionConfig(data_dir=tmp_path, mode='LIVE'))
+    assert calls == []
 
 
 def test_invalid_consent_database_is_failed_readiness_without_file_mutation(
@@ -434,8 +425,8 @@ def test_rehearsal_restart_cannot_acknowledge_an_orphaned_offer(tmp_path):
     finally:restarted.close()
 
 
-def test_graceful_idle_bare_live_restart_remains_active(tmp_path):
-    config = bootstrap.SessionConfig(data_dir=tmp_path, mode='LIVE')
+def test_graceful_idle_configured_live_restart_remains_active(live_config):
+    config = live_config
     service = bootstrap.build_service(config)
     assert service.read_snapshot('mission')['run']['status'] == 'ACTIVE'
     service.close()
@@ -444,7 +435,7 @@ def test_graceful_idle_bare_live_restart_remains_active(tmp_path):
     try:
         snapshot = restarted.read_snapshot('mission')
         assert snapshot['run']['status'] == 'ACTIVE'
-        assert snapshot['readiness']['state'] == 'NOT_READY'
+        assert snapshot['readiness']['checks'][0]['ready'] is True
         assert restarted.approval.current('mission') is None
     finally:
         restarted.close()
@@ -469,14 +460,10 @@ def test_live_restart_with_interrupted_proposal_requires_recovery(live_config):
         restarted.close()
 
 
-def test_live_coverage_mismatch_composes_inert_planning(live_config, monkeypatch):
-    from sentinel.ui import readiness
-    monkeypatch.setattr(readiness, 'check_tag_map_matches_site',
+def test_live_coverage_mismatch_refuses_before_service_creation(live_config, monkeypatch):
+    from sentinel.ui import site_profiles
+    monkeypatch.setattr(site_profiles, 'check_tag_map_matches_site',
                         lambda *args: (_ for _ in ()).throw(ValueError('mismatch')))
-    service = bootstrap.build_service(live_config)
-    try:
-        assert service.readiness.state == 'NOT_READY'
-        assert service.adapters.options == ()
-        assert service.adapters.source_kind == 'LIVE'
-    finally:
-        service.close()
+    with pytest.raises(bootstrap.StartupError,
+                       match='^INVALID_LIVE_SITE_OR_COVERAGE$'):
+        bootstrap.build_service(live_config)
