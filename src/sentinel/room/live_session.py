@@ -53,7 +53,7 @@ from .models import (AcceptanceManifest, CapabilityProfile, GoalStatus, Terminal
 from .queries import ReadQueries
 from .site import ContingencyAssurance, RoomSite
 from .store import RoomStore
-from .supervisor import SafetySupervisor
+from .supervisor import SafetySupervisor, calibration_hashes
 
 #: Upper bound on the operator request text handed to goal compilation.
 REQUEST_LIMIT_BYTES = 4096
@@ -165,6 +165,59 @@ def load_command_limits(path: str | Path | None) -> CommandLimits:
         raise LiveSessionError(f"command limits {str(path)!r} are invalid: {exc}") from exc
 
 
+@dataclass(frozen=True)
+class FlightBinding:
+    """Task B item 5: every file one capability grant is bound to, loaded once.
+
+    ``sha256s`` is the single binding set: the canonical hash of each
+    calibration profile file plus ``calibration_hashes`` of the exact
+    energy/drift/limits/site this session flies with (which already covers
+    the site document and its tag map). One grant carrying exactly this set
+    satisfies both ``capabilities.admit_live`` (against the manifest's
+    ``profile_sha256s``) and ``SafetySupervisor.validate_bindings``.
+    """
+
+    site: RoomSite
+    drift_profile: DriftProfile
+    energy_profile: EnergyProfile
+    limits: CommandLimits
+    calibration_profiles: tuple
+    landing_upper_bound_s: float = 10.0
+
+    @property
+    def calibration_sha256s(self) -> tuple[str, ...]:
+        from . import calibration
+        return tuple(sorted(calibration.canonical_profile_sha256(p) for p in self.calibration_profiles))
+
+    @property
+    def flight_sha256s(self) -> tuple[str, ...]:
+        return calibration_hashes(self.energy_profile, self.drift_profile, self.limits, self.site,
+                                  self.landing_upper_bound_s)
+
+    @property
+    def sha256s(self) -> tuple[str, ...]:
+        return tuple(sorted({*self.calibration_sha256s, *self.flight_sha256s}))
+
+
+def load_flight_binding(*, site_path, drift_profile_path, energy_profile_path, command_limits_path=None,
+                        profile_paths=(), landing_upper_bound_s: float = 10.0) -> FlightBinding:
+    """Load the profile files a grant binds to, once, refusing any bad file."""
+    from . import calibration
+    from .site import parse_room_site
+    try:
+        site = parse_room_site(json.loads(Path(site_path).read_text(encoding="utf-8")))
+    except (OSError, ValueError) as exc:
+        raise LiveSessionError(f"site {str(site_path)!r} could not be loaded: {exc}") from exc
+    profiles = []
+    for path in profile_paths:
+        try:
+            profiles.append(calibration.load_profile(path))
+        except (calibration.CalibrationError, OSError) as exc:
+            raise LiveSessionError(f"profile file {str(path)!r} could not be loaded: {exc}") from exc
+    return FlightBinding(site, load_drift_profile(drift_profile_path), load_energy_profile(energy_profile_path),
+                         load_command_limits(command_limits_path), tuple(profiles), landing_upper_bound_s)
+
+
 def session_capabilities(registry, manifest) -> CapabilityProfile:
     """The registry grants this run's session row carries.
 
@@ -213,6 +266,12 @@ def adopt_assurances(store: RoomStore, *, session_id: str, clock_domain_id: str,
         store.append_contingency_assurance(copy, expected_version=store.session_version(session_id))
         adopted.append(copy)
     return tuple(adopted)
+
+
+def _calibration_profile_sha256s(profiles) -> tuple[str, ...]:
+    from . import calibration
+    return tuple(sorted(calibration.canonical_profile_sha256(p) for p in profiles
+                        if isinstance(p, calibration.CalibrationProfile)))
 
 
 def _pose_profile(profiles):
@@ -312,6 +371,9 @@ def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, ca
         capability=manifest.requested_capability, acceptance_manifest=acceptance_manifest_for(manifest),
         landing_upper_bound_s=landing_upper_bound_s, recovery=recovery,
         mapped_heading_tag_ids=tuple(stack.mapped_heading_tag_ids) if recovery is not None else (),
+        # Task B item 5: the one grant also binds the calibration profile
+        # files this session was admitted with.
+        profile_sha256s=_calibration_profile_sha256s(calibration_profiles),
     )
     try:
         supervisor.validate_bindings(site)

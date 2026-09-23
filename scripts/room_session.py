@@ -47,6 +47,7 @@ from sentinel.emergency import EmergencyHotkey
 from sentinel.room import artifacts, calibration, capabilities, connectivity, live_session, live_stack, replay
 from sentinel.room.artifacts import ArtifactError, ManifestError, SessionManifest
 from sentinel.room.site import ContingencyTrigger, RoomSite, parse_room_site
+from sentinel.room.supervisor import calibration_hashes
 from sentinel.survey.live_detect import LiveDetectRefused, check_gates as check_consent_gates
 
 #: The count-and-return operator's default request text (Plan 06 ruling): the
@@ -156,6 +157,37 @@ def _missing_gates(manifest: SessionManifest, *, registry_path: str, now: dateti
     return tuple(gates)
 
 
+def _preview_bindings(args: argparse.Namespace) -> tuple[tuple[str, ...], str, str]:
+    """The manifest's profile/site/tag-map bindings for preview.
+
+    Task B item 5: given the flight files (``--site``, ``--drift-profile``,
+    ``--energy-profile``, optional ``--command-limits`` and
+    ``--profile-file``), the profile set is the single grant's binding set
+    (``live_session.FlightBinding.sha256s``) and the site/tag-map hashes come
+    from the site document -- the same files ``room_capability.py
+    issue-trial`` bound the grant to. Raw ``--profile``/``--site-sha256``/
+    ``--tag-map-sha256`` values still work and must agree with the files.
+    """
+    profiles = set(args.profile)
+    site_sha256, tag_map_sha256 = args.site_sha256, args.tag_map_sha256
+    files = (args.site, args.drift_profile, args.energy_profile)
+    if any(files) or args.profile_file or args.command_limits:
+        if not all(files):
+            raise GateError("--site, --drift-profile and --energy-profile bind the grant together")
+        binding = live_session.load_flight_binding(
+            site_path=args.site, drift_profile_path=args.drift_profile, energy_profile_path=args.energy_profile,
+            command_limits_path=args.command_limits, profile_paths=tuple(args.profile_file))
+        profiles |= set(binding.sha256s)
+        for name, value, derived in (("--site-sha256", site_sha256, binding.site.cube_site_sha256),
+                                     ("--tag-map-sha256", tag_map_sha256, binding.site.tag_map_sha256)):
+            if value is not None and value != derived:
+                raise GateError(f"{name} does not match --site")
+        site_sha256, tag_map_sha256 = binding.site.cube_site_sha256, binding.site.tag_map_sha256
+    if site_sha256 is None or tag_map_sha256 is None:
+        raise GateError("--site-sha256 and --tag-map-sha256 (or --site) are required")
+    return tuple(sorted(profiles)), site_sha256, tag_map_sha256
+
+
 def _cmd_preview(args: argparse.Namespace) -> int:
     try:
         _check_capability_available(args.capability)
@@ -180,14 +212,19 @@ def _cmd_preview(args: argparse.Namespace) -> int:
         return 2
     mode = _resolve_mode(target_mode=args.target_mode, trial_protocol=args.trial_protocol)
     try:
+        profile_sha256s, site_sha256, tag_map_sha256 = _preview_bindings(args)
+    except (GateError, live_session.LiveSessionError) as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+    try:
         manifest = SessionManifest(
             schema_version=artifacts.SCHEMA_VERSION, run_id=args.run_id, created_at=now.isoformat(),
             mode=mode, code_revision=args.code_revision, code_dirty=args.code_dirty,
             integration_revision=args.integration_revision, requested_capability=args.capability,
             capability_grant_sha256=args.capability_grant_sha256, capability_grant_state=args.capability_grant_state,
             request_revision=args.request_revision, goal_parser_revision=args.goal_parser_revision,
-            site_sha256=args.site_sha256, tag_map_sha256=args.tag_map_sha256, camera_sha256=args.camera_sha256,
-            profile_sha256s=tuple(sorted(args.profile)), aircraft_id=args.aircraft_id,
+            site_sha256=site_sha256, tag_map_sha256=tag_map_sha256, camera_sha256=args.camera_sha256,
+            profile_sha256s=profile_sha256s, aircraft_id=args.aircraft_id,
             firmware_version=args.firmware_version, requested_jev_identity=args.requested_jev_identity,
             resolved_jev_identity="UNVERIFIED", requested_detector_identity=args.requested_detector_identity,
             resolved_detector_identity="UNVERIFIED", max_duration_s=args.max_duration_s,
@@ -247,9 +284,14 @@ def _cmd_preview(args: argparse.Namespace) -> int:
     return 0
 
 
-def _check_profiles(manifest: SessionManifest, profile_files: list[str], *, grant_state: str) -> tuple:
-    """Verify every declared profile has an admissible file; return the loaded profiles."""
-    declared = set(manifest.profile_sha256s)
+def _check_profiles(manifest: SessionManifest, profile_files: list[str], *, grant_state: str,
+                    covered: set[str] = frozenset()) -> tuple:
+    """Verify every declared profile has an admissible file; return the loaded profiles.
+
+    ``covered`` (Task B item 5) are declared hashes already accounted for by
+    the flight calibration files (``calibration_hashes`` of the loaded
+    energy/drift/limits/site), so they need no ``--profile-file``."""
+    declared = set(manifest.profile_sha256s) - set(covered)
     if not declared:
         return ()
     seen = set()
@@ -429,7 +471,6 @@ def _cmd_live(
             print(f"refused: {exc}", file=sys.stderr)
             return 2
         try:
-            calibration_profiles = _check_profiles(manifest, args.profile_file, grant_state=winning_grant.state)
             # Fix round 1 (Q6): site-assurance freshness is a monotonic-clock-domain
             # comparison (assured_monotonic_ms/expires_monotonic_ms) -- evaluate it
             # against the injected monotonic `clock`, the same one connectivity below
@@ -439,6 +480,13 @@ def _cmd_live(
                 args.site, args.assurance, manifest=manifest, clock_domain_id=args.clock_domain_id,
                 now_monotonic_ms=int(clock() * 1000))
             drift_profile, energy_profile, limits = _load_flight_calibration(args)
+            # Task B item 5: one grant binds the calibration profile files AND the
+            # exact energy/drift/limits/site flown with; the manifest's declared
+            # profile_sha256s may therefore include those flight hashes, which the
+            # flight files just loaded (not a --profile-file) account for.
+            calibration_profiles = _check_profiles(
+                manifest, args.profile_file, grant_state=winning_grant.state,
+                covered=set(calibration_hashes(energy_profile, drift_profile, limits, site)))
             tag_map = _load_bound_tag_map(args, manifest) if client_factory is None else None
         except GateError as exc:
             print(f"refused: {exc}", file=sys.stderr)
@@ -636,8 +684,15 @@ def build_parser() -> argparse.ArgumentParser:
     preview_parser.add_argument("--integration-revision", required=True)
     preview_parser.add_argument("--request-revision", required=True)
     preview_parser.add_argument("--goal-parser-revision", required=True)
-    preview_parser.add_argument("--site-sha256", required=True)
-    preview_parser.add_argument("--tag-map-sha256", required=True)
+    preview_parser.add_argument("--site-sha256", default=None)
+    preview_parser.add_argument("--tag-map-sha256", default=None)
+    # Task B item 5: the flight files one grant binds; preview derives the
+    # manifest's profile_sha256s and site/tag-map hashes from them.
+    preview_parser.add_argument("--site", default=None)
+    preview_parser.add_argument("--drift-profile", default=None)
+    preview_parser.add_argument("--energy-profile", default=None)
+    preview_parser.add_argument("--command-limits", default=None)
+    preview_parser.add_argument("--profile-file", action="append", default=[])
     preview_parser.add_argument("--camera-sha256", required=True)
     preview_parser.add_argument("--aircraft-id", required=True)
     preview_parser.add_argument("--firmware-version", required=True)

@@ -855,22 +855,26 @@ def test_live_default_flight_stack_is_built_with_the_manifests_max_duration_s(tm
 
 
 def test_live_full_flight_refuses_without_a_matching_profile_file(tmp_path, capsys):
-    site_sha256, aircraft_id = _hash("site"), "aircraft-1"
-    profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
-    profile_hash = calibration.canonical_profile_sha256(profile)
-    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
-                            profile_sha256s=(profile_hash,))
+    # Task B item 5: the profile gate now runs after the site and flight
+    # calibration files load (their hashes are part of the one grant's
+    # binding), so this supplies them and omits only the --profile-file.
+    site = live_fakes.fixture_site()
+    binding, flags, profile_path = _flight_files(tmp_path, site)
+    grant = _promoted_grant(capability="count_return", site_sha256=site.cube_site_sha256,
+                            aircraft_id=live_fakes.AIRCRAFT_ID, profile_sha256s=binding.sha256s)
     _registry_with_grant(tmp_path, grant)
     manifest_path, digest = _write_manifest(tmp_path, **{
-        "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
+        "--capability-grant-sha256": grant.grant_sha256, "--profile": list(binding.sha256s),
+        "--site-sha256": site.cube_site_sha256, "--tag-map-sha256": site.tag_map_sha256,
     })
 
     def forbidden():
         raise AssertionError("must never reach connectivity when the profile gate refuses")
 
-    argv = _live_argv(manifest_path, digest, tmp_path, **{
-        "__flags__": ["--execute", *_consent_flags(tmp_path)],
-    })
+    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path,
+                           extra_flags=flags[2:8], site_path=tmp_path / "site.json")
+    index = argv.index("--profile-file")
+    del argv[index:index + 2]
     exit_code = cli.main(argv, drone_probe=forbidden, provider_probe=forbidden)
     err = capsys.readouterr().err
     assert exit_code == 2
@@ -1336,3 +1340,138 @@ def test_connectivity_check_rejects_invalid_bounds():
         connectivity.check(drone_probe=_fake_probe(), provider_probe=_fake_probe(), max_age_s=0, timeout_s=1.0)
     with pytest.raises(connectivity.ConnectivityError):
         connectivity.check(drone_probe=_fake_probe(), provider_probe=_fake_probe(), max_age_s=1.0, timeout_s=-1)
+
+
+# ---------------------------------------------------------------------------
+# Task B item 5: one grant per capability
+# ---------------------------------------------------------------------------
+
+
+def _flight_files(tmp_path, site, *, profile_state="PROMOTED"):
+    from sentinel.room import live_session
+    site_path = tmp_path / "site.json"
+    site_path.write_text(json.dumps(room_site_document(site)), encoding="utf-8")
+    profile = replace(_promoted_profile(site_sha256=site.cube_site_sha256, aircraft_id=live_fakes.AIRCRAFT_ID),
+                      state=profile_state, holdout_run_ids=("h",) if profile_state == "PROMOTED" else ())
+    profile_path = tmp_path / "profile.json"
+    calibration.write_profile(profile_path, profile)
+    drift_path, energy_path, limits_path = tmp_path / "drift.json", tmp_path / "energy.json", tmp_path / "limits.json"
+    drift_path.write_text(json.dumps(asdict(live_fakes.drift_profile())), encoding="utf-8")
+    energy_path.write_text(json.dumps(asdict(live_fakes.energy_profile(site))), encoding="utf-8")
+    limits_path.write_text(json.dumps({"trim_rounds": 0, "localise": False}), encoding="utf-8")
+    binding = live_session.load_flight_binding(
+        site_path=site_path, drift_profile_path=drift_path, energy_profile_path=energy_path,
+        command_limits_path=limits_path, profile_paths=(profile_path,))
+    flags = ["--site", str(site_path), "--drift-profile", str(drift_path), "--energy-profile", str(energy_path),
+             "--command-limits", str(limits_path), "--profile-file", str(profile_path)]
+    return binding, flags, profile_path
+
+
+def test_one_binding_set_covers_the_profile_file_and_the_flight_calibrations(tmp_path):
+    from sentinel.room.supervisor import calibration_hashes
+    site = live_fakes.fixture_site()
+    binding, _, profile_path = _flight_files(tmp_path, site)
+    profile_hash = calibration.canonical_profile_sha256(calibration.load_profile(profile_path))
+    flight = calibration_hashes(live_fakes.energy_profile(site), live_fakes.drift_profile(),
+                                live_fakes.command_limits(), site)
+    assert binding.sha256s == tuple(sorted({profile_hash, *flight}))
+
+
+def test_issue_trial_binds_the_profile_files_once_and_preview_declares_the_same_set(tmp_path, capsys):
+    import scripts.room_capability as capability_cli
+    site = live_fakes.fixture_site()
+    binding, flags, _ = _flight_files(tmp_path, site, profile_state="CALIBRATION")
+    registry_path = tmp_path / "registry.json"
+    assert capability_cli.main(["init", "--registry", str(registry_path)]) == 0
+    capsys.readouterr()
+    assert capability_cli.main([
+        "issue-trial", "--capability", "count_return", "--trial-protocol", "l3-canningst",
+        "--aircraft-id", live_fakes.AIRCRAFT_ID, "--evidence-destination", "runs/l3",
+        "--expires-at", "2099-01-01T00:00:00+00:00", "--session-id", "run-0001",
+        "--registry", str(registry_path), *flags]) == 0
+    grant_sha256 = capsys.readouterr().out.strip()
+    grant, = capabilities.load_registry(registry_path).grants
+    assert grant.grant_sha256 == grant_sha256 and grant.state == "TRIAL"
+    assert tuple(sorted(grant.profile_sha256s)) == binding.sha256s
+    assert grant.site_sha256 == site.cube_site_sha256
+
+    manifest_out = tmp_path / "manifest.json"
+    argv = _preview_argv(tmp_path, **{"--capability-grant-sha256": grant_sha256, "--capability-grant-state": "TRIAL",
+                                      "--consent-reference": ["consent-1"],
+                                      "__flags__": ["--manifest-out", str(manifest_out), "--trial-protocol",
+                                                    "l3-canningst", "--evidence-destination", "runs/l3", *flags]})
+    argv = [value for index, value in enumerate(argv)
+            if value not in ("--site-sha256", "--tag-map-sha256")
+            and argv[index - 1] not in ("--site-sha256", "--tag-map-sha256")]
+    assert cli.main(argv) == 0
+    err = capsys.readouterr().err
+    manifest = artifacts.parse_manifest(manifest_out.read_bytes())
+    assert manifest.profile_sha256s == binding.sha256s
+    assert (manifest.site_sha256, manifest.tag_map_sha256) == (site.cube_site_sha256, site.tag_map_sha256)
+    # The one TRIAL grant admits this acceptance manifest: no missing capability gate.
+    assert "capability admission" not in err
+
+
+def test_issue_trial_refuses_a_partial_set_of_flight_files(tmp_path, capsys):
+    import scripts.room_capability as capability_cli
+    site = live_fakes.fixture_site()
+    _, flags, _ = _flight_files(tmp_path, site)
+    registry_path = tmp_path / "registry.json"
+    capability_cli.main(["init", "--registry", str(registry_path)])
+    capsys.readouterr()
+    exit_code = capability_cli.main([
+        "issue-trial", "--capability", "count_return", "--trial-protocol", "p", "--aircraft-id", "a",
+        "--evidence-destination", "d", "--expires-at", "2099-01-01T00:00:00+00:00", "--session-id", "run-0001",
+        "--registry", str(registry_path), *flags[:2]])
+    assert exit_code == 2
+    assert "bind the grant together" in capsys.readouterr().err
+
+
+def test_promote_refuses_profile_files_that_are_not_the_trial_binding(tmp_path, capsys):
+    import scripts.room_capability as capability_cli
+    site = live_fakes.fixture_site()
+    _, flags, _ = _flight_files(tmp_path, site, profile_state="CALIBRATION")
+    registry_path = tmp_path / "registry.json"
+    capability_cli.main(["init", "--registry", str(registry_path)])
+    capability_cli.main(["issue-trial", "--capability", "count_return", "--trial-protocol", "p",
+                         "--aircraft-id", live_fakes.AIRCRAFT_ID, "--evidence-destination", "d",
+                         "--expires-at", "2099-01-01T00:00:00+00:00", "--session-id", "run-0001",
+                         "--registry", str(registry_path), *flags])
+    trial = capsys.readouterr().out.strip().splitlines()[-1]
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"trial_grant_sha256": trial, "evidence_ids": ["ev-1"], "passed": True}),
+                     encoding="utf-8")
+    other_limits = tmp_path / "other-limits.json"
+    other_limits.write_text(json.dumps({"trim_rounds": 0, "localise": False, "dead_band_cm": 5}), encoding="utf-8")
+    changed = [other_limits.as_posix() if value.endswith("limits.json") else value for value in flags]
+    exit_code = capability_cli.main(["promote", "--registry", str(registry_path), "--trial-grant-sha256", trial,
+                                     "--evidence-index", str(index), "--expires-at", "2099-01-01T00:00:00+00:00",
+                                     "--now", NOW, *changed])
+    assert exit_code == 2 and "not the TRIAL grant's binding" in capsys.readouterr().err
+    assert capability_cli.main(["promote", "--registry", str(registry_path), "--trial-grant-sha256", trial,
+                                "--evidence-index", str(index), "--expires-at", "2099-01-01T00:00:00+00:00",
+                                "--now", NOW, *flags]) == 0
+
+
+def test_live_full_flight_takes_off_under_one_grant_bound_to_every_profile_file(tmp_path, capsys):
+    site = live_fakes.fixture_site()
+    binding, flags, profile_path = _flight_files(tmp_path, site)
+    grant = _promoted_grant(capability="count_return", site_sha256=site.cube_site_sha256,
+                            aircraft_id=live_fakes.AIRCRAFT_ID, profile_sha256s=binding.sha256s)
+    capabilities.write_registry(tmp_path / "registry.json", capabilities.GrantRegistry(
+        schema_version=capabilities.SCHEMA_VERSION, grants=(grant,)))
+    manifest_path, digest = _write_manifest(tmp_path, **{
+        "--capability-grant-sha256": grant.grant_sha256, "--profile": list(binding.sha256s),
+        "--site-sha256": site.cube_site_sha256, "--tag-map-sha256": site.tag_map_sha256,
+    })
+    site_path = tmp_path / "site.json"
+    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path,
+                           extra_flags=flags[2:8], site_path=site_path)
+    stack = live_fakes.FlightStackFactory()
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         client_factory=stack, jev_factory=lambda: live_fakes.PolicyJudge("jev-vendor-x"),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    out, err = capsys.readouterr()
+    assert exit_code == 0, err
+    assert stack.executor.calls[0] == "TAKEOFF" and stack.executor.calls[-1] == "LAND"
+    assert not stack.emergencies

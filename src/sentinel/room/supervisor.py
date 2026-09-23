@@ -88,9 +88,15 @@ class SafetySupervisor:
                  clock: Callable[[], float] = time.monotonic,
                  wall_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
                  capability: str = "ADAPTIVE_FLIGHT", acceptance_manifest=None,
-                 landing_upper_bound_s: float = 10.0, recovery=None, mapped_heading_tag_ids=()):
+                 landing_upper_bound_s: float = 10.0, recovery=None, mapped_heading_tag_ids=(),
+                 profile_sha256s=()):
         if not math.isfinite(landing_upper_bound_s) or landing_upper_bound_s <= 0:
             raise ValueError("landing requires a positive calibrated upper bound")
+        #: Task B item 5: the canonical hashes of the calibration profile
+        #: files this session was admitted with. A single grant bound to
+        #: these plus ``calibration_hashes`` satisfies both the CLI's
+        #: admission and this supervisor (see ``_binding_sets``).
+        self.profile_sha256s = tuple(sorted(set(profile_sha256s)))
         self.store, self.session_id, self.site = store, session_id, site
         self.tracker, self.reserve, self.limits = tracker, reserve, limits
         self.aircraft_id, self.mode = aircraft_id, mode
@@ -144,16 +150,21 @@ class SafetySupervisor:
         grants = tuple(CapabilityGrant(**{**g, "profile_sha256s": tuple(g["profile_sha256s"]),
                                          "evidence_ids": tuple(g["evidence_ids"])}) for g in raw["grants"])
         now = self.wall_clock()
+        # Task B item 5: a grant binds either exactly these calibrations (the
+        # original flight-calibration grant) or these calibrations together
+        # with the admitted calibration profile files (the single grant the
+        # CLI's admission also accepts). Both are exact-set comparisons.
+        binding_sets = {hashes, tuple(sorted(set(hashes) | set(self.profile_sha256s)))}
         if self.mode == ExecutionMode.SIMULATION:
             admitted = next((g for g in grants if g.state == "SIMULATION_ONLY" and g.capability == self.capability
                 and g.site_sha256 == site.cube_site_sha256 and g.aircraft_id == self.aircraft_id
-                and tuple(sorted(g.profile_sha256s)) == hashes and g.evidence_ids
+                and tuple(sorted(g.profile_sha256s)) in binding_sets and g.evidence_ids
                 and g.grant_sha256 == canonical_grant_sha256(g) and g.expires_at is not None
                 and now < datetime.fromisoformat(g.expires_at.replace("Z", "+00:00"))), None)
         else:
-            admitted = next((g for g in grants if g.allows(capability=self.capability,
-                site_sha256=site.cube_site_sha256, aircraft_id=self.aircraft_id,
-                profile_sha256s=hashes, now=now, session_id=self.session_id,
+            admitted = next((g for g in grants for binding in sorted(binding_sets) if g.allows(
+                capability=self.capability, site_sha256=site.cube_site_sha256, aircraft_id=self.aircraft_id,
+                profile_sha256s=binding, now=now, session_id=self.session_id,
                 acceptance_manifest=self.acceptance_manifest)), None)
         if admitted is None:
             self.admitted_grant = None
