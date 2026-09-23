@@ -491,8 +491,9 @@ def test_legacy_command_crossing_deadline_never_fabricates_completion():
 
 
 def test_blocked_legacy_command_returns_unknown_and_retains_command_lock():
+    now = [10.0]
     entered, release = Event(), Event()
-    run, client, _ = executor()
+    run, client, _ = executor(clock=lambda: now[0])
     run.start_legacy()
 
     def sink(node):
@@ -503,6 +504,7 @@ def test_blocked_legacy_command_returns_unknown_and_retains_command_lock():
     worker, results = threaded(lambda: run.execute_legacy(plan(command(bound=.05)), sink))
     try:
         assert entered.wait(1)
+        now[0] += .1
         worker.join(1)
         assert not worker.is_alive()
         assert results[0].status == "COMMAND_COMPLETION_UNKNOWN"
@@ -658,6 +660,7 @@ def test_native_landing_watchdog_returns_unknown_without_releasing_sdk_lock(sess
 
 @pytest.mark.parametrize("cooperative", [True, False])
 def test_supervised_wait_cancels_and_discards_late_provider_results(cooperative):
+    now = [10.0]
     entered, release, cancelled, terminal = Event(), Event(), Event(), Event()
 
     def operation(cancellation):
@@ -669,10 +672,12 @@ def test_supervised_wait_cancels_and_discards_late_provider_results(cooperative)
             release.wait(2)
         return ["late candidate"]
 
-    wait = SupervisedWait()
-    thread, results = threaded(lambda: wait.run(operation, time.monotonic() + 0.05, terminal.set))
+    wait = SupervisedWait(clock=lambda: now[0])
+    thread, results = threaded(lambda: wait.run(operation, now[0] + .05, terminal.set))
     try:
-        assert entered.wait(1) and terminal.wait(1)
+        assert entered.wait(1)
+        now[0] += .1
+        assert terminal.wait(1)
         thread.join(1)
         assert not thread.is_alive()
         assert results[0].status == "DEADLINE_EXCEEDED" and results[0].value is None

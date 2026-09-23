@@ -725,7 +725,9 @@ class SafetySupervisor:
             return stop("RECOVERY_EPISODE_NOT_ADMITTED")
         action = recovery.next_action(current.request.pose, environment, ())
 
-        if action.kind in {"CONTINGENCY", "EMERGENCY"}:
+        if action.kind == "CONTINGENCY":
+            return self._recovery_contingency(action, current, executor)
+        if action.kind == "EMERGENCY":
             return stop(action.reason)
         deadline = self.clock() + action.upper_bound_s
         if action.kind != "STATIONARY_BURST":
@@ -792,6 +794,40 @@ class SafetySupervisor:
         result = CheckpointOutcome("COMPLETED" if accepted.accepted else "RECOVERY_PENDING", (), (), None,
                                    self.tracker.health.position, True)
         self._record_completion(result, current, event, executor)
+        return result
+
+    def _recovery_contingency(self, action, current, executor):
+        """A recovery ID selects a policy; fresh descent admission authorizes it."""
+        current = self.prepare(snapshot_version=self.store.session_version(self.session_id), fallback=current)
+        eligible = None
+        if (action.contingency_id is not None and current.reason not in {
+                "SITE_OR_CAPABILITY_INVALID", "TELEMETRY_INVALID", "TELEMETRY_UNAVAILABLE",
+                "LOCALIZATION_LOST", "SUPERVISION_FAILED"}):
+            try:
+                now = self.clock()
+                landing = self._landing_forecast(current.request.pose, now)
+                descent_energy = self._landing_energy(copy(self.reserve), current.request)
+                components = dict(current.energy.components)
+                components.update(contingency_landing_s=self.landing_upper_bound_s,
+                    contingency_landing_cost_pct=descent_energy.action_cost_pct,
+                    contingency_available_pct=descent_energy.current_pct)
+                current = replace(current, pose_forecast=landing,
+                    energy=replace(current.energy, components=tuple(components.items())))
+                eligible = admit_terminal_contingency(self.site, self._assurances(),
+                    contingency_id=action.contingency_id, trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE,
+                    session_id=self.session_id, clock_domain_id=self.clock_domain_id,
+                    now_monotonic_ms=now * 1000, pose=landing.projected,
+                    energy_available=descent_energy.decision != ReserveDecision.LAND_CONTINGENCY,
+                    drift_profile=self.tracker.profile, clock_guard=copy(self.clock_guard))
+            except (TypeError, ValueError, OverflowError):
+                eligible = None
+        if eligible is not None and eligible.kind != ContingencyKind.LAND_IN_PLACE:
+            eligible = None
+        terminal = replace(current, transition="LAND_CONTINGENCY", reason=action.reason,
+            invalidates_snapshot=True, contingency_id=eligible.contingency_id if eligible is not None else None)
+        event = self._audit(terminal)
+        result = self._land(executor) if eligible is not None else self.emergency(executor)
+        self._record_completion(result, terminal, event, executor)
         return result
 
     def _begin_recovery_episode(self, current, environment):
