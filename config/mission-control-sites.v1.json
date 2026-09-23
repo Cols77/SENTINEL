@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "CanningSt",
+      "label": "Canning St",
+      "enabled": true,
+      "setup_status": "Ready",
+      "site_path": "../docs/wp5-flight1-site.json",
+      "tag_map_path": "../docs/wp5-flight3-map.json",
+      "pose_db": "../artifacts/canning-st/pose.sqlite",
+      "pose_mode": "off",
+      "surface_z_cm": 50,
+      "start_x_cm": 250,
+      "start_y_cm": 190
+    },
+    {
+      "id": "Demo",
+      "label": "Demo",
+      "enabled": false,
+      "setup_status": "Venue calibration required"
+    }
+  ]
+}

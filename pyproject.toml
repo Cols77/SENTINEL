@@ -11,6 +11,9 @@ dependencies = [
     "djitellopy==2.5.0",
     "av==14.2.0",
     "psutil>=5.9",
+    "nicegui>=3.6,<4",
+    "jsonschema>=4.23",
+    "pillow>=10",
     "httpx>=0.27",
     "opencv-contrib-python>=5.0.0.93",
 ]

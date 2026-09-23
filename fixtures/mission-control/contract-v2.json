@@ -1,0 +1,117 @@
+{
+  "schema_version": 3,
+  "session": {
+    "id": "session",
+    "mode": "REHEARSAL",
+    "startup_summary": {
+      "site_id": null,
+      "pose_mode": "off",
+      "detector_name": "scripted"
+    }
+  },
+  "run": {
+    "id": "run",
+    "request_text": "",
+    "status": "ACTIVE",
+    "phase": "REQUEST",
+    "version": 0,
+    "decision_version": 0,
+    "updated_at": "1970-01-01T00:00:00+00:00"
+  },
+  "source": {
+    "mode": "REHEARSAL",
+    "kind": "SIMULATED",
+    "freshness": "FRESH"
+  },
+  "safety": {
+    "land": {
+      "available": false,
+      "status": "UNAVAILABLE",
+      "reason": "No active runner",
+      "command_id": null
+    },
+    "emergency": {
+      "available": false,
+      "status": "UNAVAILABLE",
+      "reason": "No active runner",
+      "command_id": null
+    }
+  },
+  "chat": {
+    "messages": [],
+    "pending_command_id": null
+  },
+  "proposal": null,
+  "mission": {
+    "flights": {
+      "used": 0,
+      "max": 2
+    },
+    "sweep": null,
+    "envelope": null,
+    "route": [],
+    "active_stop_id": null,
+    "commanded_position": null,
+    "return_to_start": false,
+    "return_error_cm": null
+  },
+  "localization": {
+    "status": "UNAVAILABLE",
+    "age_ms": null,
+    "stale_after_ms": 2000,
+    "latest_report": null,
+    "recent_stream": {
+      "frames_seen": 0,
+      "reports_emitted": 0,
+      "no_tag_frames": 0,
+      "gated_frames": 0,
+      "timeouts": 0
+    },
+    "containment": "UNAVAILABLE",
+    "vertical_consistency": {
+      "status": "UNAVAILABLE",
+      "measured_m": null,
+      "expected_m": null,
+      "error_m": null,
+      "reason": "No pose observation"
+    },
+    "pose_evidence": null,
+    "map_position": null
+  },
+  "evidence": {
+    "frames": [],
+    "sightings": [],
+    "objects": [],
+    "analysis": {
+      "analysed": 0,
+      "total": 0,
+      "dropped_labels": [],
+      "unknown_labels": []
+    },
+    "provider": {
+      "name": "scripted",
+      "model": "scenario",
+      "source_kind": "SIMULATED"
+    },
+    "failures": []
+  },
+  "results": {
+    "counts": []
+  },
+  "report": {
+    "status": "ABSENT",
+    "text": null,
+    "reason": null,
+    "run_id": "run",
+    "id": null
+  },
+  "events": {
+    "watermark": 0
+  },
+  "legal_actions": [],
+  "decision": {
+    "mode": "F",
+    "source": "RULES",
+    "escalation_reason": null
+  }
+}

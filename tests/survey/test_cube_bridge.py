@@ -6,6 +6,7 @@ pose stream: no hardware, no network."""
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -148,6 +149,27 @@ def test_the_tolerance_verdict_is_carried_onto_the_frame(tmp_path):
     assert frame.tolerance == "OUTER"
 
 
+def test_cube_bridge_passes_coverage_guard_and_publishes_public_stop_facts(tmp_path):
+    calls = []
+    class Guard:
+        def verdict(self, x_cm, y_cm, z_cm):
+            calls.append((x_cm, y_cm, z_cm))
+            return SimpleNamespace(level='MARGINAL', nominal_tags=1, p95_cm=22.0,
+                                   describe=lambda: 'MARGINAL: one tag')
+    option = SweepOption("ONE_STOP", "one stop", ((150, 300),), 120, (0,), 100, 22, (), 300)
+    flight = CubeFlight(client=DryRunClient(), site=FLY_SITE, mode='dry-run', pose_mode='passive',
+                        run_id='RUN1', mission_log=tmp_path / 'mission.jsonl', start_x_cm=150,
+                        start_y_cm=250, surface_z_cm=0, burst_fn=lambda: [],
+                        sleep_fn=lambda seconds: None, coverage=Guard())
+    frames = flight.fly(option)
+    assert frames and calls and calls[-1] == (150, 300, 120)
+    log = json.loads((tmp_path / 'mission.jsonl').read_text().splitlines()[0])
+    assert log['coverage'] == 'MARGINAL'
+    assert log['coverage_reason'] == 'MARGINAL: one tag'
+    assert log['predicted_tag_count'] == 1
+    assert log['predicted_fix_error_cm'] == 22.0
+
+
 def test_delta_z_cm_is_height_minus_surface(tmp_path):
     option = SweepOption("ONE_STOP", "one stop", ((150, 300),), 120, (0,), 100, 22, (), 300)
     flight = _flight(tmp_path, pose_mode="off", surface_z_cm=17.5)
@@ -279,3 +301,48 @@ def test_a_follow_up_sweep_starts_where_the_last_one_ended_not_at_the_pad(tmp_pa
     assert (flight.start_x_cm, flight.start_y_cm) == (250, 300)
     frames = flight.fly(second)
     assert (frames[0].x_cm, frames[0].y_cm) == (250, 330)
+
+
+def test_managed_runner_registered_until_cleanup_and_stop_events(tmp_path):
+    flight=_flight(tmp_path)
+    events=[];active=[]
+    def bind(runner):active.append(runner);events.append('bind')
+    def stop(entry):
+        assert active
+        events.append(entry['waypoint'])
+    def done(runner):
+        assert runner.client._closed
+        active.remove(runner);events.append('done')
+    flight.on_runner,flight.on_runner_done,flight.on_stop=bind,done,stop
+    option=SweepOption('ONE','one',((150,300),),120,(0,),100,22,(),300)
+    assert flight.fly(option)
+    assert events==['bind','ONE_0','done'] and not active
+
+
+def test_managed_runner_safety_abort_cannot_return_success(tmp_path):
+    from sentinel.client import EmergencyAborted
+    flight=_flight(tmp_path)
+    flight.on_runner=lambda runner:runner.latch_emergency()
+    done=[];flight.on_runner_done=lambda runner:done.append(runner)
+    option=SweepOption('ONE','one',((150,300),),120,(0,),100,22,(),300)
+    with pytest.raises(EmergencyAborted):flight.fly(option)
+    assert done
+    assert 'takeoff' not in flight.client.commands
+
+
+def test_observer_managed_flight_rejects_failed_runner_without_legacy_callbacks(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import sentinel.survey.cube_bridge as bridge_module
+    class FailedRunner:
+        def __init__(self, *args, **kwargs):
+            self.client = kwargs.get('client', DryRunClient())
+        def run(self, *, confirm):
+            return SimpleNamespace(status='FAIL', error='simulated failure')
+        def check_interruption(self):
+            return None
+    monkeypatch.setattr(bridge_module, 'CubeMissionRunner', FailedRunner)
+    flight = _flight(tmp_path)
+    flight.observer = object()
+    option = SweepOption('ONE', 'one', ((150, 300),), 120, (0,), 100, 22, (), 300)
+    with pytest.raises(RuntimeError, match='FLIGHT_FAILED'):
+        flight.fly(option)

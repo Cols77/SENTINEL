@@ -33,6 +33,10 @@ from sentinel.pose.stream import _to_bgr, run_pose_stream
 from sentinel.pose.watchdog import (POLL_INTERVAL_S, PoseWatchdog, post_land_travel_cm,
                                     trip_margin_cm)
 from sentinel.runner import FlightTestRunner
+from sentinel.mission_observer import (FrameCapturedEvent, MissionObserver,
+                                        PoseEstimateEvent, PoseHealthEvent, RunnerLifecycleEvent,
+                                        StopProgressEvent, notify, evidence_summary,
+                                        pose_summary, runner_finished, runner_started)
 
 POSE_MODES = ("off", "passive", "reanchor")
 MAX_WAYPOINTS = 8
@@ -234,7 +238,9 @@ class CubeMissionRunner(FlightTestRunner):
                  watchdog_fix_fn: Callable[[], tuple[float, float] | None] | None = None,
                  land_during_move: bool = False,
                  watchdog_poll_interval_s: float = POLL_INTERVAL_S,
-                 coverage=None, **runner_kwargs) -> None:
+                 coverage=None, on_stop=None, on_pose=None, on_pose_health=None,
+                 observer: MissionObserver | None = None,
+                 **runner_kwargs) -> None:
         if pose_mode not in POSE_MODES:
             raise ValueError(f"pose_mode must be one of {POSE_MODES}, got {pose_mode!r}")
         if pose_mode != "off" and burst_fn is None and (tag_map is None or conn is None):
@@ -242,6 +248,8 @@ class CubeMissionRunner(FlightTestRunner):
         runner_kwargs["retain_video_stream"] = True
         runner_kwargs["envelope"] = site.envelope()
         super().__init__(client, mode, minimum_battery, **runner_kwargs)
+        self.on_stop,self.on_pose,self.on_pose_health=on_stop,on_pose,on_pose_health
+        self.observer = observer
         self.mission, self.site, self.pose_mode = mission, site, pose_mode
         self.tag_map, self.conn, self.run_id = tag_map, conn, run_id
         self.mission_log = Path(mission_log)
@@ -280,6 +288,26 @@ class CubeMissionRunner(FlightTestRunner):
             # the watchdog off, same as pose_mode "off".
             self._watchdog_fix_fn = None
         self._validate_mission()
+
+    def run(self, *, confirm: bool):
+        """Run with typed lifecycle telemetry layered over the legacy runner."""
+        runner_started(self.observer, self.run_id, self)
+        try:
+            notify(self.observer, RunnerLifecycleEvent(
+                run_id=self.run_id, stage="MISSION", status="STARTED", runner=self))
+            try:
+                report = super().run(confirm=confirm)
+            except Exception as exc:
+                notify(self.observer, RunnerLifecycleEvent(
+                    run_id=self.run_id, stage="MISSION", status="FAILED", message=str(exc),
+                    runner=self))
+                raise
+            notify(self.observer, RunnerLifecycleEvent(
+                run_id=self.run_id, stage="MISSION", status=report.status,
+                message=getattr(report, "error", None), runner=self))
+            return report
+        finally:
+            runner_finished(self.observer, self.run_id, self)
 
     # -- planning -----------------------------------------------------------
     def _validate_mission(self) -> None:
@@ -516,7 +544,29 @@ class CubeMissionRunner(FlightTestRunner):
         return run_pose_stream(
             _StreamHeld(self.client), self.tag_map, self.conn, run_id=self.run_id,
             max_frames=None, duration_s=BURST_MAX_S, source_kind="LIVE",
-            on_frame=lambda _frame: count["n"] < BURST_TARGET_REPORTS, on_report=on_report)
+            on_frame=lambda _frame: count["n"] < BURST_TARGET_REPORTS, on_report=on_report,
+            on_estimate=self._accept_pose,on_health=self._accept_pose_health)
+
+    def _accept_pose(self, estimate) -> None:
+        if self.on_pose:
+            try:
+                self.on_pose(estimate)
+            except Exception:
+                pass
+        notify(self.observer, PoseEstimateEvent(
+            run_id=self.run_id,
+            pose=pose_summary(estimate),
+            evidence=evidence_summary(getattr(estimate, "evidence", None)),
+            estimate=estimate))
+
+    def _accept_pose_health(self, health) -> None:
+        if self.on_pose_health:
+            try:
+                self.on_pose_health(health)
+            except Exception:
+                pass
+        notify(self.observer, PoseHealthEvent(
+            run_id=self.run_id, health=getattr(health, "__dict__", None), value=health))
 
     def _localise(self, wp: Waypoint, entry: dict) -> None:
         started = time.monotonic()
@@ -699,6 +749,13 @@ class CubeMissionRunner(FlightTestRunner):
             if path is not None:
                 self._announce_frame(wp.name, record)
             self._emit("observe", f"{wp.name}: captured at look offset {offset}")
+            notify(self.observer, FrameCapturedEvent(
+                run_id=self.run_id, image_path=record.get("path"),
+                sha256=record.get("sha256"),
+                pose={"x_cm": (entry.get("fix_cm") or entry.get("commanded_cm"))[0],
+                      "y_cm": (entry.get("fix_cm") or entry.get("commanded_cm"))[1],
+                      "z_cm": entry.get("height_cm"),
+                      "heading_deg": entry.get("heading_deg")}))
         self._look_to(0)
 
     def _announce_frame(self, stop: str, record: dict) -> None:
@@ -717,6 +774,38 @@ class CubeMissionRunner(FlightTestRunner):
         self.mission_log.parent.mkdir(parents=True, exist_ok=True)
         with self.mission_log.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry) + "\n")
+        if self.on_stop:
+            try:
+                self.on_stop(dict(entry))
+            except Exception:
+                pass
+        waypoint = entry.get("waypoint", "")
+        parts = waypoint.rsplit("_", 1)
+        commanded = entry.get("commanded_cm") or [None, None]
+        measured = entry.get("fix_cm")
+        notify(self.observer, StopProgressEvent(
+            run_id=self.run_id, stop=waypoint, status=entry.get("status"),
+            option_id=parts[0] if len(parts) == 2 and parts[1].isdigit() else waypoint,
+            stop_index=int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else None,
+            x_cm=(measured or commanded)[0], y_cm=(measured or commanded)[1],
+            payload={"option_id": parts[0] if len(parts) == 2 and parts[1].isdigit() else waypoint,
+                     "stop_index": int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else None,
+                     "x_cm": (measured or commanded)[0], "y_cm": (measured or commanded)[1],
+                     "coverage": entry.get("coverage", "MARGINAL"),
+                     "coverage_reason": entry.get("coverage_reason", "Coverage prediction unavailable"),
+                     "predicted_tag_count": entry.get("predicted_tag_count"),
+                     "predicted_fix_error_cm": entry.get("predicted_fix_error_cm"),
+                     "leg_speed_cm_s": entry.get("leg_speed_cm_s"),
+                     "trim_budget": entry.get("trim_budget", self.mission.max_trim_rounds),
+                     "trim_progress": entry.get("trim_progress", entry.get("trim_rounds_sent", 0)),
+                     "return_leg": entry.get("return_leg", False),
+                     "arrival_error_cm": entry.get("arrival_error_cm"),
+                     "tolerance_cm": entry.get("tolerance_cm", TOLERANCE_CM),
+                     "tolerance_verdict": entry.get("tolerance", "UNKNOWN") or "UNKNOWN",
+                     "tag_height_cm": entry.get("tag_height_cm"),
+                     "height_cm": entry.get("height_cm"),
+                     "vertical_mismatch_cm": entry.get("vertical_mismatch_cm"),
+                     "return_error_cm": entry.get("return_error_cm")}))
 
     def _fly_sequence(self) -> None:
         self._enter_altitude_band()
@@ -737,6 +826,7 @@ class CubeMissionRunner(FlightTestRunner):
             # heading to; "EN_ROUTE" is a sentinel this method never persists
             # as-is -- _go_to succeeding replaces it with "OPEN_LOOP" below,
             # and anything _localise reaches replaces it again.
+            predicted = self.coverage.verdict(wp.x_cm, wp.y_cm, wp.z_cm) if self.coverage is not None else None
             entry = {"waypoint": wp.name, "commanded_cm": [wp.x_cm, wp.y_cm, wp.z_cm],
                      "pose_mode": self.pose_mode, "status": "EN_ROUTE", "fix_cm": None,
                      "heading_deg": None, "heading_error_deg": None, "n": 0,
@@ -746,6 +836,14 @@ class CubeMissionRunner(FlightTestRunner):
                      "watchdog_land_error": None, "watchdog_fix_errors": 0, "height_cm": None,
                      "open_loop_fix_cm": None, "open_loop_error_cm": None, "localise_s": None,
                      "battery_pct": None, "leg_speed_cm_s": self.mission.leg_speed_cm_s,
+                     "trim_budget": self.mission.max_trim_rounds,
+                     "trim_progress": 0,
+                     "return_leg": wp.name == RETURN_NAME,
+                     "tolerance_cm": TOLERANCE_CM,
+                     "coverage": predicted.level if predicted is not None else "MARGINAL",
+                     "coverage_reason": predicted.describe() if predicted is not None else "Coverage prediction unavailable",
+                     "predicted_tag_count": predicted.nominal_tags if predicted is not None else None,
+                     "predicted_fix_error_cm": predicted.p95_cm if predicted is not None else None,
                      "trim_errors_cm": []}
             try:
                 self._go_to(wp)
@@ -773,4 +871,5 @@ class CubeMissionRunner(FlightTestRunner):
                     if self._watchdog_land_error is not None:
                         entry["watchdog_land_error"] = str(self._watchdog_land_error)
                 entry["watchdog_fix_errors"] = self._watchdog_fix_errors
+                entry["trim_progress"] = entry.get("trim_rounds_sent", 0)
                 self._append_log(entry)

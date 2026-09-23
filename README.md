@@ -4,6 +4,22 @@ SENTINEL is a supervised physical-AI demonstrator for mountain inspection. An or
 
 The complete product and database contract is defined in the [SENTINEL V0 Coherence Specification](docs/superpowers/specs/2026-09-16-sentinel-v0-coherence-spec.md), whose [indoor-alley survey design](docs/superpowers/specs/2026-09-16-sentinel-v0-indoor-alley-survey-design.md) and [WP0–WP4](docs/superpowers/specs/) specifications define the executable V0 profile. This README is only a quick-start overview.
 
+## Survey Mission Control
+
+The lecture-room survey console now has a local Rehearsal/Live host and a closed schema-v3 browser projection. Rehearsal runs the production survey loop against synthetic boundary inputs without a drone. Start `uv run python -m sentinel.ui --mode rehearsal --data-dir artifacts/my-rehearsal`, open http://127.0.0.1:8771/console/, and request “count the computers”. Every flight proposal requires an explicit approval.
+
+Text chat remains the primary control path. On browsers that expose speech recognition, an explicit hold-to-talk control can submit chat; the exact phrase “Sentinel, land now” alone starts a cancellable three-second controlled-Land countdown. The browser speech provider may process microphone audio remotely after the operator presses the control. SENTINEL does not retain recordings, listen passively, approve flights by voice, or expose voice Emergency.
+
+See [Mission Control setup and Live prerequisites](examples/survey-console/README.md), [the HTTP contract](examples/survey-console/contract.md), and [verification handoff](docs/handoffs/2026-09-21-mission-control.md). Live hardware readiness has not been established by software tests.
+
+To start Live Mission Control with the configured Canning St physical site profile:
+
+```sh
+sentinel mission-control --mode live --site-profile CanningSt --data-dir artifacts/local-live
+```
+
+Live startup refuses before binding unless the selected profile is enabled and physically valid. The profile selector can switch profiles while the session is pristine; after mission activity or evidence, it locks. See the setup guide for readiness, provider, consent, and calibration details.
+
 ## V0 demonstration loop
 
 ```text

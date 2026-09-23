@@ -1,0 +1,249 @@
+"""Pure, allowlisted readiness evaluation for an inert Live host."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date
+from contextlib import closing
+import ipaddress
+import json
+import math
+import os
+from pathlib import Path
+import socket
+import sqlite3
+from typing import Literal, TYPE_CHECKING
+
+from jsonschema import validate
+
+from sentinel.camera import TELLO_MEASURED
+from sentinel.cube.coverage import CoverageModel, check_tag_map_matches_site
+from sentinel.cube.site import load_site
+from sentinel.env_file import load_env_file
+from sentinel.pose.tagmap import load_tag_map
+from sentinel.survey.cube_bridge import envelope_from_site
+from sentinel.survey.options import generate_options
+
+if TYPE_CHECKING:
+    from .bootstrap import SessionConfig
+
+
+Capability = Literal['planning', 'flight', 'detection', 'emergency']
+ReadinessState = Literal['NOT_READY', 'READY_TO_PLAN',
+                         'READY_TO_DISPATCH', 'ACTIVE']
+
+
+@dataclass(frozen=True)
+class ReadinessCheck:
+    capability: Capability
+    ready: bool
+    reason_code: str | None
+    remediation: str | None
+
+    def public(self) -> dict:
+        return {
+            'capability': self.capability,
+            'ready': self.ready,
+            'reason_code': self.reason_code,
+            'remediation': self.remediation,
+        }
+
+
+@dataclass(frozen=True)
+class LiveReadiness:
+    state: ReadinessState
+    checks: tuple[ReadinessCheck, ...]
+    command_template: str
+    resolved_local_ip: str | None = None
+
+    def public(self) -> dict:
+        return {
+            'state': self.state,
+            'checks': [check.public() for check in self.checks],
+            'command_template': self.command_template,
+        }
+
+
+PROVIDER_ENV = {
+    'gemini-openrouter': ('OPENROUTER_API_KEY', 'GEMINI_OPENROUTER_MODEL'),
+    'gemini': ('GEMINI_API_KEY', 'GEMINI_MODEL'),
+    'moondream': ('MOONDREAM_API_KEY', 'MOONDREAM_MODEL'),
+}
+
+
+def _check(capability: Capability, ready: bool, reason_code: str,
+           remediation: str) -> ReadinessCheck:
+    return ReadinessCheck(capability, ready,
+                          None if ready else reason_code,
+                          None if ready else remediation)
+
+
+def _planning(config: SessionConfig) -> ReadinessCheck:
+    required = ('site_path', 'tag_map_path', 'pose_db', 'surface_z_cm')
+    coordinates_missing = (config.start_x_cm is None or
+                           config.start_y_cm is None)
+    if any(getattr(config, name) is None for name in required) or (
+            config.pose_mode == 'off' and coordinates_missing):
+        return _check(
+            'planning', False, 'LIVE_PLANNING_CONFIG_REQUIRED',
+            'Supply --site, --tag-map, --pose-db, --surface-z-cm and, '
+            'for --pose off, both --start-x-cm and --start-y-cm.')
+    if config.pose_mode not in {'off', 'passive', 'reanchor'}:
+        return _check('planning', False, 'INVALID_POSE_MODE',
+                      'Use --pose off, --pose passive, or --pose reanchor.')
+    if config.pose_mode == 'reanchor' and not config.sr063_amended:
+        return _check('planning', False, 'SR063_AMENDMENT_REQUIRED',
+                      'Use --sr063-amended only after the amendment is approved.')
+    if (config.start_x_cm is None) != (config.start_y_cm is None):
+        return _check('planning', False, 'BOTH_START_COORDINATES_REQUIRED',
+                      'Supply both --start-x-cm and --start-y-cm.')
+    try:
+        if (not math.isfinite(config.surface_z_cm) or
+                config.surface_z_cm < 0):
+            raise ValueError('invalid surface')
+        site = load_site(config.site_path)
+        tag_map = load_tag_map(str(config.tag_map_path))
+        check_tag_map_matches_site(tag_map, site, tolerance_cm=5.0)
+        CoverageModel(site, tag_map.doc['camera_calibration'])
+        envelope = envelope_from_site(site, 300)
+        generate_options(envelope, TELLO_MEASURED)
+        if config.start_x_cm is not None and not (
+                envelope.min_x_cm <= config.start_x_cm <= envelope.max_x_cm and
+                envelope.min_y_cm <= config.start_y_cm <= envelope.max_y_cm):
+            raise ValueError('start outside envelope')
+        if config.surface_z_cm >= envelope.min_z_cm:
+            raise ValueError('surface must be below survey')
+    except Exception:
+        return _check(
+            'planning', False, 'INVALID_LIVE_SITE_OR_COVERAGE',
+            'Check --site, --tag-map, --surface-z-cm, --start-x-cm and '
+            '--start-y-cm against the measured room configuration.')
+    return _check('planning', True, '', '')
+
+
+def discover_local_ipv4(tello_ip: str) -> str | None:
+    """Inspect the OS-selected UDP route without sending a datagram."""
+    try:
+        tello = ipaddress.ip_address(tello_ip)
+        if tello.version != 4:
+            return None
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+            route.connect((tello_ip, 8889))
+            local_ip = route.getsockname()[0]
+        local = ipaddress.ip_address(local_ip)
+        if local.version == 4 and not local.is_unspecified and not local.is_loopback:
+            return local_ip
+    except (OSError, TypeError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _resolved_local_ipv4(config: SessionConfig) -> str | None:
+    if config.local_ip is None:
+        return discover_local_ipv4(config.tello_ip)
+    try:
+        local = ipaddress.ip_address(config.local_ip)
+        tello = ipaddress.ip_address(config.tello_ip)
+        if (local.version == tello.version == 4 and
+                not local.is_unspecified and not local.is_loopback):
+            return config.local_ip
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _flight(network_ready: bool) -> ReadinessCheck:
+    if not network_ready:
+        return _check('flight', False, 'LIVE_NETWORK_CONFIG_REQUIRED',
+                      'Connect to the Tello network or supply a non-loopback IPv4 '
+                      'address with --local-ip.')
+    return _check('flight', True, '', '')
+
+
+def _has_recorded_consent_readonly(database_path: Path, location: str,
+                                   consent_date: str) -> bool:
+    uri = database_path.resolve().as_uri() + '?mode=ro'
+    with closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as connection:
+        row = connection.execute(
+            'SELECT 1 FROM filming_consent '
+            'WHERE location = ? AND consent_date = ?',
+            (location, consent_date)).fetchone()
+    return row is not None
+
+
+def _detection(config: SessionConfig) -> ReadinessCheck:
+    if config.detector_name not in PROVIDER_ENV:
+        return _check(
+            'detection', False, 'LIVE_PROVIDER_REQUIRED',
+            'Select --detector gemini-openrouter, gemini, or moondream.')
+    key_name, model_name = PROVIDER_ENV[config.detector_name]
+    missing = [name for name in (key_name, model_name)
+               if not os.environ.get(name)]
+    if missing:
+        return _check(
+            'detection', False, 'LIVE_PROVIDER_ENV_REQUIRED',
+            f'Set {" and ".join(missing)} in the environment or nearest .env; '
+            'secret values are never displayed.')
+    if config.provider_profile is None:
+        return _check(
+            'detection', False, 'APPROVED_PROVIDER_PROFILE_REQUIRED',
+            'Supply --provider-profile with an approved provider-profile.v1 document.')
+    if not config.location or not config.consent_date:
+        return _check(
+            'detection', False, 'LIVE_CONSENT_CONFIG_REQUIRED',
+            'Supply --location and --consent-date for previously recorded consent.')
+    try:
+        date.fromisoformat(config.consent_date)
+        profile = json.loads(config.provider_profile.read_text())
+        root = Path(__file__).resolve().parents[3]
+        schema = json.loads((root / 'docs/superpowers/specs/contracts/'
+                             'provider-profile-v1.schema.json').read_text())
+        validate(profile, schema)
+        if (profile['approval_status'] != 'APPROVED' or
+                profile['provider'] != config.detector_name or
+                profile['model'] != os.environ[model_name]):
+            raise ValueError('profile mismatch')
+    except Exception:
+        return _check(
+            'detection', False, 'APPROVED_PROVIDER_PROFILE_REQUIRED',
+            'Check --provider-profile against the selected provider and model.')
+    survey_db = config.survey_db or config.data_dir / 'survey.sqlite'
+    if not survey_db.is_file():
+        return _check(
+            'detection', False, 'CONSENT_DATABASE_REQUIRED',
+            'Supply --survey-db containing recorded consent for the location and date.')
+    try:
+        recorded = _has_recorded_consent_readonly(
+            survey_db, config.location, config.consent_date)
+    except (OSError, sqlite3.Error):
+        return _check(
+            'detection', False, 'CONSENT_DATABASE_UNREADABLE',
+            'Check that --survey-db is a readable SQLite consent database.')
+    if not recorded:
+        return _check(
+            'detection', False, 'RECORDED_CONSENT_REQUIRED',
+            'Record consent for the exact --location and --consent-date before dispatch.')
+    return _check('detection', True, '', '')
+
+
+def _emergency(network_ready: bool) -> ReadinessCheck:
+    return _check(
+        'emergency', network_ready, 'LIVE_NETWORK_CONFIG_REQUIRED',
+        'Connect to the Tello network or supply a non-loopback IPv4 address '
+        'with --local-ip; transport is initialized only at dispatch.')
+
+
+def evaluate_live_readiness(config: SessionConfig) -> LiveReadiness:
+    """Return safe readiness facts without constructing operational adapters."""
+    # Match the integration CLI: explicit environment values win, otherwise
+    # populate missing names from the nearest .env without logging secrets.
+    load_env_file()
+    resolved_local_ip = _resolved_local_ipv4(config)
+    network_ready = resolved_local_ip is not None
+    checks = (_planning(config), _flight(network_ready), _detection(config),
+              _emergency(network_ready))
+    planning_ready = checks[0].ready
+    state: ReadinessState = (
+        'READY_TO_DISPATCH' if all(check.ready for check in checks) else
+        'READY_TO_PLAN' if planning_ready else
+        'NOT_READY')
+    return LiveReadiness(state, checks, '', resolved_local_ip)

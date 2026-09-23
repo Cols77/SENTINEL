@@ -51,6 +51,7 @@ from typing import Callable
 from sentinel.camera import CameraModel, TELLO_MEASURED
 from sentinel.cube.mission import CubeMissionRunner, FACING_DEG, Mission, Waypoint
 from sentinel.cube.site import Site
+from sentinel.mission_observer import MissionObserver
 
 from .envelope import SweepEnvelope
 from .flight import FlightFrame
@@ -108,7 +109,9 @@ class CubeFlight:
                  tag_map=None, conn=None, burst_fn: Callable[[], list] | None = None,
                  sleep_fn: Callable[[float], None] = time.sleep,
                  minimum_battery: int = 40, confirm: bool = True,
-                 camera: CameraModel = TELLO_MEASURED) -> None:
+                 camera: CameraModel = TELLO_MEASURED,
+                 on_runner=None, on_runner_done=None, on_stop=None, on_pose=None, on_pose_health=None,
+                 observer: MissionObserver | None = None, coverage=None) -> None:
         if camera != TELLO_MEASURED:
             raise SyntheticCameraRefused(
                 "CubeFlight only runs against sentinel.camera.TELLO_MEASURED; "
@@ -124,6 +127,10 @@ class CubeFlight:
         if start_x_cm is None and pose_mode == "off":
             raise ValueError("pose mode 'off' cannot measure where the drone took off; "
                              "give a tape-measured start")
+        self.on_runner,self.on_runner_done=on_runner,on_runner_done
+        self.on_stop,self.on_pose,self.on_pose_health=on_stop,on_pose,on_pose_health
+        self.observer = observer
+        self.coverage = coverage
         self.client, self.site, self.mode, self.pose_mode = client, site, mode, pose_mode
         self.run_id = run_id
         self.mission_log = Path(mission_log)
@@ -154,8 +161,20 @@ class CubeFlight:
             self.client, self.mode, self.minimum_battery, mission=mission, site=self.site,
             pose_mode=self.pose_mode, tag_map=self.tag_map, conn=self.conn,
             run_id=self.run_id, mission_log=self.mission_log, capture_dir=self.capture_dir,
-            burst_fn=self.burst_fn, sleep_fn=self.sleep_fn)
-        runner.run(confirm=self.confirm)
+            burst_fn=self.burst_fn, sleep_fn=self.sleep_fn,
+            on_stop=self.on_stop,on_pose=self.on_pose,on_pose_health=self.on_pose_health,
+            observer=self.observer, coverage=self.coverage)
+        if self.on_runner:self.on_runner(runner)
+        try:
+            report=runner.run(confirm=self.confirm)
+            # Existing CLI retains partial frames; a managed UI mission must stop
+            # on safety/failure rather than proposing another flight.
+            managed = self.on_runner is not None or self.observer is not None
+            if managed:
+                runner.check_interruption()
+                if report.status != 'PASS':raise RuntimeError('FLIGHT_FAILED')
+        finally:
+            if self.on_runner_done:self.on_runner_done(runner)
         new_lines = self.mission_log.read_text(encoding="utf-8").splitlines()[len(already):]
         # A measured start writes its own START line; it is not a stop.
         names = {waypoint.name for waypoint in mission.waypoints}
