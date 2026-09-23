@@ -25,6 +25,7 @@ import json
 import pytest
 
 from sentinel.judgment import JudgeUnavailable
+import scripts.room_jev_check as harness
 from scripts.room_jev_check import (BudgetedJudge, JevCheckRefused, build_real_jev_judge,
                                     declared_regions, load_dotenv_nearest, load_site, run_all)
 
@@ -95,6 +96,10 @@ def test_staleness_case_either_reanchors_or_the_supervisor_forces_recovery(tmp_p
     results = run_all(GreedyJudge, tmp_dir=tmp_path, cases=("staleness",), artifact_root=artifact_root)
     result = results[0]
     assert "neither a voluntary REANCHOR nor a forced RECOVER" not in result.reason
+    # Task V2: staleness is injected after the first accepted observation and
+    # the re-anchor is actually reached; the reason says who did it.
+    assert result.passed, result.reason
+    assert result.reason.startswith("Jev chose REANCHOR (POSE_REANCHORED=True, yaw ROTATE commands issued=0)")
     log = (artifact_root / "staleness" / "events.jsonl").read_text(encoding="utf-8")
     event_types = {json.loads(line)["event_type"] for line in log.splitlines() if line.strip()}
     assert "POSE_REANCHORED" in event_types or any(
@@ -102,9 +107,74 @@ def test_staleness_case_either_reanchors_or_the_supervisor_forces_recovery(tmp_p
         for line in log.splitlines() if line.strip())
 
 
-def test_all_four_cases_run_under_the_forty_call_budget(tmp_path):
-    for result in run_all(GreedyJudge, tmp_dir=tmp_path, artifact_root=tmp_path / "artifacts"):
+class NeverReanchors(GreedyJudge):
+    """Observes and answers like GreedyJudge but never picks REANCHOR."""
+
+    def choice(self, state, instruction, *, criteria, name):
+        return super().choice(state, instruction, name=name,
+                              criteria={k: v for k, v in criteria.items() if k != "REANCHOR"})
+
+
+def test_staleness_case_forces_the_supervisor_recovery_when_jev_does_not_reanchor(tmp_path):
+    results = run_all(NeverReanchors, tmp_dir=tmp_path, cases=("staleness",), artifact_root=tmp_path / "a")
+    result = results[0]
+    assert result.passed, result.reason
+    assert result.reason.startswith("supervisor forced RECOVER (POSE_REANCHORED=True")
+
+
+def test_count_computers_case_counts_two_computers_in_two_regions(tmp_path):
+    artifact_root = tmp_path / "artifacts"
+    results = run_all(GreedyJudge, tmp_dir=tmp_path, cases=("count_computers",), artifact_root=artifact_root)
+    result = results[0]
+    assert result.passed, result.reason
+    assert "computer: 0 confirmed; 2 uncertain" in result.answer  # single views, never corroborated
+
+
+def test_every_case_records_its_acceptance_policy(tmp_path):
+    from sentinel.room.controller import AcceptancePolicy
+    artifact_root = tmp_path / "artifacts"
+    run_all(GreedyJudge, tmp_dir=tmp_path, cases=("readonly",), artifact_root=artifact_root)
+    config = json.loads((artifact_root / "readonly" / "config.json").read_text(encoding="utf-8"))
+    assert config["acceptance_policy"] == AcceptancePolicy().as_config()
+    strict_root = tmp_path / "strict"
+    (tmp_path / "s").mkdir()
+    run_all(GreedyJudge, tmp_dir=tmp_path / "s", cases=("readonly",), artifact_root=strict_root,
+            acceptance=harness.STRICT_ACCEPTANCE)
+    strict = json.loads((strict_root / "readonly" / "config.json").read_text(encoding="utf-8"))
+    assert strict["acceptance_policy"]["observe_act_at"] == .8 and strict["acceptance_policy"]["reask_once"] is False
+
+
+def test_all_five_cases_run_under_the_forty_call_budget(tmp_path):
+    results = run_all(GreedyJudge, tmp_dir=tmp_path, artifact_root=tmp_path / "artifacts")
+    assert [r.name for r in results] == ["search", "staleness", "count", "readonly", "count_computers"]
+    for result in results:
         assert result.jev_calls <= 40, f"{result.name} exceeded the Jev call budget: {result.jev_calls}"
+
+
+def test_no_real_call_without_the_explicit_paid_calls_flag(monkeypatch, tmp_path):
+    """Task V2 item 4: the nearest .env (C:/coding/sentinel/.env) carries the
+    consent and the key, so they alone must never make a paid call."""
+    monkeypatch.setenv("SENTINEL_JEV_PROPOSER_CONSENT", "operator-2026-09-23")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-a-real-key")
+    monkeypatch.setattr(harness, "JevJudge", lambda **kwargs: pytest.fail("a JevJudge was built"))
+    with pytest.raises(JevCheckRefused, match="--i-authorise-paid-calls"):
+        build_real_jev_judge()
+    built = []
+    monkeypatch.setattr(harness, "build_real_jev_judge", lambda **kwargs: built.append(kwargs))
+    assert harness.main(["--case", "readonly", "--run-root", str(tmp_path)]) == 2
+    assert built == []
+
+
+def test_the_paid_calls_flag_reaches_the_consent_and_key_gates(monkeypatch, tmp_path):
+    built = []
+
+    def fake_build(**kwargs):
+        built.append(kwargs)
+        raise JevCheckRefused("stop here")
+
+    monkeypatch.setattr(harness, "build_real_jev_judge", fake_build)
+    assert harness.main(["--i-authorise-paid-calls", "--case", "readonly", "--run-root", str(tmp_path)]) == 2
+    assert built == [{"authorised": True}]
 
 
 def test_budgeted_judge_refuses_once_the_call_budget_is_exhausted():
@@ -137,7 +207,7 @@ def test_build_real_jev_judge_refuses_without_operator_consent(monkeypatch, tmp_
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.chdir(tmp_path)  # no .env anywhere above an empty tmp dir
     with pytest.raises(JevCheckRefused):
-        build_real_jev_judge()
+        build_real_jev_judge(authorised=True)
 
 
 def test_build_real_jev_judge_refuses_with_consent_but_no_api_key(monkeypatch, tmp_path):
@@ -145,7 +215,7 @@ def test_build_real_jev_judge_refuses_with_consent_but_no_api_key(monkeypatch, t
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.chdir(tmp_path)
     with pytest.raises(JevCheckRefused):
-        build_real_jev_judge()
+        build_real_jev_judge(authorised=True)
 
 
 def test_load_dotenv_nearest_finds_a_parent_env_file(tmp_path):

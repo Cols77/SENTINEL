@@ -10,16 +10,23 @@ synthetic one -- and a fake detector that reports a phone only from a chosen
 region. The drone never leaves the process: no real Tello client, no real
 detector, nothing but Jev's own judgment calls leaves the machine.
 
-Four cases (search, staleness/re-anchor, count, read-only); see
-``docs/reports/room-agent-jev-check.md`` for the results this produced.
+Five cases (search, staleness/re-anchor, count phones, read-only, count
+computers); see ``docs/reports/room-agent-jev-check.md`` for the results this
+produced. The controller runs the room loop's acceptance policy
+(``AcceptancePolicy()``: 0.5 for OBSERVE/REANCHOR/reads, 0.6 for ANSWER,
+strict 0.8 otherwise, one re-ask) unless ``--strict`` asks for the original
+single 0.8 bar.
 
-Paid calls are gated exactly the way ``build_proposer`` gates them: the
-``SENTINEL_JEV_PROPOSER_CONSENT`` environment variable must be set (any
-non-blank value) and ``OPENROUTER_API_KEY`` must resolve, or this refuses
-before making any request. Both are read from the nearest ``.env`` file
-(walking up from the current working directory) the same way the rest of
-this codebase's live-model scripts already do (see
-``scripts/live_llm_arm_retry.py``), never printed or persisted.
+Task V2: no real call is ever made without the explicit
+``--i-authorise-paid-calls`` flag (``build_real_jev_judge(authorised=True)``).
+The nearest ``.env`` (``C:/coding/sentinel/.env`` for every worktree) carries
+both the consent and the key, so those alone once triggered paid calls by
+accident. Past that flag, paid calls are gated exactly the way
+``build_proposer`` gates them: ``SENTINEL_JEV_PROPOSER_CONSENT`` must be set
+(any non-blank value) and ``OPENROUTER_API_KEY`` must resolve, or this
+refuses before making any request. Both are read from the nearest ``.env``
+file (walking up from the current working directory), never printed or
+persisted.
 """
 from __future__ import annotations
 
@@ -49,7 +56,7 @@ from sentinel.cube.localization import DriftProfile, LocalizationTracker, PoseFi
 from sentinel.cube.step_executor import CheckpointOutcome, CommandState, ExecutorState, TerminalOutcome  # noqa: E402
 from sentinel.judgment import ChoiceJudge, JevJudge, JudgeUnavailable  # noqa: E402
 from sentinel.models import Position, Telemetry  # noqa: E402
-from sentinel.room.controller import RoomController  # noqa: E402
+from sentinel.room.controller import AcceptancePolicy, RoomController  # noqa: E402
 from sentinel.room.goals import GoalLedger, GoalObjective  # noqa: E402
 from sentinel.room.grounding import CountGeometry  # noqa: E402
 from sentinel.room.ingest import DetectionEvidence, PerceptionRequest, PerceptionResult, detection_digest  # noqa: E402
@@ -110,15 +117,22 @@ class JevCheckRefused(RuntimeError):
     """The real-model gate refused before any request could be made."""
 
 
-def build_real_jev_judge(*, observation_callback=None) -> JevJudge:
+PAID_CALLS_FLAG = "--i-authorise-paid-calls"
+
+
+def build_real_jev_judge(*, authorised: bool = False, observation_callback=None) -> JevJudge:
     """The same construction ``build_proposer('jev', ...)`` uses.
 
-    Refuses fail-closed, exactly like ``build_proposer``, unless
+    Task V2: refuses first, before reading any ``.env``, unless the caller
+    passes ``authorised=True`` (the CLI's ``--i-authorise-paid-calls``).
+    Then refuses fail-closed, exactly like ``build_proposer``, unless
     ``SENTINEL_JEV_PROPOSER_CONSENT`` is set (fresh, explicit operator
     consent -- plan gate G-live-jev-proposer) AND ``OPENROUTER_API_KEY``
     resolves. Both come from the nearest ``.env`` if the environment does
     not already have them.
     """
+    if authorised is not True:
+        raise JevCheckRefused(f"real Jev calls are paid: pass {PAID_CALLS_FLAG} to make them")
     apply_nearest_dotenv()
     try:
         require_jev_proposer_consent()
@@ -479,9 +493,13 @@ class CaseResult:
 
 
 def write_run_log(case_name: str, env: Environment, judge: BudgetedJudge, *,
-                  artifact_root: Path = ARTIFACT_ROOT) -> Path:
+                  artifact_root: Path = ARTIFACT_ROOT, acceptance: AcceptancePolicy | None = None) -> Path:
     run_dir = artifact_root / case_name
     run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "config.json").write_text(json.dumps({
+        "case": case_name, "jev_call_budget": judge.budget, "jev_calls": len(judge.calls),
+        "acceptance_policy": acceptance.as_config() if acceptance is not None else None,
+    }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     events = [asdict(e) for e in env.store.events(SESSION)]
     (run_dir / "events.jsonl").write_text(
         "\n".join(json.dumps(e, default=str) for e in events) + ("\n" if events else ""), encoding="utf-8")
@@ -502,9 +520,16 @@ def _invalid_choice_events(env: Environment) -> list[dict]:
 # Cases
 # --------------------------------------------------------------------------
 
+#: Task V2: the room loop's acceptance policy (0.5 OBSERVE/REANCHOR/reads,
+#: 0.6 ANSWER, strict 0.8 otherwise, one re-ask). ``--strict`` runs the
+#: original single 0.8 bar instead (the "before" column of the report).
+ROOM_LOOP_ACCEPTANCE = AcceptancePolicy()
+STRICT_ACCEPTANCE = AcceptancePolicy.strict(.8, .15)
+
 
 def run_search_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
-                    found_region: str | None = None, artifact_root: Path = ARTIFACT_ROOT) -> CaseResult:
+                    found_region: str | None = None, artifact_root: Path = ARTIFACT_ROOT,
+                    acceptance: AcceptancePolicy = ROOM_LOOP_ACCEPTANCE) -> CaseResult:
     env = build_environment(db_path=tmp_dir / "search.sqlite3")
     try:
         regions = declared_regions(env.site)
@@ -520,13 +545,13 @@ def run_search_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
         controller = RoomController(env.store, judge, supervisor=env.supervisor, flight_executor=env.executor,
                                     resolve_checkpoint=make_resolve_checkpoint(env),
                                     perception_capture=detector.capture, perception_provider=detector.provide,
-                                    count_geometry=env.count_geometry)
+                                    count_geometry=env.count_geometry, acceptance=acceptance)
         try:
             terminal = controller.run_until_terminal(SESSION)
         except JudgeUnavailable as exc:
             return CaseResult("search", False, f"Jev call budget exhausted: {exc}", None, len(judge.calls))
         finally:
-            write_run_log("search", env, judge, artifact_root=artifact_root)
+            write_run_log("search", env, judge, artifact_root=artifact_root, acceptance=acceptance)
 
         answer_event = next((e for e in reversed(env.store.events(SESSION))
                             if e.event_type == "ROOM_TOOL_OUTCOME" and e.payload.get("answer")), None)
@@ -549,7 +574,8 @@ def run_search_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
 
 
 def run_staleness_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
-                       artifact_root: Path = ARTIFACT_ROOT) -> CaseResult:
+                       artifact_root: Path = ARTIFACT_ROOT,
+                       acceptance: AcceptancePolicy = ROOM_LOOP_ACCEPTANCE) -> CaseResult:
     env = build_environment(db_path=tmp_dir / "staleness.sqlite3")
     try:
         regions = declared_regions(env.site)
@@ -566,37 +592,58 @@ def run_staleness_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Pat
         controller = RoomController(env.store, judge, supervisor=env.supervisor, flight_executor=env.executor,
                                     resolve_checkpoint=make_resolve_checkpoint(env),
                                     perception_capture=detector.capture, perception_provider=detector.provide,
-                                    count_geometry=env.count_geometry)
+                                    count_geometry=env.count_geometry, acceptance=acceptance)
         observed = 0
-        coasted = False
+        coasted = forced = False
+        turns_since_coast = 0
         terminal = None
         try:
             while terminal is None:
                 outcome = controller.step(SESSION)
                 terminal = outcome.terminal_state
+                if coasted:
+                    turns_since_coast += 1
                 if outcome.accepted and str(outcome.candidate_id).startswith("OBSERVE:"):
                     observed += 1
-                if observed == 2 and not coasted:
+                reanchored_yet = any(e.event_type == "POSE_REANCHORED" for e in env.store.events(SESSION))
+                if terminal is None and observed >= 1 and not coasted:
+                    # Task V2: stale after the FIRST accepted observation --
+                    # two estimator failures leave the pose COASTING, where
+                    # Jev is offered a voluntary REANCHOR.
                     coast(env, failures=2)
                     coasted = True
+                elif (terminal is None and coasted and not forced and not reanchored_yet
+                      and turns_since_coast >= 1):
+                    # Jev had its turn and did not re-anchor: one more failure
+                    # crosses the profile's limit (RECOVERY_REQUIRED), and the
+                    # supervisor forces its own recovery before Jev is asked.
+                    coast(env, failures=1)
+                    forced = True
         except JudgeUnavailable as exc:
             return CaseResult("staleness", False, f"Jev call budget exhausted: {exc}", None, len(judge.calls))
         finally:
-            write_run_log("staleness", env, judge, artifact_root=artifact_root)
+            write_run_log("staleness", env, judge, artifact_root=artifact_root, acceptance=acceptance)
 
         events = env.store.events(SESSION)
         reanchored = any(e.event_type == "POSE_REANCHORED" for e in events)
-        forced_recover = any(e.event_type == "ROOM_TOOL_OUTCOME" and e.payload.get("candidate_id") == "RECOVER"
+        jev_reanchor = any(e.event_type == "ROOM_TOOL_OUTCOME" and e.payload.get("candidate_id") == "REANCHOR"
+                           and e.payload.get("code") == "REANCHORED" for e in events)
+        forced_recover = any(e.event_type == "SAFETY_ASSESSED" and e.payload.get("transition") == "RECOVER"
                              for e in events)
-        which = "Jev chose REANCHOR" if reanchored else ("supervisor forced RECOVER" if forced_recover else "neither")
+        rotations = env.executor.calls.count("ROTATE")
+        which = ("Jev chose REANCHOR" if jev_reanchor else
+                 "supervisor forced RECOVER" if forced_recover else "neither")
+        which += f" (POSE_REANCHORED={reanchored}, yaw ROTATE commands issued={rotations})"
         answer_event = next((e for e in reversed(events)
                             if e.event_type == "ROOM_TOOL_OUTCOME" and e.payload.get("answer")), None)
         answer = answer_event.payload.get("answer") if answer_event else None
         invalid = _invalid_choice_events(env)
         reasons = []
         if not coasted:
-            reasons.append("the harness never reached a second observation to inject staleness from")
-        if not (reanchored or forced_recover):
+            reasons.append("the harness never reached a first accepted observation to inject staleness after")
+        if not reanchored:
+            reasons.append("the re-anchor was never reached (no POSE_REANCHORED)")
+        if not (jev_reanchor or forced_recover):
             reasons.append("neither a voluntary REANCHOR nor a forced RECOVER happened after staleness")
         if terminal != TerminalState.COMPLETED:
             reasons.append(f"terminal_state={terminal!r}, expected COMPLETED (search resumed and completed)")
@@ -610,7 +657,8 @@ def run_staleness_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Pat
 
 
 def run_count_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
-                   artifact_root: Path = ARTIFACT_ROOT) -> CaseResult:
+                   artifact_root: Path = ARTIFACT_ROOT,
+                   acceptance: AcceptancePolicy = ROOM_LOOP_ACCEPTANCE) -> CaseResult:
     env = build_environment(db_path=tmp_dir / "count.sqlite3")
     try:
         regions = declared_regions(env.site)
@@ -629,13 +677,13 @@ def run_count_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
         controller = RoomController(env.store, judge, supervisor=env.supervisor, flight_executor=env.executor,
                                     resolve_checkpoint=make_resolve_checkpoint(env),
                                     perception_capture=detector.capture, perception_provider=detector.provide,
-                                    count_geometry=env.count_geometry)
+                                    count_geometry=env.count_geometry, acceptance=acceptance)
         try:
             terminal = controller.run_until_terminal(SESSION)
         except JudgeUnavailable as exc:
             return CaseResult("count", False, f"Jev call budget exhausted: {exc}", None, len(judge.calls))
         finally:
-            write_run_log("count", env, judge, artifact_root=artifact_root)
+            write_run_log("count", env, judge, artifact_root=artifact_root, acceptance=acceptance)
 
         events = env.store.events(SESSION)
         answer_event = next((e for e in reversed(events)
@@ -662,7 +710,8 @@ def run_count_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
 
 
 def run_readonly_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
-                      artifact_root: Path = ARTIFACT_ROOT) -> CaseResult:
+                      artifact_root: Path = ARTIFACT_ROOT,
+                      acceptance: AcceptancePolicy = ROOM_LOOP_ACCEPTANCE) -> CaseResult:
     env = build_environment(db_path=tmp_dir / "readonly.sqlite3")
     try:
         set_ledger(env, (answer_state_objective(),), request_text="what is your battery level?")
@@ -670,13 +719,14 @@ def run_readonly_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path
         env.executor.state = ExecutorState.NEW  # never took off: a read-only session must not appear airborne
 
         judge = BudgetedJudge(judge_factory())
-        controller = RoomController(env.store, judge, supervisor=env.supervisor, flight_executor=env.executor)
+        controller = RoomController(env.store, judge, supervisor=env.supervisor, flight_executor=env.executor,
+                                    acceptance=acceptance)
         try:
             terminal = controller.run_until_terminal(SESSION)
         except JudgeUnavailable as exc:
             return CaseResult("readonly", False, f"Jev call budget exhausted: {exc}", None, len(judge.calls))
         finally:
-            write_run_log("readonly", env, judge, artifact_root=artifact_root)
+            write_run_log("readonly", env, judge, artifact_root=artifact_root, acceptance=acceptance)
 
         events = env.store.events(SESSION)
         answer_event = next((e for e in reversed(events)
@@ -699,46 +749,126 @@ def run_readonly_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path
         env.store.close()
 
 
+def run_count_computers_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
+                             artifact_root: Path = ARTIFACT_ROOT,
+                             acceptance: AcceptancePolicy = ROOM_LOOP_ACCEPTANCE) -> CaseResult:
+    """Task V2's fifth case: "count the computers in the room" with two
+    computers seen in two different regions (left and right; the center
+    shows none)."""
+    env = build_environment(db_path=tmp_dir / "count_computers.sqlite3")
+    try:
+        regions = declared_regions(env.site)
+        if len(regions) < 3:
+            return CaseResult("count_computers", False, "the site declares fewer than three regions", None, 0)
+        detector = FakeDetector(env, SESSION, tmp_dir)
+        camera = env.count_geometry.camera
+        holding = {regions[1], regions[2]}
+        for index, pose_id in enumerate(regions):
+            detections = (_detection("computer", "high", camera, index=index),) if pose_id in holding else ()
+            detector.set_region(pose_id, detections)
+        set_ledger(env, (count_objective(classes=("computer",)),), request_text="count the computers in the room")
+
+        judge = BudgetedJudge(judge_factory())
+        controller = RoomController(env.store, judge, supervisor=env.supervisor, flight_executor=env.executor,
+                                    resolve_checkpoint=make_resolve_checkpoint(env),
+                                    perception_capture=detector.capture, perception_provider=detector.provide,
+                                    count_geometry=env.count_geometry, acceptance=acceptance)
+        try:
+            terminal = controller.run_until_terminal(SESSION)
+        except JudgeUnavailable as exc:
+            return CaseResult("count_computers", False, f"Jev call budget exhausted: {exc}", None, len(judge.calls))
+        finally:
+            write_run_log("count_computers", env, judge, artifact_root=artifact_root, acceptance=acceptance)
+
+        events = env.store.events(SESSION)
+        answer_event = next((e for e in reversed(events)
+                            if e.event_type == "ROOM_TOOL_OUTCOME" and e.payload.get("answer")), None)
+        answer = answer_event.payload.get("answer") if answer_event else None
+        observed = {e.payload.get("candidate_id", "").rsplit(":", 1)[-1] for e in events
+                    if e.event_type == "ROOM_TOOL_OUTCOME" and e.payload.get("code") == "OBSERVE_SUCCEEDED"}
+        invalid = _invalid_choice_events(env)
+        reasons = []
+        if terminal != TerminalState.COMPLETED:
+            reasons.append(f"terminal_state={terminal!r}, expected COMPLETED")
+        if invalid:
+            reasons.append(f"{len(invalid)} invalid/malformed Jev choice(s): {invalid[0].get('refusal_code')}")
+        if not holding <= observed:
+            reasons.append(f"not both computer regions were observed: {sorted(observed)}")
+        import re
+        counted = re.search(r"computer: (\d+) confirmed; (\d+) uncertain", answer or "")
+        if counted is None:
+            reasons.append(f"no computer count in the answer: {answer!r}")
+        elif int(counted.group(1)) + int(counted.group(2)) != 2:
+            # Each computer is seen from one pose only, so the fake detector's
+            # single views stay "uncertain" (see the count case): two in total
+            # is the right count here.
+            reasons.append(f"the answer does not count two computers: {answer!r}")
+        if "LAND" not in env.executor.calls:
+            reasons.append("the aircraft never landed before the answer was recorded")
+        passed = not reasons
+        return CaseResult("count_computers", passed,
+                          "; ".join(reasons) or "both computers counted, home returned",
+                          terminal.value if terminal else None, len(judge.calls), answer)
+    finally:
+        env.store.close()
+
+
 CASES: dict[str, Callable[..., CaseResult]] = {
     "search": run_search_case, "staleness": run_staleness_case,
     "count": run_count_case, "readonly": run_readonly_case,
+    "count_computers": run_count_computers_case,
 }
 
 
 def run_all(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
            cases: tuple[str, ...] = tuple(CASES),
-           artifact_root: Path = ARTIFACT_ROOT) -> list[CaseResult]:
+           artifact_root: Path = ARTIFACT_ROOT,
+           acceptance: AcceptancePolicy = ROOM_LOOP_ACCEPTANCE) -> list[CaseResult]:
     """``artifact_root`` defaults to the real ``artifacts/room-agent/jev-check``
     tree (what a real run under ``main()`` writes to). Callers that must not
     disturb that tree's evidence -- notably the ``GreedyJudge`` regression
     test, which used to silently overwrite a real run's logs by sharing this
     same fixed path -- pass their own ``artifact_root`` instead."""
-    return [CASES[name](judge_factory, tmp_dir=tmp_dir, artifact_root=artifact_root) for name in cases]
+    return [CASES[name](judge_factory, tmp_dir=tmp_dir, artifact_root=artifact_root, acceptance=acceptance)
+            for name in cases]
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", action="append", choices=tuple(CASES), default=None,
-                        help="run only this case (repeatable); default: all four")
+                        help="run only this case (repeatable); default: all five")
     parser.add_argument("--run-root", default=None,
                         help="scratch directory for the run's sqlite stores (default: a fresh temp dir)")
+    parser.add_argument(PAID_CALLS_FLAG, dest="authorise_paid_calls", action="store_true",
+                        help="required: every case makes real, paid OpenRouter calls to Jev")
+    parser.add_argument("--strict", action="store_true",
+                        help="the original single 0.8 acceptance bar, no re-ask (default: the room-loop policy)")
+    parser.add_argument("--artifact-root", default=None,
+                        help=f"where each case's logs go (default: {ARTIFACT_ROOT})")
     args = parser.parse_args(argv)
+    if not args.authorise_paid_calls:
+        print(f"refused: real Jev calls are paid; pass {PAID_CALLS_FLAG} to make them", file=sys.stderr)
+        return 2
 
     import tempfile
     run_root = Path(args.run_root) if args.run_root else Path(tempfile.mkdtemp(prefix="room-jev-check-"))
     run_root.mkdir(parents=True, exist_ok=True)
 
     try:
-        judge_factory = lambda: build_real_jev_judge()  # noqa: E731
+        judge_factory = lambda: build_real_jev_judge(authorised=True)  # noqa: E731
         judge_factory()  # fail fast, before any case's fixture is built
     except JevCheckRefused as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
 
     cases = tuple(args.case) if args.case else tuple(CASES)
+    acceptance = STRICT_ACCEPTANCE if args.strict else ROOM_LOOP_ACCEPTANCE
+    artifact_root = Path(args.artifact_root) if args.artifact_root else ARTIFACT_ROOT
     ok = True
     for name in cases:
-        result = CASES[name](judge_factory, tmp_dir=run_root / name)
+        (run_root / name).mkdir(parents=True, exist_ok=True)
+        result = CASES[name](judge_factory, tmp_dir=run_root / name, artifact_root=artifact_root,
+                             acceptance=acceptance)
         status = "PASS" if result.passed else "FAIL"
         ok = ok and result.passed
         print(f"{status} {result.name}: {result.reason} "
