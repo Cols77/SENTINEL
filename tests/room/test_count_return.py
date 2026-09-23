@@ -85,22 +85,33 @@ def drone(store, session_id, battery=73):
     })
 
 
-def make_resolve_checkpoint(supervisor, *, seconds=1):
+def make_resolve_checkpoint(supervisor, *, seconds=1, executor=None):
     """Build a checkpoint that actually targets the resolved endpoint/heading
     of the pose the candidate's ID declares -- not merely the tracker's
     current (unmoved) pose -- matching the controller's pose-verification
     guard added in fix round 2 (Q5). The plan still only carries a single
     stationary CAPTURE command (real waypoint navigation stays out of this
     task's "injected collaborators, not real geometry" scope; see the task
-    report), so the tracker's actual position is unaffected -- only the
-    plan's declared ``target``/``terminal_heading_deg`` metadata, which is
-    exactly what the new guard checks, reflects the requested pose."""
+    report), so the tracker's own position is unaffected -- only the plan's
+    declared ``target``/``terminal_heading_deg`` metadata reflects the
+    requested pose.
+
+    Fix round 3 (F3): the controller now *also* requires the checkpoint's
+    measured post-dispatch pose (``CheckpointOutcome.pose``) to match the
+    resolved pose, not merely the plan's declared metadata -- reproducing
+    the round-2 gap this closes (a resolver that only relabels
+    target/heading while the reported pose never moves). When ``executor``
+    is supplied, this simulates the checkpoint actually reaching its
+    declared target by setting the stub's ``reported_pose`` to match, the
+    same way real telemetry would report after really flying there."""
     def resolve(candidate, snapshot):
         pose = supervisor.tracker.health
         pose_id = candidate.candidate_id.rsplit(":", 1)[-1]
         resolved = resolve_pose_id(supervisor.site, pose_id)
         target = Position(resolved.x_cm, resolved.y_cm, resolved.z_cm) if resolved else pose.position
         heading = resolved.yaw_deg if resolved else pose.heading_deg
+        if executor is not None:
+            executor.reported_pose = target
         commands = (command(seconds=seconds),)
         return CheckpointPlan("optional", pose.position, target, pose.heading_deg, heading,
                               commands, sum(c.upper_bound_s for c in commands))
@@ -184,7 +195,13 @@ def make_controller(safety, judge, rig=None, *, resolve_checkpoint=None):
     executor = Executor(store, clock)
     kwargs = {}
     if rig is not None:
-        kwargs = dict(resolve_checkpoint=resolve_checkpoint or make_resolve_checkpoint(supervisor),
+        # Fix round 3 (F3): auto-wire the stub executor's reported measured
+        # pose to whatever pose each dispatched checkpoint actually declares,
+        # so the default (positive-path) fixture keeps crediting coverage
+        # under the new measured-pose check. A caller supplying its own
+        # ``resolve_checkpoint`` (a negative fixture, or one that never
+        # reaches a completed capture) opts out of this wiring.
+        kwargs = dict(resolve_checkpoint=resolve_checkpoint or make_resolve_checkpoint(supervisor, executor=executor),
                      perception_capture=rig.capture, perception_provider=rig.provide)
     controller = RoomController(store, judge, supervisor=supervisor, flight_executor=executor, **kwargs)
     return controller, executor
@@ -213,8 +230,34 @@ def test_read_only_question_causes_zero_movement_even_with_observation_enabled(s
     controller.resolve_checkpoint = fail_resolve
     controller.perception_capture = fail_capture
     controller.perception_provider = fail_provide
+    # Fix round 3 (F5): a session that never actually took off must not be
+    # treated as airborne just because the stub executor's default state
+    # says so -- the shared fixture defaults to AIRBORNE purely for the
+    # convenience of tests that dispatch checkpoints; this one never does.
+    executor.state = ExecutorState.NEW
     assert controller.run_until_terminal(SESSION) == TerminalState.COMPLETED
     assert executor.calls == []
+
+
+def test_airborne_without_any_checkpoint_still_requests_a_safe_return(safety):
+    """Fix round 3 (F5): ``_has_flown`` was detected only through
+    ``CHECKPOINT_COMPLETED`` events -- ``supervisor.start`` (takeoff)
+    persists no such event, so an airborne session that answers before ever
+    dispatching a checkpoint must still be based on the measured executor
+    state, not on checkpoint history alone."""
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site()
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (GoalObjective("g1", 1, GoalKind.ANSWER_STATE, (), None, None, "ROOM",
+                                              "REPORTED", None, None, ()),))
+    drone(store, SESSION)
+    controller, executor = make_controller(safety, Judge("READ_DRONE", "ANSWER"))
+    assert executor.state == ExecutorState.AIRBORNE
+
+    outcome = controller.run_until_terminal(SESSION)
+    assert outcome == TerminalState.COMPLETED
+    assert "LAND" in executor.calls
+    assert executor.state != ExecutorState.AIRBORNE
 
 
 # --- 2. ordered corner observations ------------------------------------------
@@ -292,6 +335,11 @@ def test_closer_inspection_request_yields_explicit_unavailable_reason(safety):
     supervisor.validate_bindings = lambda site: None
     set_ledger(store, SESSION, (closer_objective(),))
     controller, executor = make_controller(safety, Judge("VALIDATE:g1:UNAVAILABLE", "ESCALATE"))
+    # Fix round 3 (F5): this session never actually takes off -- pin the
+    # stub executor's default (AIRBORNE, purely a convenience for tests
+    # that do dispatch checkpoints) so _has_flown does not require a safe
+    # return for an aircraft that was never airborne to begin with.
+    executor.state = ExecutorState.NEW
 
     # Fix round 1 (Q11): the closer-inspection-unavailable answer is never
     # terminal by itself -- it is a non-terminal, per-objective fact that gets
@@ -422,7 +470,7 @@ def test_completed_coverage_answers_and_stops_offering_observation(safety, tmp_p
         executor = Executor(store, clock)
         controller = RoomController(store, judge, supervisor=supervisor, flight_executor=executor,
                                     survey_store=legacy, survey_run_id="run1",
-                                    resolve_checkpoint=make_resolve_checkpoint(supervisor),
+                                    resolve_checkpoint=make_resolve_checkpoint(supervisor, executor=executor),
                                     perception_capture=rig.capture, perception_provider=rig.provide)
         assert controller.run_until_terminal(SESSION) == TerminalState.COMPLETED
         final_criteria = judge.calls[-1][1]
@@ -801,3 +849,199 @@ def test_observation_outcome_without_a_completed_capture_is_refused_and_uncredit
     from sentinel.room.queries import ReadQueries
     snapshot = ReadQueries(store).project(SESSION)
     assert "cell1:computer" in controller._coverage(snapshot).uncovered
+
+
+# ============================================================================
+# Fix round 3 (2026-09-23): F1, F3, F4, F9.
+# ============================================================================
+
+# --- 21. a non-terminal return leg is retried until the aircraft lands -----
+
+def test_finalize_terminal_retries_a_nonterminal_return_leg_until_landed(safety):
+    """F1: a return leg that comes back as a non-terminal CheckpointOutcome
+    (SDK completion unknown, or a mid-route re-dispatch such as a
+    RECOVER episode that resolves without landing) must never be reported
+    as a terminal answer while the aircraft is still airborne --
+    _finalize_terminal must keep requesting the safe return until it
+    actually reaches a TerminalOutcome."""
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site()
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (GoalObjective("g1", 1, GoalKind.ANSWER_STATE, (), None, None, "ROOM",
+                                              "REPORTED", None, None, ()),))
+    drone(store, SESSION)
+    controller, executor = make_controller(safety, Judge("READ_DRONE", "ANSWER"))
+    assert executor.state == ExecutorState.AIRBORNE
+
+    landed = TerminalOutcome("LANDED", "REQUESTED", Position(100, 100, 0), 75, clock())
+    stuck = CheckpointOutcome("COMPLETED", (), (), None, Position(50, 50, 100), False)
+    calls = []
+
+    def dispatch(outcome, flight_executor):
+        calls.append(outcome.transition)
+        return stuck if len(calls) == 1 else landed
+
+    supervisor.dispatch = dispatch
+
+    first = controller.step(SESSION)
+    assert first.accepted
+    outcome = controller.step(SESSION)
+    assert outcome.accepted
+    assert outcome.terminal_state == TerminalState.COMPLETED
+    assert len(calls) >= 2
+
+
+def test_finalize_terminal_escalates_after_exhausting_return_attempts(safety):
+    """F1: when a return leg never reaches a TerminalOutcome even after
+    ``_MAX_RETURN_ATTEMPTS`` retries, _finalize_terminal must escalate
+    through a forced emergency landing rather than loop forever or, worse,
+    report a terminal answer while the aircraft's own physical state is
+    still provably in motion."""
+    from sentinel.room.controller import _MAX_RETURN_ATTEMPTS
+
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site()
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (GoalObjective("g1", 1, GoalKind.ANSWER_STATE, (), None, None, "ROOM",
+                                              "REPORTED", None, None, ()),))
+    drone(store, SESSION)
+    controller, executor = make_controller(safety, Judge("READ_DRONE", "ANSWER"))
+
+    stuck = CheckpointOutcome("COMPLETED", (), (), None, Position(50, 50, 100), False)
+    calls = []
+
+    def dispatch(outcome, flight_executor):
+        calls.append(outcome.transition)
+        return stuck
+
+    supervisor.dispatch = dispatch
+
+    first = controller.step(SESSION)
+    assert first.accepted
+    outcome = controller.step(SESSION)
+    # The ANSWER candidate itself was legally chosen and processed through
+    # _finalize_terminal (never a refusal, unlike the mandatory-preemption
+    # path's TurnOutcome); the aircraft's failure to actually land is
+    # reported through terminal_state instead.
+    assert outcome.accepted
+    assert outcome.terminal_state == TerminalState.ABORTED
+    assert len(calls) == _MAX_RETURN_ATTEMPTS
+    # The bound-exhaustion escalation (refresh_failure) always forces the
+    # supervisor terminal, guaranteeing the aircraft was actually landed or
+    # emergency-stopped rather than left mid-return with nothing tracking it.
+    assert supervisor._terminal is True
+
+
+# --- 22. a measured pose that never actually reached the declared pose -----
+
+def test_measured_pose_mismatch_after_dispatch_is_refused_and_uncredited(safety, tmp_path):
+    """F3: a checkpoint plan that declares the correct target/heading
+    (``_checkpoint_targets_declared_pose``) must still be refused if the
+    aircraft's own measured post-dispatch pose does not actually match the
+    resolved pose -- reproducing exactly the round-2 gap this closes: a
+    resolver that only relabels target/heading metadata while the reported
+    pose stays wherever the aircraft already was."""
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
+    judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets")
+    # No executor wiring here (unlike make_controller's default auto-wiring):
+    # the plan's declared target/heading correctly name the resolved pose,
+    # but the measured post-dispatch pose the stub executor reports never
+    # actually moves from its default.
+    controller, executor = make_controller(safety, judge, rig,
+                                           resolve_checkpoint=make_resolve_checkpoint(supervisor))
+
+    outcome = controller.step(SESSION)
+    assert not outcome.accepted
+    payload = store.events(SESSION)[-1].payload
+    assert payload["code"] == "TOOL_FAILURE" and payload["refusal_code"] == "TOOL_FAILURE"
+    assert "CAPTURE" in executor.calls  # the checkpoint really did dispatch
+    assert rig.captures == []  # but perception was never reached
+
+    from sentinel.room.queries import ReadQueries
+    snapshot = ReadQueries(store).project(SESSION)
+    assert "cell1:computer" in controller._coverage(snapshot).uncovered
+
+
+# --- 23. a perception wait preempted after a completed capture is recorded -
+
+def test_perception_preempted_after_checkpoint_completes_is_recorded_not_dropped(safety, tmp_path):
+    """F4: a perception wait preempted by a mandatory safety transition
+    after the checkpoint's own CAPTURE already completed must never
+    silently drop that capture -- a durable, non-terminal OBSERVE outcome
+    referencing the issued perception request must be recorded before the
+    mandatory preemption is reported."""
+    supervisor, store, clock, samples, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
+    original_capture = rig.capture
+
+    def capture(candidate, checkpoint_outcome, snapshot):
+        request = original_capture(candidate, checkpoint_outcome, snapshot)
+        # Force the *next* admission (the perception wait) to detect
+        # insufficient energy and preempt, deterministically, before the
+        # perception provider is ever called (SafetySupervisor.run_wait's
+        # own initial prepare() catches this synchronously).
+        samples["energy"] = EnergySample(22, clock())
+        return request
+
+    rig.capture = capture
+    judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets")
+    controller, executor = make_controller(safety, judge, rig)
+
+    outcome = controller.step(SESSION)
+    assert not outcome.accepted
+    assert "CAPTURE" in executor.calls
+    # Some mandatory safety response fired (RETURN_NOW/LAND_CONTINGENCY or a
+    # RECOVER that falls through to emergency); which one depends on assess()
+    # admitting a bare provider wait with no attached checkpoint. Either way
+    # the aircraft is no longer nominally airborne once it fires.
+    assert executor.state != ExecutorState.AIRBORNE
+    assert rig.provided == []  # the perception provider was never reached
+
+    outcomes = [e.payload for e in store.events(SESSION) if e.event_type == "ROOM_TOOL_OUTCOME"]
+    preempted = [p for p in outcomes if p.get("code") == "PERCEPTION_PREEMPTED"]
+    assert len(preempted) == 1
+    assert preempted[0]["refusal_code"] == "PERCEPTION_PREEMPTED"
+    assert preempted[0]["perception_request"]["observation_id"] == "left-rear-bottom-toward_targets"
+
+    from sentinel.room.queries import ReadQueries
+    snapshot = ReadQueries(store).project(SESSION)
+    assert "cell1:computer" in controller._coverage(snapshot).uncovered
+
+
+# --- 24. a stale decision caught after admission (not only at the Jev choice)
+
+def test_stale_decision_caught_after_room_choice_attempt_is_typed_correctly(safety, tmp_path):
+    """F9: a concurrent write that races the checkpoint's own admission --
+    not just one that preempts the Jev choice itself (see test 11) -- must
+    also be reported STALE_DECISION, never as a physical CHECKPOINT_FAILED."""
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
+    judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets")
+
+    real_resolve = make_resolve_checkpoint(supervisor)
+
+    def racing_resolve(candidate, snapshot):
+        plan = real_resolve(candidate, snapshot)
+        append(store, SESSION, "CONCURRENT_CHANGE", {})
+        return plan
+
+    controller, executor = make_controller(safety, judge, rig, resolve_checkpoint=racing_resolve)
+    outcome = controller.step(SESSION)
+    assert not outcome.accepted
+    payload = store.events(SESSION)[-1].payload
+    assert payload["code"] == "STALE_DECISION" and payload["refusal_code"] == "STALE_DECISION"
+    assert executor.calls == []
+    assert rig.captures == []

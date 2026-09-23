@@ -75,15 +75,24 @@ def _not_resolvable(class_name: str, coverage: CoverageProjection) -> bool:
 def _static_counts(objects, coverage: CoverageProjection, requested_classes: tuple[str, ...]) -> tuple[ClassCount, ...]:
     counts = []
     for class_name in _static_class_names(objects, coverage, requested_classes):
-        if _not_resolvable(class_name, coverage):
+        matching = [obj for obj in objects if obj.class_name == class_name]
+        if _not_resolvable(class_name, coverage) and not matching:
+            # A NOT_RESOLVABLE verdict with no associated evidence at all is
+            # a pure geometry fact: this class can never be resolved here,
+            # so an honest zero is reported instead of "0 confirmed".
             counts.append(ClassCount(class_name, 0, 0, "NOT_OBSERVABLE"))
             continue
-        matching = [obj for obj in objects if obj.class_name == class_name]
-        # "Confirmed" means seen from more than one distinct view (module
-        # docstring), not merely more than once -- two estimates from the
-        # same unmoved pose are one view. ``member_view_keys`` distinguishes
-        # them when the source estimates carried a view identity; it falls
-        # back to capture time for estimates that did not (see association.py).
+        # Fix round 3 (F8): a NOT_RESOLVABLE verdict is a caveat about
+        # *remaining* coverage completeness, never a license to discard
+        # objects evidence has already associated -- those objects are
+        # reported through the ordinary confirmed/uncertain split below,
+        # exactly as they would be for a class whose coverage is fully
+        # resolved. "Confirmed" means seen from more than one distinct view
+        # (module docstring), not merely more than once -- two estimates
+        # from the same unmoved pose are one view. ``member_view_keys``
+        # distinguishes them when the source estimates carried a view
+        # identity; it falls back to capture time for estimates that did
+        # not (see association.py).
         confirmed = [obj for obj in matching if len(set(obj.member_view_keys)) > 1]
         uncertain = [obj for obj in matching if len(set(obj.member_view_keys)) <= 1]
         evidence = tuple(sorted({ref for obj in matching for ref in obj.evidence_refs}))
@@ -111,9 +120,16 @@ def project_counts(objects, people_by_frame, coverage: CoverageProjection, *,
     (other than "person", which always has its own line) gets a rendered
     line even when neither the coverage cells nor any associated object
     mention it yet -- otherwise a class with no declared cells and no
-    sightings silently has no line at all instead of an honest zero."""
+    sightings silently has no line at all instead of an honest zero.
+
+    Fix round 3 (F8): the person line is emitted only when "person" was
+    actually requested or at least one person frame was actually observed
+    -- never manufactured out of nothing for a request that never mentioned
+    people and a session that never saw any."""
     static = _static_counts(objects, coverage, tuple(requested_classes))
-    return static + (_people_count(people_by_frame),)
+    if people_by_frame or "person" in requested_classes:
+        return static + (_people_count(people_by_frame),)
+    return static
 
 
 def _render_line(count: ClassCount) -> str:

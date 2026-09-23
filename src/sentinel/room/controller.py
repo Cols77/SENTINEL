@@ -13,7 +13,7 @@ from sentinel.jev_choice import assess_choice
 from sentinel.judgment import ChoiceJudge
 from sentinel.cube.energy import ExecutionMode
 from sentinel.cube.supervised_wait import SupervisedWait
-from sentinel.cube.step_executor import TerminalOutcome
+from sentinel.cube.step_executor import ExecutorState, TerminalOutcome
 from sentinel.models import Position
 
 from .candidates import build_candidates, build_observation_candidates
@@ -26,6 +26,34 @@ from .store import RoomStore, VersionConflict
 
 if TYPE_CHECKING:
     from sentinel.survey.store import SurveyStore
+
+#: Fix round 3 (F1): a safe-return leg that comes back non-terminal (an
+#: SDK-uncertain command mid-route, or a recovery episode that resolves
+#: without landing) is retried this many times -- via a fresh
+#: ``_request_safe_return`` each time, which recomputes the checkpoint from
+#: the aircraft's current measured state -- before ``_finalize_terminal``
+#: gives up and escalates through ``SafetySupervisor.refresh_failure`` (a
+#: forced emergency landing that always yields a ``TerminalOutcome``).
+_MAX_RETURN_ATTEMPTS = 5
+
+#: Fix round 3 (F3): tolerances for crediting an OBSERVE checkpoint's
+#: *measured* post-dispatch pose against the pose its candidate declared.
+#: The declared-metadata check (``_checkpoint_targets_declared_pose``) can
+#: pass even when the checkpoint never actually moved the aircraft; these
+#: tolerances gate a second, independent check against the checkpoint's own
+#: reported position (``CheckpointOutcome.pose``) and the tracker's current
+#: heading before coverage is ever credited.
+_POSE_POSITION_TOLERANCE_CM = 5.0
+_POSE_HEADING_TOLERANCE_DEG = 5.0
+
+
+def _heading_within_tolerance(a_deg: float, b_deg: float, tolerance_deg: float = _POSE_HEADING_TOLERANCE_DEG) -> bool:
+    """Fix round 3 (F6): compare headings modularly, never by exact equality
+    -- a planner or tracker that reports headings normalized to [0, 360)
+    must never be refused merely because ``resolve_semantic_pose`` normalizes
+    its own yaw to (-180, 180]."""
+    delta = (a_deg - b_deg + 180.0) % 360.0 - 180.0
+    return abs(delta) <= tolerance_deg
 
 
 @dataclass(frozen=True)
@@ -281,13 +309,21 @@ class RoomController:
         return result
 
     def _has_flown(self, session_id: str) -> bool:
-        """Fix round 1 (Q1): whether this session has ever actually dispatched
-        a physical checkpoint. ``CHECKPOINT_COMPLETED`` is written only by
-        ``SafetySupervisor._persist_completion``, i.e. only after a real
-        command was sent to the executor -- never by a fixture's manually
-        appended legacy ``DRONE_STATE_RECORDED`` telemetry read, and never by
-        an OBSERVE turn that failed before dispatch (an unresolved checkpoint
-        or a refused admission)."""
+        """Fix round 1 (Q1) / fix round 3 (F5): whether this session's
+        aircraft is currently airborne (or mid-return), or has ever actually
+        dispatched a physical checkpoint. ``CHECKPOINT_COMPLETED`` is written
+        only by ``SafetySupervisor._persist_completion``, i.e. only after a
+        real command was sent to the executor -- never by a fixture's
+        manually appended legacy ``DRONE_STATE_RECORDED`` telemetry read, and
+        never by an OBSERVE turn that failed before dispatch (an unresolved
+        checkpoint or a refused admission). ``CHECKPOINT_COMPLETED`` alone
+        missed a session that took off (``supervisor.start``, which persists
+        no room event) and then answered before ever dispatching a
+        checkpoint: the measured executor state is checked first so that gap
+        can never leave an airborne aircraft unreturned."""
+        if self.flight_executor is not None and self.flight_executor.state in (
+                ExecutorState.AIRBORNE, ExecutorState.RETURNING):
+            return True
         return any(e.event_type == "CHECKPOINT_COMPLETED" for e in self.store.events(session_id))
 
     def _request_safe_return(self, session_id, snapshot_version):
@@ -313,12 +349,33 @@ class RoomController:
 
     def _finalize_terminal(self, session_id, correlation, snapshot, prior, candidate_id, kind, digest, *,
                            code, requested_terminal, answer=None, facts=()):
-        """Fix round 1 (Q1, Q3, Q11): persist a Jev-selected (or system-forced)
-        terminal decision. When this session has actually flown, a
-        supervisor-owned safe return/landing is requested first -- mission
-        success is reported only after a confirmed touchdown; an unconfirmed
-        or failed landing downgrades the reported terminal state to ABORTED,
-        exactly like every other physical failure this controller reports.
+        """Fix round 1 (Q1, Q3, Q11) / fix round 3 (F1): persist a
+        Jev-selected (or system-forced) terminal decision. When this session
+        has actually flown, a supervisor-owned safe return/landing is
+        requested first -- mission success is reported only after a
+        confirmed touchdown; an unconfirmed or failed landing downgrades the
+        reported terminal state to ABORTED, exactly like every other
+        physical failure this controller reports.
+
+        A single ``_request_safe_return`` call can come back with a
+        non-terminal result -- an SDK-uncertain command mid-route, or a
+        RECOVER transition whose own recovery episode resolves without
+        landing (``SafetySupervisor._recover``'s non-terminal
+        ``CheckpointOutcome``) -- meaning the aircraft is still provably
+        airborne or returning. Persisting a terminal ROOM_TOOL_OUTCOME in
+        that case would end the session (``ReadQueries.project`` then
+        reports it terminal on every later ``step()``) while nothing ever
+        flies it home. So this retries a fresh ``_request_safe_return`` --
+        which recomputes the checkpoint from the aircraft's current measured
+        state each time -- up to ``_MAX_RETURN_ATTEMPTS`` times, and only
+        ever persists a terminal outcome once that attempt actually reaches
+        a ``TerminalOutcome``. If the bound is exhausted without ever
+        reaching one, this escalates through
+        ``SafetySupervisor.refresh_failure`` -- a forced emergency
+        landing/abort that always returns a ``TerminalOutcome`` -- so a
+        terminal answer is still never persisted for a genuinely open-ended
+        return.
+
         The final commit always re-reads the live session version (``_record``)
         rather than the turn's original CAS version, because the voluntary
         return itself durably advances that version.
@@ -326,7 +383,13 @@ class RoomController:
         try:
             final_terminal = requested_terminal
             if self.supervisor is not None and self.flight_executor is not None and self._has_flown(session_id):
-                result = self._request_safe_return(session_id, self.store.session_version(session_id))
+                result = None
+                for _ in range(_MAX_RETURN_ATTEMPTS):
+                    result = self._request_safe_return(session_id, self.store.session_version(session_id))
+                    if isinstance(result, TerminalOutcome):
+                        break
+                if not isinstance(result, TerminalOutcome):
+                    result = self.supervisor.refresh_failure(self.flight_executor)
                 landed = (isinstance(result, TerminalOutcome) and result.state == "LANDED"
                          and type(result.completed_at) in (int, float) and math.isfinite(result.completed_at)
                          and result.completed_at >= 0)
@@ -510,7 +573,7 @@ class RoomController:
                 # reported here directly -- bypassing Jev, never persisted as an
                 # ordinary ROOM_TOOL_OUTCOME refusal -- so the caller's outcome
                 # already includes this turn's ROOM_CHOICE_ATTEMPT event.
-                outcome = self._execute_observation(session_id, selected, snapshot, expected_version)
+                outcome = self._execute_observation(session_id, selected, snapshot, expected_version, correlation)
                 if isinstance(outcome, TurnOutcome):
                     return replace(outcome, event_ids=tuple(e.event_id for e in prior) + outcome.event_ids)
                 payload = self._outcome(snapshot, candidate_id, kind, digest, outcome["code"],
@@ -563,21 +626,41 @@ class RoomController:
             payload = self._outcome(snapshot, candidate_id, kind, digest, "STALE_DECISION", refusal="STALE_DECISION")
             return self._record(snapshot, correlation, payload, prior=prior)
 
-    def _checkpoint_targets_declared_pose(self, candidate, plan) -> bool:
-        """Fix round 2 (Q5): ``_coverage`` credits every declared cell/class a
-        pose declares visibility of purely off the ``pose_id`` embedded in an
-        OBSERVE candidate's ID -- it never checks that the checkpoint which
-        actually ran was the one that pose declares. Verify, before this
-        checkpoint is ever admitted or dispatched, that the plan
-        ``resolve_checkpoint`` built truly targets that exact declared pose's
-        resolved endpoint and heading, not merely some other (e.g. current,
-        unmoved) position happening to be reported under this pose's ID."""
-        pose_id = candidate.candidate_id.rsplit(":", 1)[-1]
-        resolved = resolve_pose_id(self.supervisor.site, pose_id)
-        if resolved is None:
-            return False
+    def _checkpoint_targets_declared_pose(self, resolved, plan) -> bool:
+        """Fix round 2 (Q5) / fix round 3 (F6): ``_coverage`` credits every
+        declared cell/class a pose declares visibility of purely off the
+        ``pose_id`` embedded in an OBSERVE candidate's ID -- it never checks
+        that the checkpoint which actually ran was the one that pose
+        declares. Verify, before this checkpoint is ever admitted or
+        dispatched, that the plan ``resolve_checkpoint`` built truly targets
+        that exact declared pose's resolved endpoint and heading, not merely
+        some other (e.g. current, unmoved) position happening to be reported
+        under this pose's ID. The heading comparison is modular, within
+        tolerance -- never exact equality -- so a planner that emits
+        headings normalized to [0, 360) is not refused merely because
+        ``resolve_semantic_pose`` normalizes its own yaw to (-180, 180]."""
         target = Position(resolved.x_cm, resolved.y_cm, resolved.z_cm)
-        return plan.target == target and plan.terminal_heading_deg == resolved.yaw_deg
+        return plan.target == target and _heading_within_tolerance(plan.terminal_heading_deg, resolved.yaw_deg)
+
+    def _measured_pose_matches_declared_pose(self, resolved, result) -> bool:
+        """Fix round 3 (F3): a checkpoint plan that *declares* the correct
+        target/heading (``_checkpoint_targets_declared_pose``) can still fail
+        to actually reach it -- nothing before this checked that the
+        dispatched commands landed the aircraft there. The round-2 positive
+        test fixture (``make_resolve_checkpoint``) hovers in place with a
+        single CAPTURE and only relabels the plan's declared target/heading;
+        this closes exactly that gap by additionally requiring the measured
+        post-checkpoint position (``CheckpointOutcome.pose``) and the
+        tracker's current heading to be within tolerance of the resolved
+        pose's own declared endpoint/heading before coverage is ever
+        credited."""
+        pose = result.pose
+        if pose is None:
+            return False
+        distance_cm = math.hypot(pose.x_cm - resolved.x_cm, pose.y_cm - resolved.y_cm)
+        if distance_cm > _POSE_POSITION_TOLERANCE_CM or abs(pose.z_cm - resolved.z_cm) > _POSE_POSITION_TOLERANCE_CM:
+            return False
+        return _heading_within_tolerance(self.supervisor.tracker.health.heading_deg, resolved.yaw_deg)
 
     def _capture_completed(self, plan, result) -> bool:
         """Fix round 2 (Q5): a dispatched ``CheckpointOutcome`` can report
@@ -597,7 +680,31 @@ class RoomController:
         return any(state.status == "COMPLETED" and state.command.kind == "CAPTURE"
                    and state.command in plan.commands for state in result.command_states)
 
-    def _execute_observation(self, session_id, candidate, snapshot, expected_version):
+    def _record_perception_preempted(self, session_id, candidate, snapshot, correlation, request):
+        """Fix round 3 (F4): a perception wait preempted by a mandatory
+        safety transition after the checkpoint's own CAPTURE already
+        completed must never silently drop that capture. Persist a durable,
+        non-terminal OBSERVE outcome referencing the issued perception
+        request (so a later delivery, or a fresh OBSERVE retry, is never
+        mistaken for a session that flew this checkpoint and captured
+        nothing) before the mandatory preemption itself is reported.
+        Coverage is never credited for this outcome -- only an
+        OBSERVE_SUCCEEDED outcome ever resolves a cell (see ``_coverage``).
+        Best-effort: a CAS race against this fresh append is not itself a
+        failure worth reporting differently -- the mandatory preemption path
+        still reports this turn either way."""
+        digest = candidate.relevant_state_sha256
+        payload = self._outcome(snapshot, candidate.candidate_id, candidate.kind, digest,
+                                "PERCEPTION_PREEMPTED", refusal="PERCEPTION_PREEMPTED")
+        payload["perception_request"] = {"observation_id": request.observation_id, "frame_id": request.frame_id,
+                                         "frame_path": request.frame_path, "captured_at": request.captured_at}
+        try:
+            self._append(session_id, self.store.session_version(session_id),
+                        correlation + ":perception-preempted", (("ROOM_TOOL_OUTCOME", payload),))
+        except VersionConflict:
+            pass
+
+    def _execute_observation(self, session_id, candidate, snapshot, expected_version, correlation):
         """Resolve, admit and dispatch exactly one checkpoint for ``candidate``,
         then wait for and ingest its correlated perception result.
 
@@ -610,7 +717,9 @@ class RoomController:
             plan = self.resolve_checkpoint(candidate, snapshot)
         except Exception:
             plan = None
-        if plan is None or not self._checkpoint_targets_declared_pose(candidate, plan):
+        pose_id = candidate.candidate_id.rsplit(":", 1)[-1]
+        resolved = resolve_pose_id(self.supervisor.site, pose_id)
+        if plan is None or resolved is None or not self._checkpoint_targets_declared_pose(resolved, plan):
             return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
         # Fix round 1 (Q6): admit the checkpoint AND the airborne perception
         # wait that follows it as one action -- a checkpoint that is only
@@ -625,8 +734,14 @@ class RoomController:
         except Exception:
             terminal = self.supervisor.refresh_failure(self.flight_executor)
             return self._preempted(session_id, None, terminal)
+        # Fix round 3 (F9): a concurrent write racing this checkpoint's own
+        # admission -- not only one that preempts the Jev choice itself
+        # (see ``_decide``'s ``VersionConflict`` handling before dispatch) --
+        # is a typed STALE_DECISION, never a physical CHECKPOINT_FAILED.
         try:
             result = self.supervisor.dispatch(admission, self.flight_executor)
+        except VersionConflict:
+            return {"code": "STALE_DECISION", "refusal": "STALE_DECISION"}
         except Exception:
             return {"code": "CHECKPOINT_FAILED", "refusal": "CHECKPOINT_FAILED"}
         if admission.transition != "CONTINUE" or isinstance(result, TerminalOutcome):
@@ -647,6 +762,12 @@ class RoomController:
             # is never treated as a success, and never releases a second
             # optional checkpoint this turn.
             return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
+        if not self._measured_pose_matches_declared_pose(resolved, result):
+            # Fix round 3 (F3): the plan declared the right target/heading,
+            # but the aircraft's own measured post-dispatch pose does not
+            # actually match it -- never credit coverage off a checkpoint
+            # that merely claimed the right pose.
+            return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
         try:
             request = self.perception_capture(candidate, result, snapshot)
         except Exception:
@@ -660,6 +781,7 @@ class RoomController:
 
         waited = self.wait_for_perception(perceive, session_id=session_id)
         if waited.status == "PREEMPTED":
+            self._record_perception_preempted(session_id, candidate, snapshot, correlation, request)
             return self._preempted(session_id, self.supervisor.last_preemption)
         if waited.status == "COMPLETED":
             perception_result, provider_error = waited.value

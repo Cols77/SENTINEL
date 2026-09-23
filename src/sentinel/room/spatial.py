@@ -43,6 +43,27 @@ _RESTING_HEIGHT_BAND_CM = 30.0
 _COMMANDED_SIGMA_MULTIPLIER = 2.0
 
 
+def semantic_heading_to_compass_deg(heading_deg: float) -> float:
+    """Fix round 3 (F6): convert a math-convention heading (0 deg = +x,
+    counter-clockwise -- the convention shared by ``sentinel.room.semantic``'s
+    ``_yaw_for_look`` and ``sentinel.cube.localization``, i.e. every other
+    room heading value) into the compass convention this module's
+    ``estimate_detection``/``PoseEvidence.heading_deg`` uses (0 deg = +y
+    "north", clockwise -- inherited from ``sentinel.survey``'s geometry).
+
+    Room heading data crosses this convention boundary only here: every
+    other room module (semantic pose resolution, coverage-pose comparison,
+    checkpoint dispatch) stays in the math convention. A caller that builds
+    a ``PoseEvidence`` from a resolved semantic pose's ``yaw_deg`` (or the
+    localization tracker's ``heading_deg``) must convert it through this
+    function first, or every detection's estimated position will be
+    misplaced by the fixed offset between the two conventions.
+    """
+    if not math.isfinite(heading_deg):
+        raise ValueError("heading must be finite")
+    return (90.0 - heading_deg) % 360.0
+
+
 class SupportKind(StrEnum):
     FLOOR = "FLOOR"
     DECLARED_HORIZONTAL_PLANE = "DECLARED_HORIZONTAL_PLANE"

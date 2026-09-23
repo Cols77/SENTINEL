@@ -17,6 +17,7 @@ from sentinel.room.spatial import (
     SupportDeclaration,
     SupportKind,
     estimate_detection,
+    semantic_heading_to_compass_deg,
 )
 
 LEVEL = CameraModel("test-level", 683.0, 683.0, 480.0, 360.0, 0.0)
@@ -121,6 +122,44 @@ def test_commanded_pose_widens_covariance_relative_to_measured():
     commanded = estimate_detection(_detection(), _pose(pose_provenance="COMMANDED"), FLOOR, LEVEL)
     assert commanded.xy_covariance_cm2[0] > measured.xy_covariance_cm2[0]
     assert commanded.xy_covariance_cm2[1] > measured.xy_covariance_cm2[1]
+
+
+# --- Fix round 3 (F6): the semantic (math) / spatial (compass) heading -----
+# --- convention boundary -----------------------------------------------------
+
+def test_semantic_heading_to_compass_deg_converts_the_fixed_offset():
+    assert semantic_heading_to_compass_deg(90.0) == 0.0
+    assert semantic_heading_to_compass_deg(0.0) == 90.0
+    assert semantic_heading_to_compass_deg(-90.0) == 180.0
+    assert semantic_heading_to_compass_deg(180.0) == 270.0
+
+
+def test_resolved_semantic_pose_heading_converts_correctly_for_spatial_estimation():
+    """A resolved semantic pose's ``yaw_deg`` is in the math convention (0
+    deg = +x, counter-clockwise, matching ``sentinel.cube.localization``);
+    ``estimate_detection``'s ``PoseEvidence.heading_deg`` is in the compass
+    convention (0 deg = +y, clockwise, inherited from ``sentinel.survey``).
+    Feed a resolved pose's own yaw through ``semantic_heading_to_compass_deg``
+    before building a ``PoseEvidence``, and confirm the resulting estimate
+    lands further along the pose's "toward_targets" look direction (this
+    site's declared ``rear_to_front_axis_xy``, here world +y) -- proving the
+    conversion, not the raw unconverted yaw, is what a caller must use at
+    this boundary."""
+    from sentinel.room.semantic import SemanticPose, resolve_semantic_pose
+    from tests.room.test_semantic import _rect_frame, _site
+
+    site = _site(semantic_frame=_rect_frame())
+    resolved = resolve_semantic_pose(site, SemanticPose("center", "middle", "middle"))
+    assert resolved.yaw_deg == 90  # math convention: "toward_targets" here faces world +y
+
+    compass_heading = semantic_heading_to_compass_deg(resolved.yaw_deg)
+    assert compass_heading == 0.0  # compass convention: 0 deg also faces +y
+    pose = _pose(x_cm=float(resolved.x_cm), y_cm=float(resolved.y_cm), z_cm=float(resolved.z_cm),
+                heading_deg=compass_heading, look_deg=0.0)
+    estimate = estimate_detection(_detection(), pose, FLOOR, LEVEL)
+    assert estimate is not None
+    assert estimate.y_cm > pose.y_cm
+    assert math.isclose(estimate.x_cm, pose.x_cm, abs_tol=1.0)
 
 
 def test_invalid_pose_geometry_returns_none_instead_of_raising():

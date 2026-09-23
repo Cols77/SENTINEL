@@ -35,6 +35,14 @@ class Executor:
         self.store, self.clock = store, clock
         self.state = ExecutorState.AIRBORNE
         self.calls = []
+        # Room controller fix round 3 (F3): the reported post-checkpoint
+        # measured position, mutable per-test/per-dispatch. Defaults to the
+        # tracker's canonical fixture position so every existing test that
+        # never touches this keeps its prior behavior; a caller that wants
+        # to simulate a checkpoint actually reaching a specific pose (see
+        # ``make_resolve_checkpoint`` in test_count_return.py) sets this
+        # before dispatch.
+        self.reported_pose = Position(100, 100, 100)
 
     def execute(self, plan):
         assert self.store.events("session")[-1].event_type == "SAFETY_ASSESSED"
@@ -45,7 +53,7 @@ class Executor:
         # plan, so this stub must actually reflect which commands it ran.
         states = tuple(CommandState(c, "COMPLETED", 0.0, 1.0) for c in plan.commands)
         return CheckpointOutcome("COMPLETED", states, ("observation",), Telemetry(76, 100),
-                                 Position(100, 100, 100), True)
+                                 self.reported_pose, True)
 
     def return_home(self, plan):
         self.state = ExecutorState.RETURNING

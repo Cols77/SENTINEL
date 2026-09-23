@@ -59,6 +59,23 @@ until Plan 06 promotes matching pose/energy/site profiles.
   per-detection historical fields (`class_name=...; confidence_band=...`),
   never as a confirmed/uncertain count. Wiring `_static_counts` into a live
   `ANSWER` is out of scope for this plan and is not claimed here.
+- **Fix round 3 (F2) correction:** region-scope `COUNT` objectives (a
+  requested "left/rear/bottom"-style subregion, as opposed to `ROOM`) have
+  **no answer route at all** — `can_answer` only recognizes `ROOM`-scoped
+  facts, and `_incomplete_answer_candidate` is offered only for `ROOM`-scope
+  objectives in `RoomController._legal_candidates`
+  (`sentinel.room.candidates.build_observation_candidates`). Once a
+  region's `OBSERVE` candidate has been attempted (succeeded or refused)
+  and is therefore suppressed, that objective can only end through
+  `ESCALATE`/`NO_LEGAL_CANDIDATES` — never an explicit incomplete answer,
+  and certainly never a rendered count. This fix round intentionally left
+  this unresolved rather than risk a region-scope incomplete-answer route
+  that could misreport a region that actually succeeded as incomplete
+  without the grounded-counting wiring above to tell the two apart; per the
+  finding this correction responds to, **the operator must explicitly
+  re-scope Plan 03 and the demo claim** to "observe-and-return, counts from
+  legacy survey only" (room-wide) if region-scope counting is not wired
+  before the next promotion review.
 - Legacy `READ_COUNTS` (merged multi-view survey reports, sourced from
   `sentinel.survey`'s `SurveyStore`, not from this session's own detections)
   is the **only** route through which a plain `ANSWER` can report a numeric
@@ -195,6 +212,30 @@ exercised — see the correction above), or anything about closer inspection,
 certified landing or following (none of those are exercised). One fixture is
 not a population estimate; it is a regression baseline against silent
 projector drift.
+
+**Fix round 3 (F10) correction:** this is projection-only replay, not
+independently re-derived decisions or coverage. `decision_stream_sha256`
+hashes the raw `ROOM_CHOICE_ATTEMPT`/`ROOM_TOOL_OUTCOME` records exactly as
+the manifest recorded them; it does not recompute the legal candidate set a
+turn actually chose from, or the coverage projection behind an
+`ANSWER:<objective>:INCOMPLETE` outcome's coverage note. `report_sha256`
+independently recomputes and cross-checks only the terminal `ANSWERED` case
+(`render_answer` against the replayed facts, see the correction above); for
+every other terminal code -- including this fixture's own
+`ANSWERED_INCOMPLETE` -- it hashes the recorded answer text as given. So a
+regression in `coverage.py`, `candidates.py` or the controller's own
+candidate-legality logic that still happened to reproduce the same recorded
+bytes would not be caught by this replay path. Closing that gap would
+require binding the site (and its coverage cells/declared visibility) into
+the manifest and reconstructing the controller's own candidate/coverage
+projection from the replayed state to compare against what was actually
+recorded -- not attempted here, since it requires regenerating the golden
+fixture against that richer binding, which risks invalidating the fixture
+this fix round's own F1/F3/F4/F5/F9 controller changes were verified
+against. Until that lands, "replay" in this report means projection-only
+replay: byte-stable reproduction of a frozen trace through the store/query
+projectors, not an independent re-derivation of the decisions or coverage
+recorded in it.
 
 ## Limitations
 

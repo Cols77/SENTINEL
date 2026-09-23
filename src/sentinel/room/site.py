@@ -274,14 +274,26 @@ class RoomSite:
         if len(set(cell_ids)) != len(cell_ids):
             raise ValueError("duplicate coverage cell identity")
         for cell in self.coverage_cells:
-            corners = [Position(x, y, z) for x, y in cell.polygon_xy_cm for z in cell.z_band_cm]
-            # Mirrors the landing-zone swept-containment pattern below: every
-            # corner must lie in the *same* convex free-space volume, not
-            # each independently in some volume or other -- free_space_volumes
-            # may be several disjoint polygons, and a cell whose corners each
-            # land in a different one can still cross unsurveyed ground in
-            # its interior.
-            if not any(all(_contains(volume, corner) for corner in corners) for volume in self.free_space_volumes):
+            # Fix round 3 (F7): a coverage cell declares where objects are
+            # *observed* (e.g. floor- or table-height), not where the
+            # aircraft may *fly* -- free_space_volumes is the flight
+            # envelope, which is routinely a different height band (a hover
+            # altitude) than the objects a cell describes. Confusing the two
+            # forced every coverage cell into the flight altitude band.
+            # Require only that the cell's horizontal footprint lies within
+            # the surveyed room's footprint: every corner is checked at each
+            # candidate volume's own mid-height, so its (already-validated)
+            # z-band trivially contains it and only the XY polygon
+            # containment is actually being tested. Mirrors the landing-zone
+            # swept-containment pattern below: every corner must lie in the
+            # *same* volume's horizontal footprint, not each independently in
+            # some volume or other -- free_space_volumes may be several
+            # disjoint polygons, and a cell whose corners each land in a
+            # different one can still cross unsurveyed ground in its
+            # interior.
+            corners_xy = cell.polygon_xy_cm
+            if not any(all(_contains(volume, Position(x, y, sum(volume.z_interval_cm) / 2))
+                          for x, y in corners_xy) for volume in self.free_space_volumes):
                 raise ValueError(f"coverage cell {cell.cell_id!r} escapes surveyed free space")
             # A forbidden volume entirely inside the cell's interior, touching
             # none of its corners, must still be caught -- an AABB overlap

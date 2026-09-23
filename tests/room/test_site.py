@@ -61,6 +61,18 @@ def test_coverage_cell_escaping_surveyed_free_space_is_rejected():
         site.validate()
 
 
+def test_coverage_cell_below_the_flight_envelope_is_accepted_when_within_surveyed_bounds():
+    """Fix round 3 (F7): a coverage cell describes where objects are
+    observed, not where the aircraft may fly -- its z-band legitimately
+    sits below the flight envelope (e.g. floor-height objects, while the
+    aircraft's free-space volume only covers a higher hover band). Only the
+    cell's horizontal footprint must lie within the surveyed room's own
+    footprint."""
+    floor = CoverageCell("floor-objects", RECT, (0, 30), ("phone",))
+    site = _site(coverage_cells=(floor,), pose_visibility=((POSE_A, ("floor-objects",)),))
+    site.validate()  # must not raise
+
+
 def test_coverage_cell_split_across_two_disjoint_free_space_volumes_is_rejected():
     # Each corner lands in *some* free-space volume, but no single volume
     # contains every corner -- the cell's interior crosses unsurveyed ground.

@@ -187,7 +187,7 @@
         [350, 260],
         [150, 260]
       ],
-      "z_band_cm": [60, 140],
+      "z_band_cm": [0, 30],
       "required_classes": ["phone", "computer"]
     }
   ],

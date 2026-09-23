@@ -192,6 +192,20 @@ def test_not_resolvable_coverage_marks_the_class_not_observable():
     assert phone.confirmed == 0 and phone.uncertain == 0
 
 
+def test_not_resolvable_coverage_still_reports_associated_objects_not_discarded():
+    """Fix round 3 (F8): a class whose remaining coverage geometry is
+    NOT_RESOLVABLE must never discard objects that were actually associated
+    from evidence -- a NOT_RESOLVABLE verdict is a caveat about
+    completeness, not a license to erase real sightings."""
+    observation = CellObservation("cell-1", "phone", "p1", "NOT_RESOLVABLE", "t0", ("ev-nr",))
+    coverage = project_coverage((_PHONE_CELL,), (observation,), declared_views_by_cell={"cell-1": ("p1",)})
+    objects = associate_static((), (_estimate("e1", "phone", x_cm=100.0, y_cm=100.0, captured_at="t0"),))
+    counts = project_counts(objects, (), coverage)
+    phone = next(c for c in counts if c.class_name == "phone")
+    assert phone.method == "GROUNDED_STATIC"
+    assert phone.confirmed == 0 and phone.uncertain == 1
+
+
 def test_multi_view_objects_are_confirmed_single_view_objects_are_uncertain():
     objects = associate_static((), (
         _estimate("e1", x_cm=100.0, y_cm=100.0, captured_at="t0"),
@@ -242,6 +256,23 @@ def test_rendered_answer_states_latest_capture_and_analysed_frames():
     assert "latest capture" in text.lower()
     assert "analysed" in text.lower() and "unanalysed" in text.lower()
     assert "2026-09-23t00:10:00+00:00" in text.lower()
+
+
+def test_person_line_omitted_when_not_requested_or_observed():
+    """Fix round 3 (F8): project_counts must not manufacture a person line
+    out of nothing -- only emit it when person was actually requested or a
+    person frame was actually observed."""
+    coverage = project_coverage((_PHONE_CELL,), ())
+    counts = project_counts((), (), coverage, requested_classes=("phone",))
+    assert not any(c.class_name == "person" for c in counts)
+
+
+def test_person_line_present_when_requested_even_with_no_detections():
+    coverage = project_coverage((), ())
+    counts = project_counts((), (), coverage, requested_classes=("person",))
+    person = next(c for c in counts if c.class_name == "person")
+    assert person.confirmed == 0 and person.uncertain == 0
+    assert person.method == "MAX_SIMULTANEOUS_LOWER_BOUND"
 
 
 def test_requested_class_with_no_cells_and_no_objects_still_gets_a_line():
