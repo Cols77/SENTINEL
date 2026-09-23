@@ -112,6 +112,80 @@ def test_legacy_settle_sleep_has_a_separate_supervised_completion_allowance(tmp_
     assert all(dict(c.arguments)["duration_s"] < c.upper_bound_s for c in settles)
 
 
+@pytest.mark.parametrize("provider_kind", ["LOCALISE", "CAPTURE"])
+def test_legacy_provider_timeout_lands_before_provider_returns_and_rejects_late_effects(tmp_path, provider_kind):
+    from dataclasses import replace
+    from threading import Event, Thread
+    from sentinel.cube.step_executor import StepExecutor
+    from sentinel.models import Position
+    now = [10.0]
+    entered, release, landed, callback_finished = Event(), Event(), Event(), Event()
+    runner, client = _runner(tmp_path, "reanchor", [])
+    executor = StepExecutor(runner, clock=lambda: now[0])
+    executor.start_legacy()
+    runner.envelope.position = Position(270, 300, 100)
+    waypoint = MISSION.waypoints[0]
+    node = PlannedCommand(provider_kind, (("look_deg", 0), ("settle_s", 0)), 1, True)
+    original_plan = runner._plan_for_waypoint(waypoint)
+    checkpoint = replace(original_plan, commands=(node,), worst_case_s=1)
+    runner._plan_for_waypoint = lambda wp: checkpoint
+    runner._active_checkpoint_plan = checkpoint
+    original_land, original_read, original_execute = client.land, client.read_frame, runner.execute_command
+
+    def land():
+        result = original_land()
+        landed.set()
+        return result
+
+    def provider(*args, **kwargs):
+        entered.set()
+        assert release.wait(3)
+        if provider_kind == "CAPTURE":
+            return original_read(*args, **kwargs)
+        return [_report(270, 270)] * 10  # Would require a later trim move.
+
+    def execute(command):
+        try:
+            return original_execute(command)
+        finally:
+            callback_finished.set()
+
+    client.land, runner.execute_command = land, execute
+    if provider_kind == "CAPTURE":
+        client.read_frame = provider
+    else:
+        runner.burst_fn = provider
+    entry = {"status": "OPEN_LOOP"}
+    errors = []
+
+    def go():
+        try:
+            runner._go_to(waypoint, entry)
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = Thread(target=go, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(1)
+        now[0] += 2
+        assert landed.wait(1), "provider waits must not retain the SDK command lock"
+        assert not executor._command_completion_unknown
+        worker.join(1)
+        assert not worker.is_alive()
+    finally:
+        release.set()
+        worker.join(1)
+        assert callback_finished.wait(1)
+        executor.close()
+    assert len(errors) == 1 and "DEADLINE_EXCEEDED" in str(errors[0])
+    assert client.commands.count("land") == 1
+    assert not any(cmd.startswith(("forward ", "back ", "left ", "right ", "cw ", "ccw "))
+                   for cmd in client.commands)
+    assert runner.envelope.position == Position(270, 300, 100)
+    assert not entry.get("frames") and "fix_cm" not in entry
+
+
 def test_runner_derives_checkpoint_motion_bounds_from_the_client_transport_policy(tmp_path):
     client = DryRunClient()
     client.transport_limits = TransportLimits(reply_timeout_s=30.0, control_attempts=3, read_timeout_s=30.0)

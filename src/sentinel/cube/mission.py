@@ -516,10 +516,14 @@ class CubeMissionRunner(FlightTestRunner):
         return math.ceil(max(deviations, default=0) + PLAUSIBILITY_CM)
 
     def _go_to(self, wp: Waypoint, entry: dict) -> None:
+        from .step_executor import CooperativeLegacySink
         self._active_checkpoint_entry = entry
         self._active_waypoint = wp
         try:
-            self.step_executor.execute_legacy(self._plan_for_waypoint(wp), self.execute_command)
+            outcome = self.step_executor.execute_legacy(self._plan_for_waypoint(wp),
+                CooperativeLegacySink(lambda command, cancellation: self.execute_command(command)))
+            if outcome.status != "COMPLETED":
+                raise RuntimeError(f"checkpoint {outcome.status}")
         finally:
             self._active_checkpoint_entry = None
             self._active_waypoint = None
@@ -527,6 +531,7 @@ class CubeMissionRunner(FlightTestRunner):
     def execute_command(self, command: PlannedCommand) -> CommandOutcome:
         """Dispatch a planned command without re-deriving its path or duration."""
 
+        self.step_executor.check_legacy_cancellation()
         arguments = dict(command.arguments)
         entry, waypoint = self._active_checkpoint_entry, self._active_waypoint
         if command.kind == "SET_SPEED":
@@ -561,6 +566,7 @@ class CubeMissionRunner(FlightTestRunner):
         elif command.kind == "SETTLE":
             self._checkpoint_effects.append((command.kind, "settle"))
             self.sleep_fn(arguments.get("duration_s", command.upper_bound_s))
+            self.step_executor.check_legacy_cancellation()
             self._unsettled_speed = None
         elif command.kind == "ROTATE":
             self._checkpoint_effects.append((command.kind, "rotation"))
@@ -739,11 +745,14 @@ class CubeMissionRunner(FlightTestRunner):
         )
         localise_settle_s = float(localise_arguments["settle_s"])
         while True:
+            self.step_executor.check_legacy_cancellation()
             self._checkpoint_effects.append(("LOCALISE", "settle"))
             self.sleep_fn(localise_settle_s)
+            self.step_executor.check_legacy_cancellation()
             self._unsettled_speed = None
             self._checkpoint_effects.append(("LOCALISE", "burst"))
             reports = self.burst_fn()
+            self.step_executor.check_legacy_cancellation()
             result = localise(reports)
             if not isinstance(result, LocalisationFix):
                 if entry["status"] == "OPEN_LOOP":
@@ -930,12 +939,16 @@ class CubeMissionRunner(FlightTestRunner):
         """Capture one planned look.  Rotation and settling are separate plan nodes."""
 
         entry.setdefault("frames", [])
-        frame = self._call(lambda: self.client.read_frame(timeout=10))
+        # Video uses a separate transport; a stalled frame provider must not
+        # own the SDK movement lock and prevent terminal landing.
+        frame = self._call_locked(lambda: self.client.read_frame(timeout=10))
+        self.step_executor.check_legacy_cancellation()
         path, digest = None, None
         if self.recorder is not None:
             saved_path = self.recorder.save(frame)
             path = str(saved_path)
             digest = hashlib.sha256(saved_path.read_bytes()).hexdigest()
+        self.step_executor.check_legacy_cancellation()
         record = {"look_deg": offset, "path": path, "sha256": digest,
                   "captured_at": datetime.now(timezone.utc).isoformat()}
         if path is not None and self.correlation_context is not None:

@@ -62,6 +62,27 @@ class ReanchorPreempted(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class CooperativeLegacySink:
+    """Opt in to cancellation with all SDK effects through ``client_call``.
+
+    The callback receives the command cancellation Event. It must check
+    ``check_legacy_cancellation`` after provider waits and before publishing
+    state. Ordinary SDK calls must run on the callback thread; nested calls
+    are gated and tracked by the executor itself.
+    Unwrapped legacy sinks retain conservative, noninterruptible semantics.
+    """
+    callback: Callable[[PlannedCommand, Event], object]
+
+
+@dataclass
+class _LegacyScope:
+    cancellation: Event
+    publication: list
+    active_calls: int = 0
+    completion_unknown: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class CommandState:
     command: PlannedCommand
     status: str
@@ -186,10 +207,27 @@ class StepExecutor:
         """The one lock used by both ordinary and legacy client calls."""
         with self.command_lock:
             with self._state_lock:
+                self.check_legacy_cancellation()
                 if (self._state in {ExecutorState.TERMINAL, ExecutorState.CLOSED}
                         and not getattr(self._context, "terminal", False)):
                     raise RuntimeError("executor is terminal")
-            yield
+                scope = getattr(self._context, "legacy_scope", None)
+                if scope is not None:
+                    scope.active_calls += 1
+            try:
+                yield
+            finally:
+                if scope is not None:
+                    with self._state_lock:
+                        scope.active_calls -= 1
+
+    def check_legacy_cancellation(self) -> None:
+        """Reject late provider effects, including after return preemption."""
+        with self._state_lock:
+            scope = getattr(self._context, "legacy_scope", None)
+            if scope is not None and (scope.cancellation.is_set()
+                                      or not self._current_locked(scope.publication)):
+                raise RuntimeError("legacy command was cancelled")
 
     def _emergency(self) -> bool:
         return (self.runner.emergency_triggered
@@ -372,7 +410,8 @@ class StepExecutor:
             revision = self._pose_revision
         return self._execute(plan, ExecutorState.RETURNING, admitted=True, return_revision=revision)
 
-    def execute_legacy(self, plan: CheckpointPlan, sink: Callable[[PlannedCommand], object]) -> CheckpointOutcome:
+    def execute_legacy(self, plan: CheckpointPlan,
+                       sink: Callable[[PlannedCommand], object] | CooperativeLegacySink) -> CheckpointOutcome:
         """Preserve historical exception/log semantics through the same iterator."""
         return self._execute(plan, ExecutorState.AIRBORNE, legacy_sink=sink)
 
@@ -433,35 +472,43 @@ class StepExecutor:
                     if self.deadline is not None:
                         deadline = min(deadline, self.deadline)
                     deadline_owned = Event()
-                    # Legacy callbacks have no cancellation protocol and may
-                    # issue nested SDK effects even for LOCALISE or CAPTURE.
-                    # Retain physical ownership for their entire invocation.
-                    interruptible = legacy_sink is None and command.interruptible and command.kind not in {
+                    cooperative = isinstance(legacy_sink, CooperativeLegacySink)
+                    interruptible = (legacy_sink is None or cooperative) and command.interruptible and command.kind not in {
                         "MOVE", "ROTATE", "SET_SPEED", "LAND",
                     }
                     legacy_errors = []
+                    cancellation = Event()
+                    scope = _LegacyScope(cancellation, publication) if cooperative else None
 
                     def operation(cancellation, command=command, publication=publication,
-                                  interruptible=interruptible):
+                                  interruptible=interruptible, scope=scope):
                         # A blocked perception/provider must not retain the SDK
                         # movement lock. Its result is published only by run().
                         context = self.client_call() if not interruptible else nullcontext()
-                        with context:
-                            try:
+                        previous = getattr(self._context, "legacy_scope", None)
+                        self._context.legacy_scope = scope
+                        try:
+                            with context:
                                 return self._dispatch_current(command, cancellation, publication, legacy_sink)
-                            except BaseException as exc:
-                                if legacy_sink is not None:
-                                    legacy_errors.append(exc)
-                                raise
+                        except BaseException as exc:
+                            if legacy_sink is not None:
+                                legacy_errors.append(exc)
+                            raise
+                        finally:
+                            self._context.legacy_scope = previous
 
-                    def on_deadline(publication=publication, owned=deadline_owned, interruptible=interruptible):
+                    def on_deadline(publication=publication, owned=deadline_owned,
+                                    interruptible=interruptible, scope=scope):
                         with self._state_lock:
                             # Provider results expire with their generation.
                             # An unresolved SDK call remains a global movement
                             # hazard even after return/terminal preemption.
-                            if not interruptible or self._current_locked(publication):
+                            unknown = not interruptible or (scope is not None and scope.active_calls > 0)
+                            if scope is not None:
+                                scope.completion_unknown |= unknown
+                            if unknown or self._current_locked(publication):
                                 owned.set()
-                                self._deadline_expired(completion_unknown=not interruptible)
+                                self._deadline_expired(completion_unknown=unknown)
 
                     # A native SETTLE *is* a timed delay: its own timer ends it
                     # successfully. The session deadline still preempts it.
@@ -470,7 +517,6 @@ class StepExecutor:
                     if command.upper_bound_s == 0 and command.kind in {"WATCHDOG", "TRIM_ALLOWANCE"}:
                         result = WaitOutcome("COMPLETED", CommandOutcome(), started, started, True)
                     else:
-                        cancellation = Event()
                         if interruptible:
                             with self._state_lock:
                                 self._active_cancellation = cancellation
@@ -485,6 +531,15 @@ class StepExecutor:
                             with self._state_lock:
                                 if self._active_cancellation is cancellation:
                                     self._active_cancellation = None
+                    if scope is not None and result.status != "COMPLETED" and not result.completion_known:
+                        with self._state_lock:
+                            unknown = scope.completion_unknown or scope.active_calls > 0
+                            if unknown:
+                                self._deadline_expired(completion_unknown=True)
+                            else:
+                                # Provider work may still run, but cancellation
+                                # has revoked its authority to send any SDK call.
+                                result = replace(result, completion_known=True)
                     outcome, cleanup = self._publish_result(
                         command, result, publication, states, observations, started,
                         settle_timer=settle_timer, deadline_owned=deadline_owned.is_set(),
@@ -516,6 +571,8 @@ class StepExecutor:
         if command.kind == "LAND":
             return self._land_locked()
         if legacy_sink is not None:
+            if isinstance(legacy_sink, CooperativeLegacySink):
+                return legacy_sink.callback(command, cancellation)
             return legacy_sink(command)
         return self._dispatch(command, cancellation)
 

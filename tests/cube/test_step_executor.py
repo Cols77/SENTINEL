@@ -515,7 +515,8 @@ def test_blocked_legacy_command_returns_unknown_and_retains_command_lock():
 
 
 @pytest.mark.parametrize("kind", ["LOCALISE", "TRIM_ALLOWANCE", "CAPTURE"])
-def test_legacy_callback_with_blocked_nested_sdk_move_retains_physical_uncertainty(kind):
+@pytest.mark.parametrize("cooperative", [False, True])
+def test_legacy_callback_with_blocked_nested_sdk_move_retains_physical_uncertainty(kind, cooperative):
     now = [10.0]
     entered, release = Event(), Event()
 
@@ -533,6 +534,10 @@ def test_legacy_callback_with_blocked_nested_sdk_move_retains_physical_uncertain
         return CommandOutcome()
 
     node = PlannedCommand(kind, (), 1, True)
+    if cooperative:
+        from sentinel.cube.step_executor import CooperativeLegacySink
+        original = sink
+        sink = CooperativeLegacySink(lambda command, cancellation: original(command))
     worker, outcomes = threaded(lambda: run.execute_legacy(plan(node), sink))
     try:
         assert entered.wait(1)
@@ -564,6 +569,53 @@ def test_timely_legacy_failure_preserves_exception_and_terminal_cleanup():
     with pytest.raises(ValueError, match="legacy failure"):
         run.execute_legacy(plan(command()), sink)
     assert client.commands.count("land") == client.close_count == 1
+
+
+def test_cooperative_legacy_sink_cannot_send_a_late_nested_command_after_provider_timeout():
+    from sentinel.cube.step_executor import CooperativeLegacySink
+    now = [10.0]
+    entered, release, finished, landed = Event(), Event(), Event(), Event()
+
+    class LandingObserved(Client):
+        def land(self):
+            result = super().land()
+            landed.set()
+            return result
+
+    run, client, measured = executor(client=LandingObserved(), clock=lambda: now[0])
+    run.start(HOME)
+    rejected = []
+
+    def callback(command, cancellation):
+        entered.set()
+        assert release.wait(3)
+        try:
+            # SDK admission enforces the expired generation even if a
+            # provider ignores its cancellation notification.
+            run.runner.move_checked("forward", 20)
+        except RuntimeError as exc:
+            rejected.append(str(exc))
+        finally:
+            finished.set()
+        return CommandOutcome()
+
+    worker, outcomes = threaded(lambda: run.execute_legacy(
+        plan(PlannedCommand("LOCALISE", (), 1, True)), CooperativeLegacySink(callback)))
+    try:
+        assert entered.wait(1)
+        now[0] += 2
+        worker.join(1)
+        assert not worker.is_alive()
+        assert outcomes[0].status == "DEADLINE_EXCEEDED" and outcomes[0].completion_known
+        assert landed.wait(1)
+        assert not run._command_completion_unknown
+    finally:
+        release.set()
+        assert finished.wait(1)
+        run.close()
+    assert rejected == ["legacy command was cancelled"]
+    assert "forward 20" not in client.commands and client.commands.count("land") == 1
+    assert run.runner.envelope.position == measured.pose
 
 
 @pytest.mark.parametrize("session_bound", [False, True])

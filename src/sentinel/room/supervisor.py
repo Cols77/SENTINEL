@@ -815,7 +815,8 @@ class SafetySupervisor:
                 continue
             assessment = self._audit(current)
             evidence = RecoveryForecastEvidence(self.session_id, self.clock_domain_id,
-                assessment.event_id, current.assessed_at, pose, plan, forecast)
+                assessment.event_id, current.assessed_at, pose, plan, forecast,
+                validated_pose_revision=pose.pose_revision, route_validated=True, energy_validated=True)
             correlation = f"recovery-forecast:{assessment.event_id}"
             try:
                 self.store.append_event_current(session_id=self.session_id,

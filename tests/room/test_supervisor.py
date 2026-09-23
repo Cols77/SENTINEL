@@ -374,7 +374,8 @@ def test_opportunistic_fix_after_recovery_resume_does_not_reconfirm_old_revision
 
 
 @pytest.mark.parametrize("source_state", [LocalizationState.ANCHORED, LocalizationState.COASTING])
-def test_proactive_provider_wait_can_start_recovery_after_an_earlier_resume(safety, source_state):
+@pytest.mark.parametrize("immediate_fix", [False, True])
+def test_proactive_provider_wait_can_start_recovery_after_an_earlier_resume(safety, source_state, immediate_fix):
     from sentinel.cube.recovery import PoseReport, RecoveryController
     from tests.cube.test_localization import fix
     supervisor, store, clock, samples, _, emergencies = safety
@@ -397,6 +398,12 @@ def test_proactive_provider_wait_can_start_recovery_after_an_earlier_resume(safe
         first = supervisor.prepare(snapshot_version=store.session_version("session"))
         assert supervisor.dispatch(first, executor).status == "COMPLETED"
         assert supervisor.prepare(snapshot_version=store.session_version("session")).transition == "CONTINUE"
+        if immediate_fix:
+            clock.now += .1
+            samples["energy"] = EnergySample(80, clock())
+            assert supervisor.tracker.accept_fix(fix(clock)).pose_revision == 3
+            assert supervisor.tracker.health.requires_route_validation
+            assert supervisor.tracker.health.requires_energy_validation
         supervisor.tracker._health = replace(supervisor.tracker.health, state=source_state)
         proactive = supervisor.prepare(snapshot_version=store.session_version("session"), provider_wait_s=100)
         assert proactive.transition == "RECOVER"
@@ -409,6 +416,9 @@ def test_proactive_provider_wait_can_start_recovery_after_an_earlier_resume(safe
         evidence = next(e for e in store.events("session") if e.event_type == "RECOVERY_FORECAST_ADMITTED")
         assert evidence.payload["forecast"]["projected"]["state"] == "RECOVERY_REQUIRED"
         assert evidence.payload["pose"]["pose_revision"] == proactive.request.pose.pose_revision
+        assert evidence.payload["validated_pose_revision"] == proactive.request.pose.pose_revision
+        assert evidence.payload["route_validated"] is True
+        assert evidence.payload["energy_validated"] is True
         assert evidence.payload["session_id"] == "session"
         assert evidence.payload["clock_domain_id"] == supervisor.clock_domain_id
         assessment = next(e for e in store.events("session") if e.event_id == evidence.payload["assessment_event_id"])

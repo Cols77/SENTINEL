@@ -197,7 +197,8 @@ def test_successful_episode_resume_is_acknowledged_once():
 
 
 @pytest.mark.parametrize("fault", ["unauthorized", "authorization_failed", "forged_forecast", "changed_pose", "changed_plan",
-                                  "stale", "wrong_session", "wrong_clock"])
+                                  "stale", "wrong_session", "wrong_clock", "route_unvalidated",
+                                  "energy_unvalidated", "wrong_validation_revision"])
 def test_proactive_episode_requires_authorized_recomputable_current_forecast(fault):
     from copy import copy
     from sentinel.cube import recovery as module
@@ -207,14 +208,18 @@ def test_proactive_episode_requires_authorized_recomputable_current_forecast(fau
     action = recovery.next_action(value.health, env, ())
     assert recovery.assess_burst(action, reports(clock)).accepted
     recovery.confirm_resume(value.health, route_validated=True, energy_validated=True)
+    clock.now += .1
+    value.accept_fix(fix(clock))
     pose = value.health
+    assert pose.requires_route_validation and pose.requires_energy_validation
     future = plan(command("SETTLE", seconds=6))
     future = replace(future, start=pose.position, target=pose.position)
     forecast = copy(value).forecast(future, clock())
     assert forecast.projected.state == LocalizationState.RECOVERY_REQUIRED
     assert hasattr(module, "RecoveryForecastEvidence")
     evidence = module.RecoveryForecastEvidence("session", "clock", "audited-recover", clock(),
-                                               pose, future, forecast)
+        pose, future, forecast, validated_pose_revision=pose.pose_revision,
+        route_validated=True, energy_validated=True)
     recovery.forecast_authorized = lambda supplied: fault != "unauthorized"
     if fault == "authorization_failed":
         def unavailable(supplied):
@@ -232,9 +237,16 @@ def test_proactive_episode_requires_authorized_recomputable_current_forecast(fau
         evidence = replace(evidence, session_id="other")
     elif fault == "wrong_clock":
         evidence = replace(evidence, clock_domain_id="other")
+    elif fault == "route_unvalidated":
+        evidence = replace(evidence, route_validated=False)
+    elif fault == "energy_unvalidated":
+        evidence = replace(evidence, energy_validated=False)
+    elif fault == "wrong_validation_revision":
+        evidence = replace(evidence, validated_pose_revision=pose.pose_revision - 1)
     assert not recovery.begin_episode(value.health, env, route_validated=True, energy_validated=True,
                                       forecast_evidence=evidence)
     assert recovery.episode_succeeded and recovery._attempts == 1
+    assert value.health.requires_route_validation and value.health.requires_energy_validation
 
 
 @pytest.mark.parametrize("failure", ["exhausted", "unresumed", "clock_reset", "session_change"])

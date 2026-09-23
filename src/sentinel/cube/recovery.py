@@ -121,6 +121,9 @@ class RecoveryForecastEvidence:
     pose: PoseHealth
     plan: CheckpointPlan
     forecast: PoseForecast
+    validated_pose_revision: int | None = None
+    route_validated: bool = False
+    energy_validated: bool = False
 
 
 def contains_disk(volume: RecoveryVolume, position: Position, radius_cm: float) -> bool:
@@ -218,6 +221,8 @@ class RecoveryController:
                     or evidence.session_id != environment.session_id
                     or evidence.clock_domain_id != environment.clock_domain_id
                     or not evidence.assessment_event_id
+                    or evidence.validated_pose_revision != current.pose_revision
+                    or evidence.route_validated is not True or evidence.energy_validated is not True
                     or not finite_number(evidence.assessed_at)
                     or not 0 <= now - evidence.assessed_at < self.tracker.profile.recovery_action_upper_bound_s
                     or evidence.pose.state not in {LocalizationState.ANCHORED, LocalizationState.COASTING}
@@ -253,11 +258,21 @@ class RecoveryController:
                 or current.state == LocalizationState.LOST
                 or pose.pose_revision != current.pose_revision
                 or self._resumed_revision is None or current.pose_revision < self._resumed_revision
-                or current.requires_route_validation or current.requires_energy_validation
                 or now * 1000 >= environment.navigation_contingency_expires_monotonic_ms):
             return False
-        if current.state != LocalizationState.RECOVERY_REQUIRED and not self._valid_forecast_evidence(
-                forecast_evidence, current, environment, now):
+        if current.state != LocalizationState.RECOVERY_REQUIRED:
+            if not self._valid_forecast_evidence(forecast_evidence, current, environment, now):
+                return False
+            # The authorized, durable admission validates this exact revision.
+            # Do not require an unrelated CONTINUE between a new fix and its
+            # proactive recovery; reject a concurrent revision change instead.
+            try:
+                self.tracker.acknowledge_validation(forecast_evidence.validated_pose_revision,
+                    route_validated=forecast_evidence.route_validated,
+                    energy_validated=forecast_evidence.energy_validated)
+            except ValueError:
+                return False
+        elif current.requires_route_validation or current.requires_energy_validation:
             return False
         environment = replace(environment)
         self._started_at = self._pending_at = self._pose = self._pending = None
