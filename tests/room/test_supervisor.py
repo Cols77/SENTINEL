@@ -10,7 +10,7 @@ import pytest
 from sentinel.cube.checkpoint import CheckpointPlan, CommandLimits, PlannedCommand
 from sentinel.cube.energy import EnergyProfile, EnergySample, ExecutionMode, ReserveGuard
 from sentinel.cube.localization import LocalizationState
-from sentinel.cube.step_executor import CheckpointOutcome, ExecutorState, TerminalOutcome
+from sentinel.cube.step_executor import CheckpointOutcome, CommandState, ExecutorState, TerminalOutcome
 from sentinel.models import Position, Telemetry
 from sentinel.room.models import CapabilityGrant, CapabilityProfile, canonical_grant_sha256
 from sentinel.room.queries import ReadQueries
@@ -35,12 +35,25 @@ class Executor:
         self.store, self.clock = store, clock
         self.state = ExecutorState.AIRBORNE
         self.calls = []
+        # Room controller fix round 3 (F3): the reported post-checkpoint
+        # measured position, mutable per-test/per-dispatch. Defaults to the
+        # tracker's canonical fixture position so every existing test that
+        # never touches this keeps its prior behavior; a caller that wants
+        # to simulate a checkpoint actually reaching a specific pose (see
+        # ``make_resolve_checkpoint`` in test_count_return.py) sets this
+        # before dispatch.
+        self.reported_pose = Position(100, 100, 100)
 
     def execute(self, plan):
         assert self.store.events("session")[-1].event_type == "SAFETY_ASSESSED"
         self.calls.extend(c.kind for c in plan.commands)
-        return CheckpointOutcome("COMPLETED", (), ("observation",), Telemetry(76, 100),
-                                 Position(100, 100, 100), True)
+        # Room controller fix round 2 (Q5): report a real per-command record,
+        # not a hardcoded empty tuple -- the controller now checks
+        # command_states for a completed CAPTURE belonging to the dispatched
+        # plan, so this stub must actually reflect which commands it ran.
+        states = tuple(CommandState(c, "COMPLETED", 0.0, 1.0) for c in plan.commands)
+        return CheckpointOutcome("COMPLETED", states, ("observation",), Telemetry(76, 100),
+                                 self.reported_pose, True)
 
     def return_home(self, plan):
         self.state = ExecutorState.RETURNING
