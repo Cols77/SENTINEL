@@ -89,9 +89,56 @@ def test_unevidenced_not_resolvable_claim_does_not_close_out_the_pair():
     assert projection.complete is False
 
 
-def test_evidenced_not_resolvable_class_is_terminal_and_counts_as_complete():
-    observation = CellObservation("cell-1", "phone", "p1", "NOT_RESOLVABLE", "2026-09-23T00:00:00+00:00", ("ev-nr",))
+def test_one_far_pose_evidenced_not_resolvable_alone_leaves_the_room_incomplete():
+    # A single evidenced NOT_RESOLVABLE claim from one pose ("p-far") must
+    # not make a (cell, class) pair terminal for the whole room on its own,
+    # with no declared site geometry to say the site has no other way of
+    # ever resolving it -- NOT_RESOLVABLE is a declared-geometry verdict
+    # (module docstring), not one sighting's opinion. Round 2 fix for Q3.
+    observation = CellObservation("cell-1", "phone", "p-far", "NOT_RESOLVABLE", "2026-09-23T00:00:00+00:00", ("ev-nr",))
     projection = project_coverage((_cell(),), (observation,))
+    assert projection.by_cell_and_class == (("cell-1", "phone", "UNVISITED"),)
+    assert projection.complete is False
+    assert projection.uncovered == ("cell-1:phone",)
+
+
+def test_two_distinct_poses_evidenced_not_resolvable_without_declared_geometry_is_terminal():
+    # With no declared view geometry supplied at all, a second, independent
+    # pose's agreement is enough corroboration -- the same "more than one
+    # distinct view" bar counting.py already applies to confirm a static
+    # object.
+    near = CellObservation("cell-1", "phone", "p-near", "NOT_RESOLVABLE", "t0", ("ev-1",))
+    far = CellObservation("cell-1", "phone", "p-far", "NOT_RESOLVABLE", "t1", ("ev-2",))
+    projection = project_coverage((_cell(),), (near, far))
+    assert projection.by_cell_and_class == (("cell-1", "phone", "NOT_RESOLVABLE"),)
+    assert projection.complete is True
+
+
+def test_not_resolvable_stays_incomplete_until_every_declared_view_of_the_cell_agrees():
+    # The site declares two poses that can see this cell; only one of them
+    # ("p-far") has reported NOT_RESOLVABLE so far -- the pair must stay
+    # incomplete until the other declared view ("p-near") has also weighed
+    # in, exactly the finding's probe.
+    far = CellObservation("cell-1", "phone", "p-far", "NOT_RESOLVABLE", "t0", ("ev-far",))
+    projection = project_coverage((_cell(),), (far,),
+                                  declared_views_by_cell={"cell-1": ("p-far", "p-near")})
+    assert projection.by_cell_and_class == (("cell-1", "phone", "UNVISITED"),)
+    assert projection.complete is False
+    assert projection.uncovered == ("cell-1:phone",)
+
+    near = CellObservation("cell-1", "phone", "p-near", "NOT_RESOLVABLE", "t1", ("ev-near",))
+    completed = project_coverage((_cell(),), (far, near),
+                                 declared_views_by_cell={"cell-1": ("p-far", "p-near")})
+    assert completed.by_cell_and_class == (("cell-1", "phone", "NOT_RESOLVABLE"),)
+    assert completed.complete is True
+
+
+def test_declared_geometry_with_no_possible_view_makes_one_evidenced_claim_terminal():
+    # The site can also declare that *no* pose can ever view a cell at all
+    # -- an empty declared set. There, a single evidenced claim is already
+    # definitive: nothing else could ever contradict it.
+    observation = CellObservation("cell-1", "phone", "p1", "NOT_RESOLVABLE", "t0", ("ev-nr",))
+    projection = project_coverage((_cell(),), (observation,), declared_views_by_cell={"cell-1": ()})
     assert projection.by_cell_and_class == (("cell-1", "phone", "NOT_RESOLVABLE"),)
     assert projection.complete is True
 

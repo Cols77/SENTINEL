@@ -16,10 +16,18 @@ unvisited cell. ``UNANALYSED`` means a frame exists but has not finished
 being scored -- distinct from a cell nobody has pointed a camera at yet.
 ``NOT_RESOLVABLE`` is terminal in the other direction: the declared geometry
 can never resolve this class here, so a room-wide count can be honestly
-complete without it ever turning ``OBSERVED``.
+complete without it ever turning ``OBSERVED``. Because it is a *geometry*
+verdict and not a single sighting's opinion, one evidenced ``NOT_RESOLVABLE``
+observation is never enough on its own in ``project_coverage``: it becomes
+terminal only once a second, independent pose corroborates it, or once the
+caller's declared view geometry (``declared_views_by_cell``) says every pose
+the site declares able to view the cell has agreed (which can mean a single
+report is definitive, when the site declares only one such pose, or even
+zero poses at all -- see ``project_coverage``).
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 import hashlib
@@ -160,48 +168,86 @@ def _capture_summary(observations: tuple[CellObservation, ...]) -> tuple[str | N
 
 
 def project_coverage(cells: tuple[CoverageCell, ...],
-                      observations: tuple[CellObservation, ...]) -> CoverageProjection:
+                      observations: tuple[CellObservation, ...],
+                      *,
+                      declared_views_by_cell: Mapping[str, tuple[str, ...]] | None = None) -> CoverageProjection:
     """Resolve every (cell_id, class_name) pair the declared cells require.
 
-    Both arguments are copied into local tuples immediately, and every field
-    of the result is itself an immutable tuple built fresh here, so no later
-    mutation of a caller's list can reach back into an already-returned
-    projection (or the digest computed from it).
+    Both positional arguments are copied into local tuples immediately, and
+    every field of the result is itself an immutable tuple built fresh here,
+    so no later mutation of a caller's list can reach back into an
+    already-returned projection (or the digest computed from it).
+    ``declared_views_by_cell`` is only read during this call and never kept
+    on the returned projection, so mutating it afterwards cannot reach back
+    either.
+
+    ``declared_views_by_cell`` maps a cell_id to the pose_ids the site
+    declares can ever view it (``RoomSite.pose_visibility``, inverted from
+    pose -> cells into cell -> poses). It is the one place this otherwise
+    site-independent module is told about declared geometry, and it exists
+    to keep ``NOT_RESOLVABLE`` the geometry verdict the module docstring
+    promises rather than a lone sighting's opinion:
+
+    * A cell present in the mapping is resolved by its declared geometry --
+      terminal once every pose the mapping names for it has (evidenced)
+      reported ``NOT_RESOLVABLE``. An empty tuple for a cell means the site
+      declares *no* pose can ever view it, so a single evidenced claim from
+      any pose is immediately definitive (the declared set is trivially a
+      subset of any report).
+    * A cell absent from the mapping (including when the mapping itself is
+      omitted, for every caller and fixture that predates declared-geometry
+      wiring) has no known declared geometry at all, so one sighting's claim
+      is not enough by itself -- it becomes terminal only once a second,
+      independent pose corroborates it, exactly the same "more than one
+      distinct view" bar ``counting._static_counts`` already applies before
+      calling a static object confirmed.
     """
     cells = tuple(cells)
     observations = tuple(observations)
+    declared_views_by_cell = declared_views_by_cell or {}
     required = sorted({(cell.cell_id, class_name)
                         for cell in cells for class_name in cell.required_classes})
+    required_set = set(required)
     latest_capture_at, analysed_frames, unanalysed_frames = _capture_summary(observations)
-    best: dict[tuple[str, str], tuple[int, CoverageStatus]] = {}
-    evidence_by_pair: dict[tuple[str, str], list[str]] = {}
+
+    evidenced_by_key: dict[tuple[str, str], list[CellObservation]] = {}
     for observation in observations:
         key = (observation.cell_id, observation.class_name)
-        if key not in {pair for pair in required}:
+        if key not in required_set:
             continue
         status = CoverageStatus(observation.status)
-        if status == CoverageStatus.OCCLUDED and not observation.evidence_refs:
-            # A claimed occlusion with no supporting evidence is worth
-            # nothing more than never having looked at all.
+        if status in (CoverageStatus.OCCLUDED, CoverageStatus.OBSERVED, CoverageStatus.NOT_RESOLVABLE) \
+                and not observation.evidence_refs:
+            # A claimed occlusion, observation or unresolvability with no
+            # supporting evidence is worth nothing more than never having
+            # looked at all.
             continue
-        if status == CoverageStatus.OBSERVED and not observation.evidence_refs:
-            # The strongest claim needs at least as much proof as OCCLUDED
-            # does -- an OBSERVED verdict with nothing to cite is not
-            # citeable evidence and must not complete coverage.
-            continue
-        if status == CoverageStatus.NOT_RESOLVABLE and not observation.evidence_refs:
-            # NOT_RESOLVABLE is terminal in the other direction (coverage
-            # can be honestly complete without it ever turning OBSERVED), so
-            # it needs the same positive evidence OCCLUDED does -- otherwise
-            # a single unevidenced per-sighting claim could close out a
-            # (cell, class) pair for the whole room with nothing behind it.
-            continue
-        rank = _RANK[status]
-        current = best.get(key)
-        if current is None or rank > current[0]:
-            best[key] = (rank, status)
-        if observation.evidence_refs:
-            evidence_by_pair.setdefault(key, []).extend(observation.evidence_refs)
+        evidenced_by_key.setdefault(key, []).append(observation)
+
+    best: dict[tuple[str, str], tuple[int, CoverageStatus]] = {}
+    evidence_by_pair: dict[tuple[str, str], list[str]] = {}
+    for key, obs_list in evidenced_by_key.items():
+        cell_id, _class_name = key
+        not_resolvable_poses = {o.pose_id for o in obs_list
+                                if CoverageStatus(o.status) == CoverageStatus.NOT_RESOLVABLE}
+        declared_views = declared_views_by_cell.get(cell_id)
+        if declared_views is not None:
+            not_resolvable_ready = bool(not_resolvable_poses) and set(declared_views) <= not_resolvable_poses
+        else:
+            not_resolvable_ready = len(not_resolvable_poses) > 1
+        for observation in obs_list:
+            status = CoverageStatus(observation.status)
+            if observation.evidence_refs:
+                evidence_by_pair.setdefault(key, []).extend(observation.evidence_refs)
+            if status == CoverageStatus.NOT_RESOLVABLE and not not_resolvable_ready:
+                # Not yet decisive: its evidence is still recorded above, but
+                # it must not win the pair (see docstring) -- falls through
+                # to whatever else has evidenced this pair, or UNVISITED.
+                continue
+            rank = _RANK[status]
+            current = best.get(key)
+            if current is None or rank > current[0]:
+                best[key] = (rank, status)
     by_cell_and_class = tuple(
         (cell_id, class_name, best.get((cell_id, class_name), (0, CoverageStatus.UNVISITED))[1].value)
         for cell_id, class_name in required

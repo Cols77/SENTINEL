@@ -180,8 +180,12 @@ def test_empty_db_reports_zero_not_not_observable():
 
 
 def test_not_resolvable_coverage_marks_the_class_not_observable():
+    # A single sighting's NOT_RESOLVABLE claim is no longer terminal on its
+    # own (coverage.py round 2 fix for Q3) -- pin the still-supported path
+    # via declared site geometry naming this pose as the cell's only
+    # possible view, so the claim is definitive.
     observation = CellObservation("cell-1", "phone", "p1", "NOT_RESOLVABLE", "t0", ("ev-nr",))
-    coverage = project_coverage((_PHONE_CELL,), (observation,))
+    coverage = project_coverage((_PHONE_CELL,), (observation,), declared_views_by_cell={"cell-1": ("p1",)})
     counts = project_counts((), (), coverage)
     phone = next(c for c in counts if c.class_name == "phone")
     assert phone.method == "NOT_OBSERVABLE"
