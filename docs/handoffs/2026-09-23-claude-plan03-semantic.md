@@ -1,7 +1,9 @@
 # Claude Code Handoff — Plan 03 Task 1
 
-Work in a separate Git worktree and branch from the latest
-`feat/jev-agentic-room-loop`. Do not edit the existing worktree.
+Work in a separate Git worktree and branch named
+`claude/plan03-semantic-pose`, based exactly on
+`391db567d28442cf07a0173d262bfb4e0ea481a8`. Do not edit the existing
+worktree.
 
 Implement only Plan 03 Task 1 from:
 
@@ -68,4 +70,3 @@ Report:
 - exact changed paths;
 - failing-test and passing-test evidence;
 - any self-review concerns.
-
