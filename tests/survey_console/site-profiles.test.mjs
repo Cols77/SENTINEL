@@ -43,8 +43,8 @@ test('stale catalogue response cannot undo a successful selection',async()=>{
  const old=control.load();
  // A catalogue can be pending when a server response to a selection arrives.
  control.update(catalogue());
- await control.select('Harbor');
- finish(catalogue());await old;
+ const selection=control.select('Harbor');
+ finish(catalogue());await Promise.all([old,selection]);
  assert.equal(control.getState().selected_profile_id,'Harbor');
  assert.equal(reads,2);
 });
@@ -97,9 +97,9 @@ test('catalogue response during pending selection triggers one post-settlement r
  const activity={...initial,run:{...initial.run,version:2},events:{watermark:1}};
  const activityRead=watch(activity);
  watch(structuredClone(activity));
- finishRead(catalogue('CanningSt',false));await activityRead;
+ finishRead(catalogue('CanningSt',false));
  finishSelect({...catalogue('Harbor'),status:'ACKNOWLEDGED',reason_code:null});
- await selection;
+ await Promise.all([activityRead,selection]);
  assert.equal(control.getState().selected_profile_id,'Harbor');
  assert.equal(control.getState().switch_allowed,false);
  assert.equal(readCalls,3);
@@ -120,4 +120,21 @@ test('pending selection failure also rechecks a discarded activity catalogue',as
  assert.equal(control.getState().selected_profile_id,'CanningSt');
  assert.equal(control.getState().switch_allowed,false);
  assert.equal(readCalls,3);
+});
+
+test('same-tick invalid response drains a discarded catalogue after the active read clears',async()=>{
+ let finishSelect,finishRead,readCalls=0;
+ const control=createSiteProfileController({
+  read_site_profiles:()=>{readCalls++;return readCalls===1?Promise.resolve(catalogue()):readCalls===2?new Promise(resolve=>finishRead=resolve):Promise.resolve(catalogue('CanningSt',false));},
+  select_site_profile:()=>new Promise(resolve=>finishSelect=resolve),
+ });
+ await control.load();
+ const selection=control.select('Harbor');
+ const activityRead=control.load();
+ finishRead(catalogue('CanningSt',false));
+ finishSelect({...catalogue(),status:'INVALID',reason_code:'SITE_PROFILE_INCOMPLETE'});
+ await Promise.all([activityRead,selection]);
+ assert.equal(readCalls,3);
+ assert.equal(control.getState().selected_profile_id,'CanningSt');
+ assert.equal(control.getState().switch_allowed,false);
 });

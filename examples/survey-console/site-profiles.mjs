@@ -74,6 +74,7 @@ export function createSiteProfileController(client,refreshSnapshot=async()=>{}){
    }catch{
     state={...state,selected_profile_id:previous,pending:false,feedback:'Site selection could not be confirmed. Refresh the catalogue.'};emit();
    }
+   if(loading)await loading;
    if(rerun){rerun=false;await api.load();}
  },
  };
