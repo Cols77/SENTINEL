@@ -16,8 +16,9 @@ function check(rule,value,path){
  }
  if(rule.type==='object'){
   if(!value||typeof value!=='object'||Array.isArray(value))fail();
-  if(Object.keys(value).length!==rule.required.length||rule.required.some(k=>!Object.hasOwn(value,k)))fail();
-  for(const [k,r] of Object.entries(rule.properties))check(r,value[k],`${path}.${k}`);
+  if(rule.required.some(k=>!Object.hasOwn(value,k)))fail();
+  if(rule.additionalProperties===false&&Object.keys(value).some(k=>!Object.hasOwn(rule.properties,k)))fail();
+  for(const [k,r] of Object.entries(rule.properties))if(Object.hasOwn(value,k))check(r,value[k],`${path}.${k}`);
  }
 }
 export function validateMission(value){
@@ -25,6 +26,16 @@ export function validateMission(value){
  const bad=()=>{throw new Error('Invalid mission reference');};
  for(const row of [value.report,...value.chat.messages,value.proposal,value.localization.latest_report,value.localization.pose_evidence])if(row&&row.run_id!==value.run.id)bad();
  if(value.source.mode!==value.session.mode)bad();
+ const readiness=value.readiness;
+ if(readiness){
+  const capabilities=['planning','flight','detection','emergency'];
+  if(readiness.checks.length!==capabilities.length||readiness.checks.some((row,index)=>row.capability!==capabilities[index]))bad();
+  if(readiness.checks.some(row=>row.ready!==(row.reason_code===null&&row.remediation===null)))bad();
+  const ready=Object.fromEntries(readiness.checks.map(row=>[row.capability,row.ready]));
+  const expected=!ready.planning?'NOT_READY':Object.values(ready).every(Boolean)?'READY_TO_DISPATCH':'READY_TO_PLAN';
+  if(readiness.state==='ACTIVE'){if(!Object.values(ready).every(Boolean))bad();}
+  else if(readiness.state!==expected)bad();
+ }
  const ids={};
  for(const key of ['frames','sightings','objects']){ids[key]=new Set(value.evidence[key].map(r=>r.id));if(ids[key].size!==value.evidence[key].length)bad();}
  for(const row of value.evidence.sightings)if(!ids.frames.has(row.frame_id))bad();

@@ -47,6 +47,12 @@ SAFETY = obj(available=B,status=enum('IDLE','REQUESTED','ACKNOWLEDGED','COMPLETE
 TAG = obj(tag_id=I,corners_xy_normalized={'type':'array','minItems':4,'maxItems':4,'items':{'type':'array','minItems':2,'maxItems':2,'items':{'type':'number','minimum':0,'maximum':1}}},status=enum('USED','DETECTED_NOT_USED'),reason_code=nullable(S),zone_id=nullable(ID),reprojection_error_px=nullable(U))
 POSE_EVIDENCE = obj(run_id=ID,report_id=ID,artifact_id=ID,sha256=ID,captured_at=S,width_px=I,height_px=I,source_kind=enum('SIMULATED','REPLAYED','LIVE'),tags=arr(TAG))
 REPORT_POSE = obj(run_id=ID,report_id=ID,observed_at=S,source_kind=enum('SIMULATED','REPLAYED','LIVE'),point=obj(x=N,y=N),heading_deg=N,altitude_m=nullable(N),method=S,tag_observations=arr(obj(tag_id=I,zone_id=ID,distance_m=U,reprojection_error_px=U)),reprojection_error_px=U)
+READINESS_CHECK = obj(
+    capability=enum('planning','flight','detection','emergency'),
+    ready=B, reason_code=nullable(ID), remediation=nullable(ID))
+READINESS = obj(
+    state=enum('NOT_READY','READY_TO_PLAN','READY_TO_DISPATCH','ACTIVE'),
+    checks=arr(READINESS_CHECK), command_template=S)
 SCHEMA = obj(
  schema_version={'const':3},
  decision=PROVENANCE,
@@ -64,3 +70,8 @@ SCHEMA = obj(
  events=obj(watermark=I),legal_actions=arr(obj(action=enum('CHAT','APPROVE','REJECT','LAND','EMERGENCY'),enabled=B,reasons=arr(S)))
 
 )
+
+# Readiness is a backwards-compatible schema-v3 extension. New backend
+# snapshots emit it, while stored/fixture v3 projections that predate the
+# extension remain valid.
+SCHEMA['properties']['readiness'] = READINESS

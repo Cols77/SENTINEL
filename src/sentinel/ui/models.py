@@ -30,6 +30,24 @@ def validate_snapshot(value):
                 raise ValueError('cross-run reference')
         if value['source']['mode'] != value['session']['mode']:
             raise ValueError('source mode mismatch')
+        readiness = value.get('readiness')
+        if readiness is not None:
+            expected = ('planning','flight','detection','emergency')
+            checks = readiness['checks']
+            if tuple(row['capability'] for row in checks) != expected:
+                raise ValueError('readiness checks must be ordered and unique')
+            for row in checks:
+                if row['ready'] != (row['reason_code'] is None and row['remediation'] is None):
+                    raise ValueError('readiness reason/remediation mismatch')
+            ready = {row['capability']: row['ready'] for row in checks}
+            expected_state = ('NOT_READY' if not ready['planning'] else
+                              'READY_TO_DISPATCH' if all(ready.values()) else
+                              'READY_TO_PLAN')
+            if readiness['state'] == 'ACTIVE':
+                if not all(ready.values()):
+                    raise ValueError('active readiness has unavailable capability')
+            elif readiness['state'] != expected_state:
+                raise ValueError('readiness state/check mismatch')
         evidence = value['evidence']
         ids = {}
         for key in ('frames','sightings','objects'):

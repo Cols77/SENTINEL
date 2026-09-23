@@ -27,6 +27,20 @@ def test_host_projection_and_capability_boundaries(tmp_path):
         service.close()
 
 
+def test_bare_live_api_projects_not_ready_without_route_or_hardware(tmp_path):
+    service = build_service(SessionConfig(data_dir=tmp_path, mode='LIVE'))
+    try:
+        with TestClient(build_app(service, repository_root=Path.cwd())) as client:
+            snapshot = client.get('/api/v1/runs/mission/snapshot').json()
+            assert snapshot['readiness']['state'] == 'NOT_READY'
+            assert [check['capability'] for check in snapshot['readiness']['checks']] == [
+                'planning', 'flight', 'detection', 'emergency']
+            assert snapshot['mission']['route'] == []
+            assert validate_snapshot(snapshot) == snapshot
+    finally:
+        service.close()
+
+
 def test_projection_uses_return_route_id_for_none_stop_index(tmp_path):
     config=SessionConfig(data_dir=tmp_path,scenario_path=Path('fixtures/mission-control/clean-computer.json'))
     service=build_service(config)

@@ -64,6 +64,19 @@ class ProjectionService:
             facts=svc.runtime.facts(run_id)
             offer=svc.approval.current(run_id)
             s=empty_snapshot(svc.session_id,run_id,svc.config.mode)
+            if svc.readiness is not None:
+                s['readiness']=svc.readiness.public()
+                if svc.registry.get(run_id) is not None:
+                    s['readiness']['state']='ACTIVE'
+            else:
+                s['readiness']={
+                    'state':'ACTIVE',
+                    'checks':[
+                        {'capability':capability,'ready':True,
+                         'reason_code':None,'remediation':None}
+                        for capability in ('planning','flight','detection','emergency')],
+                    'command_template':'',
+                }
             s['run'].update(request_text=state.get('request_text',facts['run']['request_text'] if facts['run'] else ''),status=row['status'],phase='APPROVAL' if offer else state.get('phase','REQUEST'),decision_version=row['decision_version'],updated_at=state.get('updated_at','1970-01-01T00:00:00+00:00'))
             s['decision'] = deepcopy(state.get('decision', svc.runtime._decision_defaults()))
             s['source']['kind']=svc.adapters.source_kind
@@ -192,6 +205,9 @@ class ProjectionService:
                     s['localization']=pose
                     if state.get('vertical'):
                         s['localization']['vertical_consistency']=vertical_consistency_view(state['vertical'])
-            s['legal_actions']=[dict(action=a,enabled=e,reasons=[] if e else ['Unavailable in current state']) for a,e in [('CHAT',True),('APPROVE',bool(offer)),('REJECT',bool(offer)),('LAND',s['safety']['land']['available']),('EMERGENCY',s['safety']['emergency']['available'])]]
+            planning_ready = (svc.readiness is None or next(
+                check.ready for check in svc.readiness.checks
+                if check.capability == 'planning'))
+            s['legal_actions']=[dict(action=a,enabled=e,reasons=[] if e else ['Unavailable in current state']) for a,e in [('CHAT',True),('APPROVE',bool(offer) and planning_ready),('REJECT',bool(offer) and planning_ready),('LAND',s['safety']['land']['available']),('EMERGENCY',s['safety']['emergency']['available'])]]
             validate_snapshot(s)
             return svc.store.publish_snapshot(run_id,s)

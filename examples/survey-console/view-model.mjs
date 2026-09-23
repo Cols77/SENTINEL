@@ -14,6 +14,7 @@ export function toSurveyView(s){
  decision:s.decision,proposal:s.proposal,proposer:s.decision??s.proposal?.proposer??null,escalation_reason:s.decision?.escalation_reason??s.proposal?.escalation_reason??null,report:s.report,flights:s.mission.flights,sweep:s.mission.sweep,
  frames:s.evidence.frames,sightings:s.evidence.sightings,objects:s.evidence.objects,counts:s.results.counts,
  analysis:s.evidence.analysis,provider:s.evidence.provider,failures:s.evidence.failures,mode:s.session.mode,
+ readiness:s.readiness??{state:'ACTIVE',checks:[],command_template:''},
  localization:s.localization,route:s.mission.route,return_to_start:s.mission.return_to_start,return_error_cm:s.mission.return_error_cm};
 }
 

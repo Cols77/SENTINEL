@@ -15,6 +15,52 @@ def test_live_readiness_public_shape_contains_only_allowlisted_fields():
         'planning', 'flight', 'detection', 'emergency']
 
 
+def readiness_document(state='NOT_READY'):
+    ready_capabilities = (
+        set() if state == 'NOT_READY' else
+        {'planning'} if state == 'READY_TO_PLAN' else
+        {'planning', 'flight', 'detection', 'emergency'})
+    return {
+        'state': state,
+        'checks': [
+            {'capability': capability, 'ready': capability in ready_capabilities,
+             'reason_code': (None if capability in ready_capabilities else
+                             f'LIVE_{capability.upper()}_REQUIRED'),
+             'remediation': (None if capability in ready_capabilities else
+                             f'Supply --{capability}.')}
+            for capability in ('planning', 'flight', 'detection', 'emergency')
+        ],
+        'command_template': 'sentinel mission-control --mode live --site <SITE_JSON>',
+    }
+
+
+@pytest.mark.parametrize('state',
+                         ['NOT_READY', 'READY_TO_PLAN', 'READY_TO_DISPATCH', 'ACTIVE'])
+def test_schema_v3_accepts_closed_readiness_states_and_legacy_omission(state):
+    snapshot = empty_snapshot('s', 'r', 'LIVE')
+    snapshot['readiness'] = readiness_document(state)
+    assert validate_snapshot(snapshot) == snapshot
+    del snapshot['readiness']
+    assert validate_snapshot(snapshot) == snapshot
+
+
+@pytest.mark.parametrize('mutate', [
+    lambda readiness: readiness['checks'].reverse(),
+    lambda readiness: readiness['checks'].__setitem__(
+        1, dict(readiness['checks'][0])),
+    lambda readiness: readiness['checks'][0].update(
+        ready=True, reason_code='STILL_BLOCKED', remediation=None),
+    lambda readiness: readiness.update(command_template=7),
+    lambda readiness: readiness.update(secret='private'),
+])
+def test_readiness_rejects_malformed_order_pairing_and_cross_types(mutate):
+    snapshot = empty_snapshot('s', 'r', 'LIVE')
+    snapshot['readiness'] = readiness_document()
+    mutate(snapshot['readiness'])
+    with pytest.raises(ValueError):
+        validate_snapshot(snapshot)
+
+
 def test_snapshot_rejects_private_unknown_and_cross_run_facts():
     snapshot = empty_snapshot('s', 'r', 'REHEARSAL')
     assert validate_snapshot(snapshot) == snapshot
