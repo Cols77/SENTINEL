@@ -27,15 +27,20 @@ def test_host_projection_and_capability_boundaries(tmp_path):
         service.close()
 
 
-def test_bare_live_api_projects_not_ready_without_route_or_hardware(tmp_path):
-    service = build_service(SessionConfig(data_dir=tmp_path, mode='LIVE'))
+def test_configured_live_api_projects_planning_without_hardware(tmp_path):
+    service = build_service(SessionConfig(
+        data_dir=tmp_path, mode='LIVE',
+        site_path=Path('docs/wp5-flight1-site.json'),
+        tag_map_path=Path('docs/wp5-flight3-map.json'),
+        pose_db=tmp_path / 'pose.sqlite', surface_z_cm=50,
+        start_x_cm=250, start_y_cm=190))
     try:
         with TestClient(build_app(service, repository_root=Path.cwd())) as client:
             snapshot = client.get('/api/v1/runs/mission/snapshot').json()
-            assert snapshot['readiness']['state'] == 'NOT_READY'
+            assert snapshot['readiness']['state'] == 'READY_TO_PLAN'
             assert [check['capability'] for check in snapshot['readiness']['checks']] == [
                 'planning', 'flight', 'detection', 'emergency']
-            assert snapshot['mission']['route'] == []
+            assert snapshot['mission']['route']
             assert validate_snapshot(snapshot) == snapshot
     finally:
         service.close()

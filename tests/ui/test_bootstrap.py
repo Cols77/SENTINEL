@@ -19,14 +19,19 @@ def test_bare_live_readiness_is_ordered_actionable_and_secret_free(monkeypatch):
     assert readiness.state == 'NOT_READY'
     assert [check.capability for check in readiness.checks] == [
         'planning', 'flight', 'detection', 'emergency']
-    assert all(not check.ready and check.reason_code and check.remediation
-               for check in readiness.checks)
+    assert all(check.reason_code and check.remediation
+               for check in readiness.checks if not check.ready)
+    assert not readiness.checks[0].ready
+    assert not readiness.checks[2].ready
     public = json.dumps(readiness.public())
     for required_name in ('--site', '--tag-map', '--pose-db', '--start-x-cm',
-                          '--start-y-cm', '--surface-z-cm', '--confirm',
-                          '--local-ip', 'OPENROUTER_API_KEY',
-                          'GEMINI_OPENROUTER_MODEL'):
+                          '--start-y-cm', '--surface-z-cm'):
         assert required_name in public
+    assert readiness.command_template == ''
+    assert 'LIVE_CONFIRM_REQUIRED' not in public
+    assert 'LIVE_PAID_CALL_AUTH_REQUIRED' not in public
+    assert '--confirm' not in public
+    assert '--i-authorise-paid-calls' not in public
     assert 'sentinel-secret-api-value' not in public
     assert 'sentinel-secret-model-value' not in public
 
@@ -49,10 +54,8 @@ def test_live_defaults_to_openrouter_gemini_and_loads_nearest_env(
                      if check.capability == 'detection')
 
     assert config.detector_name == 'gemini-openrouter'
-    assert detection.reason_code == 'LIVE_PAID_CALL_AUTH_REQUIRED'
-    assert 'OPENROUTER_API_KEY' in readiness.command_template
-    assert 'GEMINI_OPENROUTER_MODEL' in readiness.command_template
-    assert '--detector gemini-openrouter' in readiness.command_template
+    assert detection.reason_code == 'APPROVED_PROVIDER_PROFILE_REQUIRED'
+    assert readiness.command_template == ''
     assert 'secret-from-env' not in json.dumps(readiness.public())
     assert parse_config(['--mode', 'rehearsal']).detector_name == 'scripted'
 
@@ -70,6 +73,184 @@ def live_config(tmp_path, monkeypatch):
         pose_db=tmp_path/'pose.sqlite',detector_name='gemini',provider_profile=profile_path,
         authorise_paid_calls=True,
         location='lab',consent_date='2026-09-21',local_ip='192.168.10.2',surface_z_cm=50,start_x_cm=250,start_y_cm=190)
+
+
+def test_provider_readiness_names_only_missing_variables(live_config, monkeypatch,
+                                                         tmp_path):
+    from sentinel.ui.readiness import evaluate_live_readiness
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
+    detection = next(check for check in evaluate_live_readiness(live_config).checks
+                     if check.capability == 'detection')
+    assert detection.reason_code == 'LIVE_PROVIDER_ENV_REQUIRED'
+    assert 'GEMINI_API_KEY' in detection.remediation
+    assert 'GEMINI_MODEL' not in detection.remediation
+    monkeypatch.setenv('GEMINI_API_KEY', 'hidden-key')
+    detection = next(check for check in evaluate_live_readiness(live_config).checks
+                     if check.capability == 'detection')
+    assert detection.ready
+    assert 'hidden-key' not in json.dumps(detection.public())
+
+
+def test_provider_variable_names_are_absent_for_other_blockers(live_config):
+    from sentinel.ui.readiness import evaluate_live_readiness
+
+    for config in (replace(live_config, detector_name='scripted'),
+                   replace(live_config, provider_profile=None)):
+        detection = next(check for check in evaluate_live_readiness(config).checks
+                         if check.capability == 'detection')
+        assert detection.reason_code != 'LIVE_PROVIDER_ENV_REQUIRED'
+        public = json.dumps(detection.public())
+        assert 'GEMINI_API_KEY' not in public
+        assert 'GEMINI_MODEL' not in public
+        assert 'OPENROUTER_API_KEY' not in public
+        assert 'GEMINI_OPENROUTER_MODEL' not in public
+
+
+def test_route_discovery_uses_udp_connect_without_sending(monkeypatch):
+    from sentinel.ui import readiness
+    calls = []
+
+    class RouteSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            calls.append('close')
+
+        def connect(self, destination):
+            calls.append(('connect', destination))
+
+        def getsockname(self):
+            calls.append('getsockname')
+            return ('192.168.10.2', 43100)
+
+        def send(self, *_args):
+            pytest.fail('readiness must never send a packet')
+
+    monkeypatch.setattr(readiness.socket, 'socket',
+                        lambda family, kind: RouteSocket())
+    assert readiness.discover_local_ipv4('192.168.10.1') == '192.168.10.2'
+    assert calls == [('connect', ('192.168.10.1', 8889)), 'getsockname', 'close']
+
+
+def test_route_discovery_rejects_loopback_and_failure(monkeypatch):
+    from sentinel.ui import readiness
+
+    class RouteSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def connect(self, _destination):
+            pass
+
+        def getsockname(self):
+            return ('127.0.0.1', 43100)
+
+    monkeypatch.setattr(readiness.socket, 'socket',
+                        lambda family, kind: RouteSocket())
+    assert readiness.discover_local_ipv4('192.168.10.1') is None
+
+    def unavailable(*_args):
+        raise OSError('no route')
+
+    monkeypatch.setattr(readiness.socket, 'socket', unavailable)
+    assert readiness.discover_local_ipv4('192.168.10.1') is None
+
+
+def test_snapshot_refreshes_route_and_provider_facts(live_config, monkeypatch):
+    from sentinel.ui import readiness
+
+    route = {'address': None}
+    monkeypatch.setattr(readiness, 'discover_local_ipv4',
+                        lambda tello_ip: route['address'])
+    service = bootstrap.build_service(replace(live_config, local_ip=None,
+                                              confirm=False,
+                                              authorise_paid_calls=False))
+    try:
+        def checks():
+            snapshot = service.read_snapshot('mission')
+            assert snapshot['schema_version'] == 3
+            assert snapshot['readiness']['command_template'] == ''
+            return {row['capability']: row for row in snapshot['readiness']['checks']}
+
+        assert checks()['flight']['reason_code'] == 'LIVE_NETWORK_CONFIG_REQUIRED'
+        route['address'] = '192.168.10.2'
+        assert all(checks()[capability]['ready']
+                   for capability in ('flight', 'emergency', 'detection'))
+        monkeypatch.delenv('GEMINI_API_KEY')
+        assert checks()['detection']['reason_code'] == 'LIVE_PROVIDER_ENV_REQUIRED'
+        monkeypatch.setenv('GEMINI_API_KEY', 'hidden-key')
+        assert checks()['detection']['ready']
+        route['address'] = None
+        assert checks()['emergency']['reason_code'] == 'LIVE_NETWORK_CONFIG_REQUIRED'
+        assert checks()['flight']['reason_code'] == 'LIVE_NETWORK_CONFIG_REQUIRED'
+    finally:
+        service.close()
+
+
+def test_explicit_local_ip_takes_precedence_over_route_discovery(live_config,
+                                                                 monkeypatch):
+    from sentinel.ui import readiness
+
+    def fail_if_discovered(_tello_ip):
+        pytest.fail('explicit local IP should take precedence')
+
+    monkeypatch.setattr(readiness, 'discover_local_ipv4', fail_if_discovered)
+    checks = readiness.evaluate_live_readiness(live_config).checks
+    assert next(check for check in checks if check.capability == 'flight').ready
+    assert next(check for check in checks if check.capability == 'emergency').ready
+
+
+def test_flight_and_emergency_share_one_route_observation(live_config,
+                                                          monkeypatch):
+    from sentinel.ui import readiness
+
+    calls = []
+    def discover(_tello_ip):
+        calls.append('route')
+        return '192.168.10.2' if len(calls) == 1 else None
+
+    monkeypatch.setattr(readiness, 'discover_local_ipv4', discover)
+    checks = readiness.evaluate_live_readiness(replace(live_config, local_ip=None)).checks
+    assert calls == ['route']
+    assert next(check for check in checks if check.capability == 'flight').ready
+    assert next(check for check in checks if check.capability == 'emergency').ready
+
+
+def test_dispatch_failure_overlay_clears_when_underlying_route_changes(
+        live_config, monkeypatch):
+    from sentinel.ui import readiness
+
+    route = {'address': '192.168.10.2'}
+    monkeypatch.setattr(readiness, 'discover_local_ipv4',
+                        lambda tello_ip: route['address'])
+    service = bootstrap.build_service(replace(live_config, local_ip=None))
+    try:
+        from sentinel.ui.readiness import LiveReadiness, ReadinessCheck
+
+        base = readiness.evaluate_live_readiness(service.config)
+        failure = ReadinessCheck('flight', False, 'LIVE_PREFLIGHT_FAILED',
+                                 'Resolve the no-takeoff preflight failure.')
+        service._update_readiness(LiveReadiness(
+            'READY_TO_PLAN', tuple(failure if row.capability == 'flight' else row
+                                   for row in base.checks), ''))
+        def flight():
+            return next(row for row in service.read_snapshot('mission')['readiness']['checks']
+                        if row['capability'] == 'flight')
+
+        assert flight()['reason_code'] == 'LIVE_PREFLIGHT_FAILED'
+        assert flight()['reason_code'] == 'LIVE_PREFLIGHT_FAILED'
+        route['address'] = None
+        assert flight()['reason_code'] == 'LIVE_NETWORK_CONFIG_REQUIRED'
+        route['address'] = '192.168.10.2'
+        assert flight()['ready']
+    finally:
+        service.close()
 
 def test_bare_live_host_refuses_before_adapter_construction(tmp_path, monkeypatch):
     from sentinel.ui import live
@@ -187,8 +368,8 @@ def test_live_composition_defers_every_operational_boundary(live_config, monkeyp
         live_config.mode = 'REHEARSAL'
 
 
-def test_live_dispatch_refuses_before_client_without_flight_confirmation(live_config,
-                                                                          monkeypatch):
+def test_live_dispatch_does_not_require_startup_confirmation(live_config,
+                                                              monkeypatch):
     from sentinel.ui import live
     calls = []
     monkeypatch.setattr(live, 'make_client', lambda config: calls.append('client'))
@@ -202,7 +383,7 @@ def test_live_dispatch_refuses_before_client_without_flight_confirmation(live_co
         deadline = time.monotonic() + 2
         while service.worker.active and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert calls == []
+        assert calls == ['emergency', 'client']
     finally:
         service.close()
 
@@ -214,11 +395,14 @@ def test_live_dispatch_refuses_before_client_without_flight_confirmation(live_co
 def test_ready_to_plan_proposal_allows_current_approval_and_rejection(
         live_config, monkeypatch, decision, expected_status):
     from sentinel.ui import live
+    from sentinel.ui import readiness
 
     calls = []
     monkeypatch.setattr(live, 'make_client',
                         lambda config: calls.append('client'))
-    service = bootstrap.build_service(replace(live_config, confirm=False))
+    monkeypatch.setattr(readiness, 'discover_local_ipv4', lambda tello_ip: None)
+    service = bootstrap.build_service(replace(live_config, confirm=False,
+                                              local_ip=None))
     try:
         assert service.submit_chat(
             'mission', _chat_command(service))['kind'] == 'PROPOSE'
@@ -347,6 +531,8 @@ def test_live_preflight_failure_is_projected_as_unarmed_readiness(live_config,
             'reason_code': 'LIVE_PREFLIGHT_FAILED',
             'remediation': 'Resolve the no-takeoff preflight failure before dispatch.',
         }
+        assert next(check for check in service.read_snapshot('mission')['readiness']['checks']
+                    if check['capability'] == 'flight')['reason_code'] == 'LIVE_PREFLIGHT_FAILED'
         assert service.registry.get('mission') is None
     finally:
         service.close()
@@ -456,7 +642,7 @@ def test_invalid_profile_and_consent_refuse_at_dispatch_before_client(
     from sentinel.ui import live
     calls = []
     monkeypatch.setattr(live, 'make_client', lambda config: calls.append('client'))
-    config = live_config
+    config = replace(live_config, confirm=False, authorise_paid_calls=False)
     if change == 'consent':
         config = replace(config, location='other')
     else:
@@ -465,6 +651,11 @@ def test_invalid_profile_and_consent_refuse_at_dispatch_before_client(
         config.provider_profile.write_text(json.dumps(profile))
     service = bootstrap.build_service(config)
     try:
+        detection = next(check for check in service.read_snapshot('mission')['readiness']['checks']
+                         if check['capability'] == 'detection')
+        assert detection['reason_code'] == (
+            'RECORDED_CONSENT_REQUIRED' if change == 'consent'
+            else 'APPROVED_PROVIDER_PROFILE_REQUIRED')
         assert service.submit_chat('mission', _chat_command(service))['kind'] == 'PROPOSE'
         assert service.approval.changed.wait(2)
         snapshot = service.read_snapshot('mission')
@@ -496,6 +687,10 @@ def test_independent_transport_failure_is_deferred_to_dispatch(live_config, monk
         while service.worker.active and time.monotonic() < deadline:
             time.sleep(0.01)
         assert calls == ['emergency']
+        for _ in range(2):
+            emergency = next(check for check in service.read_snapshot('mission')['readiness']['checks']
+                             if check['capability'] == 'emergency')
+            assert emergency['reason_code'] == 'INDEPENDENT_EMERGENCY_UNAVAILABLE'
     finally:
         service.close()
 

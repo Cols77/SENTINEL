@@ -16,6 +16,7 @@ class MissionControlService:
     def __init__(self, *, config, adapters, readiness=None):
         self.config,self.adapters=config,adapters
         self.readiness=readiness
+        self._readiness_overlays={}
         self.store=UIStore.open(config.ui_db or config.data_dir/'ui.sqlite')
         try:
             self.session_id=self.store.read_run(config.run_id)['session_id']
@@ -45,6 +46,16 @@ class MissionControlService:
         self.closed=False
 
     def _update_readiness(self, readiness):
+        if self.config.mode == 'LIVE':
+            from .readiness import evaluate_live_readiness
+            base = evaluate_live_readiness(self.config)
+            base_checks = {check.capability: check for check in base.checks}
+            for check in readiness.checks:
+                baseline = base_checks[check.capability]
+                if check != baseline:
+                    self._readiness_overlays[check.capability] = (baseline, check)
+                else:
+                    self._readiness_overlays.pop(check.capability, None)
         self.readiness = readiness
 
     def require_run(self, run_id):
@@ -55,6 +66,21 @@ class MissionControlService:
         return dict(id=self.session_id,mode=self.config.mode,active_run_id=self.config.run_id)
 
     def read_snapshot(self, run_id):
+        if self.config.mode == 'LIVE':
+            from .readiness import LiveReadiness, evaluate_live_readiness
+            base = evaluate_live_readiness(self.config)
+            checks = []
+            for check in base.checks:
+                overlay = self._readiness_overlays.get(check.capability)
+                if overlay is not None and overlay[0] == check:
+                    check = overlay[1]
+                elif overlay is not None:
+                    self._readiness_overlays.pop(check.capability, None)
+                checks.append(check)
+            state = ('READY_TO_DISPATCH' if all(check.ready for check in checks)
+                     else 'READY_TO_PLAN' if checks[0].ready else 'NOT_READY')
+            self.readiness = LiveReadiness(state, tuple(checks),
+                                           base.command_template)
         return self.projection.snapshot(run_id)
 
     def read_events(self, run_id, after_sequence, limit):

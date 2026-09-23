@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+import socket
 import sqlite3
 from typing import Literal, TYPE_CHECKING
 
@@ -67,21 +68,6 @@ PROVIDER_ENV = {
 }
 
 
-def _command_template(detector_name: str) -> str:
-    selected = detector_name if detector_name in PROVIDER_ENV else 'gemini-openrouter'
-    key_name, model_name = PROVIDER_ENV[selected]
-    return (
-        f'Ensure {key_name} and {model_name} are present in the environment '
-        'or nearest .env, then run: sentinel mission-control '
-        '--mode live --site <SITE_JSON> --tag-map <TAG_MAP_JSON> '
-        '--pose-db <POSE_DB> --pose off --start-x-cm <X_CM> '
-        f'--start-y-cm <Y_CM> --surface-z-cm <Z_CM> --detector {selected} '
-        '--provider-profile <APPROVED_PROFILE_JSON> --survey-db <SURVEY_DB> '
-        '--location <LOCATION> --consent-date <YYYY-MM-DD> '
-        '--local-ip <LOCAL_IP> --confirm --i-authorise-paid-calls'
-    )
-
-
 def _check(capability: Capability, ready: bool, reason_code: str,
            remediation: str) -> ReadinessCheck:
     return ReadinessCheck(capability, ready,
@@ -132,7 +118,26 @@ def _planning(config: SessionConfig) -> ReadinessCheck:
     return _check('planning', True, '', '')
 
 
+def discover_local_ipv4(tello_ip: str) -> str | None:
+    """Inspect the OS-selected UDP route without sending a datagram."""
+    try:
+        tello = ipaddress.ip_address(tello_ip)
+        if tello.version != 4:
+            return None
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+            route.connect((tello_ip, 8889))
+            local_ip = route.getsockname()[0]
+        local = ipaddress.ip_address(local_ip)
+        if local.version == 4 and not local.is_unspecified and not local.is_loopback:
+            return local_ip
+    except (OSError, TypeError, ValueError, IndexError):
+        pass
+    return None
+
+
 def _network_ready(config: SessionConfig) -> bool:
+    if config.local_ip is None:
+        return discover_local_ipv4(config.tello_ip) is not None
     try:
         local = ipaddress.ip_address(config.local_ip)
         tello = ipaddress.ip_address(config.tello_ip)
@@ -142,13 +147,11 @@ def _network_ready(config: SessionConfig) -> bool:
         return False
 
 
-def _flight(config: SessionConfig) -> ReadinessCheck:
-    if not config.confirm:
-        return _check('flight', False, 'LIVE_CONFIRM_REQUIRED',
-                      'Restart with --confirm before dispatching a real flight.')
-    if not _network_ready(config):
+def _flight(network_ready: bool) -> ReadinessCheck:
+    if not network_ready:
         return _check('flight', False, 'LIVE_NETWORK_CONFIG_REQUIRED',
-                      'Supply a non-loopback IPv4 address with --local-ip.')
+                      'Connect to the Tello network or supply a non-loopback IPv4 '
+                      'address with --local-ip.')
     return _check('flight', True, '', '')
 
 
@@ -167,18 +170,15 @@ def _detection(config: SessionConfig) -> ReadinessCheck:
     if config.detector_name not in PROVIDER_ENV:
         return _check(
             'detection', False, 'LIVE_PROVIDER_REQUIRED',
-            'Select --detector gemini-openrouter, gemini, or moondream. The '
-            'OpenRouter path uses OPENROUTER_API_KEY and GEMINI_OPENROUTER_MODEL.')
+            'Select --detector gemini-openrouter, gemini, or moondream.')
     key_name, model_name = PROVIDER_ENV[config.detector_name]
-    if not os.environ.get(key_name) or not os.environ.get(model_name):
+    missing = [name for name in (key_name, model_name)
+               if not os.environ.get(name)]
+    if missing:
         return _check(
             'detection', False, 'LIVE_PROVIDER_ENV_REQUIRED',
-            f'Set {key_name} and {model_name} in the environment or nearest .env; '
+            f'Set {" and ".join(missing)} in the environment or nearest .env; '
             'secret values are never displayed.')
-    if not config.authorise_paid_calls:
-        return _check(
-            'detection', False, 'LIVE_PAID_CALL_AUTH_REQUIRED',
-            'Restart with --i-authorise-paid-calls after reviewing provider cost.')
     if config.provider_profile is None:
         return _check(
             'detection', False, 'APPROVED_PROVIDER_PROFILE_REQUIRED',
@@ -201,8 +201,7 @@ def _detection(config: SessionConfig) -> ReadinessCheck:
     except Exception:
         return _check(
             'detection', False, 'APPROVED_PROVIDER_PROFILE_REQUIRED',
-            'Check --provider-profile against the selected provider and '
-            f'{model_name}.')
+            'Check --provider-profile against the selected provider and model.')
     survey_db = config.survey_db or config.data_dir / 'survey.sqlite'
     if not survey_db.is_file():
         return _check(
@@ -222,11 +221,11 @@ def _detection(config: SessionConfig) -> ReadinessCheck:
     return _check('detection', True, '', '')
 
 
-def _emergency(config: SessionConfig) -> ReadinessCheck:
+def _emergency(network_ready: bool) -> ReadinessCheck:
     return _check(
-        'emergency', _network_ready(config), 'LIVE_NETWORK_CONFIG_REQUIRED',
-        'Supply a non-loopback IPv4 address with --local-ip; transport is '
-        'initialized only at dispatch.')
+        'emergency', network_ready, 'LIVE_NETWORK_CONFIG_REQUIRED',
+        'Connect to the Tello network or supply a non-loopback IPv4 address '
+        'with --local-ip; transport is initialized only at dispatch.')
 
 
 def evaluate_live_readiness(config: SessionConfig) -> LiveReadiness:
@@ -234,11 +233,12 @@ def evaluate_live_readiness(config: SessionConfig) -> LiveReadiness:
     # Match the integration CLI: explicit environment values win, otherwise
     # populate missing names from the nearest .env without logging secrets.
     load_env_file()
-    checks = (_planning(config), _flight(config), _detection(config),
-              _emergency(config))
+    network_ready = _network_ready(config)
+    checks = (_planning(config), _flight(network_ready), _detection(config),
+              _emergency(network_ready))
     planning_ready = checks[0].ready
     state: ReadinessState = (
         'READY_TO_DISPATCH' if all(check.ready for check in checks) else
         'READY_TO_PLAN' if planning_ready else
         'NOT_READY')
-    return LiveReadiness(state, checks, _command_template(config.detector_name))
+    return LiveReadiness(state, checks, '')
