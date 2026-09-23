@@ -154,7 +154,8 @@ def test_no_reachable_candidate_fails_closed() -> None:
             route_snapshot_provider=lambda: DEFAULT_ROUTE,
         ).select(local_ip=adapter.local_ip)
 
-    assert calls == [adapter.local_ip]
+    # One probe plus the single Tello-subnet retry, then a refusal.
+    assert calls == [adapter.local_ip, adapter.local_ip]
 
 
 def test_injected_adapter_discovery_is_read_only_and_used_once() -> None:
@@ -302,3 +303,79 @@ def test_default_reachability_probe_binds_candidate_and_closes_socket(
     assert probe.connected_to == ("192.168.10.1", 8889)
     assert probe.sent == [b"command"]
     assert probe.closed is True
+
+
+def test_a_tello_subnet_candidate_that_misses_first_contact_is_probed_once_more() -> None:
+    """L0 finding (2026-09-23): the 1 s probe missed first contact on the demo
+    laptop; one retry for a 192.168.10.0/24 candidate selects it."""
+    adapter = AdapterInfo(
+        "Wi-Fi 2", 19, "192.168.10.2", True, False, netmask="255.255.255.0"
+    )
+    answers = iter([False, True])
+    calls: list[str] = []
+
+    def flaky(candidate: AdapterInfo) -> bool:
+        calls.append(candidate.local_ip)
+        return next(answers)
+
+    selected = selector_for_test([adapter], reachability_probe=flaky).select()
+
+    assert selected == adapter
+    assert calls == ["192.168.10.2", "192.168.10.2"]
+
+
+def test_the_default_probe_retries_a_tello_subnet_candidate_with_a_longer_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = AdapterInfo(
+        "Wi-Fi 2", 19, "192.168.10.2", True, False, netmask="255.255.255.0"
+    )
+    timeouts: list[float] = []
+
+    def fake_probe(_candidate: AdapterInfo, *, timeout: float = 1.0) -> bool:
+        timeouts.append(timeout)
+        return len(timeouts) > 1
+
+    monkeypatch.setattr(network, "probe_tello_endpoint", fake_probe)
+    selector = NetworkAdapterSelector(
+        [adapter],
+        default_route=DEFAULT_ROUTE,
+        route_snapshot_provider=lambda: DEFAULT_ROUTE,
+    )
+
+    assert selector.select() == adapter
+    assert timeouts[0] == 1.0 and timeouts[1] > 1.0
+
+
+def test_the_retry_never_admits_an_adapter_that_owns_the_default_route() -> None:
+    adapter = AdapterInfo(
+        "Wi-Fi", 7, "192.168.10.2", True, True, netmask="255.255.255.0"
+    )
+    calls: list[str] = []
+
+    def probe(candidate: AdapterInfo) -> bool:
+        calls.append(candidate.local_ip)
+        return True
+
+    with pytest.raises(NoTelloAdapter):
+        selector_for_test(
+            [adapter],
+            default_route=RouteSnapshot("192.168.10.2", 7),
+            reachability_probe=probe,
+        ).select()
+    assert calls == []
+
+
+def test_an_unreachable_candidate_outside_the_tello_subnet_is_not_retried() -> None:
+    adapter = AdapterInfo(
+        "Ethernet", 4, "10.0.0.5", True, False, netmask="255.0.0.0"
+    )
+    calls: list[str] = []
+
+    def probe(candidate: AdapterInfo) -> bool:
+        calls.append(candidate.local_ip)
+        return False
+
+    with pytest.raises(NoTelloAdapter):
+        selector_for_test([adapter], reachability_probe=probe).select()
+    assert len(calls) <= 1

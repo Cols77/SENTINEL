@@ -527,10 +527,39 @@ def _is_safe_candidate(
         or adapter.index == default_route.interface_index
     ):
         return False
+    return _probe_with_retry(adapter, reachability_probe)
+
+
+#: Timeout of the one retry a Tello-subnet candidate gets after its first
+#: probe missed (L0 finding 2026-09-23: the 1 s probe can miss first contact).
+TELLO_RETRY_TIMEOUT_S = 2.5
+
+
+def _probe_with_retry(adapter: AdapterInfo, reachability_probe: ReachabilityProbe) -> bool:
+    """Probe once; a candidate inside 192.168.10.0/24 gets exactly one more
+    probe (the default probe with a longer timeout) before it is refused.
+    Callers have already applied every safety rule (default route, subnet)."""
     try:
+        if reachability_probe(adapter):
+            return True
+    except Exception:
+        pass
+    if not _is_tello_address(adapter.local_ip):
+        return False
+    try:
+        if reachability_probe is _DEFAULT_PROBE_MARKER:
+            return bool(probe_tello_endpoint(adapter, timeout=TELLO_RETRY_TIMEOUT_S))
         return bool(reachability_probe(adapter))
     except Exception:
         return False
+
+
+def _default_reachability_probe(adapter: AdapterInfo) -> bool:
+    """The default probe, resolved at call time (so tests may substitute it)."""
+    return probe_tello_endpoint(adapter)
+
+
+_DEFAULT_PROBE_MARKER = _default_reachability_probe
 
 
 class NetworkAdapterSelector:
@@ -570,7 +599,7 @@ class NetworkAdapterSelector:
         self.reachability_probe = (
             reachability_probe
             if reachability_probe is not None
-            else probe_tello_endpoint
+            else _default_reachability_probe
         )
         self.route_snapshot_provider = route_snapshot_provider
 
