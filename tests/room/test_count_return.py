@@ -20,7 +20,7 @@ import pytest
 
 from sentinel.cube.localization import LocalizationState
 from sentinel.cube.recovery import PoseReport, RecoveryController
-from sentinel.cube.step_executor import TerminalOutcome
+from sentinel.cube.step_executor import ExecutorState, TerminalOutcome
 from sentinel.cube.energy import EnergySample
 from sentinel.models import Position
 from sentinel.room.controller import RoomController, TurnOutcome
@@ -109,24 +109,43 @@ def make_result(tmp_path, session_id, pose_id, *, confidence_band="high", status
 
 
 class PerceptionRig:
-    """Controller-injected observation collaborators, fully test-controlled."""
+    """Controller-injected observation collaborators, fully test-controlled.
 
-    def __init__(self):
+    ``capture`` stamps each request with the *live* post-checkpoint session
+    version (fix round 1, Q4/S1): the real production ``perception_capture``
+    collaborator builds its request only after the checkpoint has actually
+    dispatched, so its ``snapshot_version`` is never the stale pre-turn value
+    a candidate was computed against. A pinned, deliberately stale version is
+    still reachable through ``set_stale`` for the negative test that exercises
+    ``ingest_result``'s authorization refusal.
+    """
+
+    def __init__(self, store, session_id):
+        self.store, self.session_id = store, session_id
         self.results = {}
+        self.stale = set()
         self.captures = []
         self.provided = []
 
     def set(self, pose_id, result):
         self.results[pose_id] = result
 
+    def set_stale(self, pose_id, result):
+        self.results[pose_id] = result
+        self.stale.add(pose_id)
+
     def capture(self, candidate, checkpoint_outcome, snapshot):
         pose_id = candidate.candidate_id.rsplit(":", 1)[-1]
         self.captures.append(pose_id)
-        return self.results[pose_id].request
+        request = self.results[pose_id].request
+        if pose_id in self.stale:
+            return request
+        return replace(request, snapshot_version=self.store.session_version(self.session_id))
 
     def provide(self, request):
         self.provided.append(request.observation_id)
-        return self.results[request.observation_id]
+        result = self.results[request.observation_id]
+        return replace(result, request=request)
 
 
 def make_controller(safety, judge, rig=None, *, resolve_checkpoint=None):
@@ -177,7 +196,7 @@ def test_ordered_region_observations_execute_in_original_request_order(safety, t
         count_objective("g1", 1, "left/rear/bottom"),
         count_objective("g2", 2, "right/front/top"),
     ))
-    rig = PerceptionRig()
+    rig = PerceptionRig(store, SESSION)
     rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
     rig.set("right-front-top-toward_targets", make_result(tmp_path, SESSION, "right-front-top-toward_targets"))
     judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets", "OBSERVE:g2:right-front-top-toward_targets")
@@ -199,7 +218,7 @@ def test_uncertain_detection_stays_uncertain_after_observation(safety, tmp_path)
     supervisor.site = room_site(coverage=True)
     supervisor.validate_bindings = lambda site: None
     set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
-    rig = PerceptionRig()
+    rig = PerceptionRig(store, SESSION)
     rig.set("left-rear-bottom-toward_targets",
            make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets", confidence_band="low"))
     judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets", "READ_OBSERVATIONS")
@@ -213,6 +232,26 @@ def test_uncertain_detection_stays_uncertain_after_observation(safety, tmp_path)
     assert facts and dict(tuple(map(tuple, facts[0]["values"])))["confidence_band"] == "low"
     assert "confirmed" not in str(facts)
 
+    # Fix round 1 (Q10): drive the single low-confidence sighting through the
+    # real grounded-counting classification (association.py/counting.py) --
+    # exactly the "more than one distinct view" bar a genuinely confirmed
+    # object must clear -- and assert it lands in the uncertain bucket with
+    # confirmed == 0, not merely that the word "confirmed" is absent from a
+    # facts dump that never contained it either way.
+    from sentinel.room.association import ObjectRevision
+    from sentinel.room.counting import _static_counts
+    from sentinel.room.queries import ReadQueries
+    from sentinel.room.spatial import SupportKind
+    snapshot = ReadQueries(store).project(SESSION)
+    observation = next(f for f in snapshot.sources if f.kind == CandidateKind.READ_OBSERVATIONS)
+    sighting = ObjectRevision("obj:computer:1", "computer", SupportKind.FLOOR, "FLOOR",
+                              30.0, 30.0, (0.0, 30.0), (100.0, 100.0, 0.0), 1,
+                              observation.observed_at, observation.evidence_ids, observation.evidence_ids)
+    coverage = controller._coverage(snapshot)
+    counts = _static_counts((sighting,), coverage, ("computer",))
+    computer = next(c for c in counts if c.class_name == "computer")
+    assert computer.confirmed == 0 and computer.uncertain == 1
+
 
 # --- 4. closer inspection is unavailable, no closer candidate ---------------
 
@@ -221,14 +260,23 @@ def test_closer_inspection_request_yields_explicit_unavailable_reason(safety):
     supervisor.site = room_site()
     supervisor.validate_bindings = lambda site: None
     set_ledger(store, SESSION, (closer_objective(),))
-    controller, executor = make_controller(safety, Judge("VALIDATE:g1:UNAVAILABLE"))
+    controller, executor = make_controller(safety, Judge("VALIDATE:g1:UNAVAILABLE", "ESCALATE"))
 
-    outcome = controller.step(SESSION)
-    assert outcome.accepted and outcome.terminal_state == TerminalState.BLOCKED
-    assert executor.calls == []
+    # Fix round 1 (Q11): the closer-inspection-unavailable answer is never
+    # terminal by itself -- it is a non-terminal, per-objective fact that gets
+    # suppressed afterward, and Jev keeps being consulted (CLARIFY/ESCALATE/
+    # the unread READ_* candidates remain legal) rather than the session
+    # ending in the same turn. With nothing productive left for this
+    # single-objective ledger, Jev explicitly escalates next -- never having
+    # flown, so no physical return is requested for that escalation either.
+    first = controller.step(SESSION)
+    assert first.accepted and first.terminal_state is None
     payload = store.events(SESSION)[-1].payload
-    assert payload["code"] == "CLOSER_INSPECTION_UNAVAILABLE"
+    assert payload["code"] == "CLOSER_INSPECTION_UNAVAILABLE" and payload["terminal_state"] is None
     assert "closer inspection" in payload["answer"].lower()
+
+    assert controller.run_until_terminal(SESSION) == TerminalState.ESCALATED
+    assert executor.calls == []
 
 
 def test_closer_inspection_never_offers_an_executable_closer_candidate(safety):
@@ -256,7 +304,7 @@ def test_observation_proceeds_under_coasting_localization(safety, tmp_path):
     supervisor.validate_bindings = lambda site: None
     samples["pose"] = replace(samples["pose"], state=LocalizationState.COASTING)
     set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
-    rig = PerceptionRig()
+    rig = PerceptionRig(store, SESSION)
     rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
     judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets")
     controller, executor = make_controller(safety, judge, rig)
@@ -279,7 +327,7 @@ def test_mandatory_recovery_bypasses_jev_then_a_later_step_resumes(safety, tmp_p
         energy_admits=lambda action: True)
     supervisor.mapped_heading_tag_ids = ((90, (1, 2)),)
     set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
-    rig = PerceptionRig()
+    rig = PerceptionRig(store, SESSION)
     rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
     judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets", "OBSERVE:g1:left-rear-bottom-toward_targets")
     controller, executor = make_controller(safety, judge, rig)
@@ -310,7 +358,7 @@ def test_battery_forces_return_before_an_unaffordable_observation(safety, tmp_pa
     supervisor.validate_bindings = lambda site: None
     samples["energy"] = EnergySample(22, clock())
     set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
-    rig = PerceptionRig()
+    rig = PerceptionRig(store, SESSION)
     rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
     judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets")
     controller, executor = make_controller(safety, judge, rig,
@@ -332,7 +380,7 @@ def test_completed_coverage_answers_and_stops_offering_observation(safety, tmp_p
     supervisor.site = room_site(coverage=True)
     supervisor.validate_bindings = lambda site: None
     set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
-    rig = PerceptionRig()
+    rig = PerceptionRig(store, SESSION)
     rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
     rig.set("right-front-top-toward_targets", make_result(tmp_path, SESSION, "right-front-top-toward_targets"))
     from tests.room.test_queries import survey
@@ -348,6 +396,12 @@ def test_completed_coverage_answers_and_stops_offering_observation(safety, tmp_p
         assert controller.run_until_terminal(SESSION) == TerminalState.COMPLETED
         final_criteria = judge.calls[-1][1]
         assert not any(key.startswith("OBSERVE:") for key in final_criteria)
+        # Fix round 1 (Q1): a terminal answer after this session has actually
+        # flown must request a supervisor-owned safe return/landing before
+        # the session is reported COMPLETED -- never leave the aircraft
+        # hovering just because Jev picked a terminal answer.
+        assert "LAND" in executor.calls
+        assert executor.state != ExecutorState.AIRBORNE
     finally:
         legacy.connection.close()
 
@@ -359,7 +413,7 @@ def test_incomplete_coverage_returns_safely_never_claims_completion(safety, tmp_
     supervisor.site = room_site(coverage=True)
     supervisor.validate_bindings = lambda site: None
     set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
-    rig = PerceptionRig()
+    rig = PerceptionRig(store, SESSION)
     rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
     judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets", "OBSERVE:g1:right-front-top-toward_targets")
     controller, executor = make_controller(safety, judge, rig)
@@ -387,7 +441,7 @@ def test_failed_return_never_reports_success(safety, tmp_path):
     supervisor.validate_bindings = lambda site: None
     samples["energy"] = EnergySample(22, clock())
     set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
-    rig = PerceptionRig()
+    rig = PerceptionRig(store, SESSION)
     rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
     judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets")
     controller, executor = make_controller(safety, judge, rig,
@@ -400,11 +454,11 @@ def test_failed_return_never_reports_success(safety, tmp_path):
     executor.land = uncertain_land
     outcome = controller.step(SESSION)
     assert not outcome.accepted
-    # An SDK-uncertain LAND completion (completed_at=None) is never reported
-    # as mission success, regardless of which non-COMPLETED terminal label
-    # the projector settles on.
-    assert outcome.terminal_state != TerminalState.COMPLETED
-    assert outcome.terminal_state in (TerminalState.ABORTED, TerminalState.SAFE_LANDED)
+    # Fix round 1 (Q9): an SDK-uncertain LAND completion (completed_at=None)
+    # must never be projected as a confirmed safe landing -- the executor's
+    # reported state name ("LANDED") alone is not confirmation. Tightened
+    # from accepting either label: only ABORTED is correct here.
+    assert outcome.terminal_state == TerminalState.ABORTED
 
 
 # --- 11. a stale Jev decision on OBSERVE is audited, never dispatched -------
@@ -414,7 +468,7 @@ def test_stale_observation_decision_is_never_dispatched(safety, tmp_path):
     supervisor.site = room_site(coverage=True)
     supervisor.validate_bindings = lambda site: None
     set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
-    rig = PerceptionRig()
+    rig = PerceptionRig(store, SESSION)
     rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
 
     def concurrent(state, criteria):
@@ -437,7 +491,7 @@ def test_typed_tool_error_then_a_different_legal_action_succeeds(safety, tmp_pat
     supervisor.validate_bindings = lambda site: None
     set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
     drone(store, SESSION)
-    rig = PerceptionRig()
+    rig = PerceptionRig(store, SESSION)
 
     def failing_resolve(candidate, snapshot):
         return None
@@ -453,3 +507,187 @@ def test_typed_tool_error_then_a_different_legal_action_succeeds(safety, tmp_pat
     second = controller.step(SESSION)
     assert second.accepted
     assert store.events(SESSION)[-1].payload["code"] == "READ_SUCCEEDED"
+
+
+# ============================================================================
+# Fix round 1 (2026-09-23): S1/Q4, Q2, Q3, Q6, Q7, Q8.
+# ============================================================================
+
+# --- 13. a stale/unauthorized perception result is typed, never credited ----
+
+def test_stale_perception_result_is_refused_and_coverage_not_credited(safety, tmp_path):
+    """S1/Q4: ingest_result's IngestOutcome.authorizes_current_state must be
+    checked. A result whose request still names a stale snapshot_version
+    (this session has moved on by the time ingestion runs) must never be
+    reported OBSERVE_SUCCEEDED, and must never credit coverage."""
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set_stale("left-rear-bottom-toward_targets",
+                  make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
+    judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets")
+    controller, executor = make_controller(safety, judge, rig)
+
+    outcome = controller.step(SESSION)
+    assert not outcome.accepted
+    payload = store.events(SESSION)[-1].payload
+    assert payload["code"] == "STALE_RESULT" and payload["refusal_code"] == "STALE_RESULT"
+    # The checkpoint itself really did fly -- only the stale perception
+    # result is refused, not the flight.
+    assert "CAPTURE" in executor.calls
+
+    from sentinel.room.queries import ReadQueries
+    snapshot = ReadQueries(store).project(SESSION)
+    assert "cell1:computer" in controller._coverage(snapshot).uncovered
+
+
+# --- 14. the plain legacy answer is gated by incomplete declared coverage ---
+
+def test_plain_answer_is_gated_while_declared_coverage_is_incomplete(safety, tmp_path):
+    """Q2: build_candidates's plain ANSWER (driven only by can_answer's
+    legacy READ_COUNTS check) must not be offered once observation is
+    enabled, the site declares coverage cells, a COUNT objective is pending
+    and coverage is not yet complete -- otherwise the count can be reported
+    as mission success without the declared coverage ever being flown."""
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    from tests.room.test_queries import survey
+    legacy, _, _ = survey(tmp_path)
+    try:
+        rig = PerceptionRig(store, SESSION)
+        judge = Judge("READ_COUNTS")
+        executor = Executor(store, clock)
+        controller = RoomController(store, judge, supervisor=supervisor, flight_executor=executor,
+                                    survey_store=legacy, survey_run_id="run1",
+                                    resolve_checkpoint=make_resolve_checkpoint(supervisor),
+                                    perception_capture=rig.capture, perception_provider=rig.provide)
+        first = controller.step(SESSION)
+        assert first.accepted and first.candidate_id == "READ_COUNTS"
+        snapshot = controller.queries.project(SESSION)
+        assert not controller._coverage(snapshot).complete
+        legal_ids = {c.candidate_id for c in controller._legal_candidates(snapshot)}
+        assert "ANSWER" not in legal_ids
+    finally:
+        legacy.connection.close()
+
+
+# --- 15. the explicit incomplete answer reports incompleteness and returns --
+
+def test_incomplete_answer_reports_incomplete_and_requests_safe_return(safety, tmp_path):
+    """Q3: the ANSWER:<objective>:INCOMPLETE candidate must be handled
+    distinctly from a plain ANSWER -- a typed incomplete code, a coverage
+    caveat naming what is still uncovered, never TerminalState.COMPLETED,
+    and (Q1) a requested safe return since this session did fly."""
+    supervisor, store, clock, *_ = safety
+    base = cube_site()
+    frame = SemanticFrame("free", (1.0, 0.0), (0.0, 1.0), "FRONT", ())
+    cells = (
+        CoverageCell("cell1", ((10, 10), (50, 10), (50, 50), (10, 50)), (0, 200), ("computer",)),
+        CoverageCell("cell2", ((150, 150), (190, 150), (190, 190), (150, 190)), (0, 200), ("computer",)),
+    )
+    # cell2 has no declared view at all, so no OBSERVE candidate can ever
+    # resolve it and the room objective is stuck incomplete once cell1 is done.
+    visibility = (("left-rear-bottom-toward_targets", ("cell1",)),)
+    supervisor.site = replace(base, semantic_frame=frame, coverage_cells=cells, pose_visibility=visibility)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
+    judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets", "ANSWER:g1:INCOMPLETE")
+    controller, executor = make_controller(safety, judge, rig)
+
+    first = controller.step(SESSION)
+    assert first.accepted and store.events(SESSION)[-1].payload["code"] == "OBSERVE_SUCCEEDED"
+
+    outcome = controller.step(SESSION)
+    assert outcome.accepted
+    assert outcome.terminal_state == TerminalState.INCOMPLETE_RETURNED
+    payload = store.events(SESSION)[-1].payload
+    assert payload["code"] == "ANSWERED_INCOMPLETE"
+    assert "cell2" in payload["answer"]
+    assert "LAND" in executor.calls
+    assert executor.state != ExecutorState.AIRBORNE
+
+
+# --- 16. the perception wait is admitted together with its checkpoint ------
+
+def test_observation_admission_reserves_the_perception_wait_too(safety, tmp_path):
+    """Q6: the checkpoint and the airborne perception wait that follows it
+    must be admitted as one action -- otherwise a checkpoint admitted alone
+    could be preempted before its own provider wait ever runs."""
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
+    judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets")
+    controller, executor = make_controller(safety, judge, rig)
+
+    seen = []
+    original_prepare = supervisor.prepare
+
+    def spy_prepare(*, snapshot_version, checkpoint=None, provider_wait_s=0, **kwargs):
+        seen.append((checkpoint is not None, provider_wait_s))
+        return original_prepare(snapshot_version=snapshot_version, checkpoint=checkpoint,
+                                provider_wait_s=provider_wait_s, **kwargs)
+
+    supervisor.prepare = spy_prepare
+    outcome = controller.step(SESSION)
+    assert outcome.accepted
+    checkpoint_calls = [call for call in seen if call[0]]
+    assert checkpoint_calls and checkpoint_calls[0][1] == controller.provider_wait_s
+
+
+# --- 17. a dispatch exception is a typed refusal, never a stale decision ---
+
+def test_dispatch_exception_during_observation_is_typed_not_stale_decision(safety, tmp_path):
+    """Q7: an exception raised by SafetySupervisor.dispatch after admission
+    already appended a SAFETY_ASSESSED event must be recorded through the
+    live-version commit path (a distinct typed code), never fall into the
+    shared tail's fixed-CAS append, which would misreport it as
+    STALE_DECISION even though nothing about the Jev decision went stale."""
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
+    judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets")
+    controller, executor = make_controller(safety, judge, rig)
+
+    def failing_dispatch(outcome, flight_executor):
+        raise RuntimeError("private transport detail")
+
+    supervisor.dispatch = failing_dispatch
+    outcome = controller.step(SESSION)
+    assert not outcome.accepted
+    payload = store.events(SESSION)[-1].payload
+    assert payload["code"] == "CHECKPOINT_FAILED" and payload["refusal_code"] == "CHECKPOINT_FAILED"
+    assert "private transport detail" not in str(payload)
+
+
+# --- 18. REAL mode never offers an OBSERVE candidate -----------------------
+
+def test_real_mode_never_offers_observation_candidate(safety, tmp_path):
+    """Q8: Plan 03 Task 4 enables OBSERVE for replay/simulation only; real
+    mode stays disabled until Plan 06 promotes matching profiles. A REAL-mode
+    session holding the base ADAPTIVE_FLIGHT grant and observation
+    collaborators must never be offered or fly an OBSERVE checkpoint."""
+    from sentinel.cube.energy import ExecutionMode
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    supervisor.mode = ExecutionMode.REAL
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    controller, executor = make_controller(safety, Judge(), rig)
+
+    snapshot = controller.queries.project(SESSION)
+    legal_ids = {c.candidate_id for c in controller._legal_candidates(snapshot)}
+    assert not any(candidate_id.startswith("OBSERVE:") for candidate_id in legal_ids)
+    assert not controller._observation_enabled
