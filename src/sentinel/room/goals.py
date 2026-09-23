@@ -126,11 +126,18 @@ class _Rejected(Exception):
         self.status = status
 
 
+#: Goal compilation only interprets the request; it moves nothing. 0.60 is the
+#: proposer arm's calibrated Jev gate. The real model reports ~0.64 for a plain
+#: "count the phones and computers" clause, which the old 0.8 always refused.
+GOAL_ACT_AT = 0.60
+
+
 class GoalCompiler:
     def __init__(
         self, judge: ChoiceJudge, store: RoomStore, *, input_limit_bytes: int,
-        prompt_revision: str,
+        prompt_revision: str, act_at: float = GOAL_ACT_AT, min_margin: float = 0.15,
     ) -> None:
+        self.act_at, self.min_margin = act_at, min_margin
         if type(input_limit_bytes) is not int or input_limit_bytes <= 0:
             raise ValueError("input_limit_bytes must be a positive integer")
         if not isinstance(prompt_revision, str) or not prompt_revision.strip():
@@ -242,7 +249,8 @@ class _Compilation:
             provider_error = type(exc).__name__
             answer = None
         assessment = assess_choice(
-            answer, criteria, escalation_label="CLARIFICATION_REQUIRED", act_at=0.8, min_margin=0.15,
+            answer, criteria, escalation_label="CLARIFICATION_REQUIRED",
+            act_at=self.compiler.act_at, min_margin=self.compiler.min_margin,
         )
         audit_assessment = asdict(assessment)
         # Labels remain values, never provider-controlled payload keys/header pairs.

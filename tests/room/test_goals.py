@@ -746,3 +746,10 @@ def test_subject_pronoun_without_antecedent_cannot_invent_an_actor(tmp_path, pro
     compiler, judge, store = setup(tmp_path, request, script)
     ledger = compiler.compile("session-1", request, snapshot())
     assert_rejected_prefix(store, judge, ledger, script, len(script), "AMBIGUOUS_ENTITY_REFERENCE")
+
+
+def test_goal_compiler_default_gate_is_the_calibrated_jev_gate():
+    # The real Jev model reports ~0.64 for a plain count clause; 0.8 refused it.
+    from sentinel.room.goals import GOAL_ACT_AT, GoalCompiler
+    assert GOAL_ACT_AT == 0.60
+    assert GoalCompiler.__init__.__kwdefaults__["act_at"] == GOAL_ACT_AT
