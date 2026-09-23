@@ -148,10 +148,14 @@ def _observe_candidate(objective: GoalObjective, pose_id: str, description: str,
     if _observe_suppressed(outcomes, candidate_id, digest):
         return None
     resolved = _resolved_position(site, pose_id)
-    distance_cm = 0.0
-    if resolved is not None:
-        home = site.home.nominal_pose
-        distance_cm = math.hypot(resolved.x_cm - home.x_cm, resolved.y_cm - home.y_cm)
+    if resolved is None:
+        # A pose that fails to resolve (malformed ID, or no semantic frame)
+        # is never offered as a candidate -- defaulting its physical cost to
+        # zero would let an unresolvable declared view sort ahead of every
+        # legitimate one in the benefit/cost/ID ordering.
+        return None
+    home = site.home.nominal_pose
+    distance_cm = math.hypot(resolved.x_cm - home.x_cm, resolved.y_cm - home.y_cm)
     return RoomCandidate(candidate_id, CandidateKind.OBSERVE, snapshot_version, digest, description, description,
                          coverage.evidence_refs, (), PhysicalCost(distance_cm=distance_cm, requires_airborne=True))
 

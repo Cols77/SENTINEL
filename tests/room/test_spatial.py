@@ -148,6 +148,48 @@ def test_estimate_id_is_stable_for_identical_inputs():
     assert first.estimate_id == second.estimate_id
 
 
+def test_covariance_grows_with_range_instead_of_a_fixed_isotropic_sigma():
+    # A closer sighting and a farther sighting of the same class must not
+    # share one fixed sigma -- ground-plane depth error grows with range
+    # (survey.merge's tolerance model), so the farther estimate's variance
+    # must be strictly larger.
+    near = estimate_detection(_detection(bbox=_point_bbox(480.0, 530.75)), _pose(z_cm=150.0), FLOOR, LEVEL)
+    far = estimate_detection(_detection(bbox=_point_bbox(480.0, 500.0)), _pose(z_cm=150.0), FLOOR, LEVEL)
+    assert near is not None and far is not None
+    near_range = math.hypot(near.x_cm - 200.0, near.y_cm - 100.0)
+    far_range = math.hypot(far.x_cm - 200.0, far.y_cm - 100.0)
+    assert far_range > near_range
+    assert max(far.xy_covariance_cm2[:2]) > max(near.xy_covariance_cm2[:2])
+
+
+def test_two_views_of_one_object_at_realistic_range_recover_a_tight_enough_estimate():
+    # At a realistic ~2 m range, two independent views of one real object
+    # must not each carry so little variance that the association gate
+    # (normalized separation <= 1) can never merge them -- see Q9.
+    from sentinel.room.association import _separation
+
+    front = estimate_detection(
+        _detection("det-a", bbox=_point_bbox(LEVEL.cx, 530.75)),
+        _pose(x_cm=200.0, y_cm=100.0, z_cm=50.0, heading_deg=0.0), FLOOR, LEVEL,
+    )
+    side = estimate_detection(
+        _detection("det-b", bbox=_point_bbox(LEVEL.cx, 587.6666666666666)),
+        _pose(x_cm=350.0, y_cm=300.0, z_cm=50.0, heading_deg=270.0), FLOOR, LEVEL,
+    )
+    assert front is not None and side is not None
+    separation = _separation(front.x_cm, front.y_cm, front.xy_covariance_cm2,
+                             side.x_cm, side.y_cm, side.xy_covariance_cm2)
+    assert separation <= 1.0
+
+
+def test_view_id_matches_for_an_unmoved_pose_and_differs_for_a_moved_one():
+    same_pose_a = estimate_detection(_detection("det-a"), _pose(captured_at="t0"), FLOOR, LEVEL)
+    same_pose_b = estimate_detection(_detection("det-b"), _pose(captured_at="t1"), FLOOR, LEVEL)
+    moved = estimate_detection(_detection("det-c"), _pose(captured_at="t2", x_cm=260.0), FLOOR, LEVEL)
+    assert same_pose_a.view_id == same_pose_b.view_id
+    assert same_pose_a.view_id != moved.view_id
+
+
 def test_multi_view_consistency_two_poses_looking_at_the_same_floor_point_agree():
     """Two independently measured poses looking at one real floor point (200,
     300) recover nearly the same (x, y) -- from straight ahead, and from the

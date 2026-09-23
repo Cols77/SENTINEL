@@ -119,11 +119,44 @@ class CoverageProjection:
     complete: bool
     uncovered: tuple[str, ...]
     evidence_refs: tuple[str, ...]
+    #: Grounded-answer fields (design spec "Goals, evidence and Jev boundary"):
+    #: the most recent observation time behind this projection, and how many
+    #: distinct frames (keyed by (pose_id, observed_at)) have finished being
+    #: scored versus are still pending. ``None``/``0``/``0`` when nothing has
+    #: been observed at all. Defaulted so pre-existing positional callers
+    #: (and old replayed digests) are unaffected.
+    latest_capture_at: str | None = None
+    analysed_frames: int = 0
+    unanalysed_frames: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "by_cell_and_class", tuple(tuple(row) for row in self.by_cell_and_class))
         object.__setattr__(self, "uncovered", tuple(self.uncovered))
         object.__setattr__(self, "evidence_refs", tuple(self.evidence_refs))
+
+
+def _frame_key(observation: CellObservation) -> tuple[str, str]:
+    return (observation.pose_id, observation.observed_at)
+
+
+def _capture_summary(observations: tuple[CellObservation, ...]) -> tuple[str | None, int, int]:
+    """Latest capture time plus analysed/unanalysed frame counts.
+
+    A "frame" here is the (pose_id, observed_at) pair a sighting was taken
+    from -- the only frame-identifying data ``CellObservation`` carries. A
+    frame counts as unanalysed only while *every* observation it produced is
+    still ``UNANALYSED``; as soon as any of its observations resolved to a
+    real verdict, the frame is analysed.
+    """
+    if not observations:
+        return None, 0, 0
+    latest = max(observation.observed_at for observation in observations)
+    statuses_by_frame: dict[tuple[str, str], set[str]] = {}
+    for observation in observations:
+        statuses_by_frame.setdefault(_frame_key(observation), set()).add(observation.status)
+    unanalysed = sum(1 for statuses in statuses_by_frame.values() if statuses == {CoverageStatus.UNANALYSED.value})
+    analysed = len(statuses_by_frame) - unanalysed
+    return latest, analysed, unanalysed
 
 
 def project_coverage(cells: tuple[CoverageCell, ...],
@@ -139,6 +172,7 @@ def project_coverage(cells: tuple[CoverageCell, ...],
     observations = tuple(observations)
     required = sorted({(cell.cell_id, class_name)
                         for cell in cells for class_name in cell.required_classes})
+    latest_capture_at, analysed_frames, unanalysed_frames = _capture_summary(observations)
     best: dict[tuple[str, str], tuple[int, CoverageStatus]] = {}
     evidence_by_pair: dict[tuple[str, str], list[str]] = {}
     for observation in observations:
@@ -149,6 +183,18 @@ def project_coverage(cells: tuple[CoverageCell, ...],
         if status == CoverageStatus.OCCLUDED and not observation.evidence_refs:
             # A claimed occlusion with no supporting evidence is worth
             # nothing more than never having looked at all.
+            continue
+        if status == CoverageStatus.OBSERVED and not observation.evidence_refs:
+            # The strongest claim needs at least as much proof as OCCLUDED
+            # does -- an OBSERVED verdict with nothing to cite is not
+            # citeable evidence and must not complete coverage.
+            continue
+        if status == CoverageStatus.NOT_RESOLVABLE and not observation.evidence_refs:
+            # NOT_RESOLVABLE is terminal in the other direction (coverage
+            # can be honestly complete without it ever turning OBSERVED), so
+            # it needs the same positive evidence OCCLUDED does -- otherwise
+            # a single unevidenced per-sighting claim could close out a
+            # (cell, class) pair for the whole room with nothing behind it.
             continue
         rank = _RANK[status]
         current = best.get(key)
@@ -163,8 +209,12 @@ def project_coverage(cells: tuple[CoverageCell, ...],
     uncovered = tuple(f"{cell_id}:{class_name}" for cell_id, class_name, status in by_cell_and_class
                       if CoverageStatus(status) not in _TERMINAL)
     all_evidence = sorted({ref for refs in evidence_by_pair.values() for ref in refs})
-    complete = not uncovered
-    return CoverageProjection(by_cell_and_class, complete, uncovered, tuple(all_evidence))
+    # A room with no declared coverage cells at all has nothing to be
+    # "complete" about -- it is undeclared, never a vacuous completeness
+    # claim (see render_coverage_note).
+    complete = bool(required) and not uncovered
+    return CoverageProjection(by_cell_and_class, complete, uncovered, tuple(all_evidence),
+                              latest_capture_at, analysed_frames, unanalysed_frames)
 
 
 def digest_coverage(projection: CoverageProjection) -> str:
@@ -177,9 +227,22 @@ def digest_coverage(projection: CoverageProjection) -> str:
         "complete": projection.complete,
         "uncovered": list(projection.uncovered),
         "evidence_refs": list(projection.evidence_refs),
+        "latest_capture_at": projection.latest_capture_at,
+        "analysed_frames": projection.analysed_frames,
+        "unanalysed_frames": projection.unanalysed_frames,
     }
     encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _capture_line(projection: CoverageProjection) -> str:
+    """The grounded-answer requirement (design spec "Goals, evidence and Jev
+    boundary"): every rendered answer states when the evidence is from and
+    how much of it has actually finished being analysed."""
+    if projection.latest_capture_at is None:
+        return "Latest capture: none recorded; frames analysed: 0, unanalysed: 0."
+    return (f"Latest capture: {projection.latest_capture_at}; frames analysed: "
+            f"{projection.analysed_frames}, unanalysed: {projection.unanalysed_frames}.")
 
 
 def render_coverage_note(projection: CoverageProjection, *, scope: Literal["ROOM", "VIEWPOINT"]) -> str:
@@ -187,12 +250,18 @@ def render_coverage_note(projection: CoverageProjection, *, scope: Literal["ROOM
 
     Never claims completeness it does not have, and never lets a scope word
     leak from the other wording: a viewpoint-scoped caveat says "viewpoint",
-    a room-scoped one says "room" -- callers must not swap them.
+    a room-scoped one says "room" -- callers must not swap them. Always
+    states the latest capture time and the analysed/unanalysed frame split,
+    per the brief's grounded-answer requirement.
     """
     if scope not in ("ROOM", "VIEWPOINT"):
         raise ValueError("coverage scope must be ROOM or VIEWPOINT")
     subject = "the room" if scope == "ROOM" else "this viewpoint"
+    capture_line = _capture_line(projection)
+    if not projection.by_cell_and_class:
+        return (f"{capture_line} Coverage for {subject} is undeclared: no coverage cells are "
+                f"configured; a zero here does not mean none are present.")
     if projection.complete:
-        return f"Coverage for {subject} is complete: every required cell was resolved."
-    return (f"Coverage for {subject} is incomplete: {', '.join(projection.uncovered)} "
+        return f"{capture_line} Coverage for {subject} is complete: every required cell was resolved."
+    return (f"{capture_line} Coverage for {subject} is incomplete: {', '.join(projection.uncovered)} "
             f"not yet resolved; a zero here does not mean none are present.")

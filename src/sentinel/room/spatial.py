@@ -28,6 +28,7 @@ from typing import Literal
 from sentinel.camera import CameraModel
 from sentinel.room.ingest import DetectionEvidence, full_frame_bbox
 from sentinel.survey.geometry import ground_point
+from sentinel.survey.merge import _lateral_tolerance_cm, _tolerance_cm
 
 #: No per-class object-height table exists anywhere in this codebase, so a
 #: resting object's top is bounded by this generic allowance above its
@@ -35,10 +36,10 @@ from sentinel.survey.geometry import ground_point
 #: simplification in the task report.
 _RESTING_HEIGHT_BAND_CM = 30.0
 
-#: Per-axis standard deviation floor (cm) for a single, unmerged sighting.
-#: Order of magnitude matches survey.merge's measured-frame lateral floor;
-#: this module has no cross-view check of its own to tighten it further.
-_BASE_SIGMA_CM = 20.0
+#: A commanded (dead-reckoned) pose's own position is the dominant source of
+#: error, in every direction, not only laterally -- so both the along-ray
+#: and cross-ray tolerances below are widened by this factor when the pose
+#: is COMMANDED rather than MEASURED.
 _COMMANDED_SIGMA_MULTIPLIER = 2.0
 
 
@@ -111,6 +112,16 @@ class SpatialEstimate:
     captured_at: str
     pose_provenance: str
     evidence_refs: tuple[str, ...]
+    #: A deterministic identity for the *camera viewpoint* this estimate was
+    #: taken from (rounded pose coordinates/heading/look), distinct from
+    #: ``captured_at``: two frames captured a second apart from an unmoved
+    #: hover pose share one ``view_id`` even though their capture times
+    #: differ, so association.py's "confirmed" (seen from more than one
+    #: distinct view) does not conflate a repeat frame with a real second
+    #: view. Optional and defaulted so a hand-built estimate (as in the
+    #: test suite) without pose data still constructs; counting/association
+    #: fall back to ``captured_at`` as the view identity in that case.
+    view_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "z_interval_cm", tuple(self.z_interval_cm))
@@ -141,6 +152,16 @@ def _estimate_id(detection_id: str, support: SupportKind, support_plane_id: str 
     detection under the same support declaration is always the same ID."""
     return "estimate:" + _digest({"detection_id": detection_id, "support": support.value,
                                   "support_plane_id": support_plane_id})
+
+
+def _view_id(pose: PoseEvidence) -> str:
+    """A pure function of the *camera's* rounded pose -- not of time -- so
+    two captures taken a moment apart from one unmoved hover pose share an
+    identity, while a genuinely different pose never does."""
+    return "view:" + _digest({
+        "x_cm": round(pose.x_cm), "y_cm": round(pose.y_cm), "z_cm": round(pose.z_cm),
+        "heading_deg": round(pose.heading_deg, 1), "look_deg": round(pose.look_deg, 1),
+    })
 
 
 def _bottom_center_px(detection: DetectionEvidence) -> tuple[float, float]:
@@ -177,8 +198,25 @@ def estimate_detection(detection: DetectionEvidence, pose: PoseEvidence,
     angle = math.radians(pose.heading_deg + pose.look_deg)
     x_cm = pose.x_cm + forward_cm * math.sin(angle) + lateral_cm * math.cos(angle)
     y_cm = pose.y_cm + forward_cm * math.cos(angle) - lateral_cm * math.sin(angle)
-    sigma_cm = _BASE_SIGMA_CM * (_COMMANDED_SIGMA_MULTIPLIER if pose.pose_provenance == "COMMANDED" else 1.0)
-    variance_cm2 = sigma_cm * sigma_cm
+
+    # Range-dependent covariance (design precedent: survey.merge's tolerance
+    # model), not a fixed isotropic sigma: along the line of sight the
+    # ground-plane depth error grows with range (a shallow ray meeting a
+    # plane), while across it the error is set by how well the camera's own
+    # position is known. A COMMANDED (dead-reckoned) pose widens both, since
+    # the camera position itself is then the dominant error source in every
+    # direction, not only laterally. The resulting ellipse is expressed in
+    # ray-aligned axes and then rotated into room (x, y) axes.
+    commanded = pose.pose_provenance == "COMMANDED"
+    range_cm = math.hypot(forward_cm, lateral_cm, delta_z_cm)
+    sigma_along_cm = _tolerance_cm(range_cm) * (_COMMANDED_SIGMA_MULTIPLIER if commanded else 1.0)
+    sigma_cross_cm = _lateral_tolerance_cm(range_cm, commanded)
+    var_along, var_cross = sigma_along_cm * sigma_along_cm, sigma_cross_cm * sigma_cross_cm
+    sin_a, cos_a = math.sin(angle), math.cos(angle)
+    var_x = var_along * sin_a * sin_a + var_cross * cos_a * cos_a
+    var_y = var_along * cos_a * cos_a + var_cross * sin_a * sin_a
+    cov_xy = (var_along - var_cross) * sin_a * cos_a
+
     z_interval_cm = (support_z_cm, support_z_cm + _RESTING_HEIGHT_BAND_CM)
     return SpatialEstimate(
         estimate_id=_estimate_id(detection.detection_id, support.support, support_plane_id),
@@ -186,10 +224,11 @@ def estimate_detection(detection: DetectionEvidence, pose: PoseEvidence,
         class_name=detection.class_name,
         x_cm=x_cm, y_cm=y_cm,
         z_interval_cm=z_interval_cm,
-        xy_covariance_cm2=(variance_cm2, variance_cm2, 0.0),
+        xy_covariance_cm2=(var_x, var_y, cov_xy),
         support=support.support,
         support_plane_id=support_plane_id,
         captured_at=pose.captured_at,
         pose_provenance=pose.pose_provenance,
         evidence_refs=(detection.detection_id,),
+        view_id=_view_id(pose),
     )

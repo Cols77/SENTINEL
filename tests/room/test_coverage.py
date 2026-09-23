@@ -53,9 +53,15 @@ def test_coverage_cell_rejects_degenerate_polygon_or_band():
         CoverageCell("c", ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0)), (150.0, 0.0), ("phone",))
 
 
-def test_empty_db_yields_a_vacuously_complete_projection():
+def test_no_declared_cells_is_undeclared_not_vacuously_complete():
+    from sentinel.room.coverage import render_coverage_note
+
+    # A site with zero declared coverage cells (every pre-Task-2 site, and
+    # any current one that simply declares none) must never read as a
+    # complete room count -- there is nothing to be complete about.
     projection = project_coverage((), ())
-    assert projection == CoverageProjection((), True, (), ())
+    assert projection == CoverageProjection((), False, (), (), None, 0, 0)
+    assert "undeclared" in render_coverage_note(projection, scope="ROOM").lower()
 
 
 def test_unvisited_cell_is_incomplete_not_a_silent_zero():
@@ -73,8 +79,18 @@ def test_observed_cell_resolves_and_completes():
     assert projection.evidence_refs == ("ev-1",)
 
 
-def test_not_resolvable_class_is_terminal_and_counts_as_complete():
-    observation = CellObservation("cell-1", "phone", "p1", "NOT_RESOLVABLE", "2026-09-23T00:00:00+00:00", ())
+def test_unevidenced_not_resolvable_claim_does_not_close_out_the_pair():
+    # A single unevidenced NOT_RESOLVABLE claim from one pose must not make
+    # a (cell, class) pair terminal for the whole room with nothing behind
+    # it -- it needs positive evidence, exactly like OCCLUDED.
+    observation = CellObservation("cell-1", "phone", "p-far", "NOT_RESOLVABLE", "2026-09-23T00:00:00+00:00", ())
+    projection = project_coverage((_cell(),), (observation,))
+    assert projection.by_cell_and_class == (("cell-1", "phone", "UNVISITED"),)
+    assert projection.complete is False
+
+
+def test_evidenced_not_resolvable_class_is_terminal_and_counts_as_complete():
+    observation = CellObservation("cell-1", "phone", "p1", "NOT_RESOLVABLE", "2026-09-23T00:00:00+00:00", ("ev-nr",))
     projection = project_coverage((_cell(),), (observation,))
     assert projection.by_cell_and_class == (("cell-1", "phone", "NOT_RESOLVABLE"),)
     assert projection.complete is True
@@ -109,6 +125,51 @@ def test_observed_beats_a_stale_occluded_claim_for_the_same_pair():
     observed = _observed(evidence=("ev-obs",))
     projection = project_coverage((_cell(),), (occluded, observed))
     assert projection.by_cell_and_class[0][2] == "OBSERVED"
+
+
+def test_observed_without_evidence_is_demoted_to_absence():
+    # The strongest claim (OBSERVED) needs at least as much proof as
+    # OCCLUDED already requires -- an OBSERVED verdict with nothing to cite
+    # must not complete coverage on no citeable evidence.
+    unevidenced = CellObservation("cell-1", "phone", "p1", "OBSERVED", "2026-09-23T00:00:00+00:00", ())
+    projection = project_coverage((_cell(),), (unevidenced,))
+    assert projection.by_cell_and_class[0][2] == "UNVISITED"
+    assert projection.complete is False
+
+
+def test_latest_capture_and_analysed_unanalysed_frame_counts_are_reported():
+    cells = (_cell("cell-1", ("phone",)), _cell("cell-2", ("computer",)))
+    observations = (
+        _observed("cell-1", "phone", pose_id="p1", evidence=("ev-1",)),  # frame (p1, t-fixed)
+        CellObservation("cell-2", "computer", "p2", "UNANALYSED", "2026-09-23T00:05:00+00:00"),
+    )
+    projection = project_coverage(cells, observations)
+    assert projection.latest_capture_at == "2026-09-23T00:05:00+00:00"
+    assert projection.analysed_frames == 1
+    assert projection.unanalysed_frames == 1
+
+
+def test_a_frame_with_any_resolved_observation_is_analysed_not_unanalysed():
+    # One frame (same pose_id + observed_at) can carry more than one
+    # (cell, class) verdict; if any of them resolved, the frame is analysed.
+    observations = (
+        CellObservation("cell-1", "phone", "p1", "OBSERVED", "t5", ("ev-1",)),
+        CellObservation("cell-2", "computer", "p1", "UNANALYSED", "t5"),
+    )
+    cells = (_cell("cell-1", ("phone",)), _cell("cell-2", ("computer",)))
+    projection = project_coverage(cells, observations)
+    assert projection.analysed_frames == 1
+    assert projection.unanalysed_frames == 0
+
+
+def test_render_coverage_note_states_latest_capture_and_analysed_frames():
+    from sentinel.room.coverage import render_coverage_note
+
+    projection = project_coverage((_cell(),), (_observed(),))
+    text = render_coverage_note(projection, scope="ROOM")
+    assert "latest capture" in text.lower()
+    assert "analysed" in text.lower() and "unanalysed" in text.lower()
+    assert "2026-09-23t00:00:00+00:00" in text.lower()
 
 
 def test_missing_frame_or_rejected_detection_leaves_the_pair_unvisited():
@@ -197,7 +258,9 @@ def _terminal_contingencies():
         RECT, (60, 140), "COASTING", "survey", "checked-clear", 5000) for trigger in ContingencyTrigger)
 
 
-def _site(*, coverage_cells=(), pose_visibility=()):
+def _site(*, coverage_cells=(), pose_visibility=(), semantic_frame="default"):
+    if semantic_frame == "default":
+        semantic_frame = SemanticFrame("room", (1.0, 0.0), (0.0, 1.0), "FRONT", ())
     return RoomSite(
         "room", "a" * 64, "b" * 64,
         (Volume3D("room", RECT, (60, 140)),), (),
@@ -205,7 +268,7 @@ def _site(*, coverage_cells=(), pose_visibility=()):
         (RouteDefinition("home-route", (Position(250, 140, 90),), ("corridor",)),),
         HomeDefinition("pad", Position(250, 140, 90), 90, "home-route"),
         _terminal_contingencies(), "survey-revision-1",
-        semantic_frame=SemanticFrame("room", (1.0, 0.0), (0.0, 1.0), "FRONT", ()),
+        semantic_frame=semantic_frame,
         coverage_cells=coverage_cells, pose_visibility=pose_visibility,
     )
 
@@ -289,6 +352,35 @@ def test_room_scope_suppresses_a_view_after_a_typed_refusal():
     assert suppressed[0].kind == CandidateKind.ANSWER
 
 
+def test_room_scope_suppresses_a_view_after_observe_succeeded():
+    # The refusal path is covered above; a defined OBSERVE_SUCCEEDED outcome
+    # for unchanged relevant state must suppress exactly the same way.
+    site = _site(coverage_cells=(ROOM_CELL,), pose_visibility=((POSE_A, ("room-floor",)), (POSE_B, ("room-floor",))))
+    coverage = project_coverage((ROOM_CELL,), ())
+    objective = _objective("g1", 1, "ROOM")
+    first_pass = build_observation_candidates((objective,), site, coverage, (), 1)
+    assert {c.candidate_id.split(":")[-1] for c in first_pass} == {POSE_A, POSE_B}
+    succeeded_candidate = next(c for c in first_pass if c.candidate_id.endswith(POSE_A))
+    outcome = ToolOutcome(succeeded_candidate.candidate_id, succeeded_candidate.kind.value,
+                          succeeded_candidate.relevant_state_sha256, "OBSERVE_SUCCEEDED", None, (), None, "evt-1")
+    remaining = build_observation_candidates((objective,), site, coverage, (outcome,), 1)
+    assert succeeded_candidate.candidate_id not in {c.candidate_id for c in remaining}
+    assert {c.candidate_id.split(":")[-1] for c in remaining} == {POSE_B}
+
+
+def test_room_scope_orders_by_descending_benefit_before_cost():
+    # POSE_B sees both cells (benefit 2) while POSE_A sees only one
+    # (benefit 1) and is otherwise no farther from home -- benefit must
+    # dominate the ordering, not merely break ties within equal benefit.
+    two_cell = CoverageCell("room-floor-2", RECT, (60, 140), ("pen",))
+    site = _site(coverage_cells=(ROOM_CELL, two_cell),
+                 pose_visibility=((POSE_A, ("room-floor",)), (POSE_B, ("room-floor", "room-floor-2"))))
+    coverage = project_coverage((ROOM_CELL, two_cell), ())
+    objective = _objective("g1", 1, "ROOM")
+    result = build_observation_candidates((objective,), site, coverage, (), 1)
+    assert [c.candidate_id.split(":")[-1] for c in result][0] == POSE_B
+
+
 def test_room_scope_produces_an_explicit_incomplete_answer_instead_of_looping():
     # No declared pose sees "room-floor" at all: coverage can never improve,
     # so no OBSERVE candidate exists, and this must not spin forever -- it
@@ -301,6 +393,26 @@ def test_room_scope_produces_an_explicit_incomplete_answer_instead_of_looping():
     assert result[0].kind == CandidateKind.ANSWER
     assert "incomplete" in result[0].description.lower()
     assert result[0].evidence_refs == coverage.evidence_refs
+
+
+def test_region_objective_on_a_site_with_no_semantic_frame_gets_no_candidate():
+    site = _site(semantic_frame=None)
+    coverage = project_coverage((), ())
+    objective = _objective("g1", 1, "left/front/bottom")
+    result = build_observation_candidates((objective,), site, coverage, (), 1)
+    assert result == ()
+
+
+def test_unresolvable_declared_pose_is_never_offered_at_zero_cost():
+    # A hand-built site that bypassed RoomSite.validate() (as this helper
+    # does) could still carry a pose_visibility entry that does not resolve.
+    # candidates.py must not fall back to a zero physical cost for it -- the
+    # candidate must simply not be offered.
+    site = _site(coverage_cells=(ROOM_CELL,), pose_visibility=(("not-a-real-pose-id", ("room-floor",)),))
+    coverage = project_coverage((ROOM_CELL,), ())
+    objective = _objective("g1", 1, "ROOM")
+    result = build_observation_candidates((objective,), site, coverage, (), 1)
+    assert all(c.kind != CandidateKind.OBSERVE for c in result)
 
 
 def test_complete_room_scope_needs_no_fallback_answer():

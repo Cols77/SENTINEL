@@ -275,9 +275,20 @@ class RoomSite:
             raise ValueError("duplicate coverage cell identity")
         for cell in self.coverage_cells:
             corners = [Position(x, y, z) for x, y in cell.polygon_xy_cm for z in cell.z_band_cm]
-            if not all(any(_contains(volume, corner) for volume in self.free_space_volumes) for corner in corners):
+            # Mirrors the landing-zone swept-containment pattern below: every
+            # corner must lie in the *same* convex free-space volume, not
+            # each independently in some volume or other -- free_space_volumes
+            # may be several disjoint polygons, and a cell whose corners each
+            # land in a different one can still cross unsurveyed ground in
+            # its interior.
+            if not any(all(_contains(volume, corner) for corner in corners) for volume in self.free_space_volumes):
                 raise ValueError(f"coverage cell {cell.cell_id!r} escapes surveyed free space")
-            if any(_contains(volume, corner) for volume in self.forbidden_volumes for corner in corners):
+            # A forbidden volume entirely inside the cell's interior, touching
+            # none of its corners, must still be caught -- an AABB overlap
+            # check (as used for the semantic envelope above) catches that
+            # where a corners-only check cannot.
+            if any(_aabb_overlap(cell.polygon_xy_cm, cell.z_band_cm, forbidden.polygon_xy_cm, forbidden.z_interval_cm)
+                   for forbidden in self.forbidden_volumes):
                 raise ValueError(f"coverage cell {cell.cell_id!r} enters a forbidden volume")
         pose_ids = [pose_id for pose_id, _ in self.pose_visibility]
         if len(set(pose_ids)) != len(pose_ids):
@@ -287,6 +298,8 @@ class RoomSite:
                 raise ValueError(f"invalid declared visibility for pose {pose_id!r}")
             if not set(visible_cell_ids) <= set(cell_ids):
                 raise ValueError(f"pose {pose_id!r} declares visibility of an unknown coverage cell")
+            if not _declared_pose_resolves(self, pose_id):
+                raise ValueError(f"pose {pose_id!r} does not resolve to a declared, in-envelope semantic pose")
 
 
 def _contains(volume, position):
@@ -298,16 +311,42 @@ def volume_contains(volume: Volume3D, position: Position) -> bool:
     return _contains(volume, position)
 
 
-def _overlaps(a, b):
+def _aabb_overlap(poly_a, z_a, poly_b, z_b) -> bool:
     """Conservative AABB overlap; never use a volume that might contain a hazard."""
-    if a.z_interval_cm[1] < b.z_interval_cm[0] or b.z_interval_cm[1] < a.z_interval_cm[0]:
+    if z_a[1] < z_b[0] or z_b[1] < z_a[0]:
         return False
     for axis in (0, 1):
-        if max(point[axis] for point in a.polygon_xy_cm) < min(point[axis] for point in b.polygon_xy_cm):
+        if max(point[axis] for point in poly_a) < min(point[axis] for point in poly_b):
             return False
-        if max(point[axis] for point in b.polygon_xy_cm) < min(point[axis] for point in a.polygon_xy_cm):
+        if max(point[axis] for point in poly_b) < min(point[axis] for point in poly_a):
             return False
     return True
+
+
+def _overlaps(a, b):
+    return _aabb_overlap(a.polygon_xy_cm, a.z_interval_cm, b.polygon_xy_cm, b.z_interval_cm)
+
+
+def _declared_pose_resolves(site: "RoomSite", pose_id: str) -> bool:
+    """True iff ``pose_id`` parses as a canonical semantic pose and actually
+    resolves against this site's declared semantic frame.
+
+    Imported lazily: ``sentinel.room.semantic`` imports ``RoomSite`` from
+    this module, so a module-level import here would be circular. By the
+    time ``validate()`` runs (always after this module has fully loaded),
+    that import is safe.
+    """
+    from sentinel.room.semantic import SemanticPose, resolve_semantic_pose
+
+    parts = pose_id.split("-")
+    if len(parts) != 4:
+        return False
+    horizontal, depth, height, look = parts
+    try:
+        resolve_semantic_pose(site, SemanticPose(horizontal, depth, height, look))
+        return True
+    except ValueError:
+        return False
 
 
 def _is_axis_aligned_rectangle(polygon, axis_u, axis_v) -> bool:
@@ -345,6 +384,17 @@ def room_site_document(site: RoomSite) -> dict:
     fields_dict = asdict(site)
     if fields_dict.get("semantic_frame") is None:
         fields_dict.pop("semantic_frame", None)
+    # A site with no declared coverage cells/visibility (every site that
+    # predates Plan 03 Task 2, and any current one that simply has none
+    # declared) must keep exactly the document -- and therefore digest --
+    # it had before these fields existed, the same way semantic_frame is
+    # already popped above. Otherwise every calibration_hashes/site_sha256
+    # binding computed against an unchanged site (see supervisor.py) fails
+    # validate_bindings for a site that did not actually change.
+    if not fields_dict.get("coverage_cells"):
+        fields_dict.pop("coverage_cells", None)
+    if not fields_dict.get("pose_visibility"):
+        fields_dict.pop("pose_visibility", None)
     return json.loads(json.dumps({"schema_version": "room-site-base-v1", **fields_dict}, allow_nan=False))
 
 

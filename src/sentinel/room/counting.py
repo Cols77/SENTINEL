@@ -60,9 +60,10 @@ class ClassCount:
             raise ValueError("class count values must be non-negative")
 
 
-def _static_class_names(objects, coverage: CoverageProjection) -> tuple[str, ...]:
+def _static_class_names(objects, coverage: CoverageProjection, requested_classes: tuple[str, ...]) -> tuple[str, ...]:
     names = {cell_class for _, cell_class, _ in coverage.by_cell_and_class if cell_class != "person"}
     names |= {obj.class_name for obj in objects if obj.class_name != "person"}
+    names |= {name for name in requested_classes if name != "person"}
     return tuple(sorted(names))
 
 
@@ -71,15 +72,20 @@ def _not_resolvable(class_name: str, coverage: CoverageProjection) -> bool:
     return bool(rows) and all(CoverageStatus(status) == CoverageStatus.NOT_RESOLVABLE for status in rows)
 
 
-def _static_counts(objects, coverage: CoverageProjection) -> tuple[ClassCount, ...]:
+def _static_counts(objects, coverage: CoverageProjection, requested_classes: tuple[str, ...]) -> tuple[ClassCount, ...]:
     counts = []
-    for class_name in _static_class_names(objects, coverage):
+    for class_name in _static_class_names(objects, coverage, requested_classes):
         if _not_resolvable(class_name, coverage):
             counts.append(ClassCount(class_name, 0, 0, "NOT_OBSERVABLE"))
             continue
         matching = [obj for obj in objects if obj.class_name == class_name]
-        confirmed = [obj for obj in matching if len(obj.member_estimate_ids) > 1]
-        uncertain = [obj for obj in matching if len(obj.member_estimate_ids) <= 1]
+        # "Confirmed" means seen from more than one distinct view (module
+        # docstring), not merely more than once -- two estimates from the
+        # same unmoved pose are one view. ``member_view_keys`` distinguishes
+        # them when the source estimates carried a view identity; it falls
+        # back to capture time for estimates that did not (see association.py).
+        confirmed = [obj for obj in matching if len(set(obj.member_view_keys)) > 1]
+        uncertain = [obj for obj in matching if len(set(obj.member_view_keys)) <= 1]
         evidence = tuple(sorted({ref for obj in matching for ref in obj.evidence_refs}))
         counts.append(ClassCount(class_name, len(confirmed), len(uncertain), "GROUNDED_STATIC", evidence))
     return tuple(counts)
@@ -95,11 +101,18 @@ def _people_count(people_by_frame: tuple[FramePeople, ...]) -> ClassCount:
                       "MAX_SIMULTANEOUS_LOWER_BOUND", (best.frame_id,))
 
 
-def project_counts(objects, people_by_frame, coverage: CoverageProjection) -> tuple[ClassCount, ...]:
+def project_counts(objects, people_by_frame, coverage: CoverageProjection, *,
+                   requested_classes: tuple[str, ...] = ()) -> tuple[ClassCount, ...]:
     """Static classes from associated objects; people from the single frame
     with the most simultaneously visible detections. Never derives a person
-    count from ``objects`` -- people never enter ``associate_static``."""
-    static = _static_counts(objects, coverage)
+    count from ``objects`` -- people never enter ``associate_static``.
+
+    ``requested_classes`` is optional and additive: every class it names
+    (other than "person", which always has its own line) gets a rendered
+    line even when neither the coverage cells nor any associated object
+    mention it yet -- otherwise a class with no declared cells and no
+    sightings silently has no line at all instead of an honest zero."""
+    static = _static_counts(objects, coverage, tuple(requested_classes))
     return static + (_people_count(people_by_frame),)
 
 
