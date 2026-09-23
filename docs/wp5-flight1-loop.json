@@ -1,0 +1,10 @@
+{
+  "schema_version": "cube-mission-v1",
+  "start": {"x_cm": 250, "y_cm": 250},
+  "waypoints": [
+    {"name": "RIGHT_NEAR", "x_cm": 280, "y_cm": 250, "z_cm": 100},
+    {"name": "RIGHT_FAR",  "x_cm": 280, "y_cm": 215, "z_cm": 100},
+    {"name": "LEFT_FAR",   "x_cm": 220, "y_cm": 215, "z_cm": 100},
+    {"name": "HOME",       "x_cm": 250, "y_cm": 250, "z_cm": 100}
+  ]
+}

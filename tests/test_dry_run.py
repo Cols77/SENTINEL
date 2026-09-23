@@ -53,6 +53,23 @@ def test_dry_run_never_constructs_a_socket(monkeypatch: pytest.MonkeyPatch) -> N
     client.close()
 
 
+def test_reconnecting_after_close_is_permitted_like_the_real_backend() -> None:
+    """djitellopy_backend.DjiTelloPyClient.connect() resets ``_closed`` to
+    False and genuinely reconnects; DryRunClient must offer the same
+    contract, not a stricter one, or a caller that flies a drone twice in
+    one session (survey.cube_bridge.CubeFlight, up to two approved sweeps)
+    cannot be dry-run tested at all."""
+    client = DryRunClient()
+    client.connect()
+    client.takeoff()
+    client.land()
+    client.close()
+
+    client.connect()   # must not raise ClientStateError("client is closed")
+    client.enter_command_mode()
+    assert client.height_cm() == 0
+
+
 def test_emergency_is_terminal_and_rejects_later_flight_commands() -> None:
     client = DryRunClient()
     client.connect()

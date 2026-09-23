@@ -1,0 +1,37 @@
+{
+  "schema_version": "cube-site-v1",
+  "_comment": "2026-09-22: the cube moved back from the tag door. Commanded area 1.6-2.6 m from the tags (y 140-240), x 185-315, z 60-140 (above 100 only the far half keeps the tags in view: the guard refuses the rest; above ~140 the whole cube is blind with tags at 53 cm); the near-door row lost the tags on 09-22. Inset 40 cm so legs may fly at 50 cm/s (35 cm travel after land). Same footprint as flight2's cube or smaller. Ground takeoff (takeoff_z_cm 0). altitude_bias_cm 18: the tags are tape-measured at 53 cm, so height? reads ~18 cm low (the value the 09-21/22 flights calibrate). Fly with the tag map generated from this file: docs/wp5-flight3-map.json (sentinel cube-site-map). Check with: sentinel cube-layout-check --coverage.",
+  "line_y_m": 4.0,
+  "stands": [
+    {
+      "x_m": 2.156,
+      "first_tag_id": 2,
+      "heights_m": [
+        0.53
+      ],
+      "size_m": 0.192
+    },
+    {
+      "x_m": 2.844,
+      "first_tag_id": 0,
+      "heights_m": [
+        0.53
+      ],
+      "size_m": 0.192
+    }
+  ],
+  "cube": {
+    "min_x_m": 1.45,
+    "max_x_m": 3.55,
+    "min_y_m": 1.0,
+    "max_y_m": 2.8,
+    "max_z_m": 2.0
+  },
+  "commanded": {
+    "inset_m": 0.4,
+    "min_z_cm": 60,
+    "max_z_cm": 140
+  },
+  "takeoff_z_cm": 0,
+  "altitude_bias_cm": 18
+}

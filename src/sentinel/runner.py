@@ -37,6 +37,7 @@ class FlightTestRunner:
         retain_video_stream: bool = False,
         video_only: bool = False,
         video_only_duration_s: float = 30.0,
+        envelope: FlightEnvelope | None = None,
     ) -> None:
         self.client = client
         self.mode = mode
@@ -51,7 +52,7 @@ class FlightTestRunner:
             raise ValueError("video_only_duration_s must not be negative")
         self.video_only = video_only
         self.video_only_duration_s = video_only_duration_s
-        self.envelope = FlightEnvelope()
+        self.envelope = envelope if envelope is not None else FlightEnvelope()
         self.video_frame: VideoFrame | None = None
         self.history: list[CommandRecord] = []
         self.emergency_event = Event()
@@ -329,6 +330,22 @@ class FlightTestRunner:
         except Exception:
             pass
 
+    def _fly_sequence(self) -> None:
+        """The approved airborne sequence, between takeoff and hover/stop."""
+
+        self._enter_altitude_band()
+        for direction in ("forward", "right", "back", "left", "up", "down"):
+            self.move_checked(direction, 50)
+
+        self._emit("flight", "sending clockwise rotation 90 degrees")
+        response = self._call(lambda: self.client.rotate("cw", 90))
+        if not self._is_ok(response):
+            raise RuntimeError(f"clockwise rotation failed: {response}")
+        self._emit("flight", "sending counter-clockwise rotation 90 degrees")
+        response = self._call(lambda: self.client.rotate("ccw", 90))
+        if not self._is_ok(response):
+            raise RuntimeError(f"counter-clockwise rotation failed: {response}")
+
     def run(self, *, confirm: bool) -> RunReport:
         if not confirm:
             raise RuntimeError("real flight requires explicit confirmation")
@@ -362,21 +379,19 @@ class FlightTestRunner:
                     raise EmergencyAborted("emergency stop triggered during takeoff")
                 airborne = True
 
-                self._enter_altitude_band()
-                for direction in ("forward", "right", "back", "left", "up", "down"):
-                    self.move_checked(direction, 50)
-
-                self._emit("flight", "sending clockwise rotation 90 degrees")
-                response = self._call(lambda: self.client.rotate("cw", 90))
-                if not self._is_ok(response):
-                    raise RuntimeError(f"clockwise rotation failed: {response}")
-                self._emit("flight", "sending counter-clockwise rotation 90 degrees")
-                response = self._call(lambda: self.client.rotate("ccw", 90))
-                if not self._is_ok(response):
-                    raise RuntimeError(f"counter-clockwise rotation failed: {response}")
+                self._fly_sequence()
                 self._emit("flight", "sending hover/stop")
-                response = self._call(self.client.stop)
-                if not self._is_ok(response):
+                try:
+                    response = self._call(self.client.stop)
+                except Exception as exc:  # noqa: BLE001 - re-raised unless it is the one known reply
+                    if "unknown command" not in str(exc).lower():
+                        raise
+                    response = str(exc)
+                if "unknown command" in str(response).lower():
+                    # This Tello firmware has no `stop` (measured 2026-09-21); a Tello
+                    # already hovers once a move has completed, so there is nothing to stop.
+                    self._emit("flight", "firmware has no stop command; already hovering")
+                elif not self._is_ok(response):
                     raise RuntimeError(f"hover/stop failed: {response}")
                 self._emit("flight", "sending landing")
                 response = self._call(self.client.land)

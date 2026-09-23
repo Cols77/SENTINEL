@@ -9,6 +9,17 @@ from sentinel.emergency import EmergencySender
 from sentinel.models import CommandRecord, RunReport, VideoFrame
 from sentinel.reporting import write_report, write_video_manifest
 
+SITE_DOC = {
+    "schema_version": "cube-site-v1",
+    "line_y_m": 5.0,
+    "stands": [{"x_m": x, "first_tag_id": 2 * i, "heights_m": [0.90, 1.45], "size_m": 0.192}
+               for i, x in enumerate([0.25, 0.75, 2.3, 2.7, 3.1, 4.65, 5.15])],
+    "cube": {"min_x_m": 0.3, "max_x_m": 5.1, "min_y_m": 2.0, "max_y_m": 4.2, "max_z_m": 2.0},
+    "commanded": {"inset_m": 0.3, "min_z_cm": 80, "max_z_cm": 180},
+}
+CALIBRATION = {"width": 960, "height": 720, "fx": 893.0, "fy": 894.0, "cx": 468.0,
+               "cy": 354.0, "dist_coeffs": [], "calibration_source": "chessboard"}
+
 
 def test_dry_run_cli_returns_zero_and_writes_jsonl(monkeypatch, tmp_path):
     output = tmp_path / "run.jsonl"
@@ -362,3 +373,72 @@ def test_explicit_emergency_ip_reaches_sender_when_route_discovery_fails(monkeyp
     monkeypatch.setattr("sentinel.cli.EmergencySender", FakeSender)
 
     assert main(["emergency", "--local-ip", "192.168.10.2"]) == 0
+
+
+def _cube_files(tmp_path):
+    import json
+
+    site = tmp_path / "site.json"
+    site.write_text(json.dumps(SITE_DOC))
+    mission = tmp_path / "mission.json"
+    mission.write_text(json.dumps({
+        "schema_version": "cube-mission-v1", "start": {"x_cm": 270, "y_cm": 250},
+        "waypoints": [{"name": "WP1", "x_cm": 270, "y_cm": 300, "z_cm": 120,
+                       "looks_deg": [-30, 30]}]}))
+    return site, mission
+
+
+def test_cube_run_dry_run_off_mode(tmp_path, monkeypatch):
+    import json
+
+    from sentinel.cli import main
+
+    monkeypatch.setattr("sentinel.cube.mission.SETTLE_S", 0.0)
+    site, mission = _cube_files(tmp_path)
+    log = tmp_path / "mission.jsonl"
+    code = main(["cube-run", "--dry-run", "--site", str(site), "--mission", str(mission),
+                 "--mission-log", str(log), "--log", str(tmp_path / "run.jsonl")])
+    assert code == 0
+    assert [json.loads(line)["status"] for line in log.read_text().splitlines()] == ["OPEN_LOOP"]
+
+
+def test_cube_run_passive_dry_run_is_honestly_unlocalised(tmp_path, monkeypatch):
+    import json
+
+    from sentinel.cli import main
+
+    monkeypatch.setattr("sentinel.cube.mission.SETTLE_S", 0.0)
+    site, mission = _cube_files(tmp_path)
+    tag_map = tmp_path / "map.json"
+    assert main(["cube-site-map", "--site", str(site), "--calibration-from",
+                 "calibration/tag-map-calibrated.json", "--out", str(tag_map)]) == 0
+    log = tmp_path / "mission.jsonl"
+    code = main(["cube-run", "--dry-run", "--site", str(site), "--mission", str(mission),
+                 "--pose", "passive", "--tag-map", str(tag_map),
+                 "--db", str(tmp_path / "pose.db"), "--mission-log", str(log),
+                 "--log", str(tmp_path / "run.jsonl")])
+    assert code == 0
+    assert [json.loads(line)["status"] for line in log.read_text().splitlines()] == ["UNLOCALISED"]
+
+
+def test_cube_run_refuses_a_tag_map_of_another_room(tmp_path, capsys):
+    """The coverage guard predicts from the site file and localisation solves against the tag
+    map: a flight where they describe different tags is refused before takeoff."""
+    from sentinel.cli import main
+
+    site, mission = _cube_files(tmp_path)
+    code = main(["cube-run", "--dry-run", "--site", str(site), "--mission", str(mission),
+                 "--pose", "passive", "--tag-map", "calibration/tag-map-calibrated.json",
+                 "--db", str(tmp_path / "pose.db"), "--mission-log", str(tmp_path / "m.jsonl"),
+                 "--log", str(tmp_path / "run.jsonl")])
+    assert code == 1 and "differ from the site file" in capsys.readouterr().out
+
+
+def test_cube_run_reanchor_requires_the_amendment_flag(tmp_path, capsys):
+    from sentinel.cli import main
+
+    site, mission = _cube_files(tmp_path)
+    code = main(["cube-run", "--dry-run", "--site", str(site), "--mission", str(mission),
+                 "--pose", "reanchor", "--tag-map", "calibration/tag-map-calibrated.json",
+                 "--log", str(tmp_path / "run.jsonl")])
+    assert code == 1 and "SR-063" in capsys.readouterr().out

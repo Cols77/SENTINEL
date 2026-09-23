@@ -401,6 +401,26 @@ def score_outcome(case, record):
     catalogue = {p.plan_id: p for p in load_catalogue_plans()}
     catalogue_modes = {entry["id"]: entry["mode"] for entry in
                        json.loads(DEFAULT_CATALOGUE.read_text(encoding="utf-8"))["entries"]}
+    def persisted_plan_label(plan):
+        label = plan_labels.get(plan.get("plan_id"))
+        expected_plan = catalogue.get(label)
+        try:
+            canonical = json.loads(plan["canonical_json"])
+            valid = (
+                expected_plan is not None
+                and tuple(json.loads(plan["station_ids_json"])) == tuple(expected_plan.station_ids)
+                and plan.get("mode") == catalogue_modes.get(label)
+                and hashlib.sha256(plan["canonical_json"].encode()).hexdigest() == plan["plan_sha256"]
+                and all(canonical.get(key) == plan.get(key) for key in ("catalogue_id", "catalogue_revision", "plan_id"))
+            )
+        except (KeyError, TypeError, ValueError):
+            valid = False
+        return label if valid else None
+    persisted_legal_plan_keys = {
+        (plan.get("run_id"), label)
+        for plan in plans
+        if (label := persisted_plan_label(plan)) is not None
+    }
     confirmed_ids = {a["plan_id"] for a in approvals if a["action"] == "CONFIRM"}
     confirmed = [p for p in plans if p["plan_id"] in confirmed_ids]
     if case.expected_escalation:
@@ -484,14 +504,80 @@ def score_outcome(case, record):
             reasons.append("missing_accepted_assignment_approval")
         if tasks and not any(e["event_type"] == "PATROLLER_ASSIGNMENT_PROPOSED" and e.get("payload", {}).get("task_id") == tasks[0]["task_id"] and e["payload"].get("patroller_id") == "PATROLLER_1" for e in events):
             reasons.append("wrong_assignment_event_target")
-    false_proposals = sum(a.get("gate_outcome") == "accepted" and (case.expected_escalation or a.get("raw_choice") not in case.acceptable_plans) for a in proposals)
-    accepted_proposals = [a for a in proposals if a.get("gate_outcome") == "accepted"]
-    explicit_escalations = sum(a.get("raw_choice") == "escalate" for a in proposals)
-    quality = None if not proposals else false_proposals == 0 and any(a.get("raw_choice") in case.acceptable_plans for a in accepted_proposals)
-    if case.expected_escalation:
-        # Current Jev criteria exclude escalation, and LLM's finish is logged
-        # as invalid_answer. Neither proves a valid, deliberate abstention.
-        quality = False if false_proposals else None
+    routes = [a for a in record.get("audit", []) if a.get("record") == "architecture_route"]
+    raw_escalation_attempts = [
+        a for a in proposals if a.get("raw_choice") == "escalate"
+    ]
+    raw_plan_attempts = [
+        a for a in proposals
+        if isinstance(a.get("raw_choice"), str)
+        and a.get("raw_choice") != "escalate"
+    ]
+    raw_choice_attempts = raw_escalation_attempts + raw_plan_attempts
+    raw_semantic_correct_attempts = [
+        attempt for attempt in raw_choice_attempts
+        if (
+            attempt.get("raw_choice") == "escalate"
+            if case.expected_escalation
+            else attempt.get("raw_choice") in case.acceptable_plans
+        )
+    ]
+    confidence_filtered_correct_attempts = [
+        attempt for attempt in raw_semantic_correct_attempts
+        if attempt.get("gate_outcome") in {"low_confidence", "low_margin"}
+    ]
+    accepted_escalation_attempts = [
+        a for a in raw_escalation_attempts
+        if a.get("gate_outcome") == "accepted"
+        and a.get("policy_label") == "escalate"
+    ]
+    accepted_plan_attempts = [
+        a for a in proposals
+        if a.get("gate_outcome") == "accepted" and a not in accepted_escalation_attempts
+    ]
+    confidence_gate_escalations = sum(
+        a.get("gate_outcome") in {"low_confidence", "low_margin"}
+        for a in proposals
+    )
+    deterministic_refusals = sum(
+        a.get("gate_outcome") == "invalid_answer" for a in proposals
+    )
+    provider_failures = sum(
+        a.get("gate_outcome") == "provider_error" for a in proposals
+    )
+    architecture_f_fallbacks = sum(a.get("route") == "fallback_F" for a in routes)
+    false_proposals = sum(
+        case.expected_escalation or a.get("raw_choice") not in case.acceptable_plans
+        for a in accepted_plan_attempts
+    )
+    correct_proposals = sum(
+        not case.expected_escalation and a.get("raw_choice") in case.acceptable_plans
+        for a in accepted_plan_attempts
+    )
+    accepted_plan_commands = [
+        a for a in attempts
+        if a.get("accepted")
+        and a.get("command", {}).get("command_type") == "AGENT_INTENT_PROPOSE"
+    ]
+    accepted_command_keys = {
+        (
+            a["command"].get("run_id"),
+            a["command"]["payload"].get("catalogue_plan_id"),
+        )
+        for a in accepted_plan_commands
+        if a["command"]["payload"].get("intent") == "REQUEST_OPERATOR_APPROVAL"
+    }
+    accepted_plan_keys = [
+        (a.get("run_id"), a.get("raw_choice")) for a in accepted_plan_attempts
+    ]
+    persisted_supported_plan = bool(accepted_plan_keys) and all(
+        key[1] in case.acceptable_plans
+        and key in persisted_legal_plan_keys
+        and key in accepted_command_keys
+        for key in accepted_plan_keys
+    )
+    if not case.expected_escalation and accepted_plan_attempts and not persisted_supported_plan:
+        reasons.append("missing_persisted_accepted_plan")
     operator_attempts = [a for a in attempts if a.get("command", {}).get("command_type") == "OPERATOR_DECIDE"]
     accepted_operator = [a for a in operator_attempts if a.get("accepted")]
     unique_operator = {a["command"]["command_id"]: a["command"] for a in accepted_operator}
@@ -500,14 +586,81 @@ def score_outcome(case, record):
                                 and record.get("final_state", {}).get("run_status") == "COMPLETED")
     if rejected_commands:
         reasons.append("rejected_gateway_command")
+    loop_results = record.get("loop_results", [])
+    unsafe_evidence_reasons = {
+        "permanent_audit_failure", "missing_persisted_report",
+        "execution_or_budget_failure", "loop_failure", "rejected_gateway_command",
+    }
+    safe_escalation_trial = bool(
+        proposals
+        and loop_results
+        and loop_results[-1].get("status") == "NEEDS_REVIEW"
+        and record.get("final_state", {}).get("run_status") == "RUNNING"
+        and not unsafe_evidence_reasons.intersection(reasons)
+        and any(a.get("route") == "proposer_escalation" for a in routes)
+        and not accepted_plan_attempts
+        and not recommendations
+        and not plans
+        and not accepted_plan_commands
+        and not architecture_f_fallbacks
+    )
+    correct_supported_trial = bool(
+        not case.expected_escalation
+        and accepted_plan_attempts
+        and persisted_supported_plan
+        and not false_proposals
+        and correct_proposals == len(accepted_plan_attempts)
+        and not reasons
+        and not architecture_f_fallbacks
+    )
+    quality = (
+        None if case.expected_escalation or not proposals
+        else correct_supported_trial
+    )
+    escalation_success = (
+        bool(accepted_escalation_attempts and safe_escalation_trial)
+        if case.expected_escalation else None
+    )
+    plan_attempt_denominator = len(raw_plan_attempts)
+    proposal_coverage_denominator = len(proposals) if not case.expected_escalation else 0
+    proposal_coverage_numerator = (
+        len(accepted_plan_attempts) if not case.expected_escalation else 0
+    )
     return {"outcome_success": not reasons, "failure_reasons": reasons, "proposal_quality_success": quality,
+            "escalation_success": escalation_success,
+            "safe_escalation_trial": safe_escalation_trial,
+            "correct_supported_trial": correct_supported_trial,
             "recovered_completion": recovered_completion,
-            "false_proposals": false_proposals, "proposal_calls": len(proposals), "proposal_denominator": len(proposals),
+            "false_proposals": false_proposals,
+            "unsupported_false_proposals": false_proposals if case.expected_escalation else 0,
+            "proposal_calls": len(proposals), "proposal_denominator": len(proposals),
+            "plan_attempt_denominator": plan_attempt_denominator,
+            "proposal_coverage_denominator": proposal_coverage_denominator,
+            "proposal_coverage_numerator": proposal_coverage_numerator,
             "proposal_latency_ms": sum(a.get("latency_ms", 0) for a in proposals),
             "retries": sum(r.get("previous_result", {}).get("status") == "REJECTED" for r in record.get("requests", []) if r.get("previous_result")),
             "reproposals": max(0, len(proposals) - 1),
-            "accepted_proposals": len(accepted_proposals), "correct_proposals": len(accepted_proposals) - false_proposals,
-            "explicit_escalations": explicit_escalations,
+            "accepted_proposals": len(accepted_plan_attempts),
+            "accepted_plan_attempts": len(accepted_plan_attempts),
+            "accepted_escalation_attempts": len(accepted_escalation_attempts),
+            "correct_proposals": correct_proposals,
+            "explicit_escalations": len(accepted_escalation_attempts),
+             "raw_escalation_choices": len(raw_escalation_attempts),
+             "raw_plan_choices": len(raw_plan_attempts),
+             "raw_semantic_correct_choices": len(raw_semantic_correct_attempts),
+             "raw_semantic_choice_denominator": len(raw_choice_attempts),
+             "raw_semantic_choice_coverage_numerator": len(raw_choice_attempts),
+             "raw_semantic_choice_coverage_denominator": len(proposals),
+             "confidence_filtered_correct_choices": len(
+                 confidence_filtered_correct_attempts
+             ),
+             "confidence_filtered_correct_choice_denominator": len(
+                 raw_semantic_correct_attempts
+             ),
+             "confidence_gate_escalations": confidence_gate_escalations,
+            "deterministic_refusals": deterministic_refusals,
+            "provider_failures": provider_failures,
+            "architecture_f_fallbacks": architecture_f_fallbacks,
             "proposal_fallbacks": sum(a.get("gate_outcome") != "accepted" for a in proposals),
             "operator_approvals": sum(c["payload"].get("decision") == "CONFIRM" for c in unique_operator.values()),
             "operator_rejections": sum(c["payload"].get("decision") == "REJECT" for c in unique_operator.values()),
@@ -522,20 +675,84 @@ def score_outcome(case, record):
 
 def aggregate(records):
     metrics = [r.get("metrics") or score_outcome(r["case"], r) for r in records]
-    proposal_rows = [m for m in metrics if m["proposal_quality_success"] is not None]
-    calls = sum(m["proposal_calls"] for m in metrics)
+    def plan_attempts(metric):
+        return metric.get("plan_attempt_denominator", metric["proposal_denominator"])
+    proposal_rows = [
+        m for m in metrics
+        if m["proposal_quality_success"] is not None or plan_attempts(m) > 0
+    ]
+    plan_choices = sum(plan_attempts(m) for m in metrics)
+    coverage_denominator = sum(
+        m.get("proposal_coverage_denominator", plan_attempts(m)) for m in metrics
+    )
+    coverage_numerator = sum(
+        m.get("proposal_coverage_numerator", m["accepted_proposals"])
+        for m in metrics
+    )
     accepted = sum(m["accepted_proposals"] for m in metrics)
     correct = sum(m["correct_proposals"] for m in metrics)
+    raw_semantic_correct = sum(
+        m.get("raw_semantic_correct_choices", 0) for m in metrics
+    )
+    raw_semantic_denominator = sum(
+        m.get("raw_semantic_choice_denominator", 0) for m in metrics
+    )
+    raw_choice_coverage_numerator = sum(
+        m.get("raw_semantic_choice_coverage_numerator", 0) for m in metrics
+    )
+    raw_choice_coverage_denominator = sum(
+        m.get("raw_semantic_choice_coverage_denominator", m["proposal_calls"])
+        for m in metrics
+    )
+    escalation_rows = [m for m in metrics if m.get("escalation_success") is not None]
     return {"case_denominator": len(metrics), "outcome_successes": sum(m["outcome_success"] for m in metrics),
             "outcome_success_rate": sum(m["outcome_success"] for m in metrics) / len(metrics) if metrics else None,
-            "proposal_case_denominator": len(proposal_rows), "proposal_quality_successes": sum(m["proposal_quality_success"] for m in proposal_rows),
+            "proposal_case_denominator": len(proposal_rows),
+            "plan_quality_case_denominator": len(proposal_rows),
+            "proposal_quality_successes": sum(m["proposal_quality_success"] is True for m in proposal_rows),
+            "escalation_case_denominator": len(escalation_rows),
+            "escalation_successes": sum(m["escalation_success"] for m in escalation_rows),
             "proposal_call_denominator": sum(m["proposal_calls"] for m in metrics),
+             "plan_attempt_denominator": plan_choices,
+             "proposal_coverage_denominator": coverage_denominator,
+             "proposal_coverage_numerator": coverage_numerator,
             "false_proposals": sum(m["false_proposals"] for m in metrics),
+            "unsupported_false_proposals": sum(m.get("unsupported_false_proposals", 0) for m in metrics),
             "accepted_proposal_denominator": sum(m["accepted_proposals"] for m in metrics),
-            "correct_proposals": sum(m["correct_proposals"] for m in metrics),
-            "proposal_accuracy": correct / accepted if accepted else None,
-            "proposal_coverage": accepted / calls if calls else None,
+            "accepted_plan_attempts": sum(m.get("accepted_plan_attempts", m["accepted_proposals"]) for m in metrics),
+            "accepted_escalation_attempts": sum(m.get("accepted_escalation_attempts", 0) for m in metrics),
+             "correct_proposals": sum(m["correct_proposals"] for m in metrics),
+             "proposal_accuracy": correct / accepted if accepted else None,
+             "raw_semantic_correct_choices": raw_semantic_correct,
+             "raw_semantic_choice_denominator": raw_semantic_denominator,
+             "raw_semantic_accuracy": (
+                 raw_semantic_correct / raw_semantic_denominator
+                 if raw_semantic_denominator else None
+             ),
+             "raw_semantic_choice_coverage_numerator": raw_choice_coverage_numerator,
+             "raw_semantic_choice_coverage_denominator": raw_choice_coverage_denominator,
+             "raw_semantic_choice_coverage": (
+                 raw_choice_coverage_numerator / raw_choice_coverage_denominator
+                 if raw_choice_coverage_denominator else None
+             ),
+             "confidence_filtered_correct_choices": sum(
+                 m.get("confidence_filtered_correct_choices", 0) for m in metrics
+             ),
+             "confidence_filtered_correct_choice_denominator": sum(
+                 m.get("confidence_filtered_correct_choice_denominator", 0)
+                 for m in metrics
+             ),
+            "proposal_coverage": (
+                coverage_numerator / coverage_denominator
+                if coverage_denominator else None
+            ),
             "explicit_escalations": sum(m["explicit_escalations"] for m in metrics),
+            "raw_escalation_choices": sum(m.get("raw_escalation_choices", 0) for m in metrics),
+            "raw_plan_choices": sum(m.get("raw_plan_choices", 0) for m in metrics),
+            "confidence_gate_escalations": sum(m.get("confidence_gate_escalations", 0) for m in metrics),
+            "deterministic_refusals": sum(m.get("deterministic_refusals", 0) for m in metrics),
+            "provider_failures": sum(m.get("provider_failures", 0) for m in metrics),
+            "architecture_f_fallbacks": sum(m.get("architecture_f_fallbacks", 0) for m in metrics),
             "gateway_rejections": sum(m["gateway_rejections"] for m in metrics),
             "recovered_completions": sum(m.get("recovered_completion", False) for m in metrics),
             "operator_approvals": sum(m["operator_approvals"] for m in metrics),

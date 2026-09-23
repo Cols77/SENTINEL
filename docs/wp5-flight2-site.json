@@ -1,0 +1,13 @@
+{
+  "schema_version": "cube-site-v1",
+  "_comment": "2026-09-21 enlarged cube, same two tags: 2.1 m wide, 0.95-3.05 m from the tag door.",
+  "line_y_m": 4.0,
+  "stands": [
+    {"x_m": 2.156, "first_tag_id": 2, "heights_m": [0.53], "size_m": 0.192},
+    {"x_m": 2.844, "first_tag_id": 0, "heights_m": [0.53], "size_m": 0.192}
+  ],
+  "cube": {"min_x_m": 1.45, "max_x_m": 3.55, "min_y_m": 0.95, "max_y_m": 3.05, "max_z_m": 2.0},
+  "commanded": {"inset_m": 0.3, "min_z_cm": 60, "max_z_cm": 180},
+  "_bias_comment": "2026-09-22: ground takeoffs, tag centres tape-measured at 53 cm by the operator, so the Tello's height? reads ~18 cm low: the drone hovers ~18 cm above it (tags cut off at the frame bottom near the door, R_NEAR saw no tag). 18 (with the tags at 53) is the value that reproduces which stops lost the tags.",
+  "altitude_bias_cm": 18
+}

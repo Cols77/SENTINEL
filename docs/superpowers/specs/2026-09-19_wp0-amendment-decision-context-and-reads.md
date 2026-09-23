@@ -1,11 +1,17 @@
 ---
+id: sentinel-wp0-amendment-decision-context-and-reads
+title: "WP0 amendment - decision_context, typed reads, result ids, operator.ask"
 status: proposed (Coherence consent required — gate G-amend, P1 Task 6)
-proposed_by: P1 — Agent Loop Foundations (`docs/superpowers/plans/2026-09-19-p1-agent-loop-foundations.md`)
+proposed_by: >-
+  P1 — Agent Loop Foundations (`docs/superpowers/plans/2026-09-19-p1-agent-loop-foundations.md`)
 proposed_at: 2026-09-19
-scope: `sentinel.v0` wire schema (`docs/superpowers/specs/contracts/sentinel-v0-wire.schema.json`)
-implements_in: P3 Task 1 (`docs/superpowers/plans/2026-09-19-p3-hybrid-E-followup.md`), only after this document is
+scope: >-
+  `sentinel.v0` wire schema (`docs/superpowers/specs/contracts/sentinel-v0-wire.schema.json`)
+implements_in: >-
+  P3 Task 1 (`docs/superpowers/plans/2026-09-19-p3-hybrid-E-followup.md`), only after this document is
   accepted. **This document does not modify the schema file.** It is a diff proposal only.
-consent_required: yes — never self-granted (SR-A03 requires any tool-surface change to be a schema amendment plus a
+consent_required: >-
+  yes — never self-granted (SR-A03 requires any tool-surface change to be a schema amendment plus a
   `tool_policy_revision` bump, approved as a WP0 contract change)
 ---
 

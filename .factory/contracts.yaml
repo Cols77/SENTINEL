@@ -67,3 +67,40 @@ contracts:
     consumers:
       - test:tests/contracts/test_semantics.py
       - test:tests/test_indoor_alley_contract_probe.py
+
+  # Added 2026-09-21 (coherence alignment): contract artifacts that existed and had
+  # consumers but were never declared. Only relationships that exist today are listed.
+  - id: JEV-ADAPTER-CONFIG-V1
+    path: docs/superpowers/specs/contracts/jev-adapter-config-v1.schema.json
+    kind: json_schema
+    status: active
+    authority: spec:sentinel-wp0-shared-coherence-contracts
+    consumers:
+      - test:tests/test_indoor_alley_contract_probe.py
+
+  - id: TAG-MAP-V1
+    path: docs/superpowers/specs/contracts/tag-map-v1.schema.json
+    kind: json_schema
+    status: active
+    authority: spec:sentinel-v0-coherence-spec
+    consumers:
+      - test:tests/pose/test_calibrate_camera.py
+
+  - id: TAG-MAP-V1-FIXTURE
+    path: docs/superpowers/specs/contracts/fixtures/tag-map-v1.valid.json
+    kind: fixture
+    status: active
+    authority: spec:sentinel-v0-coherence-spec
+    validates_against: contract:TAG-MAP-V1
+    consumers:
+      - test:tests/pose/test_calibrate_camera.py
+      - test:tests/pose/test_live_stream.py
+      - test:tests/test_cli_pose_stream.py
+
+  - id: SENTINEL-SURVEY-V1
+    path: docs/superpowers/specs/contracts/sentinel-survey-v1.schema.json
+    kind: json_schema
+    status: active
+    authority: spec:sentinel-survey-counting-design
+    consumers:
+      - test:tests/survey/test_survey_contract.py

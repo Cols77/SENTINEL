@@ -48,6 +48,21 @@ failures, replay integrity, budget checks and provider telemetry are applied.
 Unknown resolved model identity is reported as unverified, even if a requested
 model name is pinned.
 
+For Jev, each `proposal_attempt` keeps the provider's distribution confidence,
+the selected label's probability and which value supplied the confidence gate.
+The selected probability is used only when the optional scalar confidence is
+absent or null. Reports separate raw semantic label accuracy, correct raw labels
+filtered by confidence or margin, accepted supported-plan coverage and final
+persisted outcome success. A correct raw label that the policy filters remains
+an escalation and receives no accepted-plan or outcome credit.
+
+`semantic_boundary_gate.v1` is reported beside the existing live outcome gate.
+It requires the complete pinned trial matrix, verified model identity, correct
+raw labels for supported and unsupported requests, no unsupported raw or
+accepted plan, and no provider failure, malformed answer or architecture-F
+fallback credit. Confidence-filtered correct labels are reported with their own
+denominator and do not make this semantic gate fail.
+
 Scoring checks persisted plan content, evidence/task/assignment targets, accepted
 commands, approval identity and event order. Rejected commands, wrong plans,
 missing evidence, incomplete execution and missing records fail their gates.
@@ -55,12 +70,75 @@ An operator-recovered task does not prove the model selected a correct proposal.
 Invalid or unavailable answers cannot establish model-quality escalation success.
 Rationale completeness is separate from factual support, which is unassessed.
 
-The default cases are explicitly synthetic. The optional existing hand-label
+The default is the fixed 12-case
+`fixtures/proposal_eval/generated-requests-v1.json` pack. Its reviewed literal
+SHA-256 pin is
+`1b1089694fd74a82924c020bacfefc2e7a8b905077f05b8bbe01135777822f70`.
+The runner computes the file digest at runtime and requires both the exact
+canonical path and that literal digest; a matching filename or a self-consistent
+manifest value is never treated as pin evidence. The cases are explicitly
+synthetic. The optional existing hand-label
 importer preserves labels and describes its request-only adaptation; it excludes
 incompatible context, draft candidates, pending labels and other decision points
 with reasons. It does not manufacture independently labelled observations.
 No release threshold, model-default change or autonomous-action promotion follows
 from this baseline.
+
+## Reviewed live gate
+
+Both model arms bind the shared SELECT_PLAN semantic revision
+`select_plan.complete_constraints.v4`. It treats catalogue entries as future
+work, so empty pre-execution plan, task, detection, and result fields are not
+reasons to escalate. Jev's candidate criteria describe plan capabilities as
+scheduled future actions, including marker-verification steps derived from the
+catalogue, and make escalation conditional on no complete match,
+contradictory constraints, or insufficient request detail. Confidence and
+margin gates still apply uniformly to plan and escalation choices. The LLM arm additionally requires
+`SENTINEL_LLM_PROMPT_REVISION=prompt-v4-complete-constraints` and
+`SENTINEL_LLM_TOOL_POLICY_REVISION=legal-tools-v2`. Jev's policy thresholds are
+recorded separately as `act_at=0.60` and `min_margin=0.15`.
+Reports keep accepted explicit escalations separate from raw escalation and
+plan choices. Proposal coverage uses every provider attempt on supported cases,
+so provider failures, malformed answers, and model escalation cannot disappear
+from its denominator.
+The Jev manifest retains the historical `configurations.jev.prompt_revision`
+field for report-reader compatibility; it has the same value as the explicit
+`decision_prompt_revision`. The runner rejects any runtime drift from the
+required semantic revision before authorization, provider construction, or
+output creation. The manifest schema version remains `proposal-eval-run.v1`.
+
+Each live arm is authorized separately. First run a dry run with the exact
+provider identity reviewed by the operator and a concise decision note:
+
+```powershell
+rtk proxy C:\coding\sentinel\.venv\Scripts\python.exe scripts/proposal_sweep.py --mode live --arms jev --max-calls 36 --cost-per-call-usd 0.025 --expected-resolved-model jev=typesafe/jev-1.13-20260917 --identity-decision-note "jev=reviewed pinned Jev release" --dry-run
+```
+
+Copy the printed `authorization_sha256` into
+`SENTINEL_PROPOSAL_EVAL_CONSENT`, set the existing provider-specific consent,
+then repeat the identical arguments with `--execute` and a new `--output` path.
+The LLM form uses `--arms llm`, for example
+`--expected-resolved-model llm=z-ai/glm-5.3` and a matching
+`--identity-decision-note llm=...`. Identity comparison is exact:
+`~typesafe/jev-latest` does not verify `typesafe/jev-1.13-20260917`, and
+`z-ai/glm-5.3-flash` is not pooled with `z-ai/glm-5.3`.
+
+The pass/fail gate applies only to a fresh live run of exactly one model arm on
+the pinned path and digest, with three repeats, 36 terminal trials, one provider
+request/result pair and one proposal attempt/outcome per trial, and exactly 18
+supported plus 18 escalation-required trials. It reports supported correctness,
+safe escalation and unsupported false proposals with fixed `/18` denominators;
+architecture-F recovery receives zero gate credit. Any observed identity
+mismatch fails an otherwise applicable gate. Scripted, recorded, partial,
+multi-arm or alternate-fixture runs are always marked non-applicable and cannot
+claim a passing live gate.
+
+The manifest binds requested and expected identities plus the review note before
+authorization. Observed identities are append-only run evidence and never rewrite
+that manifest. Reports retain provider calls, nullable prompt/completion/total
+tokens, latency, and actual-call cost estimates. Missing usage stays null. Cost
+remains an operator estimate rather than provider billing evidence, and model
+identity metadata is provider-asserted rather than cryptographic attestation.
 
 ## Survey scope
 

@@ -369,3 +369,25 @@ def test_runner_rechecks_default_route_before_transmitting():
 
     assert report.status == "FAIL"
     assert [record.command for record in client.records] == []
+
+
+def test_envelope_is_injectable():
+    from sentinel.envelope import FlightEnvelope
+
+    envelope = FlightEnvelope(min_z_cm=80, max_z_cm=180)
+    runner = FlightTestRunner(_FakeClient(), "dry-run", envelope=envelope)
+    assert runner.envelope is envelope
+
+
+def test_fly_sequence_is_the_override_point():
+    calls = []
+
+    class _Custom(FlightTestRunner):
+        def _fly_sequence(self):
+            calls.append("custom")
+
+    client = _FakeClient()
+    report = _Custom(client, "dry-run").run(confirm=True)
+    assert calls == ["custom"] and report.status == "PASS"
+    commands = [r.command for r in client.records]
+    assert "forward 50" not in commands and "land" in commands

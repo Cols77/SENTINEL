@@ -2,10 +2,19 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+import sentinel.coordinator.proposer as proposer_module
 from sentinel.contracts import AgentModelResult, AgentRequest, AgentToolCall
 from sentinel.coordinator import LlmProposer
 from sentinel.coordinator.decision_state import DecisionState
-from sentinel.coordinator.legal_tools import EVIDENCE_GATE, SELECT_PLAN, Candidate, LegalSet
+from sentinel.coordinator.legal_tools import (
+    ESCALATE_LABEL,
+    EVIDENCE_GATE,
+    SELECT_PLAN,
+    Candidate,
+    LegalSet,
+)
 from sentinel.coordinator.policy import ContextualPolicy, PolicyContext
 from sentinel.coordinator.proposer import JevProposer
 from sentinel.coordinator.shadow import JsonlAuditSink, MemoryAuditSink
@@ -68,7 +77,7 @@ def _select_plan_context() -> PolicyContext:
             Candidate(
                 "finish",
                 {"status": "NEEDS_REVIEW", "summary": "no plan fits"},
-                "escalate",
+                ESCALATE_LABEL,
                 "ask the operator to choose",
             ),
         ),
@@ -142,6 +151,51 @@ def test_proposer_is_a_contextual_policy_and_narrows_legal_tools_without_mutatin
     assert request == original
 
 
+@pytest.mark.parametrize("field, mismatched", [
+    ("run_id", "33333333-3333-4333-8333-333333333333"),
+    ("state_version", 8),
+])
+def test_request_and_context_binding_mismatch_never_reaches_llm(field, mismatched):
+    request = _request()
+    request[field] = mismatched
+    adapter = FakeAdapter(_result(
+        "inspection.propose_plan",
+        {"catalogue_plan_id": PLAN_ID, "reason": "must not be used"},
+    ))
+    sink = MemoryAuditSink()
+
+    result = LlmProposer(adapter, sink).decide(request, _select_plan_context())
+
+    _assert_local_escalation(result)
+    assert proposer_module.is_canonical_escalation(
+        result, agent_run_id=AGENT_RUN_ID
+    )
+    assert adapter.calls == []
+    attempt, = sink.records
+    assert attempt["gate_outcome"] == "invalid_answer"
+    assert attempt["raw_choice"] is None
+    assert attempt["policy_label"] == ESCALATE_LABEL
+    assert not [r for r in sink.records if r["record"] == "proposal_recommendation"]
+
+
+def test_select_plan_rejects_an_unsupported_legal_candidate_tool():
+    context = _select_plan_context()
+    legal = LegalSet(SELECT_PLAN, context.legal.candidates + (
+        Candidate("task.create", {}, "create_task", "not legal at this boundary"),
+    ))
+    adapter = FakeAdapter(_result(
+        "inspection.propose_plan",
+        {"catalogue_plan_id": PLAN_ID, "reason": "best coverage"},
+    ))
+
+    with pytest.raises(ValueError, match="unsupported SELECT_PLAN tool"):
+        LlmProposer(adapter, MemoryAuditSink()).decide(
+            _request(), PolicyContext(context.state, legal)
+        )
+
+    assert adapter.calls == []
+
+
 def test_valid_current_proposal_preserves_optional_reason_and_writes_exact_audit_record():
     reason = "  best coverage for the operator request  "
     adapter = FakeAdapter(_result(
@@ -173,14 +227,128 @@ def test_valid_current_proposal_preserves_optional_reason_and_writes_exact_audit
     ]
 
 
-def test_model_finish_is_coerced_to_the_proposers_own_escalation():
+def test_valid_provider_escalation_is_canonicalized_and_audited_without_recommendation():
+    provider_summary = "x" * 512
+    model_result = _result(
+        "finish", {"status": "NEEDS_REVIEW", "summary": provider_summary}
+    )
+    sink = MemoryAuditSink()
+
+    result = LlmProposer(FakeAdapter(model_result), sink).decide(
+        _request(), _select_plan_context()
+    )
+
+    _assert_local_escalation(result)
+    assert result["tool_calls"][0]["arguments"]["summary"] == (
+        "plan proposal needs operator review"
+    )
+    assert proposer_module.is_canonical_escalation(result, agent_run_id=AGENT_RUN_ID)
+    assert proposer_module.parse_provider_escalation(
+        model_result, agent_run_id=AGENT_RUN_ID
+    ) == provider_summary.strip()[:512]
+    attempt, = sink.records
+    assert attempt["raw_choice"] == ESCALATE_LABEL
+    assert attempt["judge_label"] == ESCALATE_LABEL
+    assert attempt["policy_label"] == ESCALATE_LABEL
+    assert attempt["gate_outcome"] == "accepted"
+    assert attempt["provider_summary"] == provider_summary.strip()[:512]
+    assert not [r for r in sink.records if r["record"] == "proposal_recommendation"]
+
+
+def test_finish_with_done_status_fails_closed_and_is_audited_as_invalid():
     model_result = _result("finish", {"status": "DONE", "summary": "model says done"})
-    result = LlmProposer(FakeAdapter(model_result), MemoryAuditSink()).decide(
+    sink = MemoryAuditSink()
+    result = LlmProposer(FakeAdapter(model_result), sink).decide(
         _request(), _select_plan_context()
     )
 
     _assert_local_escalation(result)
     assert result != model_result.to_dict()
+    attempt, = sink.records
+    assert attempt["raw_choice"] is None
+    assert attempt["judge_label"] is None
+    assert attempt["gate_outcome"] == "invalid_answer"
+    assert attempt["policy_label"] == ESCALATE_LABEL
+    assert not [r for r in sink.records if r["record"] == "proposal_recommendation"]
+
+
+@pytest.mark.parametrize("model_result", [
+    {
+        "contract_version": "sentinel.v0",
+        "wire_type": "agent_result",
+        "agent_run_id": AGENT_RUN_ID,
+        "status": "TOOL_CALLS",
+        "tool_calls": [{
+            "contract_version": "sentinel.v0",
+            "wire_type": "agent_tool_call",
+            "tool_name": "finish",
+            "arguments": {"status": "NEEDS_REVIEW"},
+        }],
+    },
+    {
+        "contract_version": "sentinel.v0",
+        "wire_type": "agent_result",
+        "agent_run_id": AGENT_RUN_ID,
+        "status": "TOOL_CALLS",
+        "tool_calls": [
+            {
+                "contract_version": "sentinel.v0",
+                "wire_type": "agent_tool_call",
+                "tool_name": "finish",
+                "arguments": {"status": "NEEDS_REVIEW", "summary": "first"},
+            },
+            {
+                "contract_version": "sentinel.v0",
+                "wire_type": "agent_tool_call",
+                "tool_name": "finish",
+                "arguments": {"status": "NEEDS_REVIEW", "summary": "second"},
+            },
+        ],
+    },
+    AgentModelResult.from_dict({
+        "contract_version": "sentinel.v0",
+        "wire_type": "agent_result",
+        "agent_run_id": "33333333-3333-4333-8333-333333333333",
+        "status": "TOOL_CALLS",
+        "tool_calls": [{
+            "contract_version": "sentinel.v0",
+            "wire_type": "agent_tool_call",
+            "tool_name": "finish",
+            "arguments": {"status": "NEEDS_REVIEW", "summary": "wrong run"},
+        }],
+    }),
+])
+def test_invalid_provider_escalations_fail_closed_with_invalid_answer_audit(model_result):
+    sink = MemoryAuditSink()
+
+    result = LlmProposer(FakeAdapter(model_result), sink).decide(
+        _request(), _select_plan_context()
+    )
+
+    _assert_local_escalation(result)
+    attempt, = sink.records
+    assert attempt["gate_outcome"] == "invalid_answer"
+    assert attempt["policy_label"] == ESCALATE_LABEL
+    assert not [r for r in sink.records if r["record"] == "proposal_recommendation"]
+
+
+def test_schema_valid_plan_result_with_wrong_agent_run_id_fails_closed():
+    wrong_run = AgentModelResult.from_dict({
+        **_result("inspection.propose_plan", {
+            "catalogue_plan_id": PLAN_ID, "reason": "wrong run",
+        }).to_dict(),
+        "agent_run_id": "33333333-3333-4333-8333-333333333333",
+    })
+    sink = MemoryAuditSink()
+
+    result = LlmProposer(FakeAdapter(wrong_run), sink).decide(
+        _request(), _select_plan_context()
+    )
+
+    _assert_local_escalation(result)
+    attempt, = sink.records
+    assert attempt["gate_outcome"] == "invalid_answer"
+    assert not [r for r in sink.records if r["record"] == "proposal_recommendation"]
 
 
 def test_forbidden_mutating_tool_is_coerced_to_local_escalation():
