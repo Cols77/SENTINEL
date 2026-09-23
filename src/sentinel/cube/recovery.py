@@ -5,15 +5,16 @@ Yaw admission uses a complete swept disk, including propagated position error.
 """
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import asdict, dataclass, replace
 import math
 from typing import Callable
 import uuid
 
 from sentinel.models import Position
-from .checkpoint import PlannedCommand
+from .checkpoint import CheckpointPlan, PlannedCommand
 from .localization import (
-    LocalizationState, LocalizationTracker, PoseFix, PoseHealth, finite_number, heading_distance, valid_fix,
+    LocalizationState, LocalizationTracker, PoseFix, PoseForecast, PoseHealth, finite_number, heading_distance, valid_fix,
 )
 
 
@@ -109,6 +110,19 @@ class RecoveryOutcome:
     health: PoseHealth | None = None
 
 
+@dataclass(frozen=True)
+class RecoveryForecastEvidence:
+    """Audited supervision input; a forecast is not itself reset authority."""
+
+    session_id: str
+    clock_domain_id: str
+    assessment_event_id: str
+    assessed_at: float
+    pose: PoseHealth
+    plan: CheckpointPlan
+    forecast: PoseForecast
+
+
 def contains_disk(volume: RecoveryVolume, position: Position, radius_cm: float) -> bool:
     """Contain the entire horizontal disk, not merely a sampled set of headings."""
     if (not math.isfinite(radius_cm) or radius_cm < 0
@@ -136,15 +150,24 @@ def contains_disk(volume: RecoveryVolume, position: Position, radius_cm: float) 
 
 
 class RecoveryController:
+    """Bounded recovery with an optional trusted supervision authorizer.
+
+    ``forecast_authorized`` belongs to the supervising adapter. It must bind
+    evidence to a durable admission and reject reconstructed or replayed input;
+    callers cannot enable proactive recovery by supplying a forecast alone.
+    """
+
     def __init__(self, tracker: LocalizationTracker, *, clock: Callable[[], float],
                  burst_source: Callable[[RecoveryAction], tuple[PoseReport, ...]],
                  energy_admits: Callable[[RecoveryAction], bool],
-                 commit_reanchor: Callable[[RecoveryOutcome], object] | None = None):
+                 commit_reanchor: Callable[[RecoveryOutcome], object] | None = None,
+                 forecast_authorized: Callable[[RecoveryForecastEvidence], bool] | None = None):
         self.tracker = tracker
         self.clock = clock
         self.burst_source = burst_source
         self.energy_admits = energy_admits
         self.commit_reanchor = commit_reanchor
+        self.forecast_authorized = forecast_authorized
         self.max_attempts = tracker.profile.max_recovery_attempts if tracker.profile else 0
         self._started_at: float | None = None
         self._last_now: float | None = None
@@ -166,22 +189,54 @@ class RecoveryController:
     def episode_succeeded(self) -> bool:
         return self._finished and self._successful_revision is not None
 
+    @property
+    def resume_required(self) -> bool:
+        return self.episode_succeeded and self._resumed_revision is None
+
     def confirm_resume(self, pose: PoseHealth, *, route_validated: bool, energy_validated: bool) -> PoseHealth:
         """Acknowledge fresh admission after success, before any later episode."""
+        if self.episode_succeeded and self._resumed_revision is not None:
+            raise ValueError("recovery episode already resumed")
         current = self.tracker.health
         self._clock()
         if (not self.episode_succeeded or self._clock_failed
                 or route_validated is not True or energy_validated is not True
                 or pose.pose_revision != current.pose_revision
-                or current.pose_revision != self._successful_revision
+                or current.pose_revision < self._successful_revision
                 or current.state not in {LocalizationState.ANCHORED, LocalizationState.COASTING}):
             raise ValueError("recovery resume requires fresh route and energy validation")
-        self.tracker._health = replace(current, requires_route_validation=False, requires_energy_validation=False)
+        self.tracker.acknowledge_validation(current.pose_revision,
+            route_validated=route_validated, energy_validated=energy_validated)
         self._resumed_revision = current.pose_revision
         return self.tracker.health
 
+    def _valid_forecast_evidence(self, evidence, current, environment, now) -> bool:
+        if not isinstance(evidence, RecoveryForecastEvidence) or self.forecast_authorized is None:
+            return False
+        try:
+            if (self.forecast_authorized(evidence) is not True
+                    or evidence.session_id != environment.session_id
+                    or evidence.clock_domain_id != environment.clock_domain_id
+                    or not evidence.assessment_event_id
+                    or not finite_number(evidence.assessed_at)
+                    or not 0 <= now - evidence.assessed_at < self.tracker.profile.recovery_action_upper_bound_s
+                    or evidence.pose.state not in {LocalizationState.ANCHORED, LocalizationState.COASTING}
+                    or any(getattr(evidence.pose, field) != getattr(current, field) for field in
+                           ("pose_revision", "measured_at", "camera_at", "position", "heading_deg"))
+                    or evidence.plan.start != evidence.pose.position
+                    or evidence.plan.start_heading_deg != evidence.pose.heading_deg
+                    or evidence.forecast.admitted
+                    or evidence.forecast.projected.state != LocalizationState.RECOVERY_REQUIRED):
+                return False
+            tracker = copy(self.tracker)
+            tracker._health = evidence.pose
+            return tracker.forecast(evidence.plan, evidence.assessed_at) == evidence.forecast
+        except Exception:
+            return False
+
     def begin_episode(self, pose: PoseHealth, environment: RecoveryEnvironment, *,
-                      route_validated: bool, energy_validated: bool) -> bool:
+                      route_validated: bool, energy_validated: bool,
+                      forecast_evidence: RecoveryForecastEvidence | None = None) -> bool:
         """Reset only a successfully resumed episode on a later recovery need.
 
         Exhaustion, clock/session poisoning, and audit identities survive. An
@@ -195,11 +250,14 @@ class RecoveryController:
         current = self.tracker.health
         if (not self.episode_succeeded or self._clock_failed
                 or route_validated is not True or energy_validated is not True
-                or current.state != LocalizationState.RECOVERY_REQUIRED
+                or current.state == LocalizationState.LOST
                 or pose.pose_revision != current.pose_revision
-                or current.pose_revision != self._resumed_revision
+                or self._resumed_revision is None or current.pose_revision < self._resumed_revision
                 or current.requires_route_validation or current.requires_energy_validation
                 or now * 1000 >= environment.navigation_contingency_expires_monotonic_ms):
+            return False
+        if current.state != LocalizationState.RECOVERY_REQUIRED and not self._valid_forecast_evidence(
+                forecast_evidence, current, environment, now):
             return False
         environment = replace(environment)
         self._started_at = self._pending_at = self._pose = self._pending = None

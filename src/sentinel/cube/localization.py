@@ -163,6 +163,17 @@ class LocalizationTracker:
         self._health = replace(self.health, state=LocalizationState.LOST)
         return self._health
 
+    def acknowledge_validation(self, pose_revision: int, *, route_validated: bool,
+                               energy_validated: bool) -> PoseHealth:
+        """Clear reanchor prerequisites only for the freshly admitted revision."""
+        current = self.health
+        if (route_validated is not True or energy_validated is not True
+                or pose_revision != current.pose_revision
+                or current.state not in {LocalizationState.ANCHORED, LocalizationState.COASTING}):
+            raise ValueError("fresh route and energy validation must match the current pose")
+        self._health = replace(current, requires_route_validation=False, requires_energy_validation=False)
+        return self._health
+
     def _advance(self, health: PoseHealth, now: float) -> PoseHealth:
         if not math.isfinite(now) or now < health.propagated_at:
             return replace(health, state=LocalizationState.LOST)

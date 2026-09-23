@@ -187,6 +187,56 @@ def test_new_episode_requires_successful_resume_and_fresh_route_and_energy_valid
     assert not recovery.assess_burst(first, reports(clock)).accepted
 
 
+def test_successful_episode_resume_is_acknowledged_once():
+    recovery, value, clock = controller()
+    action = recovery.next_action(value.health, environment(), ())
+    assert recovery.assess_burst(action, reports(clock)).accepted
+    recovery.confirm_resume(value.health, route_validated=True, energy_validated=True)
+    with pytest.raises(ValueError, match="already resumed"):
+        recovery.confirm_resume(value.health, route_validated=True, energy_validated=True)
+
+
+@pytest.mark.parametrize("fault", ["unauthorized", "authorization_failed", "forged_forecast", "changed_pose", "changed_plan",
+                                  "stale", "wrong_session", "wrong_clock"])
+def test_proactive_episode_requires_authorized_recomputable_current_forecast(fault):
+    from copy import copy
+    from sentinel.cube import recovery as module
+    from tests.cube.test_localization import command, plan
+    recovery, value, clock = controller()
+    env = environment()
+    action = recovery.next_action(value.health, env, ())
+    assert recovery.assess_burst(action, reports(clock)).accepted
+    recovery.confirm_resume(value.health, route_validated=True, energy_validated=True)
+    pose = value.health
+    future = plan(command("SETTLE", seconds=6))
+    future = replace(future, start=pose.position, target=pose.position)
+    forecast = copy(value).forecast(future, clock())
+    assert forecast.projected.state == LocalizationState.RECOVERY_REQUIRED
+    assert hasattr(module, "RecoveryForecastEvidence")
+    evidence = module.RecoveryForecastEvidence("session", "clock", "audited-recover", clock(),
+                                               pose, future, forecast)
+    recovery.forecast_authorized = lambda supplied: fault != "unauthorized"
+    if fault == "authorization_failed":
+        def unavailable(supplied):
+            raise RuntimeError("authorization evidence unavailable")
+        recovery.forecast_authorized = unavailable
+    if fault == "forged_forecast":
+        evidence = replace(evidence, forecast=replace(forecast, reasons=("invented",)))
+    elif fault == "changed_pose":
+        evidence = replace(evidence, pose=replace(pose, pose_revision=pose.pose_revision + 1))
+    elif fault == "changed_plan":
+        evidence = replace(evidence, plan=replace(future, commands=(), worst_case_s=0))
+    elif fault == "stale":
+        clock.now += 2
+    elif fault == "wrong_session":
+        evidence = replace(evidence, session_id="other")
+    elif fault == "wrong_clock":
+        evidence = replace(evidence, clock_domain_id="other")
+    assert not recovery.begin_episode(value.health, env, route_validated=True, energy_validated=True,
+                                      forecast_evidence=evidence)
+    assert recovery.episode_succeeded and recovery._attempts == 1
+
+
 @pytest.mark.parametrize("failure", ["exhausted", "unresumed", "clock_reset", "session_change"])
 def test_episode_reset_cannot_bypass_exhaustion_or_session_poisoning(failure):
     recovery, value, clock = controller()

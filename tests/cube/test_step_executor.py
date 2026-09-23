@@ -176,6 +176,50 @@ def test_reanchor_persistence_failure_leaves_executor_pose_and_generation_intact
     run.close()
 
 
+def test_emergency_sends_while_reanchor_persistence_blocks_and_preempts_pose_publication():
+    entered, release, emergency_sent = Event(), Event(), Event()
+
+    class EmergencyObserved(Client):
+        def emergency(self):
+            response = super().emergency()
+            emergency_sent.set()
+            return response
+
+    run, client, measured = executor(client=EmergencyObserved())
+    run.start(HOME)
+    outcomes, persisted = [], []
+
+    def persist():
+        entered.set()
+        assert release.wait(3)
+        persisted.append(True)
+
+    def reanchor():
+        try:
+            run.apply_reanchor(Position(20, 0, 200), persist=persist)
+        except Exception as exc:
+            outcomes.append(exc)
+
+    worker, _ = threaded(reanchor)
+    emergency = None
+    try:
+        assert entered.wait(1)
+        emergency, _ = threaded(run.runner.trigger_emergency)
+        assert emergency_sent.wait(1), "durable I/O must never block the operator emergency send"
+        assert run.state == ExecutorState.TERMINAL
+    finally:
+        release.set()
+        worker.join(1)
+        if emergency is not None:
+            emergency.join(1)
+        run.close()
+    assert persisted == [True]
+    assert len(outcomes) == 1 and type(outcomes[0]).__name__ == "ReanchorPreempted"
+    assert outcomes[0].persisted is True
+    assert run.runner.envelope.position == measured.pose
+    assert client.commands.count("emergency") == 1 and "land" not in client.commands
+
+
 def test_measured_home_route_and_time_are_validated():
     run, client, measured = executor()
     run.measure_home = lambda definition: replace(measured, route_id="other")
@@ -468,6 +512,46 @@ def test_blocked_legacy_command_returns_unknown_and_retains_command_lock():
         release.set()
         worker.join(1)
         run.close()
+
+
+@pytest.mark.parametrize("kind", ["LOCALISE", "TRIM_ALLOWANCE", "CAPTURE"])
+def test_legacy_callback_with_blocked_nested_sdk_move_retains_physical_uncertainty(kind):
+    now = [10.0]
+    entered, release = Event(), Event()
+
+    class BlockedMove(Client):
+        def move(self, direction, distance_cm):
+            entered.set()
+            assert release.wait(3)
+            return super().move(direction, distance_cm)
+
+    run, client, _ = executor(client=BlockedMove(), clock=lambda: now[0])
+    run.start(HOME)
+
+    def sink(node):
+        run.runner.move_checked("forward", 20)
+        return CommandOutcome()
+
+    node = PlannedCommand(kind, (), 1, True)
+    worker, outcomes = threaded(lambda: run.execute_legacy(plan(node), sink))
+    try:
+        assert entered.wait(1)
+        now[0] += 2
+        worker.join(1)
+        assert not worker.is_alive()
+        result = outcomes[0]
+        assert result.status == "COMMAND_COMPLETION_UNKNOWN"
+        assert not result.completion_known and result.command_states[0].completed_at is None
+        assert run._command_completion_unknown
+        assert not run.command_lock.acquire(blocking=False)
+        assert "land" not in client.commands
+        with pytest.raises(RuntimeError, match="AIRBORNE"):
+            run.execute(plan(command()))
+    finally:
+        release.set()
+        worker.join(1)
+        run.close()
+    assert client.commands.count("forward 20") == client.commands.count("land") == 1
 
 
 def test_timely_legacy_failure_preserves_exception_and_terminal_cleanup():

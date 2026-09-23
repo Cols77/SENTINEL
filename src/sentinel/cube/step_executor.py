@@ -52,6 +52,15 @@ class HomeMeasurementError(RuntimeError):
         self.error_category = error_category
 
 
+class ReanchorPreempted(RuntimeError):
+    """Evidence committed, but a newer lifecycle prevented pose publication."""
+
+    persisted = True
+
+    def __init__(self) -> None:
+        super().__init__("reanchor publication preempted after persistence")
+
+
 @dataclass(frozen=True, slots=True)
 class CommandState:
     command: PlannedCommand
@@ -319,29 +328,40 @@ class StepExecutor:
         and invalidation. A failed durable append leaves executor state intact.
         Any failure after append latches terminal so the caller can escalate.
         """
-        with self._operation_lock, self._state_lock:
-            if self._state not in {ExecutorState.AIRBORNE, ExecutorState.RETURNING}:
-                raise RuntimeError("reanchor requires an airborne executor")
-            position = pose.position if isinstance(pose, PoseHealth) else pose
-            if not self._valid_pose(position):
-                raise ValueError("invalid reanchor position")
-            if isinstance(pose, PoseHealth):
-                values = (pose.heading_deg, pose.measured_at, pose.camera_at, pose.propagated_at,
-                          pose.camera_age_s, pose.fix_age_s, pose.look_away_s, pose.translation_cm,
-                          pose.yaw_deg, pose.xy_uncertainty_cm, pose.heading_uncertainty_deg)
-                if (pose.state != LocalizationState.ANCHORED
-                        or any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in values)
-                        or any(type(v) is not int or v < 0
-                               for v in (pose.pose_revision, pose.estimator_failures))):
-                    raise ValueError("invalid reanchor health")
+        # Retain ordinary operation/SDK ownership, while letting the direct
+        # emergency latch and motor-stop send acquire the short lifecycle lock.
+        with self._operation_lock, self.command_lock:
+            with self._state_lock:
+                if self._state not in {ExecutorState.AIRBORNE, ExecutorState.RETURNING}:
+                    raise RuntimeError("reanchor requires an airborne executor")
+                position = pose.position if isinstance(pose, PoseHealth) else pose
+                if not self._valid_pose(position):
+                    raise ValueError("invalid reanchor position")
+                if isinstance(pose, PoseHealth):
+                    values = (pose.heading_deg, pose.measured_at, pose.camera_at, pose.propagated_at,
+                              pose.camera_age_s, pose.fix_age_s, pose.look_away_s, pose.translation_cm,
+                              pose.yaw_deg, pose.xy_uncertainty_cm, pose.heading_uncertainty_deg)
+                    if (pose.state != LocalizationState.ANCHORED
+                            or any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in values)
+                            or any(type(v) is not int or v < 0
+                                   for v in (pose.pose_revision, pose.estimator_failures))):
+                        raise ValueError("invalid reanchor health")
+                admitted = self._state, self._generation, self._pose_revision, self.runner.envelope.position
             persist()
-            try:
-                self._commit_pose_locked(position)
-                self._transition_locked(self._state, invalidate=True)
-            except BaseException:
-                self._terminal_reason = "REANCHOR_SYNC_FAILED"
-                self._transition_locked(ExecutorState.TERMINAL, invalidate=True)
-                raise
+            with self._state_lock:
+                current = self._state, self._generation, self._pose_revision, self.runner.envelope.position
+                if current != admitted or self._emergency():
+                    if self._state not in {ExecutorState.TERMINAL, ExecutorState.CLOSED}:
+                        self._terminal_reason = "REANCHOR_PREEMPTED"
+                        self._transition_locked(ExecutorState.TERMINAL, invalidate=True)
+                    raise ReanchorPreempted()
+                try:
+                    self._commit_pose_locked(position)
+                    self._transition_locked(self._state, invalidate=True)
+                except BaseException:
+                    self._terminal_reason = "REANCHOR_SYNC_FAILED"
+                    self._transition_locked(ExecutorState.TERMINAL, invalidate=True)
+                    raise
 
     def return_home(self, plan: CheckpointPlan) -> CheckpointOutcome:
         """Latch return; a stale start/revision yields REPLAN_REQUIRED without motion."""
@@ -413,7 +433,10 @@ class StepExecutor:
                     if self.deadline is not None:
                         deadline = min(deadline, self.deadline)
                     deadline_owned = Event()
-                    interruptible = command.interruptible and command.kind not in {
+                    # Legacy callbacks have no cancellation protocol and may
+                    # issue nested SDK effects even for LOCALISE or CAPTURE.
+                    # Retain physical ownership for their entire invocation.
+                    interruptible = legacy_sink is None and command.interruptible and command.kind not in {
                         "MOVE", "ROTATE", "SET_SPEED", "LAND",
                     }
                     legacy_errors = []
@@ -575,7 +598,7 @@ class StepExecutor:
                 states.append(CommandState(command, "COMPLETED", started, result.completed_at))
                 return None, False
             if result.status != "COMPLETED":
-                noninterruptible = not command.interruptible or command.kind in {"MOVE", "ROTATE", "SET_SPEED", "LAND"}
+                noninterruptible = legacy or not command.interruptible or command.kind in {"MOVE", "ROTATE", "SET_SPEED", "LAND"}
                 unknown = noninterruptible and not result.completion_known
                 status = "COMMAND_COMPLETION_UNKNOWN" if unknown else result.status
                 states.append(CommandState(command, status, started,

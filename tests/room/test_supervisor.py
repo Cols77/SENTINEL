@@ -248,6 +248,63 @@ def test_failed_executor_reanchor_sync_after_durable_append_is_terminal(safety):
         executor.close()
 
 
+def test_operator_emergency_preempts_reanchor_while_durable_append_is_blocked(safety):
+    from threading import Thread
+    from sentinel.cube.recovery import PoseReport, RecoveryController
+    from sentinel.dry_run import DryRunClient
+    from tests.cube.test_localization import fix
+    supervisor, store, clock, samples, *_ = safety
+    appended, release, emergency_sent = Event(), Event(), Event()
+
+    class ObservedEmergency(DryRunClient):
+        def emergency(self):
+            result = super().emergency()
+            emergency_sent.set()
+            return result
+
+    executor, commands = real_executor(safety, client=ObservedEmergency())
+    supervisor.start(executor)
+    supervisor.tracker._health = replace(supervisor.tracker.health,
+        state=LocalizationState.RECOVERY_REQUIRED, estimator_failures=3)
+    supervisor.recovery = RecoveryController(supervisor.tracker, clock=clock,
+        burst_source=lambda action: tuple(PoseReport(str(i), fix(clock,
+            position=Position(120, 100, 100))) for i in range(3)), energy_admits=lambda action: True)
+    supervisor.mapped_heading_tag_ids = ((90, (1, 2)),)
+    append = store.append_reanchor
+
+    def blocked_append(*args, **kwargs):
+        result = append(*args, **kwargs)
+        appended.set()
+        assert release.wait(3)
+        return result
+
+    store.append_reanchor = blocked_append
+    current = supervisor.prepare(snapshot_version=store.session_version("session"))
+    results = []
+    worker = Thread(target=lambda: results.append(supervisor.dispatch(current, executor)), daemon=True)
+    emergency = Thread(target=executor.runner.trigger_emergency, daemon=True)
+    worker.start()
+    try:
+        assert appended.wait(1)
+        emergency.start()
+        assert emergency_sent.wait(1)
+        assert executor.state == ExecutorState.TERMINAL
+        assert not executor.command_lock.acquire(blocking=False)
+    finally:
+        release.set()
+        worker.join(2)
+        if emergency.ident is not None:
+            emergency.join(1)
+        executor.close()
+    assert not worker.is_alive() and results[0].state == "EMERGENCY_ABORTED"
+    assert executor.runner.envelope.position == Position(100, 100, 100)
+    assert supervisor.tracker.health.state == LocalizationState.LOST
+    events = store.events("session")
+    assert len([e for e in events if e.event_type == "POSE_REANCHORED"]) == 1
+    assert any(e.payload.get("reason") == "REANCHOR_PREEMPTED_AFTER_PERSISTENCE" for e in events)
+    assert not commands and executor.runner.client.commands.count("emergency") == 1
+
+
 def test_real_executor_can_recover_resume_and_recover_again(safety):
     from sentinel.cube.recovery import PoseReport, RecoveryController
     from tests.cube.test_localization import fix
@@ -278,6 +335,84 @@ def test_real_executor_can_recover_resume_and_recover_again(safety):
         assert [a.kind for a in actions] == ["STATIONARY_BURST", "STATIONARY_BURST"]
         assert len({a.action_id for a in actions}) == 2
         assert len([e for e in store.events("session") if e.event_type == "POSE_REANCHORED"]) == 2
+    finally:
+        executor.close()
+
+
+def test_opportunistic_fix_after_recovery_resume_does_not_reconfirm_old_revision(safety):
+    from sentinel.cube.recovery import PoseReport, RecoveryController
+    from tests.cube.test_localization import fix
+    supervisor, store, clock, samples, *_ = safety
+    executor, commands = real_executor(safety)
+    supervisor.recovery = RecoveryController(supervisor.tracker, clock=clock,
+        burst_source=lambda action: tuple(PoseReport(str(i), fix(clock)) for i in range(3)),
+        energy_admits=lambda action: True)
+    supervisor.mapped_heading_tag_ids = ((90, (1, 2)),)
+    try:
+        supervisor.start(executor)
+        supervisor.tracker._health = replace(supervisor.tracker.health,
+            state=LocalizationState.RECOVERY_REQUIRED, estimator_failures=3)
+        first = supervisor.prepare(snapshot_version=store.session_version("session"))
+        assert supervisor.dispatch(first, executor).status == "COMPLETED"
+        assert supervisor.tracker.health.pose_revision == 2
+        assert supervisor.prepare(snapshot_version=store.session_version("session")).transition == "CONTINUE"
+        clock.now += .1
+        samples["energy"] = EnergySample(80, clock())
+        assert supervisor.tracker.accept_fix(fix(clock)).pose_revision == 3
+        current = supervisor.prepare(snapshot_version=store.session_version("session"))
+        assert current.transition == "CONTINUE"
+        assert current.request.pose.pose_revision == 3
+        assert not supervisor.tracker.health.requires_route_validation
+        assert not supervisor.tracker.health.requires_energy_validation
+        supervisor.tracker._health = replace(supervisor.tracker.health,
+            state=LocalizationState.RECOVERY_REQUIRED, estimator_failures=3)
+        next_episode = supervisor.prepare(snapshot_version=store.session_version("session"))
+        assert supervisor.dispatch(next_episode, executor).status == "COMPLETED"
+        assert len([e for e in store.events("session") if e.event_type == "POSE_REANCHORED"]) == 2
+    finally:
+        executor.close()
+
+
+@pytest.mark.parametrize("source_state", [LocalizationState.ANCHORED, LocalizationState.COASTING])
+def test_proactive_provider_wait_can_start_recovery_after_an_earlier_resume(safety, source_state):
+    from sentinel.cube.recovery import PoseReport, RecoveryController
+    from tests.cube.test_localization import fix
+    supervisor, store, clock, samples, _, emergencies = safety
+    supervisor.tracker.profile = replace(supervisor.tracker.profile, max_camera_age_s=80)
+    supervisor.validate_bindings = lambda active: None  # Isolate the changed synthetic drift bound.
+    executor, commands = real_executor(safety)
+    actions = []
+
+    def burst(action):
+        actions.append(action)
+        return tuple(PoseReport(str(i), fix(clock)) for i in range(3))
+
+    supervisor.recovery = RecoveryController(supervisor.tracker, clock=clock,
+        burst_source=burst, energy_admits=lambda action: True)
+    supervisor.mapped_heading_tag_ids = ((90, (1, 2)),)
+    try:
+        supervisor.start(executor)
+        supervisor.tracker._health = replace(supervisor.tracker.health,
+            state=LocalizationState.RECOVERY_REQUIRED, estimator_failures=3)
+        first = supervisor.prepare(snapshot_version=store.session_version("session"))
+        assert supervisor.dispatch(first, executor).status == "COMPLETED"
+        assert supervisor.prepare(snapshot_version=store.session_version("session")).transition == "CONTINUE"
+        supervisor.tracker._health = replace(supervisor.tracker.health, state=source_state)
+        proactive = supervisor.prepare(snapshot_version=store.session_version("session"), provider_wait_s=100)
+        assert proactive.transition == "RECOVER"
+        assert proactive.request.pose.state == source_state
+        assert proactive.pose_forecast.projected.state == LocalizationState.RECOVERY_REQUIRED
+        result = supervisor.dispatch(proactive, executor)
+        assert isinstance(result, CheckpointOutcome) and result.status == "COMPLETED"
+        assert [a.kind for a in actions] == ["STATIONARY_BURST", "STATIONARY_BURST"]
+        assert not emergencies and not commands
+        evidence = next(e for e in store.events("session") if e.event_type == "RECOVERY_FORECAST_ADMITTED")
+        assert evidence.payload["forecast"]["projected"]["state"] == "RECOVERY_REQUIRED"
+        assert evidence.payload["pose"]["pose_revision"] == proactive.request.pose.pose_revision
+        assert evidence.payload["session_id"] == "session"
+        assert evidence.payload["clock_domain_id"] == supervisor.clock_domain_id
+        assessment = next(e for e in store.events("session") if e.event_id == evidence.payload["assessment_event_id"])
+        assert assessment.event_type == "SAFETY_ASSESSED" and assessment.payload["transition"] == "RECOVER"
     finally:
         executor.close()
 

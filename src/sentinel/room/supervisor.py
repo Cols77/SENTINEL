@@ -19,8 +19,8 @@ from typing import Callable, Literal
 from sentinel.cube.checkpoint import CheckpointPlan, CommandLimits, PlannedCommand, plan_checkpoint
 from sentinel.cube.energy import EnergyEstimate, EnergySample, ExecutionMode, ReserveDecision, ReserveGuard
 from sentinel.cube.localization import LocalizationState, LocalizationTracker, PoseForecast, PoseHealth
-from sentinel.cube.recovery import RecoveryVolume, contains_disk
-from sentinel.cube.step_executor import CheckpointOutcome, ExecutorState, HomeState, TerminalOutcome
+from sentinel.cube.recovery import RecoveryForecastEvidence, RecoveryVolume, contains_disk
+from sentinel.cube.step_executor import CheckpointOutcome, ExecutorState, HomeState, ReanchorPreempted, TerminalOutcome
 from sentinel.cube.supervised_wait import SupervisedWait, WaitOutcome
 from sentinel.models import Position
 from sentinel.motion_bounds import rotate_reply_upper_bound_s
@@ -464,9 +464,14 @@ class SafetySupervisor:
             if remaining_commands is not None:
                 checkpoint = self._plan(pose, remaining_commands)
             outcome = self.assess(SupervisorRequest(snapshot_version, checkpoint, provider_wait_s, pose, sample), self.site)
-            if outcome.transition == "CONTINUE" and getattr(self.recovery, "episode_succeeded", False):
-                resumed = self.recovery.confirm_resume(pose, route_validated=True, energy_validated=True)
-                outcome = replace(outcome, request=replace(outcome.request, pose=resumed))
+            if outcome.transition == "CONTINUE":
+                if getattr(self.recovery, "resume_required", False):
+                    validated = self.recovery.confirm_resume(pose, route_validated=True, energy_validated=True)
+                    outcome = replace(outcome, request=replace(outcome.request, pose=validated))
+                elif pose.requires_route_validation or pose.requires_energy_validation:
+                    validated = self.tracker.acknowledge_validation(pose.pose_revision,
+                        route_validated=True, energy_validated=True)
+                    outcome = replace(outcome, request=replace(outcome.request, pose=validated))
             return outcome
 
     def validate_start(self, site=None):
@@ -715,8 +720,8 @@ class SafetySupervisor:
             self._record_completion(result, terminal, event, executor)
             return result
 
-        if getattr(recovery, "episode_succeeded", False) and not recovery.begin_episode(
-                current.request.pose, environment, route_validated=True, energy_validated=True):
+        if getattr(recovery, "episode_succeeded", False) and not self._begin_recovery_episode(
+                current, environment):
             return stop("RECOVERY_EPISODE_NOT_ADMITTED")
         action = recovery.next_action(current.request.pose, environment, ())
 
@@ -778,6 +783,9 @@ class SafetySupervisor:
             accepted = recovery.assess_burst(action, waited.value)
         except _AuditPersistenceFailure:
             raise
+        except ReanchorPreempted:
+            self.tracker.mark_lost()
+            return stop("REANCHOR_PREEMPTED_AFTER_PERSISTENCE")
         except Exception:
             self.tracker.mark_lost()
             return stop("REANCHOR_SYNC_FAILED")
@@ -785,6 +793,47 @@ class SafetySupervisor:
                                    self.tracker.health.position, True)
         self._record_completion(result, current, event, executor)
         return result
+
+    def _begin_recovery_episode(self, current, environment):
+        recovery, pose = self.recovery, current.request.pose
+        if pose.state == LocalizationState.RECOVERY_REQUIRED:
+            return recovery.begin_episode(pose, environment, route_validated=True, energy_validated=True)
+        # Preserve the exact unsafe horizon, including provider wait and the
+        # reserved return. Cube independently recomputes this projection.
+        commands = current.request.checkpoint.commands if current.request.checkpoint else ()
+        if current.request.provider_wait_s:
+            commands += (PlannedCommand("SETTLE", (), current.request.provider_wait_s, True),)
+        optional = self._plan(pose, commands)
+        projected = self._forecast(pose, optional, current.assessed_at).projected
+        plans = (optional, current.termination_plan,
+                 self._plan(pose, commands + self._termination(projected, self.site).commands))
+        for plan in plans:
+            if plan is None:
+                continue
+            forecast = self._forecast(pose, plan, current.assessed_at)
+            if forecast.admitted or forecast.projected.state != LocalizationState.RECOVERY_REQUIRED:
+                continue
+            assessment = self._audit(current)
+            evidence = RecoveryForecastEvidence(self.session_id, self.clock_domain_id,
+                assessment.event_id, current.assessed_at, pose, plan, forecast)
+            correlation = f"recovery-forecast:{assessment.event_id}"
+            try:
+                self.store.append_event_current(session_id=self.session_id,
+                    assessed_snapshot_version=current.request.snapshot_version,
+                    event_type="RECOVERY_FORECAST_ADMITTED", payload=asdict(evidence),
+                    correlation_id=correlation, causation_id=assessment.event_id, idempotency_key=correlation)
+            except Exception as exc:
+                raise _AuditPersistenceFailure("recovery forecast persistence failed") from exc
+            # Only this durably recorded object has authority for this call;
+            # neither a reconstructed payload nor a later replay can reset it.
+            previous = recovery.forecast_authorized
+            recovery.forecast_authorized = lambda supplied: supplied is evidence
+            try:
+                return recovery.begin_episode(pose, environment, route_validated=True,
+                    energy_validated=True, forecast_evidence=evidence)
+            finally:
+                recovery.forecast_authorized = previous
+        return False
 
     def dispatch(self, outcome: SupervisorOutcome, executor) -> CheckpointOutcome | TerminalOutcome:
         with self._dispatch_lock:
