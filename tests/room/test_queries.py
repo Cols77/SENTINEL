@@ -5,7 +5,7 @@ import pytest
 
 from sentinel.room.goals import EntityRef, GoalLedger, GoalObjective
 from sentinel.room.ingest import ingest_result
-from sentinel.room.models import CandidateKind, CapabilityProfile, GoalKind, GoalStatus
+from sentinel.room.models import CandidateKind, CapabilityProfile, GoalKind, GoalStatus, TerminalState
 from sentinel.room.queries import ReadFact, ReadQueries, render_answer
 from sentinel.room.store import RoomStore
 from sentinel.survey.store import SurveyStore
@@ -187,6 +187,33 @@ def test_snapshot_replay_and_audit_events_do_not_change_read_hash(room):
         assert ReadQueries(with_reopened).project("s1") == latest
     finally:
         with_reopened.close()
+
+
+@pytest.mark.parametrize("completion_known,expected", [
+    (True, TerminalState.SAFE_LANDED),
+    (False, TerminalState.ABORTED),
+    (None, TerminalState.ABORTED),
+])
+def test_landed_drone_state_is_safe_only_when_completion_is_known(room, completion_known, expected):
+    """Q-LAND (Plan 03 residual task R): a DRONE_STATE_RECORDED terminal
+    ``LANDED`` is projected as SAFE_LANDED only when the same record says the
+    landing's completion is known; an SDK-uncertain landing (or a record
+    that never states completion at all) is never reported as a safe
+    landing. The read fact still carries both raw values, so the
+    uncertainty stays explicit in any answer rendered from it."""
+    state = {"flight_state": "TERMINAL", "terminal_state": "LANDED", "airborne": False}
+    if completion_known is not None:
+        state["completion_known"] = completion_known
+    append(room, "DRONE_STATE_RECORDED", {
+        "observed_at": "2026-09-23T00:00:00+00:00", "scope": "aircraft:fixture",
+        "uncertainty": "measured at checkpoint completion", "state": state,
+    })
+    queries = ReadQueries(room)
+    snapshot = queries.project("s1")
+    assert snapshot.terminal_state == expected
+    fact, = queries.read(CandidateKind.READ_DRONE, snapshot)
+    assert dict(fact.values)["terminal_state"] == "LANDED"
+    assert dict(fact.values).get("completion_known") == completion_known
 
 
 @pytest.mark.parametrize("confirmed,uncertain", [(2, 0), (1, 2)])
