@@ -32,9 +32,13 @@ session (`sentinel.room.live_session.run_count_return`):
 
 The Python-level hooks `client_factory`/`jev_factory`/`detector_factory`
 and the two connectivity probes are how real hardware and models are
-supplied. Every default refuses construction (the
-`scripts/room_calibrate.py` convention), so the CLI alone never flies
-anything, and no test in this repository does either.
+supplied. The two probes and `client_factory` default to the real-Tello
+adapters in `sentinel.room.live_stack` (Task A): a motors-off telemetry
+probe, an OpenRouter reachability probe, and a flight stack that shares the
+probe's one Tello connection. They are built only after every gate passes.
+`jev_factory` and `detector_factory` still refuse by default, so the CLI
+alone still never takes off. No test in this repository reaches hardware or
+a provider: the tests replace the adapters' transports with fakes.
 
 **What a REAL-mode session can count today.** `RoomController` offers
 OBSERVE checkpoints only in `ExecutionMode.SIMULATION`
@@ -90,6 +94,179 @@ This is `room_session.py preview`'s `--request-text` default.
 `closer_inspection` (Plan 03 Task 3), `certified_landing` and `following`
 (Plan 05) are named but refused as unavailable in this build -- asking for
 one gets an explicit "not available" refusal, not a generic argparse error.
+
+## L0: motors-off connectivity check
+
+L0 proves that the laptop can read fresh telemetry from the real Tello and
+reach the perception provider, at the same time, with the motors off. It
+sends the drone `command` (SDK mode), `height?` and `sdk?`, and reads the
+battery from the Tello's state stream. It never sends `takeoff`, `motoron`
+or an `rc` command, and it closes the connection before exiting. The
+provider half makes no paid call and sends no frame.
+
+L0 flies nothing, so it needs no capability grant, calibration profile, site
+assurance or tag map. Until the CanningSt site file exists, its manifest is
+bound to the site fixture `fixtures/room_agent/v1/semantic-site.json`
+(`cube_site_sha256` and `tag_map_sha256` below are that file's own values).
+
+### Prerequisites
+
+1. **Drone:** the Tello is powered on and sitting on the pad, with at least
+   one bar of battery. The motors stay off. Keep hands clear anyway.
+2. **Network:** one laptop adapter joined to the Tello Wi-Fi (`TELLO-...`),
+   and internet on a second adapter (Ethernet or USB tether) that holds the
+   default route. `sentinel.network` refuses a Tello adapter that owns the
+   default route. It picks the one reachable Tello adapter itself; with
+   several, add `--local-ip <laptop address on the Tello Wi-Fi>` to the live
+   command.
+3. **Provider key:** `OPENROUTER_API_KEY` (the key) and
+   `GEMINI_OPENROUTER_MODEL` (the Gemini model the live detector uses, the
+   same pair `scripts/survey_run.py --detector gemini-openrouter` reads), set
+   in the environment or in the nearest `.env` file. An explicit environment
+   value wins over `.env`.
+4. **Filming consent** for location `CanningSt` on today's date, recorded by
+   you in `runs/consent.sqlite3` (step 1 below). Record it only when
+   everyone who may appear in frame today has agreed.
+5. **Shell:** PowerShell at this checkout's root, with the project venv
+   active (`C:/coding/sentinel/.venv/Scripts/Activate.ps1`). The venv's
+   installed `sentinel` is the main checkout (`C:/coding/sentinel/src`), so
+   `PYTHONPATH` must put this checkout's `src` first.
+
+**Provider reachability** means: an HTTPS `GET` to
+`https://openrouter.ai/api/v1/key` with the key as a bearer token answers
+HTTP 200. That proves the internet route works and OpenRouter accepts the
+key. The call is free, and neither the key nor its reply is printed or
+recorded. The reported identity `openrouter:<model>` names the configured
+model. The call does not check that the model exists.
+
+### Sequence
+
+Session variables (a fresh run id each time you preview):
+
+```powershell
+$env:PYTHONPATH = "src;."
+$RUN = "l0-$(Get-Date -Format yyyyMMdd-HHmmss)"
+$TODAY = Get-Date -Format yyyy-MM-dd
+New-Item -ItemType Directory -Force runs | Out-Null
+```
+
+1. Record today's filming consent (your own record):
+
+```powershell
+python -c "from sentinel.survey.store import SurveyStore; from sentinel.survey.consent import record_consent; s = SurveyStore.open('runs/consent.sqlite3'); record_consent(s, 'CanningSt', '$TODAY', 'operator'); s.connection.close()"
+```
+
+2. Create the grant registry (once; L0 admits no grant, but live binds the
+   run to the registry):
+
+```powershell
+python scripts/room_capability.py init --registry runs/registry.json
+```
+
+   It prints the empty registry's digest. On a later day it refuses with
+   `refused: runs\registry.json already exists`: that is fine, the existing
+   registry is reused.
+
+3. Preview the L0 manifest. L0 binds no grant, camera, aircraft or model, so
+   those fields carry zero hashes and `UNVERIFIED`, and the bounds are the
+   smallest legal ones:
+
+```powershell
+python scripts/room_session.py preview --target-mode live --run-id $RUN `
+  --capability connectivity --grant-registry runs/registry.json `
+  --capability-grant-sha256 0000000000000000000000000000000000000000000000000000000000000000 `
+  --capability-grant-state DISABLED `
+  --code-revision "$(git rev-parse HEAD)" --integration-revision "$(git rev-parse HEAD)" `
+  --request-revision l0 --goal-parser-revision l0 `
+  --site-sha256 2bb3e7bc6bce4c3fd19d6501d6f178c220aa4f0ee610f54b1038b688daf940c0 `
+  --tag-map-sha256 422350233ea53a58daf129602b4219b07e811d85f3f4a4a3cff125cad98159c0 `
+  --camera-sha256 0000000000000000000000000000000000000000000000000000000000000000 `
+  --aircraft-id UNVERIFIED --firmware-version UNVERIFIED `
+  --requested-jev-identity UNVERIFIED --requested-detector-identity UNVERIFIED `
+  --max-duration-s 60 --max-distance-cm 1 --max-recovery-attempts 0 `
+  --consent-reference "CanningSt/$TODAY" --manifest-out runs/$RUN.manifest.json
+$DIGEST = (Get-Content runs/$RUN.manifest.json -Raw | ConvertFrom-Json).authorization_digest
+```
+
+   Expected: the canonical manifest JSON on stdout, and on stderr
+   `missing gate: capability admission: ...` (L0 has no grant; live's
+   connectivity-only check does not need one).
+
+4. Run the motors-off connectivity check:
+
+```powershell
+python scripts/room_session.py live --execute `
+  --manifest runs/$RUN.manifest.json --authorization-digest $DIGEST `
+  --capability connectivity --grant-registry runs/registry.json `
+  --consent-db runs/consent.sqlite3 --location CanningSt --date $TODAY --i-authorise-paid-calls `
+  --run-root runs --connectivity-timeout-s 20 --connectivity-max-age-s 30 --check-connectivity-only
+```
+
+   `--i-authorise-paid-calls` is the consent gate's flag; L0 itself makes no
+   paid call. The 20 s timeout covers adapter selection (a 1 s `command`
+   probe per candidate adapter) and DJITelloPy's connect (up to 7 s per
+   attempt). The 30 s maximum age keeps the quick provider answer fresh while
+   the drone path finishes.
+
+   Expected on success (exit code 0): on stderr
+
+   ```
+   drone_identity=tello 192.168.10.1 sdk=<reply> battery=<n>% height=0cm drone_checked_at=<t> provider_identity=openrouter:<model> provider_checked_at=<t>
+   ```
+
+   and on stdout exactly
+
+   ```
+   CONNECTIVITY_READY
+   ```
+
+   `<reply>` is the Tello's answer to `sdk?`. An SDK 1.3 Tello answers
+   `unknown command: sdk?`, which still proves a live SDK link. The
+   preflight is recorded as a `CONNECTIVITY_CHECKED` event in
+   `runs/$RUN/session.sqlite3`.
+
+5. Verify the run artifact:
+
+```powershell
+python scripts/room_verify_artifact.py --manifest runs/$RUN/manifest.json --connectivity-only --expect-capability connectivity
+```
+
+   Expected: the run id on stdout, exit code 0. `--connectivity-only`
+   checks the manifest digest and run directory, re-hashes every durable
+   event, and requires the run's latest `CONNECTIVITY_CHECKED` event to be a
+   ready `--check-connectivity-only` preflight. An L0 run never writes
+   `terminal.json`.
+
+### When L0 refuses
+
+Every refusal exits 2 and prints `refused: ...` on stderr.
+
+| Message | Meaning | What to do |
+|---|---|---|
+| `live detection makes paid calls: pass --i-authorise-paid-calls` | The flag is missing. | Add it. |
+| `live detection sends frames to a provider: give --consent-db, --location and --date ...` / `no consent database at ...` | The consent flags or database are missing. | Run step 1, then pass all three flags. |
+| `no filming consent recorded for CanningSt on <date>; ...` | No consent record for this location and date. | Run step 1 today, only if everyone in frame agreed. |
+| `authorization_digest does not match the manifest bound at preview time` | `$DIGEST` is not this manifest's digest (for example a new PowerShell window, or a re-run preview). | Re-run the `$DIGEST = ...` line for the same `$RUN`. |
+| `--capability does not match the manifest's requested_capability` | The live command's `--capability` differs from the preview's. | Use `connectivity` in both. |
+| `grant registry could not be loaded: ...` | `runs/registry.json` is missing or damaged. | Run step 2. |
+| `run artifact could not be opened: ...` | `runs/$RUN` already holds a different manifest. | Preview again with a fresh `$RUN`. |
+| `connectivity preflight not ready (drone_ready=False, ...)` | The drone path failed. `drone_error` says why (rows below). | Fix that cause, then re-run step 4. |
+| `drone_error=NoTelloAdapter: ...` | No laptop adapter is on the Tello Wi-Fi without owning the default route. | Join the Tello Wi-Fi, keep internet on the other adapter, or pass `--local-ip`. |
+| `drone_error=AmbiguousAdapter: ...` | More than one adapter reaches a Tello. | Pass `--local-ip <address on the Tello Wi-Fi>`. |
+| `drone_error=RouteDiscoveryError: ...` | Windows reports no usable internet default route. | Connect the internet adapter. |
+| `drone_error=TimeoutError: probe did not answer within timeout_s` | The drone did not answer in time: off, asleep, or out of range. | Power-cycle the Tello, rejoin its Wi-Fi, re-run. |
+| `drone_error=LiveStackError: invalid battery telemetry: ...` (or height / SDK reply) | The Tello answered with a malformed reading. | Power-cycle the Tello and re-run. If it repeats, do not fly. |
+| `connectivity preflight not ready (..., provider_ready=False, ...)` | The provider path failed. `provider_error` says why (rows below). | Fix that cause, then re-run step 4. |
+| `provider_error=LiveStackError: provider reachability needs OPENROUTER_API_KEY to be set` (or `GEMINI_OPENROUTER_MODEL`) | The key or model is not configured. | Set it in the environment or `.env`. |
+| `provider_error=LiveStackError: OpenRouter did not accept OPENROUTER_API_KEY: HTTP <status>` | OpenRouter answered but refused the key (401: invalid key; 402: no credit). | Fix the key or the account. |
+| `provider_error=ConnectError: ...` / `ConnectTimeout: ...` | No internet route to OpenRouter. | Check the internet adapter. |
+| `drone_error=stale telemetry` / `provider_error=stale reachability check` | That path answered, but its answer was older than `--connectivity-max-age-s` when both paths settled. | Re-run. If it repeats, raise `--connectivity-max-age-s`. |
+
+`room_verify_artifact.py --connectivity-only` refuses with
+`the run's latest connectivity preflight was not ready (...)` when the last
+L0 attempt on this run failed (re-run step 4 until it prints
+`CONNECTIVITY_READY`), and with `run has no CONNECTIVITY_CHECKED event` when
+step 4 never reached the preflight.
 
 ## 1. Preview a manifest
 
@@ -168,12 +345,10 @@ drone telemetry probe and the provider reachability probe answer fresh
 path never silently doubles the wait for the other. It never sends a
 takeoff command.
 
-Running this from Python (e.g. an interactive check) requires injecting
-real `drone_probe`/`provider_probe` callables into
-`scripts.room_session.main(...)`; the CLI's own defaults always refuse,
-so `python scripts/room_session.py ... --check-connectivity-only` alone
-(no code-level override) always refuses too. That is deliberate: nothing
-in this repository wires a real probe on its own.
+The CLI's default probes are the real ones (`sentinel.room.live_stack`),
+so this command reaches the Tello and OpenRouter. The operator's exact
+sequence, expected output and failure meanings are in "L0: motors-off
+connectivity check" above.
 
 ## 3. The full live count-and-return session
 
@@ -183,7 +358,7 @@ python scripts/room_session.py live \
   --capability count_return --grant-registry path/to/registry.json \
   --consent-db path/to/consent.sqlite3 --location <site-name> --date <YYYY-MM-DD> --i-authorise-paid-calls \
   --profile-file path/to/profile.json \
-  --site path/to/semantic-site.json \
+  --site path/to/semantic-site.json --tag-map path/to/tag-map.json \
   --assurance path/to/navigation-assurance.json --assurance path/to/energy-assurance.json \
   --clock-domain-id <clock-domain-id> \
   --drift-profile path/to/drift-profile.json \
@@ -233,7 +408,9 @@ constructed until connectivity does too):
    bound to `--clock-domain-id`.
 7. Flight calibration evidence: `--drift-profile` and `--energy-profile`
    (and optional `--command-limits`) load and validate.
-8. The motors-off connectivity preflight (same as above), recorded as a
+8. Tag map (default flight stack only): `--tag-map`'s file bytes hash to
+   the manifest's `tag_map_sha256`. The stack localises from this map.
+9. The motors-off connectivity preflight (same as above), recorded as a
    durable `CONNECTIVITY_CHECKED` event under `--run-root`.
 
 After the preflight, the session follows the steps in "Scope of this
@@ -299,11 +476,14 @@ run.
   offers OBSERVE only in SIMULATION. Until Plan 03 opens it for promoted
   real profiles, a live session returns and lands safely but ends `BLOCKED`
   without a count. Opening it needs no change here.
-- **Production flight stack.** No module yet builds the real
-  `live_session.FlightStack` from a connected Tello: the `StepExecutor`
-  over the client, the tag-pose `refresh()` that feeds the session's
-  `LocalizationTracker`, the emergency landing and the frame source.
-  `client_factory` defaults to refuse until one exists.
+- **Pre-takeoff pose.** The default flight stack
+  (`sentinel.room.live_stack`) anchors the tracker from a tag burst taken
+  on the pad, at pad height, before `SafetySupervisor.start` admits
+  takeoff. A flight site's home corridor must therefore reach down to the
+  pad level minus the drift profile's `max_height_error_cm`, or takeoff is
+  refused with `TERMINATION_PATH_INVALID`. The pad must also
+  see at least two mapped tags, or takeoff is refused with
+  `LOCALIZATION_LOST`.
 - **In-flight site assurance.** The verified `--assurance` records are
   adopted with their original monotonic window. Each contingency's
   `max_assurance_age_ms` (from the site survey) must cover the flight, or

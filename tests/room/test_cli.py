@@ -1044,6 +1044,95 @@ def test_replay_never_constructs_a_provider_or_client():
     cli.main(["replay", "--fixture", str(REPLAY_MANIFEST_PATH)])
 
 
+RUNBOOK_PATH = Path(__file__).resolve().parents[2] / "docs" / "room-agent-live-runbook.md"
+L0_HEADING = "## L0: motors-off connectivity check"
+
+
+def _runbook_l0_section() -> str:
+    text = RUNBOOK_PATH.read_text(encoding="utf-8")
+    start = text.index(L0_HEADING)
+    end = text.find("\n## ", start + len(L0_HEADING))
+    return text[start:] if end == -1 else text[start:end]
+
+
+def _runbook_commands(section: str, substitutions: dict) -> list[tuple[str, list[str]]]:
+    """Every ``python scripts/...`` command in the section's PowerShell blocks,
+    backtick continuations joined and the given variables substituted."""
+    import re
+    import shlex
+
+    commands = []
+    for block in re.findall(r"```powershell\n(.*?)```", section, flags=re.S):
+        for line in re.sub(r"[ \t]*`\n[ \t]*", " ", block).splitlines():
+            line = line.strip()
+            if not line.startswith("python scripts/"):
+                continue
+            for name, value in substitutions.items():
+                line = line.replace(name, value)
+            tokens = shlex.split(line)
+            commands.append((tokens[1], tokens[2:]))
+    return commands
+
+
+def test_runbook_l0_sequence_runs_end_to_end_against_the_fake_transports(tmp_path, capsys, monkeypatch):
+    # The L0 section's own copy-paste commands, in order, run from a scratch
+    # repository root: registry init, preview, the motors-off connectivity
+    # check through the live defaults (fake Tello and provider transports),
+    # then the artifact check.
+    import scripts.room_capability as capability_cli
+    import scripts.room_verify_artifact as verify_cli
+    from sentinel.survey.consent import record_consent
+    from sentinel.survey.store import SurveyStore
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "runs").mkdir()
+    store = SurveyStore.open(tmp_path / "runs" / "consent.sqlite3")
+    record_consent(store, location="CanningSt", consent_date="2026-09-23", recorded_by="operator")
+    store.connection.close()
+    transport = _fake_tello(monkeypatch)
+    _fake_provider(monkeypatch)
+    commands = _runbook_commands(_runbook_l0_section(), {
+        "$RUN": "l0-test", "$TODAY": "2026-09-23", "$(git rev-parse HEAD)": "abc123"})
+    mains = {"scripts/room_capability.py": capability_cli.main, "scripts/room_session.py": cli.main,
+             "scripts/room_verify_artifact.py": verify_cli.main}
+    assert [(script, argv[0]) for script, argv in commands] == [
+        ("scripts/room_capability.py", "init"), ("scripts/room_session.py", "preview"),
+        ("scripts/room_session.py", "live"), ("scripts/room_verify_artifact.py", "--manifest")]
+    outputs = []
+    for script, argv in commands:
+        if "$DIGEST" in argv:
+            manifest = json.loads((tmp_path / "runs" / "l0-test.manifest.json").read_text(encoding="utf-8"))
+            argv = [manifest["authorization_digest"] if token == "$DIGEST" else token for token in argv]
+        exit_code = mains[script](argv)
+        out, err = capsys.readouterr()
+        assert exit_code == 0, (script, err)
+        outputs.append(out.strip())
+    assert outputs[2] == "CONNECTIVITY_READY"
+    assert outputs[3] == "l0-test"
+    assert stack_fakes.sent_motor_commands(transport.tello.sent) == []
+
+
+def test_runbook_l0_preview_binds_the_named_site_fixture():
+    commands = _runbook_commands(_runbook_l0_section(), {})
+    preview = next(argv for script, argv in commands if argv[0] == "preview")
+    parsed = cli.build_parser().parse_args(preview)
+    assert "fixtures/room_agent/v1/semantic-site.json" in _runbook_l0_section()
+    assert (parsed.site_sha256, parsed.tag_map_sha256) == (SITE_SHA256, TAG_MAP_SHA256)
+    assert parsed.capability == "connectivity"
+
+
+def test_runbook_l0_states_prerequisites_expected_output_and_failure_meanings():
+    section = _runbook_l0_section()
+    for needle in (
+        "CONNECTIVITY_READY", live_stack.PROVIDER_KEY_ENV, live_stack.PROVIDER_MODEL_ENV,
+        live_stack.OPENROUTER_KEY_URL, "PYTHONPATH", "Tello Wi-Fi", "authorization_digest",
+        "drone_ready=False", "provider_ready=False", "stale telemetry", "stale reachability check",
+        "TimeoutError", "no filming consent recorded", "authorization_digest does not match",
+        "already exists", "missing gate: capability admission", "--connectivity-only",
+    ):
+        assert needle in section, needle
+
+
 def test_default_request_text_matches_the_runbook():
     runbook = (Path(__file__).resolve().parents[2] / "docs" / "room-agent-live-runbook.md").read_text(encoding="utf-8")
     assert " ".join(cli.DEFAULT_REQUEST_TEXT.split()) in " ".join(runbook.split())
