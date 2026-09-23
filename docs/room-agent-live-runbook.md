@@ -11,18 +11,21 @@ only (Plan 05 tracker/following is deferred); the CLI's built-in help
 manifest authorization, capability admission, matching calibration
 profiles, provider/filming consent, site assurance and a motors-off
 connectivity preflight -- and stops there. **Actual autonomous flight
-dispatch (SafetySupervisor/tracker/reserve/recovery bootstrap and the
-controller run loop) is not wired in this build.** `--check-connectivity-
-only` is the one live sub-mode that runs end to end: it proves the aircraft
-and the perception provider both answer, fresh, motors off, and exits.
-Every other live invocation, once every gate and the connectivity preflight
-pass, refuses with `full live flight execution is not wired in this build`
--- by design, not as a bug: this task never launches a real flight, and
-`client_factory`/`jev_factory` (the two Python-level hooks a caller would
-override to wire in a real Tello client and judgment model) default to
-refuse construction, the same convention `scripts/room_calibrate.py` uses
-for its own executor. Wiring a real flight loop through this CLI is future
-work.
+dispatch (a goal-ledger bootstrap, SafetySupervisor/tracker/reserve/
+recovery bootstrap and the controller run loop) is not wired in this
+build.** `--check-connectivity-only` is the one live sub-mode that runs end
+to end: it proves the aircraft and the perception provider both answer,
+fresh, motors off, and exits. Every other live invocation, once every gate
+and the connectivity preflight pass, actually constructs the flight client,
+the judgment model and the detector (`client_factory`/`jev_factory`/
+`detector_factory` -- three Python-level hooks a caller would override to
+wire in real ones; every default refuses construction, the same convention
+`scripts/room_calibrate.py` uses for its own executor) and durably records
+the jev's and detector's own reported identity (`IDENTITY_RESOLVED`,
+fix round 3) before refusing with `full live flight execution is not wired
+in this build` -- by design, not as a bug: this task never launches a real
+flight. Wiring a real flight loop through this CLI is future work; see
+"Known follow-ups" for exactly what that needs.
 
 Every live invocation (including `--check-connectivity-only`) requires
 `--run-root`: a `sentinel.room.artifacts.RunArtifacts` directory is opened
@@ -191,8 +194,10 @@ constructed until connectivity does too):
    re-checked for freshness immediately before the point this build would
    otherwise dispatch a flight.
 
-Only after all seven pass -- and the freshness re-check still holds --
-does this build reach its own boundary and refuse with `full live flight
+Only after all seven pass -- and the freshness re-check still holds -- does
+this build construct the flight client, the judgment model and the
+detector, durably record the jev's and detector's own reported identity,
+and then reach its own boundary and refuse with `full live flight
 execution is not wired in this build`.
 
 ## 4. Replay a frozen fixture
@@ -242,22 +247,44 @@ run.
 
 ## Known follow-ups
 
-- Full live flight dispatch (SafetySupervisor/tracker/reserve/recovery
-  bootstrap, the actual controller run loop, and real
-  `client_factory`/`jev_factory` wiring) is out of scope for this task --
-  see "Scope of this build" above. Fix round 2 investigated wiring this in:
-  `RoomController._observation_enabled` (owned by a parallel, in-flight
-  Plan 03 fix; this task may not edit `controller.py`) hard-gates OBSERVE
-  checkpoints to `ExecutionMode.SIMULATION`, so a real-mode session could
-  never actually fly the checkpoints count-and-return depends on even if
-  the rest of the dispatch machinery were built here. Separately, no
-  production factory exists anywhere in this codebase for constructing a
-  `LocalizationTracker`'s drift profile or a `ReserveGuard`'s energy
-  profile from `--profile-file` evidence -- `SafetySupervisor` needs both,
-  and building them from scratch is new architecture, not a CLI wiring
-  task. A run artifact/store and a durably-recorded, freshness-rechecked
-  connectivity preflight are wired (this round); driving
-  `RoomController.run_until_terminal` against a real supervisor is not.
+- Full live flight dispatch (a goal-ledger bootstrap, SafetySupervisor/
+  tracker/reserve/recovery bootstrap, and the actual controller run loop)
+  is out of scope for this task -- see "Scope of this build" above. Fix
+  round 2 investigated wiring this in and fix round 3 re-verified it at a
+  finer grain; both are still blocked by three independent gaps, none of
+  them a CLI wiring fix:
+  1. `RoomController._observation_enabled` (owned by a parallel, in-flight
+     Plan 03 fix; this task may not edit `controller.py`) hard-gates
+     OBSERVE checkpoints to `ExecutionMode.SIMULATION`, and
+     `tests/room/test_count_return.py::test_real_mode_never_offers_observation_candidate`
+     pins that off for `ExecutionMode.REAL` as a regression test owned by
+     that same fix. A real-mode session could fly and land but could never
+     actually fly the checkpoints count-and-return's counting depends on,
+     even if every other gap below were closed here.
+  2. No production factory exists anywhere in this codebase for
+     constructing a `LocalizationTracker`'s drift profile or a
+     `ReserveGuard`'s energy profile from `--profile-file` evidence --
+     `SafetySupervisor` needs both, `DriftProfile` alone has ~25 measured
+     drift/recovery/burst-spread constants this room's `CalibrationProfile`
+     (a battery bound plus sampled pose-envelope points) was never designed
+     to carry or derive, and `DriftProfile` is constructed nowhere in this
+     repository outside `tests/cube/test_localization.py`'s own unit
+     fixture. Inventing those constants without real measurement would be
+     an unreviewed, unsafe, implementer-alone decision for a real flight.
+  3. `sentinel.room.goals.GoalCompiler.compile` needs an already-
+     `create_session`-ed store row and a `sentinel.room.models.RoomSnapshot`
+     to turn `DEFAULT_REQUEST_TEXT` into the `GoalLedger`
+     `RoomController` actually runs against -- no production call site
+     anywhere in this repository builds either; every existing controller
+     test (`tests/room/test_count_return.py`, `test_supervisor.py`, ...)
+     injects a pre-built `GoalLedger` directly through a private test
+     helper instead.
+  A run artifact/store, a durably-recorded, freshness-rechecked
+  connectivity preflight, and (fix round 3) real client/jev/detector
+  construction with durably-recorded resolved identities are wired;
+  driving `RoomController.run_until_terminal` against a real supervisor and
+  a real goal ledger is not. Each of the three gaps above needs its own
+  scoped design/operator ruling before a future round can close it.
 - The site-assurance gate here is a simplified, standalone re-check of
   `sentinel.room.site`'s per-trigger current-assurance rule; it does not
   go through `SafetySupervisor`'s own clock-domain machinery (there is no

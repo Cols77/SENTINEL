@@ -4,17 +4,40 @@ Pure stdlib plus sentinel.room.*. Every command prints only the canonical
 manifest bytes, a digest, or a typed refusal reason (to stderr) -- never a
 credential, header, file content or environment value.
 
-Capability-flight-capable factories (``client_factory``/``jev_factory``,
-plus the two connectivity probes) are injected through ``main()``'s
-keyword-only parameters, the same dependency-injection convention
-``scripts/room_calibrate.py`` uses for its executor. Every one defaults to a
-factory that refuses outright: this build never wires a real Tello/provider
-client or judgment model into a live session, so a real one can only be
-constructed if a caller deliberately overrides the default -- which this
-script never does on its own, and this file's own tests never do either.
-Every gate below (manifest authorization, capability admission, matching
-profiles, consent, site assurance, connectivity) is checked and enforced
-*before* any of those factories is ever called.
+Capability-flight-capable factories (``client_factory``/``jev_factory``/
+``detector_factory``, plus the two connectivity probes) are injected
+through ``main()``'s keyword-only parameters, the same dependency-injection
+convention ``scripts/room_calibrate.py`` uses for its executor. Every one
+defaults to a factory that refuses outright: this build never wires a real
+Tello/provider client, judgment model or detector into a live session, so a
+real one can only be constructed if a caller deliberately overrides the
+default -- which this script never does on its own, and this file's own
+tests never do either. Every gate below (manifest authorization, capability
+admission, matching profiles, consent, site assurance, connectivity) is
+checked and enforced *before* any of those factories is ever called.
+
+Fix round 3 (Q2): once client/jev/detector are constructed, the jev's and
+detector's own reported ``.identity`` are durably recorded via
+``RunArtifacts.record_resolved_identity`` -- the manifest itself always
+declares ``resolved_jev_identity``/``resolved_detector_identity`` as
+``"UNVERIFIED"`` (``artifacts.SessionManifest`` refuses any other value at
+construction time; see ``preview``), so a run's *actual* resolved identity
+only ever lives in this durable, append-only event log, never in
+manifest.json. This build still stops one boundary short of actually
+flying: driving ``RoomController.run_until_terminal`` needs (1) a
+goal-ledger bootstrap (``sentinel.room.goals.GoalCompiler.compile`` needs a
+``RoomSnapshot`` and an already-``create_session``-ed store row -- no
+production call site anywhere in this repository builds either; every
+existing controller test injects a pre-built ``GoalLedger`` directly) and
+(2) a ``SafetySupervisor`` built with a real ``LocalizationTracker``/
+``ReserveGuard`` (their ``DriftProfile``/``EnergyProfile`` need measured
+drift/recovery/reserve constants this room's ``CalibrationProfile`` --
+``--profile-file``'s battery bound plus sampled pose-envelope points --
+does not carry; ``DriftProfile`` is constructed nowhere in this repository
+outside ``tests/cube/test_localization.py``'s own unit fixture). Neither is
+a CLI wiring task; see ``docs/room-agent-live-runbook.md``'s "Known
+follow-ups" for the full accounting, including why a real-mode session
+could not fly count-and-return's OBSERVE checkpoints today regardless.
 """
 from __future__ import annotations
 
@@ -78,6 +101,13 @@ def _refuse_jev() -> object:
     raise RuntimeError(
         "live flight requires an injected jev_factory; this build never constructs a "
         "real judgment model on its own"
+    )
+
+
+def _refuse_detector() -> object:
+    raise RuntimeError(
+        "live flight requires an injected detector_factory; this build never constructs a "
+        "real detector on its own"
     )
 
 
@@ -298,6 +328,7 @@ def _cmd_live(
     provider_probe: Callable[[], connectivity.ProbeResult],
     client_factory: Callable[[], object],
     jev_factory: Callable[[], object],
+    detector_factory: Callable[[], object],
     clock: Callable[[], float],
     wall_clock: Callable[[], datetime],
 ) -> int:
@@ -422,21 +453,43 @@ def _cmd_live(
             print("refused: connectivity preflight expired before takeoff", file=sys.stderr)
             return 2
 
-        # Full live flight: this CLI's own scope stops here. SafetySupervisor/
-        # tracker/reserve/recovery bootstrap and the actual controller run loop
-        # are an operator-supplied controller_factory this build does not wire
-        # (see docs/room-agent-live-runbook.md) -- client_factory/jev_factory
-        # default to refuse, so no real client or judgment model is ever
-        # constructed without a caller deliberately overriding both.
+        # Fix round 3 (Q2): connectivity passed. Every collaborator this CLI
+        # can itself construct -- flight client, judgment model, detector --
+        # is now actually constructed (still only ever a real one if a
+        # caller deliberately overrides that factory's refuse-by-default),
+        # and the jev's/detector's own reported identity is durably recorded
+        # (never only implied by the manifest's request) before this build's
+        # own boundary: driving RoomController.run_until_terminal needs a
+        # goal-ledger bootstrap and a real SafetySupervisor tracker/reserve
+        # that exist nowhere in this repository outside hand-built test
+        # fixtures -- see this module's own docstring and
+        # docs/room-agent-live-runbook.md's "Known follow-ups".
         try:
             client_factory()
-            jev_factory()
+            judge = jev_factory()
+            detector = detector_factory()
         except Exception as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 2
+        try:
+            for role, constructed in (("jev", judge), ("detector", detector)):
+                identity = getattr(constructed, "identity", None)
+                if not isinstance(identity, str) or not identity:
+                    print(f"refused: the constructed {role} object exposes no nonblank string .identity",
+                          file=sys.stderr)
+                    return 2
+                run.record_resolved_identity(role=role, resolved=identity, observed_at=now)
+            run.append_event("LIVE_EXECUTION_NOT_WIRED", {
+                "reason": "full live flight execution is not wired in this build",
+                "missing": ["goal_ledger_bootstrap", "safety_supervisor_tracker_reserve"],
+            }, now=wall_clock())
+        except (ArtifactError, OSError) as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 2
         print(
-            "refused: full live flight execution is not wired in this build; connectivity passed "
-            "but no controller_factory is available (see docs/room-agent-live-runbook.md)",
+            "refused: full live flight execution is not wired in this build; connectivity, client, jev "
+            "and detector construction all passed but no goal-ledger bootstrap or SafetySupervisor "
+            "tracker/reserve construction is available (see docs/room-agent-live-runbook.md)",
             file=sys.stderr,
         )
         return 2
@@ -556,6 +609,7 @@ def main(
     provider_probe: Callable[[], connectivity.ProbeResult] = _refuse_provider_probe,
     client_factory: Callable[[], object] = _refuse_client,
     jev_factory: Callable[[], object] = _refuse_jev,
+    detector_factory: Callable[[], object] = _refuse_detector,
     clock: Callable[[], float] = time.monotonic,
     wall_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> int:
@@ -563,8 +617,8 @@ def main(
     args = parser.parse_args(argv)
     if args.mode == "live":
         return _cmd_live(args, drone_probe=drone_probe, provider_probe=provider_probe,
-                         client_factory=client_factory, jev_factory=jev_factory, clock=clock,
-                         wall_clock=wall_clock)
+                         client_factory=client_factory, jev_factory=jev_factory,
+                         detector_factory=detector_factory, clock=clock, wall_clock=wall_clock)
     return args.func(args)
 
 

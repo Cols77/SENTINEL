@@ -3,9 +3,10 @@
 
 Everything here is OFFLINE: no provider, network, drone client or hardware
 object is constructed anywhere in this file. Live mode is exercised through
-its injected drone_probe/provider_probe/client_factory/jev_factory
-parameters only; every default (unauthorized) factory is proven to refuse,
-and this file never overrides them with anything that reaches a socket.
+its injected drone_probe/provider_probe/client_factory/jev_factory/
+detector_factory parameters only; every default (unauthorized) factory is
+proven to refuse, and this file never overrides them with anything that
+reaches a socket.
 """
 from __future__ import annotations
 
@@ -342,6 +343,15 @@ def _fake_probe(identity="drone-1", checked_at=None):
     return probe
 
 
+def _fake_collaborator(identity="vendor-x"):
+    # Fix round 3 (Q2): jev_factory()/detector_factory()'s returned object
+    # must expose a nonblank string .identity -- _cmd_live records it
+    # durably via RunArtifacts.record_resolved_identity before reaching its
+    # own unwired-controller boundary.
+    from types import SimpleNamespace
+    return lambda: SimpleNamespace(identity=identity)
+
+
 def test_connectivity_only_refuses_with_default_unauthorized_probes(tmp_path, capsys):
     manifest_path, digest = _write_manifest(tmp_path)
     consent = _consent_flags(tmp_path)
@@ -449,10 +459,94 @@ def test_live_full_flight_gates_pass_then_refuses_at_the_unwired_controller_boun
     })
     argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
     exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
-                         client_factory=lambda: object(), jev_factory=lambda: object())
+                         client_factory=lambda: object(), jev_factory=_fake_collaborator("jev-vendor-x"),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
     err = capsys.readouterr().err
     assert exit_code == 2
     assert "not wired in this build" in err
+
+
+def test_live_full_flight_records_resolved_jev_and_detector_identity_before_the_boundary(tmp_path, capsys):
+    # Fix round 3 (Q2): the manifest's own resolved_jev_identity/
+    # resolved_detector_identity are always "UNVERIFIED" (SessionManifest
+    # refuses any other value); the *actual* resolved identity only ever
+    # lives in the run artifact's durable IDENTITY_RESOLVED event log.
+    site_sha256, aircraft_id = SITE_SHA256, "aircraft-1"
+    profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
+    profile_hash = calibration.canonical_profile_sha256(profile)
+    profile_path = tmp_path / "profile.json"
+    calibration.write_profile(profile_path, profile)
+    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
+                            profile_sha256s=(profile_hash,))
+    _registry_with_grant(tmp_path, grant)
+    manifest_path, digest = _write_manifest(tmp_path, **{
+        "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
+        "--site-sha256": SITE_SHA256, "--tag-map-sha256": TAG_MAP_SHA256,
+    })
+    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         client_factory=lambda: object(), jev_factory=_fake_collaborator("jev-vendor-x"),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    assert exit_code == 2
+    capsys.readouterr()
+    events = _run_events(tmp_path, "runs", manifest_path)
+    resolved = {e.payload["role"]: e.payload["resolved"] for e in events if e.event_type == "IDENTITY_RESOLVED"}
+    assert resolved == {"jev": "jev-vendor-x", "detector": "detector-vendor-y"}
+    not_wired = [e for e in events if e.event_type == "LIVE_EXECUTION_NOT_WIRED"]
+    assert len(not_wired) == 1
+    assert set(not_wired[0].payload["missing"]) == {"goal_ledger_bootstrap", "safety_supervisor_tracker_reserve"}
+
+
+def test_live_full_flight_refuses_when_the_constructed_jev_has_no_identity(tmp_path, capsys):
+    site_sha256, aircraft_id = SITE_SHA256, "aircraft-1"
+    profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
+    profile_hash = calibration.canonical_profile_sha256(profile)
+    profile_path = tmp_path / "profile.json"
+    calibration.write_profile(profile_path, profile)
+    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
+                            profile_sha256s=(profile_hash,))
+    _registry_with_grant(tmp_path, grant)
+    manifest_path, digest = _write_manifest(tmp_path, **{
+        "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
+        "--site-sha256": SITE_SHA256, "--tag-map-sha256": TAG_MAP_SHA256,
+    })
+    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
+    # jev's identity is checked (and refused) before detector's, in the same
+    # order both are constructed and then validated -- so no IDENTITY_RESOLVED
+    # event is ever recorded for either role, even though detector_factory
+    # itself is still constructed alongside client/jev (all three are cheap,
+    # side-effect-free construction checks; only what they *report* differs).
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         client_factory=lambda: object(), jev_factory=lambda: object(),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "no nonblank string .identity" in err
+    events = _run_events(tmp_path, "runs", manifest_path)
+    assert not [e for e in events if e.event_type == "IDENTITY_RESOLVED"]
+
+
+def test_live_full_flight_default_detector_factory_refuses(tmp_path, capsys):
+    # Fix round 3 (Q2): detector_factory now defaults to refuse, the same
+    # convention client_factory/jev_factory already use.
+    site_sha256, aircraft_id = SITE_SHA256, "aircraft-1"
+    profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
+    profile_hash = calibration.canonical_profile_sha256(profile)
+    profile_path = tmp_path / "profile.json"
+    calibration.write_profile(profile_path, profile)
+    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
+                            profile_sha256s=(profile_hash,))
+    _registry_with_grant(tmp_path, grant)
+    manifest_path, digest = _write_manifest(tmp_path, **{
+        "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
+        "--site-sha256": SITE_SHA256, "--tag-map-sha256": TAG_MAP_SHA256,
+    })
+    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         client_factory=lambda: object(), jev_factory=_fake_collaborator("jev-vendor-x"))
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "requires an injected detector_factory" in err
 
 
 def test_live_full_flight_refuses_without_a_matching_profile_file(tmp_path, capsys):
@@ -634,7 +728,8 @@ def test_live_full_flight_records_connectivity_before_refusing_at_the_unwired_co
     })
     argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
     exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
-                         client_factory=lambda: object(), jev_factory=lambda: object())
+                         client_factory=lambda: object(), jev_factory=_fake_collaborator("jev-vendor-x"),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
     err = capsys.readouterr().err
     assert exit_code == 2
     assert "not wired in this build" in err
