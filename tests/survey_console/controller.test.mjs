@@ -1,0 +1,116 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { makeScenario } from "../../examples/survey-console/fixtures.mjs";
+import { createController } from "../../examples/survey-console/controller.mjs";
+const sample = () => makeScenario("computers-followup");
+const event = (s, n) => ({
+  id: `e${n}`,
+  run_id: s.run_id,
+  sequence: n,
+  occurred_at: s.updated_at,
+  summary: `Event ${n}`,
+});
+test("late run A read cannot replace run B", async () => {
+  let finish;
+  const a = sample().snapshots[0],
+    b = makeScenario("people-lower-bound").snapshots[0];
+  const c = createController({
+    read_survey: (id) =>
+      id === a.run_id ? new Promise((r) => (finish = r)) : Promise.resolve(b),
+    read_survey_events: async () => [],
+  });
+  const pending = c.open(a.run_id);
+  await c.open(b.run_id);
+  finish(a);
+  await pending;
+  assert.equal(c.getState().survey.run_id, b.run_id);
+});
+test("old snapshots cannot regress state, duplicates do not notify and mutations cannot escape", async () => {
+  let s = sample().snapshots.at(-1);
+  const c = createController({
+    read_survey: async () => s,
+    read_survey_events: async () => [],
+  });
+  await c.open(s.run_id);
+  let notifications = 0;
+  c.subscribe(() => notifications++);
+  await c.ingest([event(s, 1)]);
+  const before = notifications;
+  await c.ingest([event(s, 1)]);
+  assert.equal(notifications, before);
+  await c.ingest([{ ...event(s, 2), run_id: "foreign" }]);
+  assert.equal(notifications, before);
+  s = sample().snapshots[0];
+  await c.refresh();
+  assert.equal(c.getState().survey.version, 6);
+  const copy = c.getState();
+  copy.survey.flights.used = 99;
+  assert.equal(c.getState().survey.flights.used, 1);
+});
+test("gap blocks until a complete snapshot reconciles, log gap stays explicit", async () => {
+  let s = sample().snapshots[0];
+  const c = createController({
+    read_survey: async () => s,
+    read_survey_events: async () => [],
+  });
+  await c.open(s.run_id);
+  await c.ingest([event(s, 1), event(s, 3)]);
+  assert.equal(c.getState().needs_refresh, true);
+  assert.deepEqual(c.getState().log_gaps, [2]);
+  s = { ...s, version: 2, event_sequence: 3 };
+  await c.refresh();
+  assert.equal(c.getState().needs_refresh, false);
+  assert.deepEqual(c.getState().log_gaps, [2]);
+  await c.ingest([event(s, 2)]);
+  assert.deepEqual(c.getState().log_gaps, []);
+  assert.deepEqual(
+    c.getState().events.map((e) => e.sequence),
+    [1, 2, 3],
+  );
+});
+test("malformed and equal-version changed payloads preserve last good snapshot and block", async () => {
+  let s = sample().snapshots[0];
+  const c = createController({
+    read_survey: async () => s,
+    read_survey_events: async () => [],
+  });
+  await c.open(s.run_id);
+  s = { ...s, request_text: "Changed immutable snapshot" };
+  await c.refresh();
+  assert.equal(c.getState().needs_refresh, true);
+  assert.notEqual(c.getState().survey.request_text, s.request_text);
+  s = { ...s, version: 2, schema_version: 99 };
+  await c.refresh();
+  assert.equal(c.getState().survey.version, 1);
+  assert.match(c.getState().error, /Invalid projection/);
+});
+test("101 events paginate; a repeated page is rejected", async () => {
+  const s = { ...sample().snapshots[0], event_sequence: 101 };
+  const events = Array.from({ length: 101 }, (_, i) => event(s, i + 1));
+  let repeat = false;
+  const c = createController({
+    read_survey: async () => s,
+    read_survey_events: async (_id, after, limit) =>
+      repeat
+        ? events.slice(0, 100)
+        : events.filter((e) => e.sequence > after).slice(0, limit),
+  });
+  await c.open(s.run_id);
+  assert.equal(c.getState().events.length, 101);
+  repeat = true;
+  await c.refresh();
+  assert.match(c.getState().error, /progress|cursor/);
+  assert.equal(c.getState().needs_refresh, true);
+});
+test("conflicting event identity is not silently overwritten", async () => {
+  const s = sample().snapshots[0];
+  const c = createController({
+    read_survey: async () => s,
+    read_survey_events: async () => [],
+  });
+  await c.open(s.run_id);
+  await c.ingest([event(s, 1)]);
+  await c.ingest([{ ...event(s, 1), summary: "Other" }]);
+  assert.equal(c.getState().needs_refresh, true);
+  assert.equal(c.getState().events[0].summary, "Event 1");
+});
