@@ -752,10 +752,11 @@ class StepExecutor:
                 return
             self._command_completion_unknown |= completion_unknown
             self._transition_locked(ExecutorState.TERMINAL, invalidate=True)
-            self._terminal_reason = ("COMMAND_COMPLETION_UNKNOWN" if self._command_completion_unknown
-                                     else "DEADLINE_EXCEEDED")
-            if self._land_attempted and self._command_completion_unknown:
-                self._terminal = self._terminal_outcome("COMMAND_COMPLETION_UNKNOWN")
+            if self._terminal is None:
+                self._terminal_reason = ("COMMAND_COMPLETION_UNKNOWN" if self._command_completion_unknown
+                                         else "DEADLINE_EXCEEDED")
+                if self._land_attempted and self._command_completion_unknown:
+                    self._terminal = self._terminal_outcome("COMMAND_COMPLETION_UNKNOWN")
             if self._cleanup_started:
                 return
             self._cleanup_started = True

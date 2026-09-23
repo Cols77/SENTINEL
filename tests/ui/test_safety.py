@@ -118,6 +118,23 @@ def test_acknowledged_controlled_land_records_landed_on_the_shared_step_executor
     assert outcome.reason == 'OPERATOR_LAND'
 
 
+def test_a_stale_command_deadline_does_not_overwrite_an_acknowledged_controlled_land():
+    """A deadline watcher for an unrelated in-flight command must not resurrect
+    COMMAND_COMPLETION_UNKNOWN over an already-recorded controlled Land --
+    `_deadline_expired` must guard both the terminal reason and the nested
+    terminal outcome the same way `note_controlled_land` and `_land_locked`
+    already do."""
+    from sentinel.cube.step_executor import ExecutorState
+    runner = FlightTestRunner(_FakeClient(), 'dry-run')
+    runner.step_executor.start_legacy()
+    runner.request_controlled_land()
+    assert runner.step_executor.state is ExecutorState.TERMINAL
+    runner.step_executor._deadline_expired(completion_unknown=True)
+    outcome = runner.step_executor.land()
+    assert outcome.state == 'LANDED'
+    assert outcome.reason == 'OPERATOR_LAND'
+
+
 def test_emergency_latch_failure_does_not_block_the_independent_send():
     """`SafetyRegistry.latch_all` must not let one runner's executor hook
     raise or block the still-pending emergency transport send."""
