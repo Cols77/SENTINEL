@@ -28,6 +28,8 @@ class MissionControlService:
         self.safety=RunnerSafetyAdapter(self.registry,(lambda:9) if config.mode=='REHEARSAL' else adapters.emergency_sender,self.session_id,self._audit_safety)
         if config.mode == 'LIVE' and hasattr(adapters.flight, 'on_emergency_ready'):
             adapters.flight.on_emergency_ready=self.safety.admit_emergency_sender
+        if config.mode == 'LIVE' and hasattr(adapters.flight, 'on_readiness_update'):
+            adapters.flight.on_readiness_update=self._update_readiness
         self.runtime=SurveyRuntime(config.survey_db or config.data_dir/'survey.sqlite',self.store,adapters,self.approval,self.registry)
         self.worker=MissionWorker(self.runtime.execute)
         self.projection=ProjectionService(self)
@@ -41,6 +43,9 @@ class MissionControlService:
         from .chat import ChatService
         self.chat=ChatService(self)
         self.closed=False
+
+    def _update_readiness(self, readiness):
+        self.readiness = readiness
 
     def require_run(self, run_id):
         if run_id != self.config.run_id:

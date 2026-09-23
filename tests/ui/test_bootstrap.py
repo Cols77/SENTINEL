@@ -183,6 +183,49 @@ def test_live_dispatch_preflights_only_after_approval(live_config, monkeypatch):
         service.close()
 
 
+def test_live_preflight_failure_is_projected_as_unarmed_readiness(live_config,
+                                                                   monkeypatch):
+    from sentinel.ui import live
+    from sentinel.dry_run import DryRunClient
+
+    class BrokenPreflight:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def preflight(self):
+            raise RuntimeError('battery unavailable')
+
+    monkeypatch.setattr(live, 'check_emergency_transport',
+                        lambda config: (lambda: 9))
+    monkeypatch.setattr(live, 'make_client', lambda config: DryRunClient())
+    monkeypatch.setattr(live, 'FlightTestRunner', BrokenPreflight)
+    service = bootstrap.build_service(live_config)
+    try:
+        assert service.submit_chat('mission', _chat_command(service))['kind'] == 'PROPOSE'
+        assert _approve_current(service)['status'] == 'ACKNOWLEDGED'
+        deadline = time.monotonic() + 2
+        flight = None
+        while time.monotonic() < deadline:
+            flight = next(check for check in service.readiness.checks
+                          if check.capability == 'flight')
+            if flight.reason_code == 'LIVE_PREFLIGHT_FAILED':
+                break
+            time.sleep(0.01)
+        snapshot = service.read_snapshot('mission')
+        flight = next(check for check in snapshot['readiness']['checks']
+                      if check['capability'] == 'flight')
+        assert snapshot['readiness']['state'] == 'READY_TO_PLAN'
+        assert flight == {
+            'capability': 'flight',
+            'ready': False,
+            'reason_code': 'LIVE_PREFLIGHT_FAILED',
+            'remediation': 'Resolve the no-takeoff preflight failure before dispatch.',
+        }
+        assert service.registry.get('mission') is None
+    finally:
+        service.close()
+
+
 def test_cli_config_and_root_dispatch(monkeypatch):
     from sentinel.ui.__main__ import parse_config
     from sentinel import cli

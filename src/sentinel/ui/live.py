@@ -17,7 +17,7 @@ from sentinel.survey.options import generate_options
 from sentinel.survey.proposer import RuleProposer
 from sentinel.survey.store import SurveyStore
 from .bootstrap import StartupError
-from .readiness import evaluate_live_readiness
+from .readiness import LiveReadiness, ReadinessCheck, evaluate_live_readiness
 from .scenarios import ScenarioAdapters
 from .pose_projection import project_pose
 
@@ -107,10 +107,29 @@ class LiveFlight:
         self._supervisor = None
         self._supervisors = []
         self.on_emergency_ready = None
+        self.on_readiness_update = None
+
+    def _publish_readiness(self, readiness):
+        if self.on_readiness_update is not None:
+            self.on_readiness_update(readiness)
+
+    def _record_failure(self, capability, reason_code, remediation):
+        readiness = evaluate_live_readiness(self.config)
+        checks = tuple(
+            ReadinessCheck(capability, False, reason_code, remediation)
+            if check.capability == capability else check
+            for check in readiness.checks
+        )
+        planning_ready = checks[0].ready
+        state = ('READY_TO_DISPATCH' if all(check.ready for check in checks)
+                 else 'READY_TO_PLAN' if planning_ready else 'NOT_READY')
+        self._publish_readiness(
+            LiveReadiness(state, checks, readiness.command_template))
 
     def _require(self, readiness, capability):
         check=next(row for row in readiness.checks if row.capability==capability)
         if not check.ready:
+            self._publish_readiness(readiness)
             raise StartupError(check.reason_code)
 
     def _prepare_pose_store(self):
@@ -119,6 +138,9 @@ class LiveFlight:
             with sqlite3.connect(self.config.pose_db) as conn:
                 ensure_schema(conn)
         except Exception as exc:
+            self._record_failure(
+                'planning', 'POSE_DATABASE_UNAVAILABLE',
+                'Check that --pose-db names a writable SQLite path before dispatch.')
             raise StartupError('POSE_DATABASE_UNAVAILABLE') from exc
 
     def _new_supervisor(self, option):
@@ -144,6 +166,7 @@ class LiveFlight:
     def fly(self,option):
         config=self.config
         readiness=evaluate_live_readiness(config)
+        self._publish_readiness(readiness)
         self._require(readiness,'planning')
         self._require(readiness,'flight')
         self._require(readiness,'detection')
@@ -152,6 +175,9 @@ class LiveFlight:
         try:
             sender=check_emergency_transport(config)
         except Exception as exc:
+            self._record_failure(
+                'emergency', 'INDEPENDENT_EMERGENCY_UNAVAILABLE',
+                'Restore the independent emergency transport before dispatch.')
             raise StartupError('INDEPENDENT_EMERGENCY_UNAVAILABLE') from exc
         if self.on_emergency_ready is not None:
             self.on_emergency_ready(sender)
@@ -160,10 +186,13 @@ class LiveFlight:
         frames = None
         supervisor = None
         try:
-            client=make_client(config)
             try:
+                client=make_client(config)
                 FlightTestRunner(client,'real',envelope=self.site.envelope()).preflight()
             except Exception as exc:
+                self._record_failure(
+                    'flight', 'LIVE_PREFLIGHT_FAILED',
+                    'Resolve the no-takeoff preflight failure before dispatch.')
                 raise StartupError('LIVE_PREFLIGHT_FAILED') from exc
             # Provider/consent admission and preflight both precede the
             # supervised provider process. No provider session exists during
