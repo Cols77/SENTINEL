@@ -4,9 +4,11 @@
 Everything here is OFFLINE: no provider, network, drone client or hardware
 object is constructed anywhere in this file. Live mode is exercised through
 its injected drone_probe/provider_probe/client_factory/jev_factory/
-detector_factory parameters only; every default (unauthorized) factory is
-proven to refuse, and this file never overrides them with anything that
-reaches a socket.
+detector_factory parameters, or through the Task A live defaults
+(``sentinel.room.live_stack``) with their lowest transport seams replaced:
+an autouse fixture makes any real Tello client build or provider HTTP call
+raise, and the tests that exercise the defaults swap in the fake DJITelloPy
+transport from ``tests/room/test_live_stack.py``.
 """
 from __future__ import annotations
 
@@ -20,9 +22,11 @@ from pathlib import Path
 import pytest
 
 import scripts.room_session as cli
-from sentinel.room import artifacts, calibration, capabilities, connectivity
+from sentinel.room import artifacts, calibration, capabilities, connectivity, live_stack
 from sentinel.room.models import CapabilityGrant, canonical_grant_sha256
+from sentinel.room.site import room_site_document
 from tests.room import test_live_session as live_fakes
+from tests.room import test_live_stack as stack_fakes
 
 FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "room_agent" / "v1"
 SITE_PATH = FIXTURE_DIR / "semantic-site.json"
@@ -40,6 +44,38 @@ NOW = "2026-09-23T12:00:00+00:00"
 
 def _hash(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+TAG_MAP_FIXTURE = Path(__file__).resolve().parents[2] / stack_fakes.TAG_MAP_FIXTURE
+
+
+@pytest.fixture(autouse=True)
+def _forbid_real_transports(monkeypatch):
+    """The live defaults reach hardware and the provider only through these
+    seams; in this file every one of them refuses unless a test swaps in a fake."""
+
+    def no_tello(**_kwargs):
+        raise RuntimeError("test forbids building a real Tello client")
+
+    def no_http(*_args, **_kwargs):
+        raise RuntimeError("test forbids provider network calls")
+
+    monkeypatch.setattr(live_stack, "build_tello_client", no_tello)
+    monkeypatch.setattr(live_stack, "_http_get", no_http)
+    monkeypatch.setattr(live_stack, "provider_environ", lambda: {})
+
+
+def _fake_provider(monkeypatch):
+    monkeypatch.setattr(live_stack, "provider_environ", lambda: {
+        live_stack.PROVIDER_KEY_ENV: "test-key", live_stack.PROVIDER_MODEL_ENV: "google/gemini-test"})
+    monkeypatch.setattr(live_stack, "_http_get",
+                        lambda url, *, headers, timeout: stack_fakes.FakeResponse(200))
+
+
+def _fake_tello(monkeypatch, **tello_kwargs):
+    transport = stack_fakes.FakeTransport(**tello_kwargs)
+    monkeypatch.setattr(live_stack, "build_tello_client", lambda **_kwargs: transport())
+    return transport
 
 
 def _preview_argv(tmp_path, **overrides) -> list[str]:
@@ -353,7 +389,7 @@ def _fake_collaborator(identity="vendor-x"):
     return lambda: SimpleNamespace(identity=identity)
 
 
-def test_connectivity_only_refuses_with_default_unauthorized_probes(tmp_path, capsys):
+def test_connectivity_only_refuses_when_the_default_probes_reach_nothing(tmp_path, capsys):
     manifest_path, digest = _write_manifest(tmp_path)
     consent = _consent_flags(tmp_path)
     argv = _live_argv(manifest_path, digest, tmp_path,
@@ -445,14 +481,15 @@ def _full_gate_argv(tmp_path, manifest_path, digest, *, grant, profile_path, ext
     )
 
 
-def _flight_setup(tmp_path, *, flight_grant=True, calibration_flags=True):
+def _flight_setup(tmp_path, *, flight_grant=True, calibration_flags=True, site=None):
     """Every file a flight-capable live invocation binds to: the admission
     grant (manifest profile hashes), the flight-calibration grant the
     SafetySupervisor itself verifies (calibration_hashes of the drift/energy/
     limits files and the site), the calibration profile, the drift/energy/
-    limits evidence files, and a manifest bound to the fixture site."""
-    site = live_fakes.fixture_site()
-    site_path = live_fakes.write_site(tmp_path / "site.json")
+    limits evidence files, and a manifest bound to the fixture site (or *site*)."""
+    site = site or live_fakes.fixture_site()
+    site_path = tmp_path / "site.json"
+    site_path.write_text(json.dumps(room_site_document(site)), encoding="utf-8")
     aircraft_id = live_fakes.AIRCRAFT_ID
     profile = _promoted_profile(site_sha256=site.cube_site_sha256, aircraft_id=aircraft_id)
     profile_hash = calibration.canonical_profile_sha256(profile)
@@ -536,6 +573,75 @@ def test_live_full_flight_runs_count_and_return_and_finalizes_a_verifiable_termi
         expect_capability="count_return",
         require_event=("CONNECTIVITY_CHECKED", "TAKEOFF_AUTHORIZED", "GOAL_LEDGER_ACCEPTED", "DRONE_STATE_RECORDED"),
     ) == "run-0001"
+
+
+class _FakeHotkey:
+    """Records construction/start/stop instead of listening for a real keypress."""
+
+    instances: list["_FakeHotkey"] = []
+
+    def __init__(self, on_emergency):
+        self.on_emergency = on_emergency
+        self.started = self.stopped = False
+        _FakeHotkey.instances.append(self)
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_live_full_flight_arms_and_disarms_the_emergency_hotkey_for_the_whole_flight(tmp_path, capsys, monkeypatch):
+    # Q1: every other real-flight path in this codebase arms the operator's
+    # motor-stop hotkey (sentinel.cli's cube-run --real); this proves the
+    # live CLI now does too, for a stack that exposes trigger_emergency, and
+    # disarms it once the flight ends.
+    from sentinel.cube.step_executor import ExecutorState
+
+    _FakeHotkey.instances = []
+    monkeypatch.setattr(cli, "EmergencyHotkey", _FakeHotkey)
+    argv, manifest_path = _flight_setup(tmp_path)
+    base_stack = live_fakes.FlightStackFactory()
+    triggered = []
+
+    def client_factory(**kwargs):
+        built = base_stack(**kwargs)
+
+        def trigger():
+            triggered.append(True)
+            built.executor.state = ExecutorState.TERMINAL
+
+        return replace(built, trigger_emergency=trigger)
+
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         client_factory=client_factory, jev_factory=lambda: live_fakes.PolicyJudge(),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    out, err = capsys.readouterr()
+    assert exit_code == 0, err
+    assert "EMERGENCY: press E to stop motors immediately." in err
+    assert len(_FakeHotkey.instances) == 1
+    hotkey = _FakeHotkey.instances[0]
+    assert hotkey.started is True and hotkey.stopped is True
+    hotkey.on_emergency()  # simulate the operator pressing E
+    assert triggered == [True]
+    assert base_stack.executor.state is ExecutorState.TERMINAL
+
+
+def test_live_full_flight_never_arms_a_hotkey_for_a_stack_with_nothing_to_stop(tmp_path, capsys, monkeypatch):
+    # A fake/replay stack exposes no trigger_emergency: nothing is armed, and
+    # the flight proceeds exactly as before this fix.
+    _FakeHotkey.instances = []
+    monkeypatch.setattr(cli, "EmergencyHotkey", _FakeHotkey)
+    argv, manifest_path = _flight_setup(tmp_path)
+    stack = live_fakes.FlightStackFactory()
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         client_factory=stack, jev_factory=lambda: live_fakes.PolicyJudge(),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    err = capsys.readouterr().err
+    assert exit_code == 0
+    assert "EMERGENCY" not in err
+    assert _FakeHotkey.instances == []
 
 
 def test_live_full_flight_rejected_goal_ledger_finalizes_blocked_without_takeoff(tmp_path, capsys):
@@ -660,39 +766,116 @@ def test_live_full_flight_default_detector_factory_refuses(tmp_path, capsys):
                          client_factory=stack, jev_factory=lambda: live_fakes.PolicyJudge())
     err = capsys.readouterr().err
     assert exit_code == 2
-    assert "requires an injected detector_factory" in err
+    # Task B: the default is the live gemini-openrouter detector; without its key it refuses by name.
+    assert "OPENROUTER_API_KEY" in err
     assert stack.calls == []
 
 
-def test_live_full_flight_default_client_factory_refuses_before_takeoff(tmp_path, capsys):
+def test_live_default_flight_stack_requires_a_tag_map_before_connectivity(tmp_path, capsys, monkeypatch):
+    transport = _fake_tello(monkeypatch)
     argv, manifest_path = _flight_setup(tmp_path)
-    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+
+    def forbidden():
+        raise AssertionError("the tag-map gate must refuse before connectivity")
+
+    exit_code = cli.main(argv, drone_probe=forbidden, provider_probe=forbidden,
                          jev_factory=lambda: live_fakes.PolicyJudge(),
                          detector_factory=_fake_collaborator("detector-vendor-y"))
     err = capsys.readouterr().err
     assert exit_code == 2
-    assert "requires an injected client_factory" in err
+    assert "--tag-map is required" in err
+    assert transport.builds == 0
+    assert not _run_dir(tmp_path, manifest_path).exists()
+
+
+def test_live_default_flight_stack_refuses_a_tag_map_not_bound_to_the_manifest(tmp_path, capsys, monkeypatch):
+    transport = _fake_tello(monkeypatch)
+    argv, _ = _flight_setup(tmp_path)  # the fixture site binds tag_map_sha256 "b" * 64
+    exit_code = cli.main([*argv, "--tag-map", str(TAG_MAP_FIXTURE)],
+                         jev_factory=lambda: live_fakes.PolicyJudge(),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "tag_map_sha256" in err
+    assert transport.builds == 0
+
+
+def test_live_default_flight_stack_shares_the_probe_connection_and_never_takes_off_without_tag_poses(
+        tmp_path, capsys, monkeypatch):
+    # The default drone probe and the default flight stack share one client
+    # (DJITelloPy's receivers are process-global), built only after every
+    # gate. With no tag pose the supervisor refuses takeoff: nothing flies.
+    from dataclasses import replace
+
+    tag_map_sha256 = hashlib.sha256(TAG_MAP_FIXTURE.read_bytes()).hexdigest()
+    site = replace(live_fakes.fixture_site(), tag_map_sha256=tag_map_sha256)
+    argv, manifest_path = _flight_setup(tmp_path, site=site)
+    transport = _fake_tello(monkeypatch)
+    bursts = []
+    monkeypatch.setattr(live_stack, "wp5_pose_burst", lambda *args, **kwargs: bursts.append(kwargs) or [])
+    exit_code = cli.main([*argv, "--tag-map", str(TAG_MAP_FIXTURE)], provider_probe=_fake_probe("gemini-1"),
+                         jev_factory=lambda: live_fakes.PolicyJudge(),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "takeoff refused" in err and "LOCALIZATION_LOST" in err
+    assert transport.builds == 1
+    assert bursts  # the default stack asked the WP5 stack for tag poses
+    assert stack_fakes.sent_motor_commands(transport.tello.sent) == []
+    assert transport.tello.ended is True  # the CLI closes the shared connection
+    events = _run_events(tmp_path, "runs", manifest_path)
+    checked = next(e for e in events if e.event_type == "CONNECTIVITY_CHECKED").payload
+    assert checked["drone_identity"].startswith("tello 192.168.10.1 ")
+    assert "LIVE_SESSION_REFUSED" in _event_types(events)
     assert not (_run_dir(tmp_path, manifest_path) / "terminal.json").exists()
-    assert "LIVE_SESSION_REFUSED" in _event_types(_run_events(tmp_path, "runs", manifest_path))
+
+
+def test_live_default_flight_stack_is_built_with_the_manifests_max_duration_s(tmp_path, capsys, monkeypatch):
+    # S2/Q5: the manifest's own declared flight-duration bound must reach the
+    # default flight stack's StepExecutor deadline.
+    transport = _fake_tello(monkeypatch)
+    tag_map_sha256 = hashlib.sha256(TAG_MAP_FIXTURE.read_bytes()).hexdigest()
+    site = replace(live_fakes.fixture_site(), tag_map_sha256=tag_map_sha256)
+    argv, manifest_path = _flight_setup(tmp_path, site=site)
+    captured = {}
+    real_init = live_stack.TelloFlightStackFactory.__init__
+
+    def spy_init(self, **kwargs):
+        captured.update(kwargs)
+        real_init(self, **kwargs)
+
+    monkeypatch.setattr(live_stack.TelloFlightStackFactory, "__init__", spy_init)
+    manifest = artifacts.parse_manifest(Path(manifest_path).read_bytes())
+    cli.main([*argv, "--tag-map", str(TAG_MAP_FIXTURE)], provider_probe=_fake_probe("gemini-1"),
+             jev_factory=lambda: live_fakes.PolicyJudge(),
+             detector_factory=_fake_collaborator("detector-vendor-y"))
+    capsys.readouterr()
+    assert transport.builds == 1
+    assert captured.get("max_duration_s") == manifest.max_duration_s
+    assert manifest.max_duration_s is not None
 
 
 def test_live_full_flight_refuses_without_a_matching_profile_file(tmp_path, capsys):
-    site_sha256, aircraft_id = _hash("site"), "aircraft-1"
-    profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
-    profile_hash = calibration.canonical_profile_sha256(profile)
-    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
-                            profile_sha256s=(profile_hash,))
+    # Task B item 5: the profile gate now runs after the site and flight
+    # calibration files load (their hashes are part of the one grant's
+    # binding), so this supplies them and omits only the --profile-file.
+    site = live_fakes.fixture_site()
+    binding, flags, profile_path = _flight_files(tmp_path, site)
+    grant = _promoted_grant(capability="count_return", site_sha256=site.cube_site_sha256,
+                            aircraft_id=live_fakes.AIRCRAFT_ID, profile_sha256s=binding.sha256s)
     _registry_with_grant(tmp_path, grant)
     manifest_path, digest = _write_manifest(tmp_path, **{
-        "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
+        "--capability-grant-sha256": grant.grant_sha256, "--profile": list(binding.sha256s),
+        "--site-sha256": site.cube_site_sha256, "--tag-map-sha256": site.tag_map_sha256,
     })
 
     def forbidden():
         raise AssertionError("must never reach connectivity when the profile gate refuses")
 
-    argv = _live_argv(manifest_path, digest, tmp_path, **{
-        "__flags__": ["--execute", *_consent_flags(tmp_path)],
-    })
+    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path,
+                           extra_flags=flags[2:8], site_path=tmp_path / "site.json")
+    index = argv.index("--profile-file")
+    del argv[index:index + 2]
     exit_code = cli.main(argv, drone_probe=forbidden, provider_probe=forbidden)
     err = capsys.readouterr().err
     assert exit_code == 2
@@ -831,7 +1014,7 @@ def test_live_connectivity_only_records_a_not_ready_preflight_too(tmp_path, caps
     consent = _consent_flags(tmp_path)
     argv = _live_argv(manifest_path, digest, tmp_path,
                       **{"__flags__": ["--execute", "--check-connectivity-only", *consent]})
-    exit_code = cli.main(argv)  # default probes refuse -> not ready
+    exit_code = cli.main(argv)  # default probes hit the forbidden transports -> not ready
     assert exit_code == 2
     capsys.readouterr()
     events = _run_events(tmp_path, "runs", manifest_path)
@@ -879,14 +1062,59 @@ def test_live_full_flight_refuses_when_connectivity_has_expired_before_takeoff(t
     assert not (_run_dir(tmp_path, manifest_path) / "terminal.json").exists()
 
 
-def test_live_default_factories_refuse_real_construction(tmp_path, capsys):
+def test_live_default_factories_refuse_real_construction(tmp_path, capsys, monkeypatch):
+    transport = _fake_tello(monkeypatch)
     argv, _ = _flight_setup(tmp_path)
-    # No probe/client/jev/detector overrides at all: every one of this
-    # build's defaults must refuse before anything real is reached.
+    # No probe/client/jev/detector overrides at all: without a bound tag map
+    # the defaults refuse before any real client is built.
     exit_code = cli.main(argv)
     err = capsys.readouterr().err
     assert exit_code == 2
-    assert "never construct" in err or "requires an injected" in err
+    assert "--tag-map is required" in err
+    assert transport.builds == 0
+
+
+def test_connectivity_only_defaults_are_the_live_stack_probes(tmp_path, capsys, monkeypatch):
+    transport = _fake_tello(monkeypatch, battery=64, sdk="30")
+    _fake_provider(monkeypatch)
+    manifest_path, digest = _write_manifest(tmp_path)
+    consent = _consent_flags(tmp_path)
+    argv = _live_argv(manifest_path, digest, tmp_path,
+                      **{"__flags__": ["--execute", "--check-connectivity-only", *consent]})
+    exit_code = cli.main(argv)
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert out.strip() == "CONNECTIVITY_READY"
+    # Command mode and two reads; no takeoff, motor or RC command; closed.
+    assert transport.tello.sent == ["command", "height?", "sdk?"]
+    assert stack_fakes.sent_motor_commands(transport.tello.sent) == []
+    assert transport.tello.ended is True
+    checked = next(e for e in _run_events(tmp_path, "runs", manifest_path)
+                   if e.event_type == "CONNECTIVITY_CHECKED").payload
+    assert checked["drone_identity"] == "tello 192.168.10.1 sdk=30 battery=64% height=0cm"
+    assert checked["provider_identity"] == "openrouter:google/gemini-test"
+
+
+def test_connectivity_only_default_provider_probe_names_a_missing_key(tmp_path, capsys, monkeypatch):
+    _fake_tello(monkeypatch)
+    manifest_path, digest = _write_manifest(tmp_path)
+    consent = _consent_flags(tmp_path)
+    argv = _live_argv(manifest_path, digest, tmp_path,
+                      **{"__flags__": ["--execute", "--check-connectivity-only", *consent]})
+    exit_code = cli.main(argv)
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "provider_ready=False" in err and live_stack.PROVIDER_KEY_ENV in err
+
+
+def test_live_default_probes_are_never_built_when_a_gate_refuses(tmp_path, capsys, monkeypatch):
+    transport = _fake_tello(monkeypatch)
+    manifest_path, digest = _write_manifest(tmp_path)
+    argv = _live_argv(manifest_path, digest, tmp_path, **{"__flags__": ["--execute", "--check-connectivity-only"]})
+    exit_code = cli.main(argv)  # no consent flags: refused before any probe runs
+    capsys.readouterr()
+    assert exit_code == 2
+    assert transport.builds == 0
 
 
 # ---------------------------------------------------------------------------
@@ -913,6 +1141,135 @@ def test_replay_never_constructs_a_provider_or_client():
     # replay_fixture's own default factories (`forbidden`) already assert
     # this; reaching the end without an exception is the proof.
     cli.main(["replay", "--fixture", str(REPLAY_MANIFEST_PATH)])
+
+
+RUNBOOK_PATH = Path(__file__).resolve().parents[2] / "docs" / "room-agent-live-runbook.md"
+L0_HEADING = "## L0: motors-off connectivity check"
+
+
+def _runbook_l0_section() -> str:
+    text = RUNBOOK_PATH.read_text(encoding="utf-8")
+    start = text.index(L0_HEADING)
+    end = text.find("\n## ", start + len(L0_HEADING))
+    return text[start:] if end == -1 else text[start:end]
+
+
+def _runbook_commands(section: str, substitutions: dict) -> list[tuple[str, list[str]]]:
+    """Every ``python scripts/...`` command in the section's PowerShell blocks,
+    backtick continuations joined and the given variables substituted."""
+    import re
+    import shlex
+
+    commands = []
+    for block in re.findall(r"```powershell\n(.*?)```", section, flags=re.S):
+        for line in re.sub(r"[ \t]*`\n[ \t]*", " ", block).splitlines():
+            line = line.strip()
+            if not line.startswith("python scripts/"):
+                continue
+            for name, value in substitutions.items():
+                line = line.replace(name, value)
+            tokens = shlex.split(line)
+            commands.append((tokens[1], tokens[2:]))
+    return commands
+
+
+def test_runbook_l0_sequence_runs_end_to_end_against_the_fake_transports(tmp_path, capsys, monkeypatch):
+    # The L0 section's own copy-paste commands, in order, run from a scratch
+    # repository root: registry init, preview, the motors-off connectivity
+    # check through the live defaults (fake Tello and provider transports),
+    # then the artifact check.
+    import scripts.room_capability as capability_cli
+    import scripts.room_verify_artifact as verify_cli
+    from sentinel.survey.consent import record_consent
+    from sentinel.survey.store import SurveyStore
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "runs").mkdir()
+    _copy_repo_files(tmp_path, "fixtures/room_agent/v1/canningst-site.json")
+    store = SurveyStore.open(tmp_path / "runs" / "consent.sqlite3")
+    record_consent(store, location="CanningSt", consent_date="2026-09-23", recorded_by="operator")
+    store.connection.close()
+    transport = _fake_tello(monkeypatch)
+    _fake_provider(monkeypatch)
+    commands = _runbook_commands(_runbook_l0_section(), {
+        "$RUN": "l0-test", "$TODAY": "2026-09-23", "$(git rev-parse HEAD)": "abc123"})
+    mains = {"scripts/room_capability.py": capability_cli.main, "scripts/room_session.py": cli.main,
+             "scripts/room_verify_artifact.py": verify_cli.main}
+    assert [(script, argv[0]) for script, argv in commands] == [
+        ("scripts/room_capability.py", "init"), ("scripts/room_session.py", "preview"),
+        ("scripts/room_session.py", "live"), ("scripts/room_verify_artifact.py", "--manifest")]
+    outputs = []
+    for script, argv in commands:
+        if "$DIGEST" in argv:
+            manifest = json.loads((tmp_path / "runs" / "l0-test.manifest.json").read_text(encoding="utf-8"))
+            argv = [manifest["authorization_digest"] if token == "$DIGEST" else token for token in argv]
+        exit_code = mains[script](argv)
+        out, err = capsys.readouterr()
+        assert exit_code == 0, (script, err)
+        outputs.append(out.strip())
+    assert outputs[2] == "CONNECTIVITY_READY"
+    assert outputs[3] == "l0-test"
+    assert stack_fakes.sent_motor_commands(transport.tello.sent) == []
+
+
+def test_runbook_l0_preview_binds_the_canningst_site(monkeypatch):
+    # Task B item 7: L0 is bound to the CanningSt site L3 flies.
+    monkeypatch.chdir(REPO_ROOT)
+    commands = _runbook_commands(_runbook_l0_section(), {})
+    preview = next(argv for script, argv in commands if argv[0] == "preview")
+    parsed = cli.build_parser().parse_args(preview)
+    assert parsed.site == "fixtures/room_agent/v1/canningst-site.json"
+    site = json.loads((REPO_ROOT / parsed.site).read_text(encoding="utf-8"))
+    _, site_sha256, tag_map_sha256 = cli._preview_bindings(parsed)
+    assert (site_sha256, tag_map_sha256) == (site["cube_site_sha256"], site["tag_map_sha256"])
+    assert parsed.capability == "connectivity"
+
+
+def test_runbook_l0_states_prerequisites_expected_output_and_failure_meanings():
+    section = _runbook_l0_section()
+    for needle in (
+        "CONNECTIVITY_READY", live_stack.PROVIDER_KEY_ENV, live_stack.PROVIDER_MODEL_ENV,
+        live_stack.OPENROUTER_KEY_URL, "PYTHONPATH", "Tello Wi-Fi", "authorization_digest",
+        "drone_ready=False", "provider_ready=False", "stale telemetry", "stale reachability check",
+        "TimeoutError", "no filming consent recorded", "authorization_digest does not match",
+        "already exists", "missing gate: capability admission", "--connectivity-only",
+    ):
+        assert needle in section, needle
+
+
+FULL_FLIGHT_HEADING = "## 3. The full live count-and-return session"
+
+
+def _runbook_full_flight_section() -> str:
+    text = RUNBOOK_PATH.read_text(encoding="utf-8")
+    start = text.index(FULL_FLIGHT_HEADING)
+    end = text.find("\n## ", start + len(FULL_FLIGHT_HEADING))
+    return text[start:] if end == -1 else text[start:end]
+
+
+def _flag_value(text: str, flag: str) -> str | None:
+    import re
+
+    match = re.search(re.escape(flag) + r"\s+(\S+)", text)
+    return match.group(1) if match else None
+
+
+def test_runbook_full_flight_command_uses_l0s_tested_connectivity_timing():
+    # Q6: this command's own argparse defaults (5s/5s) always refuse a real
+    # flight (the real drone probe alone can take close to 20s), so it must
+    # be pinned to L0's tested values above rather than silently drifting
+    # back to them.
+    l0_section, full_flight_section = _runbook_l0_section(), _runbook_full_flight_section()
+    for flag in ("--connectivity-timeout-s", "--connectivity-max-age-s"):
+        l0_value, full_flight_value = _flag_value(l0_section, flag), _flag_value(full_flight_section, flag)
+        assert l0_value is not None, flag
+        assert full_flight_value == l0_value, (flag, l0_value, full_flight_value)
+    parsed = cli.build_parser().parse_args([
+        "live", "--execute", "--manifest", "m", "--authorization-digest", "d",
+        "--capability", "count_return", "--grant-registry", "r", "--run-root", "rr",
+    ])
+    assert str(parsed.connectivity_timeout_s) != _flag_value(full_flight_section, "--connectivity-timeout-s")
+    assert str(parsed.connectivity_max_age_s) != _flag_value(full_flight_section, "--connectivity-max-age-s")
 
 
 def test_default_request_text_matches_the_runbook():
@@ -989,3 +1346,235 @@ def test_connectivity_check_rejects_invalid_bounds():
         connectivity.check(drone_probe=_fake_probe(), provider_probe=_fake_probe(), max_age_s=0, timeout_s=1.0)
     with pytest.raises(connectivity.ConnectivityError):
         connectivity.check(drone_probe=_fake_probe(), provider_probe=_fake_probe(), max_age_s=1.0, timeout_s=-1)
+
+
+# ---------------------------------------------------------------------------
+# Task B item 5: one grant per capability
+# ---------------------------------------------------------------------------
+
+
+def _flight_files(tmp_path, site, *, profile_state="PROMOTED"):
+    from sentinel.room import live_session
+    site_path = tmp_path / "site.json"
+    site_path.write_text(json.dumps(room_site_document(site)), encoding="utf-8")
+    profile = replace(_promoted_profile(site_sha256=site.cube_site_sha256, aircraft_id=live_fakes.AIRCRAFT_ID),
+                      state=profile_state, holdout_run_ids=("h",) if profile_state == "PROMOTED" else ())
+    profile_path = tmp_path / "profile.json"
+    calibration.write_profile(profile_path, profile)
+    drift_path, energy_path, limits_path = tmp_path / "drift.json", tmp_path / "energy.json", tmp_path / "limits.json"
+    drift_path.write_text(json.dumps(asdict(live_fakes.drift_profile())), encoding="utf-8")
+    energy_path.write_text(json.dumps(asdict(live_fakes.energy_profile(site))), encoding="utf-8")
+    limits_path.write_text(json.dumps({"trim_rounds": 0, "localise": False}), encoding="utf-8")
+    binding = live_session.load_flight_binding(
+        site_path=site_path, drift_profile_path=drift_path, energy_profile_path=energy_path,
+        command_limits_path=limits_path, profile_paths=(profile_path,))
+    flags = ["--site", str(site_path), "--drift-profile", str(drift_path), "--energy-profile", str(energy_path),
+             "--command-limits", str(limits_path), "--profile-file", str(profile_path)]
+    return binding, flags, profile_path
+
+
+def test_one_binding_set_covers_the_profile_file_and_the_flight_calibrations(tmp_path):
+    from sentinel.room.supervisor import calibration_hashes
+    site = live_fakes.fixture_site()
+    binding, _, profile_path = _flight_files(tmp_path, site)
+    profile_hash = calibration.canonical_profile_sha256(calibration.load_profile(profile_path))
+    flight = calibration_hashes(live_fakes.energy_profile(site), live_fakes.drift_profile(),
+                                live_fakes.command_limits(), site)
+    assert binding.sha256s == tuple(sorted({profile_hash, *flight}))
+
+
+def test_issue_trial_binds_the_profile_files_once_and_preview_declares_the_same_set(tmp_path, capsys):
+    import scripts.room_capability as capability_cli
+    site = live_fakes.fixture_site()
+    binding, flags, _ = _flight_files(tmp_path, site, profile_state="CALIBRATION")
+    registry_path = tmp_path / "registry.json"
+    assert capability_cli.main(["init", "--registry", str(registry_path)]) == 0
+    capsys.readouterr()
+    assert capability_cli.main([
+        "issue-trial", "--capability", "count_return", "--trial-protocol", "l3-canningst",
+        "--aircraft-id", live_fakes.AIRCRAFT_ID, "--evidence-destination", "runs/l3",
+        "--expires-at", "2099-01-01T00:00:00+00:00", "--session-id", "run-0001",
+        "--registry", str(registry_path), *flags]) == 0
+    grant_sha256 = capsys.readouterr().out.strip()
+    grant, = capabilities.load_registry(registry_path).grants
+    assert grant.grant_sha256 == grant_sha256 and grant.state == "TRIAL"
+    assert tuple(sorted(grant.profile_sha256s)) == binding.sha256s
+    assert grant.site_sha256 == site.cube_site_sha256
+
+    manifest_out = tmp_path / "manifest.json"
+    argv = _preview_argv(tmp_path, **{"--capability-grant-sha256": grant_sha256, "--capability-grant-state": "TRIAL",
+                                      "--consent-reference": ["consent-1"],
+                                      "__flags__": ["--manifest-out", str(manifest_out), "--trial-protocol",
+                                                    "l3-canningst", "--evidence-destination", "runs/l3", *flags]})
+    argv = [value for index, value in enumerate(argv)
+            if value not in ("--site-sha256", "--tag-map-sha256")
+            and argv[index - 1] not in ("--site-sha256", "--tag-map-sha256")]
+    assert cli.main(argv) == 0
+    err = capsys.readouterr().err
+    manifest = artifacts.parse_manifest(manifest_out.read_bytes())
+    assert manifest.profile_sha256s == binding.sha256s
+    assert (manifest.site_sha256, manifest.tag_map_sha256) == (site.cube_site_sha256, site.tag_map_sha256)
+    # The one TRIAL grant admits this acceptance manifest: no missing capability gate.
+    assert "capability admission" not in err
+
+
+def test_issue_trial_refuses_a_partial_set_of_flight_files(tmp_path, capsys):
+    import scripts.room_capability as capability_cli
+    site = live_fakes.fixture_site()
+    _, flags, _ = _flight_files(tmp_path, site)
+    registry_path = tmp_path / "registry.json"
+    capability_cli.main(["init", "--registry", str(registry_path)])
+    capsys.readouterr()
+    exit_code = capability_cli.main([
+        "issue-trial", "--capability", "count_return", "--trial-protocol", "p", "--aircraft-id", "a",
+        "--evidence-destination", "d", "--expires-at", "2099-01-01T00:00:00+00:00", "--session-id", "run-0001",
+        "--registry", str(registry_path), *flags[:2]])
+    assert exit_code == 2
+    assert "bind the grant together" in capsys.readouterr().err
+
+
+def test_promote_refuses_profile_files_that_are_not_the_trial_binding(tmp_path, capsys):
+    import scripts.room_capability as capability_cli
+    site = live_fakes.fixture_site()
+    _, flags, _ = _flight_files(tmp_path, site, profile_state="CALIBRATION")
+    registry_path = tmp_path / "registry.json"
+    capability_cli.main(["init", "--registry", str(registry_path)])
+    capability_cli.main(["issue-trial", "--capability", "count_return", "--trial-protocol", "p",
+                         "--aircraft-id", live_fakes.AIRCRAFT_ID, "--evidence-destination", "d",
+                         "--expires-at", "2099-01-01T00:00:00+00:00", "--session-id", "run-0001",
+                         "--registry", str(registry_path), *flags])
+    trial = capsys.readouterr().out.strip().splitlines()[-1]
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"trial_grant_sha256": trial, "evidence_ids": ["ev-1"], "passed": True}),
+                     encoding="utf-8")
+    other_limits = tmp_path / "other-limits.json"
+    other_limits.write_text(json.dumps({"trim_rounds": 0, "localise": False, "dead_band_cm": 5}), encoding="utf-8")
+    changed = [other_limits.as_posix() if value.endswith("limits.json") else value for value in flags]
+    exit_code = capability_cli.main(["promote", "--registry", str(registry_path), "--trial-grant-sha256", trial,
+                                     "--evidence-index", str(index), "--expires-at", "2099-01-01T00:00:00+00:00",
+                                     "--now", NOW, *changed])
+    assert exit_code == 2 and "not the TRIAL grant's binding" in capsys.readouterr().err
+    assert capability_cli.main(["promote", "--registry", str(registry_path), "--trial-grant-sha256", trial,
+                                "--evidence-index", str(index), "--expires-at", "2099-01-01T00:00:00+00:00",
+                                "--now", NOW, *flags]) == 0
+
+
+def test_live_full_flight_takes_off_under_one_grant_bound_to_every_profile_file(tmp_path, capsys):
+    site = live_fakes.fixture_site()
+    binding, flags, profile_path = _flight_files(tmp_path, site)
+    grant = _promoted_grant(capability="count_return", site_sha256=site.cube_site_sha256,
+                            aircraft_id=live_fakes.AIRCRAFT_ID, profile_sha256s=binding.sha256s)
+    capabilities.write_registry(tmp_path / "registry.json", capabilities.GrantRegistry(
+        schema_version=capabilities.SCHEMA_VERSION, grants=(grant,)))
+    manifest_path, digest = _write_manifest(tmp_path, **{
+        "--capability-grant-sha256": grant.grant_sha256, "--profile": list(binding.sha256s),
+        "--site-sha256": site.cube_site_sha256, "--tag-map-sha256": site.tag_map_sha256,
+    })
+    site_path = tmp_path / "site.json"
+    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path,
+                           extra_flags=flags[2:8], site_path=site_path)
+    stack = live_fakes.FlightStackFactory()
+    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                         client_factory=stack, jev_factory=lambda: live_fakes.PolicyJudge("jev-vendor-x"),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    out, err = capsys.readouterr()
+    assert exit_code == 0, err
+    assert stack.executor.calls[0] == "TAKEOFF" and stack.executor.calls[-1] == "LAND"
+    assert not stack.emergencies
+
+
+# ---------------------------------------------------------------------------
+# Task B item 7: the L3 runbook sequence
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+L3_PREP_HEADING = "## L3 preparation: history profiles and one TRIAL grant"
+L3_HEADING = "## L3: count-and-return acceptance trial (c)"
+
+
+def _copy_repo_files(root: Path, *relative: str) -> None:
+    for name in relative:
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((REPO_ROOT / name).read_bytes())
+
+
+def _runbook_section(heading: str) -> str:
+    text = RUNBOOK_PATH.read_text(encoding="utf-8")
+    start = text.index(heading)
+    end = text.find("\n## ", start + len(heading))
+    return text[start:] if end == -1 else text[start:end]
+
+
+def test_runbook_l3_sequence_runs_end_to_end_under_one_trial_grant(tmp_path, capsys, monkeypatch):
+    # The L3 sections' own copy-paste commands, in order, from a scratch root
+    # holding the site, tag map and history profiles: issue-trial, preview,
+    # the assurances, the live trial (fake flight stack, Jev, detector and
+    # probes -- no hardware, no provider) and the artifact check.
+    import scripts.room_assurance as assurance_cli
+    import scripts.room_capability as capability_cli
+    import scripts.room_profiles_from_history as history_cli
+    import scripts.room_verify_artifact as verify_cli
+    from sentinel.survey.consent import record_consent
+    from sentinel.survey.store import SurveyStore
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "runs").mkdir()
+    profiles = "fixtures/room_agent/v1/profiles"
+    _copy_repo_files(tmp_path, "fixtures/room_agent/v1/canningst-site.json", "docs/wp5-flight3-map.json",
+                     *(f"{profiles}/canningst-{name}.json"
+                       for name in ("drift", "energy", "command-limits", "flight-profile", "policy")))
+    capability_cli.main(["init", "--registry", "runs/registry.json"])
+    store = SurveyStore.open(tmp_path / "runs" / "consent.sqlite3")
+    record_consent(store, location="CanningSt", consent_date="2026-09-23", recorded_by="operator")
+    store.connection.close()
+    capsys.readouterr()
+    substitutions = {"$RUN": "l3-test", "$TODAY": "2026-09-23", "$EXPIRES": "2099-01-01T00:00:00Z",
+                     "$(git rev-parse HEAD)": "abc123"}
+    commands = [command for heading in (L3_PREP_HEADING, L3_HEADING)
+                for command in _runbook_commands(_runbook_section(heading), substitutions)]
+    assert [(script, argv[0]) for script, argv in commands] == [
+        ("scripts/room_profiles_from_history.py", "--trials-root"),
+        ("scripts/room_capability.py", "issue-trial"), ("scripts/room_session.py", "preview"),
+        ("scripts/room_assurance.py", "--site"), ("scripts/room_session.py", "live"),
+        ("scripts/room_verify_artifact.py", "--manifest")]
+    stack = live_fakes.FlightStackFactory()
+    judge = live_fakes.PolicyJudge("jev:typesafe-ai/jev")
+    mains = {"scripts/room_capability.py": capability_cli.main, "scripts/room_assurance.py": assurance_cli.main,
+             "scripts/room_verify_artifact.py": verify_cli.main,
+             "scripts/room_session.py": lambda argv: cli.main(
+                 argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                 client_factory=stack, jev_factory=lambda: judge,
+                 detector_factory=_fake_collaborator("gemini-openrouter:google/gemini-test"))}
+    registry = lambda: json.loads((tmp_path / "runs" / "registry.json").read_text(encoding="utf-8"))
+    for script, argv in commands[1:]:  # the history re-derivation needs the real trials (tested elsewhere)
+        values = {"$GRANT": lambda: registry()["grants"][-1]["grant_sha256"],
+                  "$DIGEST": lambda: json.loads((tmp_path / "runs" / "l3-test.manifest.json")
+                                                .read_text(encoding="utf-8"))["authorization_digest"],
+                  "$TERMINAL": lambda: json.loads((tmp_path / "runs" / "l3-test" / "terminal.json")
+                                                  .read_text(encoding="utf-8"))["state"]}
+        argv = [values[token]() if token in values else token for token in argv]
+        exit_code = mains[script](argv)
+        out, err = capsys.readouterr()
+        assert exit_code == 0, (script, argv[0], err)
+        if argv[0] == "preview":
+            assert "missing gate" not in err  # the one TRIAL grant admits the acceptance manifest
+    grant, = registry()["grants"]
+    assert grant["state"] == "TRIAL" and grant["capability"] == "count_return"
+    terminal = json.loads((tmp_path / "runs" / "l3-test" / "terminal.json").read_text(encoding="utf-8"))
+    assert terminal["took_off"] is True and terminal["landing_state"] == "LANDED"
+    assert stack.executor.calls[0] == "TAKEOFF" and stack.executor.calls[-1] == "LAND"
+    assert "goal_family" in judge.names and "room_action" in judge.names
+
+
+def test_runbook_l3_states_the_checklist_before_the_motors_on_step():
+    section = _runbook_section(L3_HEADING)
+    checklist = section.index("Pre-flight checklist")
+    motors_on = section.index("python scripts/room_session.py live")
+    assert checklist < motors_on
+    for needle in ("at least **85 %**", "Clear distance **measured", "emergency stop",
+                   cli.DEFAULT_REQUEST_TEXT.split(",")[0]):
+        assert needle in " ".join(section.split()) or needle in section, needle
+    assert "L1" not in _runbook_section(L3_PREP_HEADING).replace("no L1 calibration", "")
+    text = RUNBOOK_PATH.read_text(encoding="utf-8")
+    assert text.index("## L2 safety trials (optional, after L3)") > text.index(L3_HEADING)

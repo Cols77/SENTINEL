@@ -276,7 +276,10 @@ class LocalizationTracker:
         # A heading error rotates the commanded displacement. Bound the chord
         # at the largest heading error over the leg, in addition to measured drift.
         heading_bound = health.heading_uncertainty_deg + (distance * profile.heading_drift_per_cm if profile else 0)
-        bearing_error = 2 * distance * math.sin(math.radians(min(180, heading_bound)) / 2)
+        # A heading error rotates only a horizontal displacement: a vertical
+        # climb or descent keeps its x/y whatever the yaw (Task B2).
+        horizontal = 0.0 if command.kind == "MOVE" and args.get("direction") in {"up", "down"} else distance
+        bearing_error = 2 * horizontal * math.sin(math.radians(min(180, heading_bound)) / 2)
         state = health.state if health.state in {LocalizationState.LOST, LocalizationState.RECOVERY_REQUIRED} else LocalizationState.COASTING
         return replace(health, state=state, position=position, heading_deg=heading,
             translation_cm=health.translation_cm + distance, yaw_deg=health.yaw_deg + yaw,

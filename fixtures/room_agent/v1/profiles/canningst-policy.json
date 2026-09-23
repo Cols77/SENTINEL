@@ -1,0 +1,55 @@
+{
+  "schema_version": "room-history-profile-policy-v1",
+  "profile_id": "canningst-history-20260923",
+  "aircraft_id": "tello-canningst",
+  "firmware_version": null,
+  "camera_sha256": null,
+  "battery_margin_percent_per_s": 0.02,
+  "battery_quantization_allowance_percent": 1.0,
+  "battery_percentile": 90,
+  "min_battery_window_s": 30,
+  "landing_floor_percent": 20,
+  "telemetry_allowance_pct": 1,
+  "sample_max_age_s": 5.0,
+  "height_error_margin_cm": 10,
+  "robust_drift": {"percentile": 90, "margin_fraction": 0.2},
+  "excluded_runs": {
+    "20260923-122157-reanchor": "Outside the operating envelope: took off at 51 % (42 % right after takeoff) and 76-77 C, below the runbook's 50 % pre-flight floor, and ended on the Tello's own 'error Auto land' at 10 % during the RETURN correction (docs/wp5-bigbang-2026-09-23.md in the integration worktree). Its first leg carries the 0.45 cm/cm outlier (54.7 cm open-loop error) and its battery reading collapses nonlinearly below 30 %."
+  },
+  "declared_overrides": {
+    "xy_drift_per_cm": {
+      "value": 0.157471,
+      "statistic": "p90 of per-leg open-loop error / commanded path since the last tag fix, 7 legs of the 2 nominal flights, + 20 % margin",
+      "justification": "Task B2: the worst single leg (0.45 cm/cm, 2026-09-23 12:21 first leg) comes from a run excluded above; the old per-leg ratio also divided by the straight-line distance from the previous waypoint, not the path flown since the last fix the tracker resets on. The robust statistic over the nominal legs is 0.1312 cm/cm; with a 20 % margin 0.1575."
+    }
+  },
+  "declared_notes": {
+    "xy_drift_cm_s": "Task B2 fix 1, operator judgment (not a measurement; the 0.1 it replaces was not one either): hover drift 0.05 cm/s. The history cannot measure it (the stop bursts last about 2 s, noise-dominated), and the robust per-leg statistic above already bounds every nominal leg's open-loop error, including the hover time inside that leg, without any hover term. The tracker charges this rate again over every command's worst-case bound (SET_SPEED 21 s, vertical telemetry 7 s, ...). At 0.1 cm/s no lateral CanningSt observation is admissible at the history drift; at 0.05 cm/s the left/right observations at x 226/274 are."
+  },
+  "drift_limits": {
+    "max_camera_age_s": 240,
+    "max_fix_age_s": 300,
+    "max_estimator_failures": 3,
+    "max_look_away_s": 240,
+    "max_translation_cm": 300,
+    "max_yaw_deg": 360,
+    "max_xy_uncertainty_cm": 30,
+    "max_heading_uncertainty_deg": 15,
+    "xy_drift_cm_s": 0.05,
+    "xy_drift_per_yaw_deg": 0.05,
+    "heading_drift_deg_s": 0.05,
+    "heading_drift_per_yaw_deg": 0.02,
+    "max_fix_age_on_arrival_s": 2,
+    "max_fix_jump_cm": 75,
+    "max_fix_heading_jump_deg": 20,
+    "recovery_deadline_s": 40,
+    "max_recovery_attempts": 3,
+    "min_burst_reports": 8,
+    "max_burst_spread_cm": 10,
+    "max_burst_heading_spread_deg": 8,
+    "rotation_radius_cm": 12,
+    "recovery_action_upper_bound_s": 15,
+    "canonical_heading_tolerance_deg": 10
+  },
+  "command_limits": {"trim_rounds": 0, "localise": false}
+}

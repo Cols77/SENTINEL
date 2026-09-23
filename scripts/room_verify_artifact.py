@@ -33,6 +33,12 @@ from the manifest, never guessed or derived separately from it):
   drifted identity record.
 - ``--require-event`` (repeatable): each named event type must appear at
   least once in the durable event log.
+
+``--connectivity-only`` (instead of ``--expect-terminal``) verifies an L0
+motors-off connectivity run, which never finalizes ``terminal.json``: the
+manifest, event-hash, profile and ``--require-event`` checks above, then the
+run's latest ``CONNECTIVITY_CHECKED`` event must be a ready
+``--check-connectivity-only`` preflight.
 """
 from __future__ import annotations
 
@@ -94,42 +100,25 @@ def _resolved_identities_from_events(events) -> dict:
     return resolved
 
 
-def verify(*, manifest_path: Path, expect_terminal: str, expect_capability: str,
-          require_event: tuple[str, ...] = (), profile_files: tuple[str, ...] = ()) -> str:
-    """Run every check; returns the verified run_id, or raises VerificationError."""
+def _bound_manifest(manifest_path: Path, expect_capability: str):
+    """The manifest (digest-checked by ``parse_manifest``), stored under its own run_id directory."""
     manifest = artifacts.parse_manifest(manifest_path.read_bytes())
-    run_id = manifest.run_id
     run_dir = manifest_path.parent
-    if run_dir.name != run_id:
+    if run_dir.name != manifest.run_id:
         raise VerificationError(
             f"manifest is not stored under its own run_id directory "
-            f"(expected {run_id!r}, found {run_dir.name!r})"
+            f"(expected {manifest.run_id!r}, found {run_dir.name!r})"
         )
     if manifest.requested_capability != expect_capability:
         raise VerificationError(
             f"manifest requested_capability {manifest.requested_capability!r} "
             f"does not match --expect-capability {expect_capability!r}"
         )
-    terminal_path = run_dir / "terminal.json"
-    if not terminal_path.exists():
-        raise VerificationError("run directory has no terminal.json")
-    try:
-        terminal_document = json.loads(terminal_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise VerificationError(f"terminal.json is not valid JSON: {exc}") from exc
-    if not isinstance(terminal_document, dict):
-        raise VerificationError("terminal.json must be a JSON object")
-    if terminal_document.get("run_id") != run_id:
-        raise VerificationError("terminal.json run_id does not match the manifest's run_id")
-    state = terminal_document.get("state")
-    if state != expect_terminal:
-        raise VerificationError(f"terminal state {state!r} does not match --expect-terminal {expect_terminal!r}")
-    if state in _SAFE_TERMINATION_STATES and not terminal_document.get("completed_at"):
-        raise VerificationError(
-            f"terminal state {state!r} is a safe-termination state but terminal.json "
-            "records no completed_at evidence of an actual confirmed landing"
-        )
+    return manifest, run_dir
 
+
+def _verified_events(run_dir: Path, run_id: str):
+    """Every durable event, contiguous from 1 and each independently re-hashed."""
     sqlite_path = run_dir / "session.sqlite3"
     if not sqlite_path.exists():
         raise VerificationError("run directory has no session.sqlite3")
@@ -158,18 +147,10 @@ def verify(*, manifest_path: Path, expect_terminal: str, expect_capability: str,
         )
         if recomputed != event.event_sha256:
             raise VerificationError(f"event {event.event_id} hash does not match its durable content")
-    if state in _SAFE_TERMINATION_STATES and not _has_durable_landing_evidence(events):
-        raise VerificationError(
-            f"terminal state {state!r} is a safe-termination state but the durable event log has no "
-            "DRONE_STATE_RECORDED evidence of a confirmed landing (terminal_state=LANDED, completion_known)"
-        )
+    return events
 
-    resolved = _resolved_identities_from_events(events)
-    if resolved != terminal_document.get("resolved_identities", {}):
-        raise VerificationError(
-            "terminal.json resolved_identities do not match the durable event log (mismatched identity)"
-        )
 
+def _check_profiles_and_events(manifest, events, *, require_event, profile_files) -> None:
     declared_profiles = set(manifest.profile_sha256s)
     for path in profile_files:
         try:
@@ -185,6 +166,73 @@ def verify(*, manifest_path: Path, expect_terminal: str, expect_capability: str,
     for event_type in require_event:
         if not any(event.event_type == event_type for event in events):
             raise VerificationError(f"required event type {event_type!r} is missing from the run")
+
+
+def verify_connectivity(*, manifest_path: Path, expect_capability: str, require_event: tuple[str, ...] = (),
+                        profile_files: tuple[str, ...] = ()) -> str:
+    """Verify an L0 run: a motors-off connectivity diagnostic, which never
+    finalizes a ``terminal.json`` (a later flight may still share the run).
+
+    The same manifest, run-directory, event-integrity, profile and
+    ``--require-event`` checks as ``verify``; then the run's latest
+    ``CONNECTIVITY_CHECKED`` event must be a ready ``--check-connectivity-only``
+    preflight.
+    """
+    manifest, run_dir = _bound_manifest(manifest_path, expect_capability)
+    events = _verified_events(run_dir, manifest.run_id)
+    _check_profiles_and_events(manifest, events, require_event=require_event, profile_files=profile_files)
+    checks = [event for event in events if event.event_type == "CONNECTIVITY_CHECKED"]
+    if not checks:
+        raise VerificationError("run has no CONNECTIVITY_CHECKED event")
+    latest = checks[-1].payload
+    if latest.get("check_connectivity_only") is not True:
+        raise VerificationError("the run's latest connectivity preflight was not a --check-connectivity-only run")
+    if latest.get("ready") is not True:
+        raise VerificationError("the run's latest connectivity preflight was not ready "
+                                f"(drone_error={latest.get('drone_error')}, "
+                                f"provider_error={latest.get('provider_error')})")
+    return manifest.run_id
+
+
+def verify(*, manifest_path: Path, expect_terminal: str, expect_capability: str,
+          require_event: tuple[str, ...] = (), profile_files: tuple[str, ...] = ()) -> str:
+    """Run every check; returns the verified run_id, or raises VerificationError."""
+    manifest, run_dir = _bound_manifest(manifest_path, expect_capability)
+    run_id = manifest.run_id
+    terminal_path = run_dir / "terminal.json"
+    if not terminal_path.exists():
+        raise VerificationError("run directory has no terminal.json")
+    try:
+        terminal_document = json.loads(terminal_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise VerificationError(f"terminal.json is not valid JSON: {exc}") from exc
+    if not isinstance(terminal_document, dict):
+        raise VerificationError("terminal.json must be a JSON object")
+    if terminal_document.get("run_id") != run_id:
+        raise VerificationError("terminal.json run_id does not match the manifest's run_id")
+    state = terminal_document.get("state")
+    if state != expect_terminal:
+        raise VerificationError(f"terminal state {state!r} does not match --expect-terminal {expect_terminal!r}")
+    if state in _SAFE_TERMINATION_STATES and not terminal_document.get("completed_at"):
+        raise VerificationError(
+            f"terminal state {state!r} is a safe-termination state but terminal.json "
+            "records no completed_at evidence of an actual confirmed landing"
+        )
+
+    events = _verified_events(run_dir, run_id)
+    if state in _SAFE_TERMINATION_STATES and not _has_durable_landing_evidence(events):
+        raise VerificationError(
+            f"terminal state {state!r} is a safe-termination state but the durable event log has no "
+            "DRONE_STATE_RECORDED evidence of a confirmed landing (terminal_state=LANDED, completion_known)"
+        )
+
+    resolved = _resolved_identities_from_events(events)
+    if resolved != terminal_document.get("resolved_identities", {}):
+        raise VerificationError(
+            "terminal.json resolved_identities do not match the durable event log (mismatched identity)"
+        )
+
+    _check_profiles_and_events(manifest, events, require_event=require_event, profile_files=profile_files)
 
     # Fix round 1 (Q8): cross-check summary.json (RunArtifacts.finalize's own
     # second, independently-written record of this run) against what was just
@@ -217,7 +265,10 @@ def verify(*, manifest_path: Path, expect_terminal: str, expect_capability: str,
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="room_verify_artifact")
     parser.add_argument("--manifest", required=True)
-    parser.add_argument("--expect-terminal", required=True, choices=tuple(state.value for state in TerminalState))
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--expect-terminal", choices=tuple(state.value for state in TerminalState))
+    # An L0 motors-off connectivity run: verified without a terminal.json.
+    mode.add_argument("--connectivity-only", action="store_true")
     parser.add_argument("--expect-capability", required=True)
     parser.add_argument("--require-event", action="append", default=[])
     parser.add_argument("--profile-file", action="append", default=[])
@@ -227,12 +278,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    common = {"manifest_path": Path(args.manifest), "expect_capability": args.expect_capability,
+              "require_event": tuple(args.require_event), "profile_files": tuple(args.profile_file)}
     try:
-        run_id = verify(
-            manifest_path=Path(args.manifest), expect_terminal=args.expect_terminal,
-            expect_capability=args.expect_capability, require_event=tuple(args.require_event),
-            profile_files=tuple(args.profile_file),
-        )
+        if args.connectivity_only:
+            run_id = verify_connectivity(**common)
+        else:
+            run_id = verify(expect_terminal=args.expect_terminal, **common)
     except (VerificationError, ManifestError, OSError, sqlite3.Error) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2

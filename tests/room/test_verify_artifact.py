@@ -340,3 +340,78 @@ def test_verify_function_raises_verification_error_directly(tmp_path):
 def test_verify_rejects_an_unknown_expect_terminal_via_argparse():
     with pytest.raises(SystemExit):
         verify_cli.main(["--manifest", "nope.json", "--expect-terminal", "BOGUS", "--expect-capability", "x"])
+
+
+# ---------------------------------------------------------------------------
+# --connectivity-only: an L0 run (a connectivity preflight, never a terminal)
+# ---------------------------------------------------------------------------
+
+
+def _connectivity_run(tmp_path, *, ready=True, connectivity_only=True, checks=1):
+    run = _open_run(tmp_path, requested_capability="connectivity")
+    for _ in range(checks):
+        run.append_event("CONNECTIVITY_CHECKED", {
+            "ready": ready, "drone_ready": ready, "provider_ready": True,
+            "drone_identity": "tello 192.168.10.1 sdk=30 battery=87% height=0cm" if ready else None,
+            "provider_identity": "openrouter:google/gemini-test", "drone_checked_at": 1.0 if ready else None,
+            "provider_checked_at": 1.0, "drone_error": None if ready else "TimeoutError: no reply",
+            "provider_error": None, "max_age_s": 5.0, "timeout_s": 5.0,
+            "check_connectivity_only": connectivity_only,
+        }, now=NOW)
+    run.close()
+    return tmp_path / "run-0001" / "manifest.json"
+
+
+def _verify_l0(manifest_path, *extra):
+    return verify_cli.main(["--manifest", str(manifest_path), "--connectivity-only",
+                            "--expect-capability", "connectivity", *extra])
+
+
+def test_verify_connectivity_only_accepts_a_ready_l0_run_without_a_terminal(tmp_path, capsys):
+    manifest_path = _connectivity_run(tmp_path)
+    assert not (manifest_path.parent / "terminal.json").exists()
+    assert _verify_l0(manifest_path) == 0
+    assert capsys.readouterr().out.strip() == "run-0001"
+
+
+@pytest.mark.parametrize("ready, connectivity_only", [(False, True), (True, False)])
+def test_verify_connectivity_only_refuses_unless_the_latest_check_is_a_ready_l0(tmp_path, capsys, ready,
+                                                                               connectivity_only):
+    manifest_path = _connectivity_run(tmp_path, ready=ready, connectivity_only=connectivity_only)
+    assert _verify_l0(manifest_path) == 2
+    assert "connectivity" in capsys.readouterr().err
+
+
+def test_verify_connectivity_only_refuses_a_run_with_no_preflight(tmp_path, capsys):
+    run = _open_run(tmp_path, requested_capability="connectivity")
+    run.close()
+    assert _verify_l0(tmp_path / "run-0001" / "manifest.json") == 2
+    assert "zero durable events" in capsys.readouterr().err
+
+
+def test_verify_connectivity_only_still_rehashes_every_event(tmp_path, capsys):
+    manifest_path = _connectivity_run(tmp_path)
+    connection = sqlite3.connect(manifest_path.parent / "session.sqlite3")
+    try:
+        connection.execute("DROP TRIGGER room_events_no_update")
+        connection.execute("UPDATE room_events SET payload_json = '{\"ready\":true}' "
+                           "WHERE event_type = 'CONNECTIVITY_CHECKED'")
+        connection.commit()
+    finally:
+        connection.close()
+    assert _verify_l0(manifest_path) == 2
+    assert "hash does not match" in capsys.readouterr().err
+
+
+def test_verify_connectivity_only_checks_the_manifest_capability(tmp_path, capsys):
+    manifest_path = _connectivity_run(tmp_path)
+    exit_code = verify_cli.main(["--manifest", str(manifest_path), "--connectivity-only",
+                                 "--expect-capability", "count_return"])
+    assert exit_code == 2
+    assert "expect-capability" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mode_flags", [[], ["--connectivity-only", "--expect-terminal", "COMPLETED"]])
+def test_verify_takes_exactly_one_of_expect_terminal_or_connectivity_only(mode_flags):
+    with pytest.raises(SystemExit):
+        verify_cli.main(["--manifest", "nope.json", "--expect-capability", "x", *mode_flags])

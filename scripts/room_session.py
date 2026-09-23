@@ -7,14 +7,18 @@ credential, header, file content or environment value.
 Capability-flight-capable factories (``client_factory``/``jev_factory``/
 ``detector_factory``, plus the two connectivity probes) are injected
 through ``main()``'s keyword-only parameters, the same dependency-injection
-convention ``scripts/room_calibrate.py`` uses for its executor. Every one
-defaults to a factory that refuses outright: this build never wires a real
-Tello/provider client, judgment model or detector into a live session, so a
-real one can only be constructed if a caller deliberately overrides the
-default -- which this script never does on its own, and this file's own
-tests never do either. Every gate below (manifest authorization, capability
-admission, matching profiles, consent, site assurance, connectivity) is
-checked and enforced *before* any of those factories is ever called.
+convention ``scripts/room_calibrate.py`` uses for its executor. Task A: the
+two probes and ``client_factory`` default to the real-Tello adapters in
+``sentinel.room.live_stack`` -- a motors-off telemetry probe and a flight
+stack sharing one Tello connection, and an OpenRouter reachability probe.
+The full flight's default stack also needs ``--tag-map``, bound to the
+manifest's ``tag_map_sha256``. Task B: ``jev_factory``/``detector_factory``
+default to the live Jev judge and the gemini-openrouter detector
+(``live_stack.default_jev``/``default_detector``), which refuse without
+``OPENROUTER_API_KEY``/``GEMINI_OPENROUTER_MODEL``. Every gate below (manifest authorization, capability
+admission, matching profiles, consent, site assurance, tag map,
+connectivity) is checked and enforced *before* any of those defaults is
+built or called.
 
 Fix round 4 (Q2): one ``live`` invocation authorizes and runs the bounded
 count-and-return session. After every gate and a ready preflight, Jev and
@@ -41,9 +45,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from sentinel.room import artifacts, calibration, capabilities, connectivity, live_session, replay
+from sentinel.emergency import EmergencyHotkey
+from sentinel.room import (artifacts, calibration, capabilities, connectivity, live_session, live_stack, replay,
+                           wiring)
 from sentinel.room.artifacts import ArtifactError, ManifestError, SessionManifest
+from sentinel.room.controller import AcceptancePolicy
 from sentinel.room.site import ContingencyTrigger, RoomSite, parse_room_site
+from sentinel.room.supervisor import calibration_hashes
 from sentinel.survey.live_detect import LiveDetectRefused, check_gates as check_consent_gates
 
 #: The count-and-return operator's default request text (Plan 06 ruling): the
@@ -68,39 +76,45 @@ class GateError(RuntimeError):
     """A live-mode authorization gate (capability, profile, consent, site) refused."""
 
 
-def _refuse_drone_probe() -> "connectivity.ProbeResult":
-    raise RuntimeError(
-        "connectivity check requires an injected drone_probe; this build never constructs "
-        "a real Tello telemetry probe on its own"
-    )
+class _ArmedFlightStackFactory:
+    """Wrap a flight-stack factory to arm the operator's motor-stop hotkey.
+
+    Q1: every other real-flight path in this codebase arms
+    ``EmergencyHotkey(runner.trigger_emergency)`` (``sentinel.cli``'s
+    ``cube-run --real``); nothing in ``sentinel.room`` did, although
+    ``FlightStack.emergency`` is only a forced landing, never the direct
+    motor stop. This arms one for the whole flight, from stack construction
+    until landing/close, whenever the built stack exposes
+    ``trigger_emergency`` (the real Tello stack does; fakes and replay do
+    not, and are left unarmed).
+    """
+
+    def __init__(self, inner: Callable[..., "live_session.FlightStack"]) -> None:
+        self._inner = inner
+        self.hotkey: EmergencyHotkey | None = None
+
+    def __call__(self, **kwargs) -> "live_session.FlightStack":
+        stack = self._inner(**kwargs)
+        trigger = getattr(stack, "trigger_emergency", None)
+        if trigger is not None:
+            print("EMERGENCY: press E to stop motors immediately.", file=sys.stderr)
+            self.hotkey = EmergencyHotkey(trigger)
+            self.hotkey.start()
+        return stack
+
+    def stop(self) -> None:
+        if self.hotkey is not None:
+            self.hotkey.stop()
 
 
-def _refuse_provider_probe() -> "connectivity.ProbeResult":
-    raise RuntimeError(
-        "connectivity check requires an injected provider_probe; this build never constructs "
-        "a real provider reachability probe on its own"
-    )
+def _default_jev() -> object:
+    """Task B (L3): the live Jev judge, built only after every gate and a ready preflight."""
+    return live_stack.default_jev()
 
 
-def _refuse_client(**_bindings) -> "live_session.FlightStack":
-    raise RuntimeError(
-        "live flight requires an injected client_factory; this build never constructs a "
-        "real Tello flight stack on its own"
-    )
-
-
-def _refuse_jev() -> object:
-    raise RuntimeError(
-        "live flight requires an injected jev_factory; this build never constructs a "
-        "real judgment model on its own"
-    )
-
-
-def _refuse_detector() -> object:
-    raise RuntimeError(
-        "live flight requires an injected detector_factory; this build never constructs a "
-        "real detector on its own"
-    )
+def _default_detector() -> object:
+    """Task B (L3): the live gemini-openrouter detector, built only after every gate."""
+    return live_stack.default_detector()
 
 
 def _parse_now(raw: str | None) -> datetime:
@@ -143,6 +157,48 @@ def _missing_gates(manifest: SessionManifest, *, registry_path: str, now: dateti
     return tuple(gates)
 
 
+def _preview_bindings(args: argparse.Namespace) -> tuple[tuple[str, ...], str, str]:
+    """The manifest's profile/site/tag-map bindings for preview.
+
+    Task B item 5: given the flight files (``--site``, ``--drift-profile``,
+    ``--energy-profile``, optional ``--command-limits`` and
+    ``--profile-file``), the profile set is the single grant's binding set
+    (``live_session.FlightBinding.sha256s``) and the site/tag-map hashes come
+    from the site document -- the same files ``room_capability.py
+    issue-trial`` bound the grant to. Raw ``--profile``/``--site-sha256``/
+    ``--tag-map-sha256`` values still work and must agree with the files.
+    """
+    profiles = set(args.profile)
+    site_sha256, tag_map_sha256 = args.site_sha256, args.tag_map_sha256
+    files = (args.site, args.drift_profile, args.energy_profile)
+    if args.site and not (args.drift_profile or args.energy_profile or args.profile_file or args.command_limits):
+        # A site alone (the motors-off L0 manifest) binds only its own hashes.
+        try:
+            site = parse_room_site(json.loads(Path(args.site).read_text(encoding="utf-8")))
+        except (OSError, ValueError) as exc:
+            raise GateError(f"--site could not be loaded: {exc}") from exc
+        for name, value, derived in (("--site-sha256", site_sha256, site.cube_site_sha256),
+                                     ("--tag-map-sha256", tag_map_sha256, site.tag_map_sha256)):
+            if value is not None and value != derived:
+                raise GateError(f"{name} does not match --site")
+        return tuple(sorted(profiles)), site.cube_site_sha256, site.tag_map_sha256
+    if any(files) or args.profile_file or args.command_limits:
+        if not all(files):
+            raise GateError("--site, --drift-profile and --energy-profile bind the grant together")
+        binding = live_session.load_flight_binding(
+            site_path=args.site, drift_profile_path=args.drift_profile, energy_profile_path=args.energy_profile,
+            command_limits_path=args.command_limits, profile_paths=tuple(args.profile_file))
+        profiles |= set(binding.sha256s)
+        for name, value, derived in (("--site-sha256", site_sha256, binding.site.cube_site_sha256),
+                                     ("--tag-map-sha256", tag_map_sha256, binding.site.tag_map_sha256)):
+            if value is not None and value != derived:
+                raise GateError(f"{name} does not match --site")
+        site_sha256, tag_map_sha256 = binding.site.cube_site_sha256, binding.site.tag_map_sha256
+    if site_sha256 is None or tag_map_sha256 is None:
+        raise GateError("--site-sha256 and --tag-map-sha256 (or --site) are required")
+    return tuple(sorted(profiles)), site_sha256, tag_map_sha256
+
+
 def _cmd_preview(args: argparse.Namespace) -> int:
     try:
         _check_capability_available(args.capability)
@@ -167,14 +223,20 @@ def _cmd_preview(args: argparse.Namespace) -> int:
         return 2
     mode = _resolve_mode(target_mode=args.target_mode, trial_protocol=args.trial_protocol)
     try:
+        profile_sha256s, site_sha256, tag_map_sha256 = _preview_bindings(args)
+    except (GateError, live_session.LiveSessionError) as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+    try:
         manifest = SessionManifest(
             schema_version=artifacts.SCHEMA_VERSION, run_id=args.run_id, created_at=now.isoformat(),
             mode=mode, code_revision=args.code_revision, code_dirty=args.code_dirty,
             integration_revision=args.integration_revision, requested_capability=args.capability,
             capability_grant_sha256=args.capability_grant_sha256, capability_grant_state=args.capability_grant_state,
             request_revision=args.request_revision, goal_parser_revision=args.goal_parser_revision,
-            site_sha256=args.site_sha256, tag_map_sha256=args.tag_map_sha256, camera_sha256=args.camera_sha256,
-            profile_sha256s=tuple(sorted(args.profile)), aircraft_id=args.aircraft_id,
+            site_sha256=site_sha256, tag_map_sha256=tag_map_sha256,
+            camera_sha256=args.camera_sha256 or wiring.camera_model_sha256(),
+            profile_sha256s=profile_sha256s, aircraft_id=args.aircraft_id,
             firmware_version=args.firmware_version, requested_jev_identity=args.requested_jev_identity,
             resolved_jev_identity="UNVERIFIED", requested_detector_identity=args.requested_detector_identity,
             resolved_detector_identity="UNVERIFIED", max_duration_s=args.max_duration_s,
@@ -225,7 +287,7 @@ def _cmd_preview(args: argparse.Namespace) -> int:
             f"--capability {args.capability} --grant-registry {args.grant_registry} "
             "--consent-db <consent-db-path> --location <location> --date <YYYY-MM-DD> "
             "--i-authorise-paid-calls --profile-file <profile-file-path> "
-            "--site <site-path> --assurance <assurance-file-path> "
+            "--site <site-path> --tag-map <tag-map-path> --assurance <assurance-file-path> "
             "--clock-domain-id <clock-domain-id> --drift-profile <drift-profile-path> "
             "--energy-profile <energy-profile-path> --command-limits <command-limits-path> "
             "--run-root <run-artifact-root>"
@@ -234,9 +296,14 @@ def _cmd_preview(args: argparse.Namespace) -> int:
     return 0
 
 
-def _check_profiles(manifest: SessionManifest, profile_files: list[str], *, grant_state: str) -> tuple:
-    """Verify every declared profile has an admissible file; return the loaded profiles."""
-    declared = set(manifest.profile_sha256s)
+def _check_profiles(manifest: SessionManifest, profile_files: list[str], *, grant_state: str,
+                    covered: set[str] = frozenset()) -> tuple:
+    """Verify every declared profile has an admissible file; return the loaded profiles.
+
+    ``covered`` (Task B item 5) are declared hashes already accounted for by
+    the flight calibration files (``calibration_hashes`` of the loaded
+    energy/drift/limits/site), so they need no ``--profile-file``."""
+    declared = set(manifest.profile_sha256s) - set(covered)
     if not declared:
         return ()
     seen = set()
@@ -343,11 +410,22 @@ def _load_flight_calibration(args: argparse.Namespace):
         raise GateError(str(exc)) from exc
 
 
+def _load_bound_tag_map(args: argparse.Namespace, manifest: SessionManifest):
+    """The default flight stack's tag map, bound to the manifest's ``tag_map_sha256``
+    (``--site`` is already bound to the same hash)."""
+    if not args.tag_map:
+        raise GateError("--tag-map is required for the default real-Tello flight stack")
+    try:
+        return live_stack.load_bound_tag_map(args.tag_map, expected_sha256=manifest.tag_map_sha256)
+    except (live_stack.LiveStackError, OSError) as exc:
+        raise GateError(str(exc)) from exc
+
+
 def _cmd_live(
     args: argparse.Namespace, *,
-    drone_probe: Callable[[], connectivity.ProbeResult],
-    provider_probe: Callable[[], connectivity.ProbeResult],
-    client_factory: Callable[..., "live_session.FlightStack"],
+    drone_probe: Callable[[], connectivity.ProbeResult] | None,
+    provider_probe: Callable[[], connectivity.ProbeResult] | None,
+    client_factory: Callable[..., "live_session.FlightStack"] | None,
     jev_factory: Callable[[], object],
     detector_factory: Callable[[], object],
     clock: Callable[[], float],
@@ -405,7 +483,6 @@ def _cmd_live(
             print(f"refused: {exc}", file=sys.stderr)
             return 2
         try:
-            calibration_profiles = _check_profiles(manifest, args.profile_file, grant_state=winning_grant.state)
             # Fix round 1 (Q6): site-assurance freshness is a monotonic-clock-domain
             # comparison (assured_monotonic_ms/expires_monotonic_ms) -- evaluate it
             # against the injected monotonic `clock`, the same one connectivity below
@@ -415,6 +492,14 @@ def _cmd_live(
                 args.site, args.assurance, manifest=manifest, clock_domain_id=args.clock_domain_id,
                 now_monotonic_ms=int(clock() * 1000))
             drift_profile, energy_profile, limits = _load_flight_calibration(args)
+            # Task B item 5: one grant binds the calibration profile files AND the
+            # exact energy/drift/limits/site flown with; the manifest's declared
+            # profile_sha256s may therefore include those flight hashes, which the
+            # flight files just loaded (not a --profile-file) account for.
+            calibration_profiles = _check_profiles(
+                manifest, args.profile_file, grant_state=winning_grant.state,
+                covered=set(calibration_hashes(energy_profile, drift_profile, limits, site)))
+            tag_map = _load_bound_tag_map(args, manifest) if client_factory is None else None
         except GateError as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 2
@@ -431,7 +516,18 @@ def _cmd_live(
     except (ArtifactError, OSError) as exc:
         print(f"refused: run artifact could not be opened: {exc}", file=sys.stderr)
         return 2
+    link = None
     try:
+        # Past every gate: the live defaults are built only now. The default
+        # drone probe and flight stack share one Tello connection (DJITelloPy's
+        # receivers are process-global), made on the probe's first call.
+        if drone_probe is None or client_factory is None:
+            link = live_stack.TelloLink(local_ip=args.local_ip, clock=clock)
+        if drone_probe is None:
+            drone_probe = link.probe
+        if provider_probe is None:
+            def provider_probe():
+                return live_stack.openrouter_provider_probe(clock=clock)
         # Past every capability/consent/(site) gate. A motors-off connectivity
         # preflight always runs before takeoff -- proving fresh drone telemetry
         # and provider reachability concurrently -- whether this is the explicit
@@ -469,6 +565,11 @@ def _cmd_live(
         # the detector are constructed (only ever real if a caller overrides
         # the refuse-by-default factories) and their own reported identities
         # are durably recorded before anything can fly.
+        try:
+            acceptance = AcceptancePolicy(**json.loads(getattr(args, "jev_acceptance_json", None) or "{}"))
+        except (TypeError, ValueError) as exc:
+            print(f"refused: invalid --jev-acceptance-json: {exc}", file=sys.stderr)
+            return 2
         try:
             judge = jev_factory()
             detector = detector_factory()
@@ -508,22 +609,33 @@ def _cmd_live(
                 "rechecked_at": takeoff_now, "max_age_s": args.connectivity_max_age_s,
             }, now=wall_clock())
 
+        if client_factory is None:
+            client_factory = live_stack.TelloFlightStackFactory(
+                link=link, tag_map=tag_map, run_id=manifest.run_id, run_dir=run.root,
+                max_duration_s=manifest.max_duration_s)
+        # Q1: arm the operator's motor-stop hotkey for the whole flight, from
+        # stack construction until landing/close (stopped in the finally
+        # below). See _ArmedFlightStackFactory.
+        armed_factory = _ArmedFlightStackFactory(client_factory)
         try:
-            outcome = live_session.run_count_return(
-                store=run.store, manifest=manifest, site=site, drift_profile=drift_profile,
-                energy_profile=energy_profile, limits=limits, calibration_profiles=calibration_profiles,
-                flight_stack_factory=client_factory, judge=judge, detector=detector,
-                assurances=verified_assurances, request_text=DEFAULT_REQUEST_TEXT,
-                frames_dir=run.root / "frames", clock=clock, wall_clock=wall_clock,
-                before_takeoff=before_takeoff,
-            )
-        except live_session.LiveSessionError as exc:
             try:
-                run.append_event("LIVE_SESSION_REFUSED", {"reason": str(exc)}, now=wall_clock())
-            except (ArtifactError, OSError):
-                pass
-            print(f"refused: {exc}", file=sys.stderr)
-            return 2
+                outcome = live_session.run_count_return(
+                    store=run.store, manifest=manifest, site=site, drift_profile=drift_profile,
+                    energy_profile=energy_profile, limits=limits, calibration_profiles=calibration_profiles,
+                    flight_stack_factory=armed_factory, judge=judge, detector=detector,
+                    assurances=verified_assurances, request_text=DEFAULT_REQUEST_TEXT,
+                    frames_dir=run.root / "frames", clock=clock, wall_clock=wall_clock,
+                    before_takeoff=before_takeoff, acceptance=acceptance,
+                )
+            except live_session.LiveSessionError as exc:
+                try:
+                    run.append_event("LIVE_SESSION_REFUSED", {"reason": str(exc)}, now=wall_clock())
+                except (ArtifactError, OSError):
+                    pass
+                print(f"refused: {exc}", file=sys.stderr)
+                return 2
+        finally:
+            armed_factory.stop()
         landing = outcome.landing
         try:
             run.finalize({
@@ -540,6 +652,8 @@ def _cmd_live(
         print(json.dumps({"run_id": manifest.run_id, "terminal_state": outcome.terminal_state.value}))
         return 0
     finally:
+        if link is not None:
+            link.close()  # connectivity-only ends here too: the probe's connection is closed
         run.close()
 
 
@@ -587,9 +701,18 @@ def build_parser() -> argparse.ArgumentParser:
     preview_parser.add_argument("--integration-revision", required=True)
     preview_parser.add_argument("--request-revision", required=True)
     preview_parser.add_argument("--goal-parser-revision", required=True)
-    preview_parser.add_argument("--site-sha256", required=True)
-    preview_parser.add_argument("--tag-map-sha256", required=True)
-    preview_parser.add_argument("--camera-sha256", required=True)
+    preview_parser.add_argument("--site-sha256", default=None)
+    preview_parser.add_argument("--tag-map-sha256", default=None)
+    # Task B item 5: the flight files one grant binds; preview derives the
+    # manifest's profile_sha256s and site/tag-map hashes from them.
+    preview_parser.add_argument("--site", default=None)
+    preview_parser.add_argument("--drift-profile", default=None)
+    preview_parser.add_argument("--energy-profile", default=None)
+    preview_parser.add_argument("--command-limits", default=None)
+    preview_parser.add_argument("--profile-file", action="append", default=[])
+    # Task B: defaults to the production camera model's hash (the one
+    # wiring.make_count_geometry places detections with).
+    preview_parser.add_argument("--camera-sha256", default=None)
     preview_parser.add_argument("--aircraft-id", required=True)
     preview_parser.add_argument("--firmware-version", required=True)
     preview_parser.add_argument("--requested-jev-identity", required=True)
@@ -625,8 +748,17 @@ def build_parser() -> argparse.ArgumentParser:
     live_parser.add_argument("--drift-profile", default=None)
     live_parser.add_argument("--energy-profile", default=None)
     live_parser.add_argument("--command-limits", default=None)
+    # Task A: the default real-Tello flight stack localises from this tag map;
+    # its file bytes must hash to the manifest's tag_map_sha256.
+    live_parser.add_argument("--tag-map", default=None)
+    # The laptop's address on the Tello Wi-Fi; omitted, sentinel.network selects
+    # the one reachable Tello adapter itself.
+    live_parser.add_argument("--local-ip", default=None)
     live_parser.add_argument("--check-connectivity-only", action="store_true")
     live_parser.add_argument("--connectivity-max-age-s", type=float, default=5.0)
+    # Task V2: the room loop's per-kind Jev acceptance thresholds, as a JSON
+    # object of AcceptancePolicy fields (default: the room-loop policy).
+    live_parser.add_argument("--jev-acceptance-json", default=None)
     live_parser.add_argument("--connectivity-timeout-s", type=float, default=5.0)
     # The durable run-artifact root (RunArtifacts.open lays out
     # root/manifest.run_id/{manifest.json, raw.jsonl, session.sqlite3, ...}).
@@ -657,17 +789,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(
     argv: list[str] | None = None, *,
-    drone_probe: Callable[[], connectivity.ProbeResult] = _refuse_drone_probe,
-    provider_probe: Callable[[], connectivity.ProbeResult] = _refuse_provider_probe,
-    client_factory: Callable[..., "live_session.FlightStack"] = _refuse_client,
-    jev_factory: Callable[[], object] = _refuse_jev,
-    detector_factory: Callable[[], object] = _refuse_detector,
+    drone_probe: Callable[[], connectivity.ProbeResult] | None = None,
+    provider_probe: Callable[[], connectivity.ProbeResult] | None = None,
+    client_factory: Callable[..., "live_session.FlightStack"] | None = None,
+    jev_factory: Callable[[], object] = _default_jev,
+    detector_factory: Callable[[], object] = _default_detector,
     clock: Callable[[], float] = time.monotonic,
     wall_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> int:
     """``client_factory(tracker=..., clock=..., site=...)`` returns the connected
     ``live_session.FlightStack``; it is called only after every gate, the
-    preflight, and Jev/detector identity recording."""
+    preflight, and Jev/detector identity recording. ``None`` for a probe or
+    ``client_factory`` selects the ``sentinel.room.live_stack`` default."""
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.mode == "live":

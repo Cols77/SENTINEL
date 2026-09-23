@@ -73,6 +73,20 @@ class SupervisorOutcome:
     assessed_at: float | None
     termination_plan: CheckpointPlan | None = None
     contingency_id: str | None = None
+    #: Task V2: the declared pose_id whose *expected* re-anchor this
+    #: admission credited (the return may start from a tag fix at that
+    #: checkpoint), or None when the plan was admitted without one.
+    expected_reanchor: str | None = None
+
+
+#: Task V2: the refusals an expected re-anchor at the destination checkpoint
+#: can relieve -- the landing at the end of the return and the drift limit of
+#: the whole out-and-back, both assessed from a fix at that checkpoint.
+#: Everything else (the outbound path, the corridor home from the fixless
+#: forecast, energy, the current pose, the site) is judged exactly as before,
+#: so a fix that never comes still leaves a clear way home (and the absurd
+#: 0.45 cm/cm drift, whose corridor home is not clear, is still refused).
+_REANCHOR_RELIEVES = frozenset({"PROJECTED_TERMINATION_LANDING_INVALID", "LOCALIZATION_RECOVERY_REQUIRED"})
 
 
 class _AuditPersistenceFailure(RuntimeError):
@@ -88,9 +102,15 @@ class SafetySupervisor:
                  clock: Callable[[], float] = time.monotonic,
                  wall_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
                  capability: str = "ADAPTIVE_FLIGHT", acceptance_manifest=None,
-                 landing_upper_bound_s: float = 10.0, recovery=None, mapped_heading_tag_ids=()):
+                 landing_upper_bound_s: float = 10.0, recovery=None, mapped_heading_tag_ids=(),
+                 profile_sha256s=()):
         if not math.isfinite(landing_upper_bound_s) or landing_upper_bound_s <= 0:
             raise ValueError("landing requires a positive calibrated upper bound")
+        #: Task B item 5: the canonical hashes of the calibration profile
+        #: files this session was admitted with. A single grant bound to
+        #: these plus ``calibration_hashes`` satisfies both the CLI's
+        #: admission and this supervisor (see ``_binding_sets``).
+        self.profile_sha256s = tuple(sorted(set(profile_sha256s)))
         self.store, self.session_id, self.site = store, session_id, site
         self.tracker, self.reserve, self.limits = tracker, reserve, limits
         self.aircraft_id, self.mode = aircraft_id, mode
@@ -109,6 +129,11 @@ class SafetySupervisor:
         self.last_persistence_error = None
         self.last_preempted_version = 0
         self.last_preemption = None
+        #: The grant the most recent successful ``validate_bindings`` admitted
+        #: this session under (None until bindings validate, and reset to None
+        #: by any later failed validation). ``RoomController`` reads it to
+        #: decide whether REAL-mode observation is authorized.
+        self.admitted_grant: CapabilityGrant | None = None
         # A restart cannot erase a durable return/terminal latch or import old
         # clearances: it has a new clock domain and must obtain new assurances.
         events = store.events(session_id)
@@ -119,7 +144,21 @@ class SafetySupervisor:
                              e.payload.get("transition") in {"RETURN_NOW", "LAND_CONTINGENCY"} for e in events)
 
     def validate_bindings(self, site: RoomSite) -> None:
-        self.reserve.profile.validate_for_execution(mode=self.mode,
+        try:
+            self._validate_bindings(site)
+        except Exception:
+            self.admitted_grant = None
+            raise
+
+    def _validate_bindings(self, site: RoomSite) -> None:
+        # Task B item 6: a CALIBRATION-scope energy profile (derived from
+        # recorded flights, never promoted) is legal in REAL mode only inside
+        # a TRIAL acceptance run; its site/aircraft binding is still checked,
+        # and the grant admitted below must then be that TRIAL grant.
+        calibration_scope = (self.mode == ExecutionMode.REAL and self.acceptance_manifest is not None
+                             and self.reserve.profile.execution_scope == "CALIBRATION")
+        self.reserve.profile.validate_for_execution(
+            mode=ExecutionMode.CALIBRATION if calibration_scope else self.mode,
             site_sha256=site.cube_site_sha256, aircraft_id=self.aircraft_id)
         profile = self.tracker.profile
         if profile is None or not profile.validated or not profile.evidence_refs:
@@ -132,19 +171,26 @@ class SafetySupervisor:
         grants = tuple(CapabilityGrant(**{**g, "profile_sha256s": tuple(g["profile_sha256s"]),
                                          "evidence_ids": tuple(g["evidence_ids"])}) for g in raw["grants"])
         now = self.wall_clock()
+        # Task B item 5: a grant binds either exactly these calibrations (the
+        # original flight-calibration grant) or these calibrations together
+        # with the admitted calibration profile files (the single grant the
+        # CLI's admission also accepts). Both are exact-set comparisons.
+        binding_sets = {hashes, tuple(sorted(set(hashes) | set(self.profile_sha256s)))}
         if self.mode == ExecutionMode.SIMULATION:
-            allowed = any(g.state == "SIMULATION_ONLY" and g.capability == self.capability
+            admitted = next((g for g in grants if g.state == "SIMULATION_ONLY" and g.capability == self.capability
                 and g.site_sha256 == site.cube_site_sha256 and g.aircraft_id == self.aircraft_id
-                and tuple(sorted(g.profile_sha256s)) == hashes and g.evidence_ids
+                and tuple(sorted(g.profile_sha256s)) in binding_sets and g.evidence_ids
                 and g.grant_sha256 == canonical_grant_sha256(g) and g.expires_at is not None
-                and now < datetime.fromisoformat(g.expires_at.replace("Z", "+00:00")) for g in grants)
+                and now < datetime.fromisoformat(g.expires_at.replace("Z", "+00:00"))), None)
         else:
-            allowed = CapabilityProfile(grants).allows(capability=self.capability,
-                site_sha256=site.cube_site_sha256, aircraft_id=self.aircraft_id,
-                profile_sha256s=hashes, now=now, session_id=self.session_id,
-                acceptance_manifest=self.acceptance_manifest)
-        if not allowed:
+            admitted = next((g for g in grants for binding in sorted(binding_sets) if g.allows(
+                capability=self.capability, site_sha256=site.cube_site_sha256, aircraft_id=self.aircraft_id,
+                profile_sha256s=binding, now=now, session_id=self.session_id,
+                acceptance_manifest=self.acceptance_manifest)), None)
+        if admitted is None or (calibration_scope and admitted.state != "TRIAL"):
+            self.admitted_grant = None
             raise ValueError("capability does not match session/site/aircraft/calibrations")
+        self.admitted_grant = admitted
 
     def _assurances(self):
         return self.store.contingency_assurances(self.session_id, clock_domain_id=self.clock_domain_id)
@@ -216,9 +262,18 @@ class SafetySupervisor:
         if profile is None:
             return False
         position, heading = pose.position, pose.heading_deg
-        forecast = self._forecast(pose, plan, self.clock() if now is None else now)
-        radius = profile.rotation_radius_cm + max(pose.xy_uncertainty_cm,
-                                                  forecast.projected.xy_uncertainty_cm)
+        # Task B2: each command's swept disk is bounded by the uncertainty
+        # accrued by the *end of that command* (drift only grows between
+        # fixes, so that bounds the whole segment), not by the uncertainty at
+        # the end of the entire plan. The old end-of-plan radius charged the
+        # drift of the whole return (down to the landing) to its first point,
+        # which refused every CanningSt pose 30 cm from a cube face even at
+        # near-zero drift.
+        segment_tracker = copy(self.tracker)
+        segment_now = self.clock() if now is None else now
+        segment_tracker._health = pose
+        accrued = segment_tracker._advance(pose, max(segment_now, pose.propagated_at))
+        segment_now = accrued.propagated_at
         height = profile.max_height_error_cm
         volumes = site.free_space_volumes
         if corridor:
@@ -227,6 +282,14 @@ class SafetySupervisor:
         for command in plan.commands:
             previous = position
             args = dict(command.arguments)
+            if not math.isfinite(command.upper_bound_s) or command.upper_bound_s < 0:
+                return False
+            segment_now += command.upper_bound_s
+            try:
+                accrued = segment_tracker._advance(
+                    segment_tracker._command(segment_tracker._advance(accrued, segment_now), command), segment_now)
+            except (ValueError, KeyError):
+                return False
             if command.kind == "LAND":
                 # assess checks descent separately after localization/reserve
                 # admission, using the full projected landing footprint.
@@ -234,6 +297,7 @@ class SafetySupervisor:
             if command.kind == "TRIM_ALLOWANCE" and args.get("max_rounds", 0):
                 # Trims are conditional commands not exposed by this adapter.
                 return False
+            radius = profile.rotation_radius_cm + max(pose.xy_uncertainty_cm, accrued.xy_uncertainty_cm)
             propagated = self.tracker._command(replace(pose, position=position, heading_deg=heading), command)
             position, heading = propagated.position, propagated.heading_deg
             points = tuple(Position(p.x_cm, p.y_cm, p.z_cm + dz)
@@ -259,9 +323,14 @@ class SafetySupervisor:
             if (home or require_descent) and entry.kind == ContingencyKind.EMERGENCY:
                 # Emergency escalation is not verified landing geometry.
                 continue
+            # Task B item 4: the checkpoint planner deliberately leaves an
+            # offset within its dead band uncorrected, so a return that ends
+            # "at" home lands within that band of it -- never exactly on a
+            # measured position. Exact equality refused every real landing.
+            tolerance = max(1e-6, float(getattr(self.limits, "dead_band_cm", 0)))
             if home and (entry.z_band_cm[0] != site.home.nominal_pose.z_cm
-                         or not math.isclose(pose.position.x_cm, home_pose.x_cm, abs_tol=1e-6)
-                         or not math.isclose(pose.position.y_cm, home_pose.y_cm, abs_tol=1e-6)):
+                         or not math.isclose(pose.position.x_cm, home_pose.x_cm, abs_tol=tolerance)
+                         or not math.isclose(pose.position.y_cm, home_pose.y_cm, abs_tol=tolerance)):
                 # The policy must describe the actual pad and touchdown level.
                 continue
             try:
@@ -306,8 +375,91 @@ class SafetySupervisor:
         return guard.assess(current=request.energy_sample, next_plan=None, recovery_plan=None,
             provider_wait_s=0, termination_plan=self._landing_plan(request.pose))
 
+    def _reanchor_destination(self, request: SupervisorRequest, site: RoomSite):
+        """Task V2: ``(pose_id, declared Position, yaw)`` when this checkpoint
+        ends at a declared observation pose where a tag fix is expected, else
+        None.
+
+        All of: the plan names a declared pose (``OBSERVE:...:<pose_id>``);
+        the site declares at least two tags visible from it that the bound
+        tag map has mapped at that pose's yaw; a stationary yaw-scan recovery
+        exists (the recovery adapter, whose time and energy the reserve
+        already holds: ``recovery_deadline_s``); and the current pose is
+        ANCHORED or COASTING (never RECOVERY_REQUIRED/LOST).
+        """
+        from .semantic import resolve_pose_id
+
+        profile = self.tracker.profile
+        checkpoint = request.checkpoint
+        if (checkpoint is None or self.recovery is None or profile is None or not profile.recovery_deadline_s
+                or request.pose.state not in {LocalizationState.ANCHORED, LocalizationState.COASTING}):
+            return None
+        pose_id = checkpoint.checkpoint_id.rsplit(":", 1)[-1]
+        declared = dict(site.pose_tag_visibility).get(pose_id)
+        if not declared:
+            return None
+        resolved = resolve_pose_id(site, pose_id)
+        if resolved is None:
+            return None
+        mapped = set()
+        for heading, tags in self.mapped_heading_tag_ids or ():
+            delta = abs((float(heading) - float(resolved.yaw_deg) + 180) % 360 - 180)
+            if delta <= profile.canonical_heading_tolerance_deg:
+                mapped |= set(tags)
+        if len(set(declared) & mapped) < 2:
+            return None
+        return pose_id, Position(resolved.x_cm, resolved.y_cm, resolved.z_cm), float(resolved.yaw_deg)
+
+    def _at_destination(self, pose: PoseHealth, destination) -> bool:
+        _, position, yaw = destination
+        tolerance = float(getattr(self.limits, "dead_band_cm", 0)) + 5.0
+        return (math.dist((pose.position.x_cm, pose.position.y_cm), (position.x_cm, position.y_cm)) <= tolerance
+                and abs(pose.position.z_cm - position.z_cm) <= self.tracker.profile.max_height_error_cm
+                and abs((pose.heading_deg - yaw + 180) % 360 - 180) <= self.tracker.profile.canonical_heading_tolerance_deg)
+
+    def _expected_fix(self, current: PoseHealth, projected: PoseHealth) -> PoseHealth:
+        """The pose a tag fix at the checkpoint is expected to give: anchored
+        where the aircraft is forecast to be, no better than the fix it has
+        now (when it has one) and never better than the profile's accepted
+        burst spread, taken only after the reserved recovery time -- the
+        return is judged from the end of one full stationary yaw-scan
+        recovery, the latest point the fix can arrive."""
+        profile = self.tracker.profile
+        anchored = current.state == LocalizationState.ANCHORED
+        xy = (min(current.xy_uncertainty_cm, profile.max_burst_spread_cm) if anchored
+              else profile.max_burst_spread_cm)
+        heading = (min(current.heading_uncertainty_deg, profile.max_burst_heading_spread_deg) if anchored
+                   else profile.max_burst_heading_spread_deg)
+        at = projected.propagated_at + profile.recovery_deadline_s
+        return PoseHealth(LocalizationState.ANCHORED, projected.position, projected.heading_deg, at, at, at,
+                          xy_uncertainty_cm=xy, heading_uncertainty_deg=heading,
+                          pose_revision=projected.pose_revision, source="expected_reanchor")
+
     def assess(self, request: SupervisorRequest, site: RoomSite) -> SupervisorOutcome:
-        """Read-only decision; no telemetry I/O, latch, pose mutation or events."""
+        """Read-only decision; no telemetry I/O, latch, pose mutation or events.
+
+        Task V2: a refusal of the *return from the destination checkpoint*
+        (``_REANCHOR_RELIEVES``) is re-assessed once with the return starting
+        from an expected tag re-anchor there, when the site declares the tags
+        in view (``_reanchor_destination``). Only that reassessment's CONTINUE
+        replaces the refusal, and it is marked ``expected_reanchor`` so the
+        dispatch can demand the fix (``prepare``'s ``expected_fix``).
+        """
+        outcome = self._assess(request, site)
+        if outcome.transition == "CONTINUE" or outcome.reason not in _REANCHOR_RELIEVES:
+            return outcome
+        try:
+            destination = self._reanchor_destination(request, site)
+        except (ValueError, TypeError, KeyError):
+            destination = None
+        if destination is None:
+            return outcome
+        credited = self._assess(request, site, destination=destination)
+        if credited.transition != "CONTINUE":
+            return outcome
+        return replace(credited, expected_reanchor=destination[0])
+
+    def _assess(self, request: SupervisorRequest, site: RoomSite, destination=None) -> SupervisorOutcome:
         try:
             now = self.clock()
         except Exception:
@@ -377,17 +529,48 @@ class SafetySupervisor:
             projected_home_clear = True
             projected_routes = []
             prefix = ()
-            for command in plan.commands:
+            # Task V2: with a credited destination, every command boundary
+            # after the last translation, at the declared pose, returns from
+            # the expected re-anchor there; earlier boundaries (the outbound
+            # leg) still return from their fixless forecast.
+            last_move = max((index for index, command in enumerate(plan.commands) if command.kind == "MOVE"),
+                            default=-1)
+            expected_final = None
+            for index, command in enumerate(plan.commands):
                 prefix += (command,)
                 projected = self._forecast(request.pose, self._plan(request.pose, prefix), now).projected
                 route = self._termination(projected, site)
-                projected_routes.append((projected, route))
+                # The corridor home is always judged from the fixless
+                # forecast: a fix that never comes must still leave a clear
+                # way home. The expected fix relieves only the landing
+                # precision and the out-and-back's drift budget.
                 if not self._path_clear(projected, route, site, corridor=True, now=projected.propagated_at):
                     projected_home_clear = False
                     break
+                if destination is not None and index >= last_move and self._at_destination(projected, destination):
+                    projected = self._expected_fix(request.pose, projected)
+                    route = self._termination(projected, site)
+                    if index == len(plan.commands) - 1:
+                        expected_final = projected
+                projected_routes.append((projected, route))
             home_forecast = self._forecast(request.pose, termination, now)
-            full_forecast = self._forecast(request.pose,
-                self._plan(request.pose, plan.commands + projected_termination.commands), now)
+            if destination is not None:
+                if expected_final is None:
+                    raise ValueError("expected re-anchor credited only at the declared destination")
+                # The stationary recovery the fix may need is reserved at the
+                # checkpoint: its whole deadline's hover must stay clear.
+                recovery_hold = PlannedCommand("SETTLE", (), self.tracker.profile.recovery_deadline_s, True)
+                if not self._path_clear(request.pose, self._plan(request.pose, plan.commands + (recovery_hold,)),
+                                        site):
+                    raise ValueError("expected re-anchor recovery hold is not clear")
+                outbound = self._forecast(request.pose, plan, now)
+                back = self._forecast(expected_final, self._termination(expected_final, site),
+                                      expected_final.propagated_at)
+                reasons = tuple(sorted(set(outbound.reasons) | set(back.reasons)))
+                full_forecast = PoseForecast(not reasons, back.projected, reasons)
+            else:
+                full_forecast = self._forecast(request.pose,
+                    self._plan(request.pose, plan.commands + projected_termination.commands), now)
         except (ValueError, KeyError, StopIteration):
             return result("LAND_CONTINGENCY", "TERMINATION_PATH_INVALID")
         if not home_clear:
@@ -439,8 +622,18 @@ class SafetySupervisor:
         return result("CONTINUE", "ADMITTED")
 
     def prepare(self, *, snapshot_version, checkpoint=None, provider_wait_s=0, fallback=None,
-                remaining_commands=None):
-        """Effectful telemetry refresh and stream/clock observation before admission."""
+                remaining_commands=None, remaining_of=None, expected_fix=None):
+        """Effectful telemetry refresh and stream/clock observation before admission.
+
+        ``remaining_of`` names the checkpoint the ``remaining_commands`` belong
+        to (Task V2: its declared destination keeps its expected re-anchor).
+        ``expected_fix`` (Task V2) is the pose revision the aircraft arrived
+        at a checkpoint admitted on an expected re-anchor with: once no
+        translation remains, a refresh that brings no newer fix means the
+        expected fix was not obtained, and the pose is latched
+        RECOVERY_REQUIRED -- the supervisor's stationary yaw-scan recovery
+        runs before any further translation, and its failure lands.
+        """
         with self._lock:
             if self._terminal:
                 raise RuntimeError("supervisor is terminal")
@@ -461,9 +654,19 @@ class SafetySupervisor:
                     invalidates_snapshot=True, contingency_id=None,
                     request=replace(fallback.request, snapshot_version=snapshot_version))
             self.reserve.ingest_sample(sample)
+            missed = False
+            if (expected_fix is not None and remaining_commands is not None
+                    and not any(command.kind == "MOVE" for command in remaining_commands)
+                    and pose.pose_revision <= expected_fix
+                    and pose.state in {LocalizationState.ANCHORED, LocalizationState.COASTING}):
+                self.tracker._health = replace(self.tracker.health, state=LocalizationState.RECOVERY_REQUIRED)
+                pose, missed = self.tracker.health, True
             if remaining_commands is not None:
-                checkpoint = self._plan(pose, remaining_commands)
+                checkpoint = self._plan(pose, remaining_commands,
+                                        remaining_of.checkpoint_id if remaining_of is not None else "wait")
             outcome = self.assess(SupervisorRequest(snapshot_version, checkpoint, provider_wait_s, pose, sample), self.site)
+            if missed and outcome.transition == "RECOVER":
+                outcome = replace(outcome, reason="EXPECTED_REANCHOR_MISSING")
             if outcome.transition == "CONTINUE":
                 if getattr(self.recovery, "resume_required", False):
                     validated = self.recovery.confirm_resume(pose, route_validated=True, energy_validated=True)
@@ -474,10 +677,29 @@ class SafetySupervisor:
                     outcome = replace(outcome, request=replace(outcome.request, pose=validated))
             return outcome
 
+    def _pre_takeoff_pose(self, pose, site):
+        """Task B item 4: before takeoff the real stack anchors the tracker on
+        the pad, at pad height. Takeoff is a vertical climb over that measured
+        pad position to the surveyed home hover (the home route's final
+        checkpoint altitude), not a planned translation, so start admission
+        assesses the return/landing from that airborne home -- the measured
+        x/y, heading and uncertainty unchanged, only the altitude lifted. A
+        pose already airborne (above the pad band) is assessed as measured."""
+        profile = self.tracker.profile
+        route = next((r for r in site.routes if r.route_id == site.home.route_id), None)
+        if route is None or profile is None:
+            return pose
+        pad_z = site.home.nominal_pose.z_cm
+        if pose.position.z_cm > pad_z + profile.max_height_error_cm:
+            return pose
+        return replace(pose, position=replace(pose.position, z_cm=route.checkpoints[-1].z_cm))
+
     def validate_start(self, site=None):
         active = site or self.site
         self._site_current(active, self.clock())
         pose, sample = self.refresh()
+        if self._measured_home is None:
+            pose = self._pre_takeoff_pose(pose, active)
         outcome = self.assess(SupervisorRequest(self.store.session_version(self.session_id), None, 0, pose, sample), active)
         if outcome.transition != "CONTINUE":
             raise ValueError(f"start blocked: {outcome.reason}")
@@ -691,8 +913,14 @@ class SafetySupervisor:
             fresh=fresh, causation_id=event.event_id if event is not None else None,
             assessed_snapshot_version=admitted.request.snapshot_version)
 
-    def _recover(self, current, executor):
-        """Use the cube recovery policy; publish only a timely validated burst."""
+    def _recover(self, current, executor, *, voluntary=False):
+        """Use the cube recovery policy; publish only a timely validated burst.
+
+        ``voluntary`` (Task B item 2c, a Jev-chosen early re-anchor): an
+        attempt that merely cannot be carried out -- no rotation bound, a
+        burst wait that failed -- is refused without landing; the aircraft
+        was never required to recover. Integrity failures (a contradictory
+        or unsynchronizable re-anchor) still stop exactly as before."""
         recovery = self.recovery
         if recovery.tracker is not self.tracker:
             raise ValueError("recovery must own the active localization tracker")
@@ -713,6 +941,9 @@ class SafetySupervisor:
             navigation_contingency_id=navigation.contingency_id, now_monotonic_ms=self.clock() * 1000,
             mapped_heading_tag_ids=self.mapped_heading_tag_ids)
         def stop(reason):
+            if voluntary and reason in {"RECOVERY_ROTATION_BOUND_UNAVAILABLE", "RECOVERY_WAIT_FAILED"}:
+                return CheckpointOutcome("VOLUNTARY_REANCHOR_REFUSED", (), (), None,
+                                         self.tracker.health.position, True)
             terminal = replace(current, transition="LAND_CONTINGENCY", reason=reason,
                                invalidates_snapshot=True, contingency_id=None)
             event = self._audit(terminal)
@@ -730,8 +961,12 @@ class SafetySupervisor:
         if action.kind == "EMERGENCY":
             return stop(action.reason)
         deadline = self.clock() + action.upper_bound_s
-        if action.kind != "STATIONARY_BURST":
-            delta = (action.heading_deg - current.request.pose.heading_deg + 180) % 360 - 180
+        delta = ((action.heading_deg - current.request.pose.heading_deg + 180) % 360 - 180
+                 if action.kind != "STATIONARY_BURST" else 0.0)
+        # Task V2: a yaw burst at the heading the aircraft already holds (a
+        # tag-visible checkpoint faces the mapped heading) is a burst with no
+        # rotation: the SDK refuses a 0-degree yaw, which failed the recovery.
+        if action.kind != "STATIONARY_BURST" and round(abs(delta)) >= 1:
             rotation_s = rotate_reply_upper_bound_s(degrees=abs(delta),
                 base_timeout_s=self.limits.transport_limits.reply_timeout_s)
             if rotation_s >= action.upper_bound_s:
@@ -795,6 +1030,90 @@ class SafetySupervisor:
                                    self.tracker.health.position, True)
         self._record_completion(result, current, event, executor)
         return result
+
+    def voluntary_reanchor(self, executor, *, snapshot_version):
+        """Task B item 2c: a Jev-chosen, bounded re-anchor before it is mandatory.
+
+        Runs the existing stationary recovery (settle, then the recovery
+        policy's own mapped-tag yaw scan, accepting or refusing each burst)
+        through this supervisor's admission, but under a *fresh* recovery
+        episode so a voluntary attempt can never consume or reset the
+        mandatory episode's attempts. It is never allowed to land: when the
+        policy runs out of admissible actions the attempt is simply refused
+        and the flight continues under the unchanged safety floor
+        (RECOVERY_REQUIRED still forces the mandatory recovery, LOST still
+        lands). A mandatory transition found at any admission is dispatched
+        exactly as everywhere else and reported as ``PREEMPTED``.
+
+        Returns ``(code, result)``: ``REANCHORED`` (accepted fix, committed
+        with its candidate invalidations), ``REANCHOR_REFUSED``,
+        ``REANCHOR_UNAVAILABLE`` (no recovery adapter / not coasting or
+        anchored), or ``PREEMPTED`` with the dispatched mandatory result.
+        """
+        from sentinel.cube.recovery import RecoveryController
+
+        mandatory = self.recovery
+        if mandatory is None or self.tracker.profile is None:
+            return "REANCHOR_UNAVAILABLE", None
+        with self._dispatch_lock:
+            settle = PlannedCommand("SETTLE", (), self.tracker.profile.recovery_action_upper_bound_s, True)
+            current = self.prepare(snapshot_version=snapshot_version, remaining_commands=[settle])
+            if current.transition != "CONTINUE":
+                # Mandatory (including an already-required recovery): the
+                # supervisor's own path owns it, exactly as for any action.
+                return "PREEMPTED", self.dispatch(current, executor)
+            if current.request.pose.state not in {LocalizationState.ANCHORED, LocalizationState.COASTING}:
+                return "REANCHOR_UNAVAILABLE", None
+            voluntary = RecoveryController(self.tracker, clock=mandatory.clock,
+                                           burst_source=mandatory.burst_source,
+                                           energy_admits=mandatory.energy_admits)
+            navigation = next(e for e in self.site.terminal_contingencies
+                              if e.trigger == ContingencyTrigger.NAVIGATION_UNAVAILABLE)
+            self.recovery = voluntary
+            preempted = None
+            try:
+                code, result = self._voluntary_attempts(voluntary, current, executor, navigation)
+                if code == "_DISPATCH":
+                    preempted, code, result = result, "PREEMPTED", None
+            finally:
+                self.recovery = mandatory
+            if preempted is not None:
+                # Dispatched only once the mandatory recovery adapter is back.
+                result = self.dispatch(preempted, executor)
+            return code, result
+
+    def _voluntary_attempts(self, voluntary, current, executor, navigation):
+        """The bounded attempt loop of ``voluntary_reanchor``; a mandatory
+        transition found between attempts is handed back as ``_DISPATCH``."""
+        revision = self.tracker.health.pose_revision
+        for _ in range(max(1, voluntary.max_attempts)):
+            try:
+                environment = adapt_recovery_environment(self.site, self._assurances(),
+                    session_id=self.session_id, clock_domain_id=self.clock_domain_id,
+                    navigation_contingency_id=navigation.contingency_id,
+                    now_monotonic_ms=self.clock() * 1000, mapped_heading_tag_ids=self.mapped_heading_tag_ids)
+            except (TypeError, ValueError):
+                return "REANCHOR_REFUSED", None
+            # Peek the policy's next action: a voluntary attempt that has run
+            # out of admissible actions is refused here and never reaches
+            # _recover's contingency/emergency landing.
+            action = voluntary.next_action(current.request.pose, environment, ())
+            if action.kind in {"CONTINGENCY", "EMERGENCY"}:
+                return "REANCHOR_REFUSED", None
+            result = self._recover(current, executor, voluntary=True)
+            if isinstance(result, TerminalOutcome) or self._returning or self._terminal:
+                # _recover itself dispatched a mandatory return/landing.
+                return "PREEMPTED", result
+            health = self.tracker.health
+            if (result.status == "COMPLETED" and result.completion_known and health.pose_revision > revision
+                    and health.state == LocalizationState.ANCHORED):
+                return "REANCHORED", result
+            if result.status != "RECOVERY_PENDING":
+                return "REANCHOR_REFUSED", result
+            current = self.prepare(snapshot_version=self.store.session_version(self.session_id))
+            if current.transition != "CONTINUE":
+                return "_DISPATCH", current
+        return "REANCHOR_REFUSED", None
 
     def _recovery_contingency(self, action, current, executor):
         """A recovery ID selects a policy; fresh descent admission authorizes it."""
@@ -929,6 +1248,12 @@ class SafetySupervisor:
             remaining = list(plan.commands)
             if not remaining:
                 raise ValueError("dispatch requires a checkpoint; use supervised waits for providers")
+            # Task V2: a checkpoint admitted on an expected re-anchor must get
+            # a fresh fix once it has arrived (after its last translation);
+            # ``arrival`` is the pose revision it arrived with.
+            awaiting = current.transition == "CONTINUE" and current.expected_reanchor is not None
+            arrival = (current.request.pose.pose_revision
+                       if awaiting and not any(c.kind == "MOVE" for c in remaining) else None)
             while remaining:
                 cmd = remaining.pop(0)
                 if cmd.kind == "LAND":
@@ -962,8 +1287,19 @@ class SafetySupervisor:
                     return replace(result, command_states=tuple(states), observation_ids=tuple(observations))
                 if not remaining:
                     return replace(result, command_states=tuple(states), observation_ids=tuple(observations))
+                if awaiting and cmd.kind == "MOVE":
+                    arrival = self.tracker.health.pose_revision
                 refreshed = self.prepare(snapshot_version=self.store.session_version(self.session_id),
-                    remaining_commands=remaining, fallback=current)
+                    remaining_commands=remaining, remaining_of=plan, fallback=current,
+                    expected_fix=arrival if awaiting else None)
+                if (awaiting and arrival is not None and not any(c.kind == "MOVE" for c in remaining)
+                        and refreshed.request.pose.pose_revision > arrival):
+                    awaiting = False  # the expected fix was obtained
+                if awaiting and refreshed.reason == "EXPECTED_REANCHOR_MISSING":
+                    # Audit why this checkpoint now needs the recovery; the
+                    # recovery's own admissions follow as usual.
+                    awaiting = False
+                    self._audit(refreshed)
                 if refreshed.transition != current.transition:
                     return self.dispatch(refreshed, executor)
                 current = refreshed

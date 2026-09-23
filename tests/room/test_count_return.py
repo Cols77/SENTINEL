@@ -809,23 +809,109 @@ def test_dispatch_exception_during_observation_is_typed_not_stale_decision(safet
 
 # --- 18. REAL mode never offers an OBSERVE candidate -----------------------
 
-def test_real_mode_never_offers_observation_candidate(safety, tmp_path):
-    """Q8: Plan 03 Task 4 enables OBSERVE for replay/simulation only; real
-    mode stays disabled until Plan 06 promotes matching profiles. A REAL-mode
-    session holding the base ADAPTIVE_FLIGHT grant and observation
-    collaborators must never be offered or fly an OBSERVE checkpoint."""
-    from sentinel.cube.energy import ExecutionMode
-    supervisor, store, clock, *_ = safety
-    supervisor.site = room_site(coverage=True)
-    supervisor.validate_bindings = lambda site: None
-    supervisor.mode = ExecutionMode.REAL
-    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
-    rig = PerceptionRig(store, SESSION)
-    controller, executor = make_controller(safety, Judge(), rig)
+def bind_real_mode(safety, *, grant_capability="count_return", grant_state="PROMOTED",
+                   session_capability="count_return", acceptance=None, validate=True, energy=None):
+    """Put the fixture supervisor in REAL mode under one real, hash-bound grant.
 
+    The grant is bound to ``calibration_hashes`` of exactly the PROMOTED
+    energy profile, drift profile, limits and site this supervisor flies
+    with, and written into the session row the supervisor validates against.
+    ``acceptance`` is ``None`` (no acceptance manifest) or a session kind
+    (``"ACCEPTANCE"``/``"LIVE"``) for the manifest a TRIAL grant is bound to.
+    ``validate`` runs the supervisor's real ``validate_bindings``."""
+    import json
+    from sentinel.cube.energy import EnergyProfile, ExecutionMode, ReserveGuard
+    from sentinel.room.models import (AcceptanceManifest, CapabilityGrant, CapabilityProfile,
+                                      canonical_acceptance_manifest_sha256, canonical_grant_sha256)
+    from sentinel.room.store import _canonical_json, _json_value
+    from sentinel.room.supervisor import calibration_hashes
+    supervisor, store, clock, *_ = safety
+    site = room_site(coverage=True)
+    energy = energy or EnergyProfile("energy", site.cube_site_sha256, "aircraft", .01, 1, 20, 2, "PROMOTED")
+    supervisor.site, supervisor.reserve = site, ReserveGuard(energy, clock)
+    supervisor.mode, supervisor.capability = ExecutionMode.REAL, session_capability
+    manifest = None
+    if acceptance is not None:
+        manifest = AcceptanceManifest(SESSION, grant_capability, "", acceptance)
+        manifest = replace(manifest, manifest_sha256=canonical_acceptance_manifest_sha256(manifest))
+    supervisor.acceptance_manifest = manifest
+    hashes = calibration_hashes(energy, supervisor.tracker.profile, supervisor.limits, site)
+    grant = CapabilityGrant(grant_capability, grant_state, site.cube_site_sha256, "aircraft", hashes,
+                            ("evidence",), "2099-01-01T00:00:00Z", "",
+                            manifest.manifest_sha256 if manifest is not None else None)
+    grant = replace(grant, grant_sha256=canonical_grant_sha256(grant))
+    with store._lock, store.connection:
+        store.connection.execute("UPDATE room_sessions SET capability_json = ? WHERE session_id = ?",
+                                 (_canonical_json(_json_value(CapabilityProfile((grant,)))), SESSION))
+    if validate:
+        try:
+            supervisor.validate_bindings(site)
+        except ValueError:
+            pass
+    return grant
+
+
+def _offers_observation(controller):
     snapshot = controller.queries.project(SESSION)
-    legal_ids = {c.candidate_id for c in controller._legal_candidates(snapshot)}
-    assert not any(candidate_id.startswith("OBSERVE:") for candidate_id in legal_ids)
+    return any(c.candidate_id.startswith("OBSERVE:") for c in controller._legal_candidates(snapshot))
+
+
+@pytest.mark.parametrize("binding", [
+    pytest.param({"validate": False}, id="bindings-never-validated"),
+    pytest.param({"grant_capability": "ADAPTIVE_FLIGHT", "session_capability": "ADAPTIVE_FLIGHT"},
+                 id="adaptive-flight-grant"),
+    pytest.param({"grant_state": "TRIAL"}, id="trial-grant-outside-acceptance"),
+    pytest.param({"grant_state": "TRIAL", "acceptance": "LIVE"}, id="trial-grant-live-manifest"),
+    pytest.param({"grant_state": "SIMULATION_ONLY"}, id="simulation-only-grant"),
+    pytest.param({"grant_capability": "closer_inspection", "session_capability": "closer_inspection"},
+                 id="closer-inspection-grant"),
+])
+def test_real_mode_never_offers_observation_candidate(safety, tmp_path, binding):
+    """Q8 / Task B item 2: REAL mode offers OBSERVE only for a count_return
+    session whose supervisor validated a matching PROMOTED grant, or a TRIAL
+    grant inside its ACCEPTANCE run. Every other binding -- never validated,
+    another capability (ADAPTIVE_FLIGHT, closer_inspection), a TRIAL grant
+    outside an acceptance run, a simulation-only grant -- keeps it disabled,
+    even with every observation collaborator present."""
+    supervisor, store, clock, *_ = safety
+    bind_real_mode(safety, **binding)
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    controller, executor = make_controller(safety, Judge(), PerceptionRig(store, SESSION))
+
+    assert not controller._observation_enabled
+    assert not _offers_observation(controller)
+
+
+@pytest.mark.parametrize("binding", [
+    pytest.param({"grant_state": "PROMOTED"}, id="promoted-count-return"),
+    pytest.param({"grant_state": "TRIAL", "acceptance": "ACCEPTANCE"}, id="trial-count-return-acceptance"),
+])
+def test_real_mode_offers_observation_under_a_validated_count_return_grant(safety, tmp_path, binding):
+    """Task B item 2, positive case: a count_return session whose supervisor
+    actually validated its bindings under a matching PROMOTED grant (or a
+    TRIAL grant in its acceptance run) is offered OBSERVE in REAL mode."""
+    supervisor, store, clock, *_ = safety
+    grant = bind_real_mode(safety, **binding)
+    assert supervisor.admitted_grant == grant
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    controller, executor = make_controller(safety, Judge(), PerceptionRig(store, SESSION))
+
+    assert controller._observation_enabled
+    assert _offers_observation(controller)
+
+
+def test_real_mode_observation_is_withdrawn_when_bindings_stop_validating(safety, tmp_path):
+    """The gate follows the supervisor's latest validation: once bindings
+    fail (here, the site changed under the grant), observation is disabled."""
+    supervisor, store, clock, *_ = safety
+    bind_real_mode(safety)
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    controller, executor = make_controller(safety, Judge(), PerceptionRig(store, SESSION))
+    assert controller._observation_enabled
+
+    with pytest.raises(ValueError):
+        supervisor.validate_bindings(replace(supervisor.site, site_id="another-site"))
+    assert supervisor.admitted_grant is None
     assert not controller._observation_enabled
 
 

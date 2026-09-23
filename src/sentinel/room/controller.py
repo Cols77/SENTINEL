@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
+import hashlib
+import json
 import math
 import re
 import time
@@ -17,13 +19,14 @@ from sentinel.cube.supervised_wait import SupervisedWait
 from sentinel.cube.step_executor import ExecutorState, TerminalOutcome
 from sentinel.models import Position
 
-from .candidates import build_candidates, build_observation_candidates, count_answer_candidate, count_scope
-from .coverage import CellObservation, CoverageProjection, project_coverage
+from .candidates import (build_candidates, build_observation_candidates, count_answer_candidate, count_scope,
+                         is_search_objective, search_answer_candidate, search_pose_ids, search_sightings)
+from .coverage import CellObservation, CoverageProjection, project_coverage, render_coverage_note
 from .grounding import CountGeometry, ground_frame, project_objective_count, render_objective_count
 from .ingest import ingest_result
-from .models import CandidateKind, GoalKind, GoalStatus, RoomCandidate, TerminalState
+from .models import CandidateKind, GoalKind, GoalStatus, PhysicalCost, RoomCandidate, TerminalState
 from .queries import READ_KINDS, ReadFact, ReadQueries, ReadSnapshot, ToolOutcome, relevant_hash, render_answer
-from .semantic import resolve_pose_id
+from .semantic import resolve_pose_id, semantic_region_of
 from .spatial import PoseEvidence, semantic_heading_to_compass_deg
 from .store import RoomStore, VersionConflict
 
@@ -59,6 +62,84 @@ def _heading_within_tolerance(a_deg: float, b_deg: float, tolerance_deg: float =
     return abs(delta) <= tolerance_deg
 
 
+#: The one capability under which a REAL-mode session may fly OBSERVE
+#: checkpoints (count-and-return and its autonomous search).
+OBSERVATION_CAPABILITY = "count_return"
+
+
+def real_observation_admitted(supervisor) -> bool:
+    """Whether a REAL-mode supervisor's validated binding authorizes OBSERVE.
+
+    True only when the supervisor flies ``count_return`` and its last binding
+    validation admitted a matching ``count_return`` grant that is PROMOTED,
+    or TRIAL inside an ACCEPTANCE-kind manifest. Every other case -- no
+    validation yet, a failed one, another capability, closer inspection --
+    keeps observation disabled.
+    """
+    grant = getattr(supervisor, "admitted_grant", None)
+    if grant is None or getattr(supervisor, "capability", None) != OBSERVATION_CAPABILITY:
+        return False
+    if grant.capability != OBSERVATION_CAPABILITY:
+        return False
+    if grant.state == "PROMOTED":
+        return True
+    manifest = getattr(supervisor, "acceptance_manifest", None)
+    return (grant.state == "TRIAL" and manifest is not None
+            and getattr(manifest, "session_kind", None) == "ACCEPTANCE")
+
+
+@dataclass(frozen=True)
+class AcceptancePolicy:
+    """Task V2: per-kind acceptance thresholds for Jev's top legal choice.
+
+    The room loop's candidates are bounded: an OBSERVE is one supervised
+    checkpoint, a REANCHOR is the supervisor's own stationary recovery, a
+    read changes nothing, and physical safety never rests on Jev (every
+    movement is admitted or refused by the SafetySupervisor; mandatory
+    recovery and return bypass Jev). Those kinds accept at a lower
+    confidence; a final ANSWER slightly higher; anything else -- CLARIFY and
+    ESCALATE end the session, and any other kind -- keeps the strict bar.
+    A choice below its bar is re-asked once with the refusal as feedback
+    (``reask_once``) before the turn counts as refused; never more.
+    """
+
+    strict_act_at: float = .8
+    observe_act_at: float = .5
+    reanchor_act_at: float = .5
+    read_act_at: float = .5
+    answer_act_at: float = .6
+    min_margin: float = .15
+    reask_once: bool = True
+
+    def __post_init__(self):
+        for name in ("strict_act_at", "observe_act_at", "reanchor_act_at", "read_act_at", "answer_act_at",
+                     "min_margin"):
+            value = getattr(self, name)
+            if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError(f"acceptance threshold {name} must be a finite probability")
+        if type(self.reask_once) is not bool:
+            raise ValueError("reask_once must be a boolean")
+
+    @classmethod
+    def strict(cls, act_at: float = .8, min_margin: float = .15) -> "AcceptancePolicy":
+        """One bar for every kind, no re-ask (the controller's original policy)."""
+        return cls(act_at, act_at, act_at, act_at, act_at, min_margin, False)
+
+    def act_at_for(self, kind) -> float:
+        if kind == CandidateKind.OBSERVE:
+            return self.observe_act_at
+        if kind == CandidateKind.REANCHOR:
+            return self.reanchor_act_at
+        if kind in READ_KINDS:
+            return self.read_act_at
+        if kind == CandidateKind.ANSWER:
+            return self.answer_act_at
+        return self.strict_act_at
+
+    def as_config(self) -> dict:
+        return asdict(self)
+
+
 @dataclass(frozen=True)
 class TurnOutcome:
     candidate_id: str
@@ -79,10 +160,17 @@ class RoomController:
                  ingest_pending: Callable[[str], object] | None = None,
                  supervisor=None, flight_executor=None, provider_wait_s: float = 10.0,
                  resolve_checkpoint=None, perception_capture=None, perception_provider=None,
-                 count_geometry: CountGeometry | None = None):
+                 count_geometry: CountGeometry | None = None, acceptance: AcceptancePolicy | None = None):
         for value in (act_at, min_margin):
             if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
                 raise ValueError("choice thresholds must be finite probabilities")
+        if acceptance is not None and not isinstance(acceptance, AcceptancePolicy):
+            raise ValueError("acceptance must be an AcceptancePolicy")
+        #: Task V2: without an explicit policy every kind keeps ``act_at``
+        #: and nothing is re-asked (the original behaviour).
+        self.acceptance = acceptance if acceptance is not None else AcceptancePolicy.strict(act_at, min_margin)
+        if acceptance is not None:
+            act_at, min_margin = acceptance.strict_act_at, acceptance.min_margin
         self.store, self.judge = store, judge
         query_clock = ({"clock": supervisor.clock, "clock_domain_id": supervisor.clock_domain_id}
                        if supervisor is not None else {})
@@ -120,15 +208,24 @@ class RoomController:
 
     @property
     def _observation_enabled(self) -> bool:
-        # Plan 03 Task 4 enables OBSERVE for replay/simulation only; real mode
-        # stays disabled until Plan 06 promotes matching pose/energy/site
-        # profiles (fix round 1, Q8). A REAL-mode session must never fly an
-        # OBSERVE checkpoint just because the base ADAPTIVE_FLIGHT grant and
-        # observation collaborators happen to be present.
-        return (self.supervisor is not None and self.flight_executor is not None
+        # Plan 03 Task 4 enabled OBSERVE for replay/simulation only (fix
+        # round 1, Q8). Task B (room-live-adapters, item 2): REAL mode enables
+        # it only for a session admitted under the count_return capability by
+        # a matching PROMOTED grant, or a TRIAL grant inside its acceptance
+        # run -- and only once the supervisor's own binding validation
+        # actually admitted that grant (``admitted_grant``). A REAL-mode
+        # session must never fly an OBSERVE checkpoint just because some
+        # other grant (e.g. ADAPTIVE_FLIGHT) and the observation
+        # collaborators happen to be present.
+        if not (self.supervisor is not None and self.flight_executor is not None
                 and self.resolve_checkpoint is not None and self.perception_capture is not None
-                and self.perception_provider is not None
-                and self.supervisor.mode == ExecutionMode.SIMULATION)
+                and self.perception_provider is not None):
+            return False
+        if self.supervisor.mode == ExecutionMode.SIMULATION:
+            return True
+        if self.supervisor.mode == ExecutionMode.REAL:
+            return real_observation_admitted(self.supervisor)
+        return False
 
     def _observation_objectives(self, snapshot):
         if snapshot.ledger is None or snapshot.ledger.status != GoalStatus.PENDING:
@@ -287,20 +384,158 @@ class RoomController:
         observations that states full-room coverage is unknown). Its only
         terminal routes are the grounded ``ANSWER:COUNTS`` candidate and the
         explicit ``ANSWER:<objective>:INCOMPLETE`` candidate."""
-        return self._observation_enabled and bool(self._count_objectives(snapshot))
+        # Task B item 2b: a search objective likewise answers only from this
+        # session's own observations (ANSWER:SEARCH), never from historical
+        # READ_OBSERVATIONS evidence that happens to name the class.
+        return self._observation_enabled and (bool(self._count_objectives(snapshot))
+                                              or bool(self._search_objectives(snapshot)))
+
+    def _search_objectives(self, snapshot: ReadSnapshot):
+        return tuple(sorted((o for o in self._observation_objectives(snapshot) if is_search_objective(o)),
+                            key=lambda o: o.ordinal))
 
     def _count_answer_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
         if not self._observation_enabled:
             return ()
-        candidate = count_answer_candidate(snapshot, self._coverage(snapshot))
-        return (candidate,) if candidate is not None else ()
+        coverage = self._coverage(snapshot)
+        candidates = (count_answer_candidate(snapshot, coverage),
+                      search_answer_candidate(snapshot, self.supervisor.site, coverage))
+        return tuple(candidate for candidate in candidates if candidate is not None)
+
+    def _detection_bands(self, snapshot: ReadSnapshot) -> dict[str, str]:
+        """``<observation_id>/<detection_id>`` -> the detector's confidence band,
+        from the session's persisted observation evidence."""
+        bands = {}
+        for fact in snapshot.sources:
+            if fact.kind != CandidateKind.READ_OBSERVATIONS or len(fact.evidence_ids) < 3:
+                continue
+            observation_id, _, detection_id = fact.evidence_ids[:3]
+            bands[f"{observation_id}/{detection_id}"] = dict(fact.values).get("confidence_band")
+        return bands
+
+    def _search_sections(self, snapshot: ReadSnapshot) -> tuple[list[str], bool]:
+        """Task B item 2b: one answer section per search objective, and
+        whether every search was conclusive (found, or every declared region
+        in scope actually observed)."""
+        site = self.supervisor.site
+        coverage = self._coverage(snapshot)
+        bands = self._detection_bands(snapshot)
+        observed = {o.count_evidence.pose_id for o in snapshot.outcomes
+                    if o.code == "OBSERVE_SUCCEEDED" and o.count_evidence is not None}
+        sections, conclusive = [], True
+        for objective in self._search_objectives(snapshot):
+            classes = ", ".join(objective.target_classes)
+            header = f"Objective {objective.objective_id} (search for {classes}):"
+            sightings = search_sightings(objective, site, snapshot.outcomes)
+            if not sightings:
+                in_scope = search_pose_ids(objective, site)
+                seen = [pose_id for pose_id in in_scope if pose_id in observed]
+                missing = [pose_id for pose_id in in_scope if pose_id not in observed]
+                conclusive = conclusive and not missing
+                lines = [header, f"{classes}: not found in observed regions "
+                                 f"({', '.join(seen) or 'none observed'})."]
+                if missing:
+                    lines.append(f"Regions that could not be observed: {', '.join(missing)}.")
+                lines.append(render_coverage_note(coverage, scope="ROOM"))
+                sections.append("\n".join(lines))
+                continue
+            lines = [header]
+            for outcome, item in sightings:
+                pose_id = outcome.count_evidence.pose_id
+                band = bands.get(item.source_detection_id if hasattr(item, "source_detection_id")
+                                 else item.detection_id)
+                confidence = ("high confidence" if band == "high"
+                              else f"uncertain ({band or 'unknown'} confidence)")
+                viewpoint = "-".join(pose_id.split("-")[:3])
+                if hasattr(item, "x_cm"):
+                    horizontal, depth, inside = semantic_region_of(site, item.x_cm, item.y_cm)
+                    where = f"{horizontal}-{depth} part of the room" + ("" if inside else ", beyond the flyable area")
+                    placement = (f"placed on the {item.support_plane_id} support plane in the {where} "
+                                 f"(about x={round(item.x_cm)} cm, y={round(item.y_cm)} cm; "
+                                 f"{item.pose_provenance.lower()} camera pose)")
+                else:
+                    placement = f"seen but not placed ({item.reason})"
+                lines.append(f"{item.class_name}: seen from the {viewpoint} region "
+                             f"(declared pose {pose_id}); {placement}; {confidence}. "
+                             f"[observation={outcome.count_evidence.observation_id}; event={outcome.event_id}]")
+            sections.append("\n".join(lines))
+        return sections, conclusive
+
+    # -- Task B item 2c: localization health Jev can see, and REANCHOR ----------
+
+    def localization_health(self) -> dict | None:
+        """The Jev-facing localization summary for this turn, or None without
+        a supervisor. State (ANCHORED/COASTING/...), the age of the last
+        accepted tag fix, the current position uncertainty and the margin
+        left before the calibrated RECOVERY_REQUIRED threshold -- plain
+        numbers only, never coordinates."""
+        if self.supervisor is None:
+            return None
+        tracker = self.supervisor.tracker
+        health, profile = tracker.health, tracker.profile
+        margins = []
+        if profile is not None:
+            for field in ("camera_age_s", "fix_age_s", "estimator_failures", "look_away_s", "translation_cm",
+                          "yaw_deg", "xy_uncertainty_cm", "heading_uncertainty_deg"):
+                limit = getattr(profile, "max_" + field)
+                if limit:
+                    margins.append(max(0.0, 1.0 - getattr(health, field) / limit))
+        return {
+            "state": health.state.value,
+            "last_tag_fix_age_s": round(max(0.0, health.fix_age_s), 1),
+            "position_uncertainty_cm": round(max(0.0, health.xy_uncertainty_cm), 1),
+            "margin_before_mandatory_recovery_pct": round(100 * min(margins)) if margins else None,
+        }
+
+    def _reanchor_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
+        """A Jev-selectable bounded re-anchor, offered while COASTING (or while
+        ANCHORED on a fix older than half the calibrated limit), only when a
+        supervisor recovery adapter exists and the aircraft is airborne. It
+        never replaces the safety floor: RECOVERY_REQUIRED is still recovered
+        by the supervisor before Jev is asked, and LOST still lands."""
+        if (self.supervisor is None or self.flight_executor is None
+                or getattr(self.supervisor, "recovery", None) is None
+                or self.flight_executor.state != ExecutorState.AIRBORNE):
+            return ()
+        tracker = self.supervisor.tracker
+        health, profile = tracker.health, tracker.profile
+        aged = profile is not None and health.fix_age_s >= profile.max_fix_age_s / 2
+        if not (health.state == LocalizationState.COASTING
+                or (health.state == LocalizationState.ANCHORED and aged)):
+            return ()
+        digest = hashlib.sha256(json.dumps({"candidate_id": "REANCHOR", "pose_revision": health.pose_revision,
+                                            "state": health.state.value}, sort_keys=True).encode()).hexdigest()
+        if any(o.candidate_id == "REANCHOR" and o.relevant_state_sha256 == digest and o.refusal_code is not None
+               for o in snapshot.outcomes):
+            return ()
+        summary = self.localization_health()
+        description = (f"Re-anchor now: hover and re-acquire the mapped tags (bounded, supervisor-admitted). "
+                       f"Localization is {summary['state']}; last tag fix {summary['last_tag_fix_age_s']} s ago; "
+                       f"{summary['margin_before_mandatory_recovery_pct']}% margin left before a mandatory "
+                       f"recovery.")
+        return (RoomCandidate("REANCHOR", CandidateKind.REANCHOR, snapshot.state_version, digest, description,
+                              description, (), (), PhysicalCost(requires_airborne=True)),)
+
+    def _execute_reanchor(self, session_id, expected_version):
+        """Run the voluntary re-anchor; a dict payload, or a TurnOutcome when
+        a mandatory transition preempted it (reported like any preemption)."""
+        try:
+            code, result = self.supervisor.voluntary_reanchor(self.flight_executor, snapshot_version=expected_version)
+        except VersionConflict:
+            return {"code": "STALE_DECISION", "refusal": "STALE_DECISION"}
+        if code == "PREEMPTED":
+            terminal = result if isinstance(result, TerminalOutcome) else None
+            return self._preempted(session_id, self.supervisor.last_preemption, terminal_outcome=terminal)
+        if code == "REANCHORED":
+            return {"code": "REANCHORED"}
+        return {"code": code, "refusal": code}
 
     def _legal_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
         base = build_candidates(snapshot)
         if self._legacy_count_answer_blocked(snapshot):
             base = tuple(c for c in base if c.kind != CandidateKind.ANSWER)
         return (*base, *self._observation_candidates(snapshot), *self._count_answer_candidates(snapshot),
-               *self._closer_unavailable_candidates(snapshot))
+               *self._closer_unavailable_candidates(snapshot), *self._reanchor_candidates(snapshot))
 
     def _local_terminal(self, terminal, candidate_id):
         if not isinstance(terminal, TerminalOutcome):
@@ -563,31 +798,73 @@ class RoomController:
                                            code="NO_LEGAL_CANDIDATES", requested_terminal=TerminalState.BLOCKED)
         criteria = {key: c.description for key, c in candidates.items()}
         state = asdict(snapshot)
-        provider_error = None
+        if self.supervisor is not None:
+            # Task B item 2c: this turn's localization health, so Jev can
+            # choose an early bounded re-anchor (never coordinates).
+            state["localization"] = self.localization_health()
         started = time.monotonic_ns()
-        def choose(cancel):
+        policy = self.acceptance
+
+        def ask(asked_state):
+            def choose(cancel):
+                try:
+                    return self.judge.choice(deepcopy(asked_state),
+                        "Choose one legal action. Reads are historical. Never compose factual values.",
+                        criteria=dict(criteria), name="room_action"), None
+                except Exception as exc:
+                    return None, type(exc).__name__
+            waited = self.wait_for_perception(choose, session_id=session_id)
+            if waited.status == "PREEMPTED":
+                return None
+            if waited.status == "COMPLETED":
+                answer, error = waited.value
+            else:
+                answer, error = None, waited.status
+            # Task V2: the bar is the one for the kind Jev actually chose.
             try:
-                return self.judge.choice(deepcopy(state),
-                    "Choose one legal action. Reads are historical. Never compose factual values.",
-                    criteria=dict(criteria), name="room_action"), None
-            except Exception as exc:
-                return None, type(exc).__name__
-        waited = self.wait_for_perception(choose, session_id=session_id)
-        if waited.status == "PREEMPTED":
+                label = answer.get("value") if isinstance(answer, dict) else None
+            except Exception:
+                label = None
+            chosen = candidates.get(label) if type(label) is str else None
+            act_at = policy.act_at_for(chosen.kind if chosen is not None else None)
+            assessment = assess_choice(answer, criteria, escalation_label="ESCALATE",
+                                       act_at=act_at, min_margin=policy.min_margin)
+            return assessment, error, act_at
+
+        def audit(assessment):
+            audited = asdict(assessment)
+            audited["probabilities"] = [{"label": label, "probability": probability}
+                                        for label, probability in assessment.probabilities]
+            return audited
+
+        asked = ask(state)
+        if asked is None:
             return self._preempted(session_id, self.supervisor.last_preemption)
-        if waited.status == "COMPLETED":
-            answer, provider_error = waited.value
-        else:
-            answer, provider_error = None, waited.status
-        assessment = assess_choice(answer, criteria, escalation_label="ESCALATE",
-                                   act_at=self.act_at, min_margin=self.min_margin)
-        audited = asdict(assessment)
-        audited["probabilities"] = [{"label": label, "probability": probability}
-                                    for label, probability in assessment.probabilities]
+        assessment, provider_error, act_at = asked
+        reask = None
+        if (policy.reask_once and not provider_error
+                and assessment.outcome in ("LOW_CONFIDENCE", "THIN_MARGIN")):
+            # Task V2: one re-ask with the refusal as feedback, never a loop.
+            feedback = {"refused_choice": assessment.selected_label, "refusal": assessment.outcome,
+                        "confidence": assessment.confidence, "required_confidence": act_at,
+                        "margin": assessment.margin, "required_margin": policy.min_margin,
+                        "acceptance_thresholds": policy.as_config(),
+                        "note": ("Your previous choice was refused: below the acceptance threshold for its "
+                                 "kind. Choose once more from the same legal actions. Repeat it only if you "
+                                 "are confident it is the right next action; this is the last ask this turn.")}
+            reask = {"first_assessment": audit(assessment), "first_act_at": act_at, "feedback": feedback}
+            asked = ask({**state, "previous_refusal": feedback})
+            if asked is None:
+                return self._preempted(session_id, self.supervisor.last_preemption)
+            assessment, provider_error, act_at = asked
+        audited = audit(assessment)
         attempt = {"snapshot_version": snapshot.state_version, "state": state,
                    "candidates": [asdict(c) for c in candidates.values()], "assessment": audited,
-                   "provider_error": provider_error, "act_at": self.act_at, "min_margin": self.min_margin,
+                   "provider_error": provider_error, "act_at": act_at, "min_margin": policy.min_margin,
+                   "acceptance_policy": policy.as_config(),
                    "latency_ms": (time.monotonic_ns() - started) // 1_000_000}
+        if reask is not None:
+            attempt["reask"] = reask
         selected = candidates.get(assessment.selected_label)
         # Illegal provider labels are one failed decision operation. Retain the
         # actual proposed label in the assessment, but do not let arbitrary new
@@ -643,6 +920,17 @@ class RoomController:
                                         refusal=outcome.get("refusal"), observed_at=outcome.get("observed_at"),
                                         count_evidence=outcome.get("count_evidence"))
                 return self._record(snapshot, correlation, payload, prior=prior)
+            elif selected.kind == CandidateKind.REANCHOR:
+                # Task B item 2c: the supervisor's own stationary recovery,
+                # chosen early by Jev and admitted like any other action. An
+                # accepted fix commits its candidate invalidations; the typed
+                # outcome is what Jev sees next turn.
+                outcome = self._execute_reanchor(session_id, expected_version)
+                if isinstance(outcome, TurnOutcome):
+                    return replace(outcome, event_ids=tuple(e.event_id for e in prior) + outcome.event_ids)
+                payload = self._outcome(snapshot, candidate_id, kind, digest, outcome["code"],
+                                        refusal=outcome.get("refusal"))
+                return self._record(snapshot, correlation, payload, prior=prior)
             elif selected.kind == CandidateKind.ANSWER:
                 # Fix round 1 (Q1, Q3): a terminal answer -- plain or the
                 # explicit ANSWER:<objective>:INCOMPLETE candidate -- requests
@@ -654,6 +942,25 @@ class RoomController:
                 # session's own observations, each with its scope-worded
                 # coverage caveat -- and persist it on the terminal outcome.
                 # The legacy READ_COUNTS report is never rendered as a count.
+                if candidate_id == "ANSWER:SEARCH":
+                    # Task B item 2b: where the searched object was seen (or
+                    # "not found in observed regions" with the coverage
+                    # note), plus any count objectives' grounded counts; the
+                    # safe return runs before this is recorded.
+                    sections, conclusive = self._search_sections(snapshot)
+                    projections = self._count_projections(snapshot)
+                    sections += [render_objective_count(p) for p in projections]
+                    facts = tuple(f for f in snapshot.facts if f.kind != CandidateKind.READ_COUNTS)
+                    others = [o for o in self._observation_objectives(snapshot)
+                              if o.kind != GoalKind.COUNT and not is_search_objective(o)]
+                    if others and facts:
+                        sections.append(render_answer(facts))
+                    return self._finalize_terminal(
+                        session_id, correlation, snapshot, prior, candidate_id, kind, digest,
+                        code="ANSWERED_SEARCH" if conclusive else "ANSWERED_INCOMPLETE",
+                        requested_terminal=TerminalState.COMPLETED if conclusive else TerminalState.INCOMPLETE_RETURNED,
+                        answer="\n\n".join(sections), facts=facts,
+                        extra={"count_projection": [p.to_payload() for p in projections]})
                 if candidate_id == "ANSWER:COUNTS" or candidate_id.endswith(":INCOMPLETE"):
                     projections = self._count_projections(snapshot)
                     sections = [render_objective_count(p) for p in projections]
@@ -744,8 +1051,16 @@ class RoomController:
         pose = result.pose
         if pose is None:
             return False
+        # Task B2: the checkpoint planner deliberately leaves an offset within
+        # its dead band uncorrected (e.g. the CanningSt pad at y 190 and the
+        # rear poses at y 183: no 7 cm move is ever commanded), so a correct
+        # arrival is within the dead band of the declared pose, plus the
+        # measurement tolerance -- never within the tolerance alone, which
+        # refused every such observation as TOOL_FAILURE.
+        limits = getattr(self.supervisor, "limits", None)
+        tolerance_cm = _POSE_POSITION_TOLERANCE_CM + float(getattr(limits, "dead_band_cm", 0) or 0)
         distance_cm = math.hypot(pose.x_cm - resolved.x_cm, pose.y_cm - resolved.y_cm)
-        if distance_cm > _POSE_POSITION_TOLERANCE_CM or abs(pose.z_cm - resolved.z_cm) > _POSE_POSITION_TOLERANCE_CM:
+        if distance_cm > tolerance_cm or abs(pose.z_cm - resolved.z_cm) > tolerance_cm:
             return False
         return _heading_within_tolerance(health.heading_deg, resolved.yaw_deg)
 

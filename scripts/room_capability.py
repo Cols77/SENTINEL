@@ -54,18 +54,53 @@ def _cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _flight_binding(args: argparse.Namespace):
+    """Task B item 5: the profile files one grant binds, loaded once.
+
+    ``None`` when no flight file was named (raw ``--profile`` hashes only).
+    Otherwise ``--site``, ``--drift-profile`` and ``--energy-profile`` are
+    all required, plus optional ``--command-limits`` and ``--profile-file``.
+    """
+    from sentinel.room import live_session
+
+    files = (args.site, args.drift_profile, args.energy_profile)
+    if not any(files) and not args.profile_file and not args.command_limits:
+        return None
+    if not all(files):
+        raise GrantRegistryError("--site, --drift-profile and --energy-profile bind the grant together")
+    try:
+        return live_session.load_flight_binding(
+            site_path=args.site, drift_profile_path=args.drift_profile, energy_profile_path=args.energy_profile,
+            command_limits_path=args.command_limits, profile_paths=tuple(args.profile_file))
+    except live_session.LiveSessionError as exc:
+        raise GrantRegistryError(str(exc)) from exc
+
+
+def _binding_profiles_and_site(args: argparse.Namespace) -> tuple[tuple[str, ...], str | None]:
+    binding = _flight_binding(args)
+    profiles = set(args.profile or ())
+    site_sha256 = args.site_sha256
+    if binding is not None:
+        profiles |= set(binding.sha256s)
+        if site_sha256 is not None and site_sha256 != binding.site.cube_site_sha256:
+            raise GrantRegistryError("--site-sha256 does not match --site")
+        site_sha256 = binding.site.cube_site_sha256
+    return tuple(sorted(profiles)), site_sha256
+
+
 def _cmd_issue_trial(args: argparse.Namespace) -> int:
     registry_path = Path(args.registry)
     try:
         registry = load_registry(registry_path)
+        profile_sha256s, site_sha256 = _binding_profiles_and_site(args)
         acceptance_manifest = _acceptance_manifest(args.session_id, args.capability)
         new_registry, grant = issue_trial(
             registry,
             capability=args.capability,
             trial_protocol=args.trial_protocol,
-            site_sha256=args.site_sha256,
+            site_sha256=site_sha256,
             aircraft_id=args.aircraft_id,
-            profile_sha256s=tuple(args.profile or ()),
+            profile_sha256s=profile_sha256s,
             evidence_destination=args.evidence_destination,
             expires_at=args.expires_at,
             acceptance_manifest=acceptance_manifest,
@@ -93,6 +128,14 @@ def _cmd_promote(args: argparse.Namespace) -> int:
             )
             return 2
         evidence_index = parse_evidence_index(Path(args.evidence_index).read_bytes())
+        binding = _flight_binding(args)
+        if binding is not None and (
+                tuple(sorted(trial_candidates[0].profile_sha256s)) != binding.sha256s
+                or trial_candidates[0].site_sha256 != binding.site.cube_site_sha256):
+            # Task B item 5: the promoted grant inherits the trial's single
+            # binding; promote refuses if the named files are not that binding.
+            print("refused: the named profile files are not the TRIAL grant's binding", file=sys.stderr)
+            return 2
         new_registry, grant = promote(
             registry,
             trial_grant=trial_candidates[0],
@@ -108,6 +151,16 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_flight_file_args(parser: argparse.ArgumentParser) -> None:
+    """Task B item 5: the files one grant binds (see ``live_session.FlightBinding``)."""
+    parser.add_argument("--site", default=None, help="room-site document (binds its site and tag map)")
+    parser.add_argument("--drift-profile", default=None)
+    parser.add_argument("--energy-profile", default=None)
+    parser.add_argument("--command-limits", default=None)
+    parser.add_argument("--profile-file", action="append", default=[],
+                        help="calibration profile file (room-calibration-profile-v1)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="room_capability")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -119,9 +172,11 @@ def build_parser() -> argparse.ArgumentParser:
     issue_parser = subparsers.add_parser("issue-trial", help="write one narrowly scoped TRIAL grant")
     issue_parser.add_argument("--capability", required=True)
     issue_parser.add_argument("--trial-protocol", required=True)
-    issue_parser.add_argument("--site-sha256", required=True)
+    issue_parser.add_argument("--site-sha256", default=None,
+                              help="the site binding; derived from --site when that is given")
     issue_parser.add_argument("--aircraft-id", required=True)
     issue_parser.add_argument("--profile", action="append", default=[])
+    _add_flight_file_args(issue_parser)
     issue_parser.add_argument("--evidence-destination", required=True)
     issue_parser.add_argument("--expires-at", required=True)
     issue_parser.add_argument("--session-id", required=True)
@@ -137,6 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--now", default=None,
         help="tz-aware ISO-8601 instant to promote as of; defaults to the real current UTC time",
     )
+    _add_flight_file_args(promote_parser)
     promote_parser.set_defaults(func=_cmd_promote)
 
     return parser

@@ -11,7 +11,8 @@ parts -- it defines no new safety rule:
    a malformed or missing file refuses.
 2. The flight stack (executor, telemetry refresh, emergency landing, frame
    source) from the injected ``flight_stack_factory``, bound to that tracker
-   and clock. This build never constructs a real drone adapter on its own.
+   and clock. This module never constructs a drone adapter itself; the CLI's
+   default factory is ``sentinel.room.live_stack.TelloFlightStackFactory``.
 3. A REAL-mode ``SafetySupervisor``. ``validate_bindings`` requires a grant in
    the session's capability profile bound to ``calibration_hashes`` of the
    exact drift/energy/limits/site this session flies with; the CLI copies the
@@ -41,17 +42,18 @@ from typing import Callable, Iterable
 from sentinel.cube.checkpoint import CommandLimits, TransportLimits
 from sentinel.cube.energy import EnergyProfile, ExecutionMode, ReserveGuard
 from sentinel.cube.localization import DriftProfile, LocalizationTracker
+from sentinel.cube.recovery import RecoveryController
 from sentinel.cube.step_executor import ExecutorState, TerminalOutcome
 
 from . import wiring
-from .controller import RoomController
+from .controller import AcceptancePolicy, RoomController
 from .goals import GoalCompiler
 from .models import (AcceptanceManifest, CapabilityProfile, GoalStatus, TerminalState,
                      canonical_acceptance_manifest_sha256)
 from .queries import ReadQueries
 from .site import ContingencyAssurance, RoomSite
 from .store import RoomStore
-from .supervisor import SafetySupervisor
+from .supervisor import SafetySupervisor, calibration_hashes
 
 #: Upper bound on the operator request text handed to goal compilation.
 REQUEST_LIMIT_BYTES = 4096
@@ -72,13 +74,27 @@ class FlightStack:
     ``refresh()`` returns the current ``(PoseHealth, EnergySample)`` measured
     from the aircraft; ``emergency(executor)`` performs a forced landing and
     returns its ``TerminalOutcome``; ``frame_source.read_frame(timeout=...)``
-    reads the connected video stream for perception.
+    reads the connected video stream for perception. ``trigger_emergency``,
+    when the stack reaches real hardware, is the operator's direct motor-stop
+    path (``FlightTestRunner.trigger_emergency``): the CLI arms it under the
+    operator's emergency hotkey for the whole flight. It is ``None`` for a
+    stack with nothing to stop (fakes, replay).
     """
 
     executor: object
     refresh: Callable[[], tuple]
     emergency: Callable[[object], TerminalOutcome]
     frame_source: object
+    trigger_emergency: Callable[[], None] | None = None
+    #: Task B item 2c: a stationary tag burst as ``PoseReport``s for the
+    #: supervisor's recovery policy (``RecoveryController.burst_source``),
+    #: and the headings at which two or more mapped tags are visible. When
+    #: both are present the supervisor gets a recovery adapter, so a
+    #: RECOVERY_REQUIRED pose is re-anchored instead of landed and Jev may
+    #: choose an early bounded re-anchor. ``None``/``()`` keeps the old
+    #: behaviour (mandatory recovery unavailable -> forced landing).
+    recovery_burst: Callable[[object], tuple] | None = None
+    mapped_heading_tag_ids: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -149,6 +165,59 @@ def load_command_limits(path: str | Path | None) -> CommandLimits:
         raise LiveSessionError(f"command limits {str(path)!r} are invalid: {exc}") from exc
 
 
+@dataclass(frozen=True)
+class FlightBinding:
+    """Task B item 5: every file one capability grant is bound to, loaded once.
+
+    ``sha256s`` is the single binding set: the canonical hash of each
+    calibration profile file plus ``calibration_hashes`` of the exact
+    energy/drift/limits/site this session flies with (which already covers
+    the site document and its tag map). One grant carrying exactly this set
+    satisfies both ``capabilities.admit_live`` (against the manifest's
+    ``profile_sha256s``) and ``SafetySupervisor.validate_bindings``.
+    """
+
+    site: RoomSite
+    drift_profile: DriftProfile
+    energy_profile: EnergyProfile
+    limits: CommandLimits
+    calibration_profiles: tuple
+    landing_upper_bound_s: float = 10.0
+
+    @property
+    def calibration_sha256s(self) -> tuple[str, ...]:
+        from . import calibration
+        return tuple(sorted(calibration.canonical_profile_sha256(p) for p in self.calibration_profiles))
+
+    @property
+    def flight_sha256s(self) -> tuple[str, ...]:
+        return calibration_hashes(self.energy_profile, self.drift_profile, self.limits, self.site,
+                                  self.landing_upper_bound_s)
+
+    @property
+    def sha256s(self) -> tuple[str, ...]:
+        return tuple(sorted({*self.calibration_sha256s, *self.flight_sha256s}))
+
+
+def load_flight_binding(*, site_path, drift_profile_path, energy_profile_path, command_limits_path=None,
+                        profile_paths=(), landing_upper_bound_s: float = 10.0) -> FlightBinding:
+    """Load the profile files a grant binds to, once, refusing any bad file."""
+    from . import calibration
+    from .site import parse_room_site
+    try:
+        site = parse_room_site(json.loads(Path(site_path).read_text(encoding="utf-8")))
+    except (OSError, ValueError) as exc:
+        raise LiveSessionError(f"site {str(site_path)!r} could not be loaded: {exc}") from exc
+    profiles = []
+    for path in profile_paths:
+        try:
+            profiles.append(calibration.load_profile(path))
+        except (calibration.CalibrationError, OSError) as exc:
+            raise LiveSessionError(f"profile file {str(path)!r} could not be loaded: {exc}") from exc
+    return FlightBinding(site, load_drift_profile(drift_profile_path), load_energy_profile(energy_profile_path),
+                         load_command_limits(command_limits_path), tuple(profiles), landing_upper_bound_s)
+
+
 def session_capabilities(registry, manifest) -> CapabilityProfile:
     """The registry grants this run's session row carries.
 
@@ -199,6 +268,22 @@ def adopt_assurances(store: RoomStore, *, session_id: str, clock_domain_id: str,
     return tuple(adopted)
 
 
+def record_acceptance_policy(store: RoomStore, session_id: str, acceptance: AcceptancePolicy) -> None:
+    """Task V2: append the session's Jev acceptance thresholds as a
+    ``ROOM_ACCEPTANCE_POLICY`` config event (every choice attempt also
+    carries them)."""
+    correlation = f"acceptance-policy:{session_id}"
+    store.append_event(session_id=session_id, expected_version=store.session_version(session_id),
+                       event_type="ROOM_ACCEPTANCE_POLICY", payload=acceptance.as_config(),
+                       correlation_id=correlation, causation_id=None, idempotency_key=correlation)
+
+
+def _calibration_profile_sha256s(profiles) -> tuple[str, ...]:
+    from . import calibration
+    return tuple(sorted(calibration.canonical_profile_sha256(p) for p in profiles
+                        if isinstance(p, calibration.CalibrationProfile)))
+
+
 def _pose_profile(profiles):
     """The calibration profile whose validated speeds the checkpoint wiring flies at."""
     usable = [profile for profile in profiles if getattr(profile, "speeds_cm_s", ())]
@@ -214,7 +299,7 @@ def run_count_return(
     assurances: Iterable[ContingencyAssurance], request_text: str, frames_dir: str | Path,
     clock: Callable[[], float], wall_clock: Callable[[], datetime],
     before_takeoff: Callable[[], None], landing_upper_bound_s: float = 10.0,
-    provider_wait_s: float = 10.0,
+    provider_wait_s: float = 10.0, acceptance: AcceptancePolicy | None = None,
 ) -> LiveSessionOutcome:
     """Build, take off, run to a terminal state and return the outcome.
 
@@ -232,6 +317,11 @@ def run_count_return(
             wall_clock=wall_clock, landing_upper_bound_s=landing_upper_bound_s)
         if isinstance(prepared, LiveSessionOutcome):
             return prepared
+        # Task V2: the room loop's per-kind Jev acceptance thresholds (and
+        # the one re-ask), recorded in the session ledger as this session's
+        # config before anything flies.
+        acceptance = acceptance if acceptance is not None else AcceptancePolicy()
+        record_acceptance_policy(store, manifest.run_id, acceptance)
         before_takeoff()
     except LiveSessionError:
         raise
@@ -254,7 +344,7 @@ def run_count_return(
 
     controller = RoomController(
         store, judge, supervisor=supervisor, flight_executor=stack.executor, provider_wait_s=provider_wait_s,
-        **collaborators,
+        acceptance=acceptance, **collaborators,
     )
     try:
         terminal = controller.run_until_terminal(manifest.run_id)
@@ -282,12 +372,23 @@ def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, ca
         raise LiveSessionError(str(exc)) from exc
     if not isinstance(stack, FlightStack):
         raise LiveSessionError("client_factory must return a live_session.FlightStack")
+    recovery = None
+    if stack.recovery_burst is not None and stack.mapped_heading_tag_ids:
+        # Energy is admitted by the supervisor itself (every recovery rotation
+        # and burst goes through prepare()'s reserve assessment), so the
+        # policy's own energy hook defers to it.
+        recovery = RecoveryController(tracker, clock=clock, burst_source=stack.recovery_burst,
+                                      energy_admits=lambda action: True)
     supervisor = SafetySupervisor(
         store=store, session_id=session_id, site=site, tracker=tracker, reserve=reserve, limits=limits,
         aircraft_id=manifest.aircraft_id, mode=ExecutionMode.REAL, refresh=stack.refresh,
         emergency=stack.emergency, clock=clock, wall_clock=wall_clock,
         capability=manifest.requested_capability, acceptance_manifest=acceptance_manifest_for(manifest),
-        landing_upper_bound_s=landing_upper_bound_s,
+        landing_upper_bound_s=landing_upper_bound_s, recovery=recovery,
+        mapped_heading_tag_ids=tuple(stack.mapped_heading_tag_ids) if recovery is not None else (),
+        # Task B item 5: the one grant also binds the calibration profile
+        # files this session was admitted with.
+        profile_sha256s=_calibration_profile_sha256s(calibration_profiles),
     )
     try:
         supervisor.validate_bindings(site)
@@ -314,5 +415,8 @@ def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, ca
         terminal = RoomController(store, judge).run_until_terminal(session_id)
         return LiveSessionOutcome(terminal, False, ledger.status.value, None, "GOAL_LEDGER_NOT_PENDING")
     collaborators = {"resolve_checkpoint": resolve_checkpoint, "perception_capture": perception_capture,
-                     "perception_provider": perception_provider}
+                     "perception_provider": perception_provider,
+                     # Task B item 3: the calibrated Tello camera and the
+                     # site's declared support planes place detections.
+                     "count_geometry": wiring.make_count_geometry(site)}
     return supervisor, stack, ledger, collaborators

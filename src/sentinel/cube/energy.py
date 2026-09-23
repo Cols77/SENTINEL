@@ -37,6 +37,8 @@ class ExecutionMode(str, Enum):
 # Comparing against a stream epoch makes that phase envelope cumulative across
 # frequent subsecond polls and counter advances.
 MOTOR_TIME_QUANTIZATION_ENVELOPE_S = Decimal("1")
+#: A single 1 % battery reading step over a shorter window is not learned as a rate.
+BURN_QUANTIZATION_WINDOW_S = Decimal("10")
 
 
 def _exact_decimal(value: object, field: str) -> Decimal:
@@ -222,6 +224,7 @@ class ReserveGuard:
         self._last_ingested_sample: EnergySample | None = None
         self._minimum_battery_pct: int | None = None
         self._conservative_sample: EnergySample | None = None
+        self._stream_anchor: EnergySample | None = None
 
     @property
     def conservative_sample(self) -> EnergySample | None:
@@ -255,6 +258,8 @@ class ReserveGuard:
         self._minimum_battery_pct = min(self._minimum_battery_pct, sample.battery_pct) \
             if self._minimum_battery_pct is not None else sample.battery_pct
         self._last_ingested_sample = sample
+        if self._stream_anchor is None:
+            self._stream_anchor = sample
         if sample.motor_time_s is not None and self._motor_epoch is None:
             self._motor_epoch = (
                 _exact_decimal(sample.measured_at_s, "measured_at_s"),
@@ -288,8 +293,20 @@ class ReserveGuard:
                     > MOTOR_TIME_QUANTIZATION_ENVELOPE_S):
                 return False
         burn = previous.battery_pct - current.battery_pct
-        if burn > 0:
+        # Task B2: a single 1 % reading step between two samples a few
+        # seconds apart is the reading's resolution, not a burn rate (2 s
+        # apart it read as 0.5 %/s and priced every action at tens of
+        # percent). Such a pair teaches nothing by itself; the rate over the
+        # stream since its first sample, once that spans the window, does.
+        if burn > 1 or (burn == 1 and elapsed >= BURN_QUANTIZATION_WINDOW_S):
             self._observed_upper = max(self._observed_upper, Decimal(burn) / elapsed)
+        anchor = self._stream_anchor
+        if anchor is not None:
+            anchor_elapsed = _exact_decimal(current.measured_at_s, "measured_at_s") - _exact_decimal(
+                anchor.measured_at_s, "measured_at_s")
+            anchor_burn = anchor.battery_pct - current.battery_pct
+            if anchor_burn > 0 and anchor_elapsed >= BURN_QUANTIZATION_WINDOW_S:
+                self._observed_upper = max(self._observed_upper, Decimal(anchor_burn) / anchor_elapsed)
         return True
 
     def ingest_sample(self, sample: EnergySample) -> bool:
