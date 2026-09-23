@@ -39,7 +39,8 @@ L3 trial). Nothing is invented silently.
 |---|---|---|---|
 | free space `cube` footprint | x 160–340, y 160–300 cm | derived | cube `min/max_x_m`, `min/max_y_m` |
 | free space `cube` z | −20 to 200 cm | derived + contract | top: cube `max_z_m` 2.0. Bottom: the floor (0) minus the drift profile's `max_height_error_cm` (20, see the history profile). `admit_terminal_contingency` requires one free-space prism to contain the swept landing disk down to touchdown minus that height error |
-| free space `flight` (semantic envelope) | x 160–340, y 160–300, z 60–180 cm | derived | cube footprint (the brief: semantic frame over the cube) and the commanded z band `commanded.min_z_cm`/`max_z_cm`. The live runner's flight envelope is this volume (`live_stack.site_envelope`), so a measured home near the start pad (y ≈ 190) is inside it |
+| free space `flight` | x 160–340, y 160–300, z 60–180 cm | derived | cube footprint (the brief: semantic frame over the cube) and the commanded z band `commanded.min_z_cm`/`max_z_cm`. Until Task B2 fix 1 it was the semantic envelope |
+| free space `observation` (semantic envelope) | x 220–280, y 160–300, z 60–140 cm | **operator_confirm** (Task B2 fix 1) | chosen, not derived: inside the cube, centred on the pad's x, so the three regions resolve to x 230/250/270 at y 183 and z 100 (the takeoff height; no vertical legs). With the history drift (0.157 cm/cm) the supervisor refuses the WP5 inset corners x 190/310 (their out-and-back ends 30 cm from the rear face) and admits these. The live runner's flight envelope is this volume (`live_stack.site_envelope`), so a measured home near the start pad (x ≈ 250, y ≈ 190, z 60–140) is inside it |
 | forbidden volumes | none | derived | the WP5 cube is the surveyed clear volume; nothing is declared inside it |
 | corridor `home-corridor` | x 160–340, y 160–300, z −20 to 200 cm | derived + contract | cube footprint; bottom = pad z minus `max_height_error_cm` (Task A carry-over: takeoff is refused unless the home corridor reaches it) |
 
@@ -73,7 +74,7 @@ Both triggers (`NAVIGATION_UNAVAILABLE`, `RETURN_ENERGY_UNAVAILABLE`) are
 | axes | left→right +x, rear→front +y | derived | front = max y, the tag stands' side (y 4.0 m) |
 | landmarks | none | derived | the tag stands are outside the cube; no other landmark is surveyed |
 | coverage cells | left / center / right strips x 190–230 / 230–270 / 270–310, y 190–270, z 0–80 | derived + **operator_confirm** | the commanded (inset 0.3 m) area; z 0–80 = floor to the demo surface plus the 30 cm resting band. Required classes `computer`, `phone` (the L3 request) |
-| `pose_visibility` | `left/center/right-rear-middle-toward_targets` → its own strip | **operator_confirm** | a declared visibility matrix, not a calibrated frustum. The left/right regions resolve to WP5's commanded corners x 190/310 |
+| `pose_visibility` | `left/center/right-rear-middle-toward_targets` → its own strip | **operator_confirm** | a declared visibility matrix, not a calibrated frustum. The left/right regions resolve to x 230/270 (the `observation` envelope), on the inner edges of their strips |
 | support plane `FLOOR` | z 0, no classes | derived | the floor |
 | support plane `demo-surface` | z 50, classes `computer`, `phone`, `pen` | derived + **operator_confirm** (classes) | registry `surface_z_cm` 50. The survey path rays every detection onto this surface (`sentinel.survey.cube_bridge`); which classes rest on it (vs the floor) is the operator's to confirm |
 

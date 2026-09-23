@@ -55,14 +55,23 @@ def test_canningst_site_binds_the_mission_control_cube_and_tag_map():
 def test_canningst_geometry_is_the_wp5_cube_with_front_toward_the_tags():
     site = canningst_site()
     cube = json.loads(CUBE_PATH.read_text(encoding="utf-8"))["cube"]
+    volumes = {volume.volume_id: volume for volume in site.free_space_volumes}
+    footprint = ((round(cube["min_x_m"] * 100), round(cube["min_y_m"] * 100)),
+                 (round(cube["max_x_m"] * 100), round(cube["min_y_m"] * 100)),
+                 (round(cube["max_x_m"] * 100), round(cube["max_y_m"] * 100)),
+                 (round(cube["min_x_m"] * 100), round(cube["max_y_m"] * 100)))
+    assert volumes["cube"].polygon_xy_cm == volumes["flight"].polygon_xy_cm == footprint
+    assert volumes["flight"].z_interval_cm == (60, 180)  # WP5 commanded altitude band
+    # Task B2 fix 1: the semantic (and runner) envelope is the smaller
+    # observation volume inside the cube, so the three regions stand 20 cm
+    # apart at the takeoff height: the history drift admits them (the WP5
+    # inset corners x 190/310 at z 120 it does not, see below).
     envelope = live_stack.site_envelope(site)
-    assert (envelope.min_x_cm, envelope.max_x_cm) == (round(cube["min_x_m"] * 100), round(cube["max_x_m"] * 100))
-    assert (envelope.min_y_cm, envelope.max_y_cm) == (round(cube["min_y_m"] * 100), round(cube["max_y_m"] * 100))
-    assert (envelope.min_z_cm, envelope.max_z_cm) == (60, 180)  # WP5 commanded altitude band
+    assert (envelope.min_x_cm, envelope.max_x_cm, envelope.min_y_cm, envelope.max_y_cm) == (220, 280, 160, 300)
+    assert (envelope.min_z_cm, envelope.max_z_cm) == (60, 140)
     assert site.semantic_frame.rear_to_front_axis_xy == (0.0, 1.0)  # front = max Y, the tag stands' side
-    # The semantic left/right regions land on WP5's commanded inset corners (x 190 / 310).
-    assert resolve_pose_id(site, "left-rear-middle-toward_targets").x_cm == 190
-    assert resolve_pose_id(site, "right-rear-middle-toward_targets").x_cm == 310
+    poses = {pose_id: resolve_pose_id(site, pose_id) for pose_id in (LEFT, CENTER, RIGHT)}
+    assert [(p.x_cm, p.y_cm, p.z_cm) for p in poses.values()] == [(230, 183, 100), (250, 183, 100), (270, 183, 100)]
 
 
 def test_canningst_home_is_the_start_pad_and_its_route_ends_over_it():
@@ -251,71 +260,77 @@ CENTER, LEFT, RIGHT = ("center-rear-middle-toward_targets", "left-rear-middle-to
                        "right-rear-middle-toward_targets")
 
 
-def test_the_regenerated_history_profiles_admit_the_center_region_after_takeoff(tmp_path):
-    """Task B2, the runbook's "What L3 will do with the history profiles":
-    with the robust drift (p90 of the nominal legs + 20 %, 0.157 cm/cm) the
-    center observation is admitted at 90 % battery. Left and right stay
-    refused: their out-and-back return ends at the pad, 30 cm from the cube's
-    rear face, and 160 cm of travel without a fix at 0.157 cm/cm alone is
-    25 cm of uncertainty, more than the 18 cm the 12 cm rotation radius
-    leaves there."""
+def test_the_regenerated_history_profiles_admit_every_region_after_takeoff(tmp_path):
+    """Task B2 item 3, the runbook's "What L3 will do": with the committed
+    profiles (robust drift 0.157 cm/cm, p90 of the nominal legs + 20 %) and
+    site (regions at x 230/250/270, the takeoff height) every region is
+    admitted at 90 % battery."""
     decisions = _decisions(tmp_path)
-    assert decisions[CENTER].transition == "CONTINUE", decisions[CENTER].reason
+    assert all(d.transition == "CONTINUE" for d in decisions.values()), {k: d.reason for k, d in decisions.items()}
+    # The reservation is well inside what 90 % leaves above the 20 % floor.
+    assert max(d.energy.action_cost_pct for d in decisions.values()) <= 45
+
+
+def test_the_old_outlier_drift_is_still_refused_wherever_the_aircraft_must_move(tmp_path):
+    """The 0.45 cm/cm leg of the excluded run, declared as the drift: both
+    lateral regions are refused (the supervisor still refuses an absurd
+    drift). The center stays admitted: it is a hover over the pad (no
+    translation, so no per-centimetre drift)."""
+    decisions = _decisions(tmp_path, drift_override=0.45)
     for pose_id in (LEFT, RIGHT):
         assert decisions[pose_id].transition == "RETURN_NOW", (pose_id, decisions[pose_id].reason)
-        assert decisions[pose_id].reason in {"OPTIONAL_PATH_INVALID", "PROJECTED_TERMINATION_PATH_INVALID"}
-    # The reservation is well inside what 90 % leaves above the 20 % floor.
-    assert decisions[CENTER].energy.action_cost_pct <= 50
-
-
-def test_the_old_outlier_drift_is_still_refused_everywhere(tmp_path):
-    """The 0.45 cm/cm leg of the excluded run, declared as the drift: no
-    region is admissible (the supervisor still refuses an absurd drift)."""
-    for pose_id, decision in _decisions(tmp_path, drift_override=0.45).items():
-        assert decision.transition == "RETURN_NOW", (pose_id, decision.reason)
+        assert decisions[pose_id].reason in {"OPTIONAL_PATH_INVALID", "PROJECTED_TERMINATION_PATH_INVALID",
+                                             "PROJECTED_TERMINATION_LANDING_INVALID"}
+    assert decisions[CENTER].transition == "CONTINUE", decisions[CENTER].reason
 
 
 def test_at_30_percent_battery_the_mission_is_refused_before_takeoff(tmp_path):
-    import pytest
     with pytest.raises(ValueError, match="RETURN_ENERGY_UNAVAILABLE"):
         _decisions(tmp_path, battery=30)
 
 
-def test_takeoff_needs_about_half_a_battery(tmp_path):
-    """The runbook's takeoff figure: a recovery and the whole return above the 20 % floor."""
+def test_takeoff_needs_about_45_percent(tmp_path):
+    """The runbook's takeoff figure (a recovery and the whole return above the
+    20 % floor): admitted at 50 %, refused at 40 % (the threshold is 43 %)."""
     _decisions(tmp_path / "ok", battery=50)
-    with pytest.raises(ValueError, match="RETURN_ENERGY_UNAVAILABLE"):
-        _decisions(tmp_path / "refused", battery=45)
+    with pytest.raises(ValueError, match="start blocked"):
+        _decisions(tmp_path / "refused", battery=40)
 
 
-@pytest.mark.parametrize("battery, center", [(90, "CONTINUE"), (70, "CONTINUE"), (60, "RETURN_NOW")])
-def test_the_battery_an_observation_needs(tmp_path, battery, center):
-    """The runbook's battery figure: an observation reserves its own worst
-    case, a recovery and the whole return (about 40 % at 0.288 %/s); below
-    about 65 % none is admitted and the aircraft returns."""
-    decision = _decisions(tmp_path, battery=battery)[CENTER]
-    assert decision.transition == center, decision.reason
+@pytest.mark.parametrize("battery, center, lateral", [
+    (90, "CONTINUE", "CONTINUE"), (65, "CONTINUE", "CONTINUE"), (57, "CONTINUE", "RETURN_NOW"),
+    (50, "RETURN_NOW", "RETURN_NOW")])
+def test_the_battery_an_observation_needs(tmp_path, battery, center, lateral):
+    """The runbook's battery figures: an observation reserves its own worst
+    case, a recovery and the whole return (35 % center, 40 % left/right at
+    0.288 %/s): the center needs about 55 %, left/right about 60 %."""
+    decisions = _decisions(tmp_path, battery=battery)
+    assert decisions[CENTER].transition == center, decisions[CENTER].reason
+    for pose_id in (LEFT, RIGHT):
+        assert decisions[pose_id].transition == lateral, (pose_id, decisions[pose_id].reason)
 
 
-def test_a_geometry_feasible_declared_drift_admits_every_region(tmp_path):
-    """What an operator declaration would need for left/right at CanningSt
-    (the report's "known gaps"): 0.05 cm/cm with the policy's time terms is
-    still refused; 0.05 with 0.02 cm/s and 0.01 deg/s hover drift admits all
-    three."""
+def test_the_wp5_corner_regions_are_refused_at_the_history_drift_even_without_hover_drift(tmp_path):
+    """Why the site has an observation envelope (Task B2 fix 1): over the
+    whole cube the left/right regions resolve to WP5's inset corners (x
+    190/310, z 120). Their out-and-back ends at the pad, 30 cm from the rear
+    face; 160 cm without a fix at 0.157 cm/cm is 25 cm, more than the 18 cm
+    the 12 cm rotation radius leaves -- refused even with zero hover drift."""
+    from dataclasses import replace
     from sentinel.room import live_session
-    decisions = _decisions(tmp_path / "a", drift_override=0.05)
-    assert decisions[LEFT].transition == "RETURN_NOW"
     original = live_session.load_flight_binding
 
-    def lighter(**kwargs):
-        from dataclasses import replace
+    def whole_cube(**kwargs):
         binding = original(**kwargs)
-        return replace(binding, drift_profile=replace(binding.drift_profile, xy_drift_cm_s=0.02,
-                                                      heading_drift_deg_s=0.01))
+        site = replace(binding.site, semantic_frame=replace(binding.site.semantic_frame, envelope_volume_id="flight"))
+        return replace(binding, site=site, drift_profile=replace(binding.drift_profile, xy_drift_cm_s=0.0,
+                                                                 heading_drift_deg_s=0.0))
 
-    live_session.load_flight_binding = lighter
+    live_session.load_flight_binding = whole_cube
     try:
-        decisions = _decisions(tmp_path / "b", drift_override=0.05)
+        decisions = _decisions(tmp_path)
     finally:
         live_session.load_flight_binding = original
-    assert all(d.transition == "CONTINUE" for d in decisions.values()), {k: d.reason for k, d in decisions.items()}
+    assert decisions[CENTER].transition == "CONTINUE", decisions[CENTER].reason
+    for pose_id in (LEFT, RIGHT):
+        assert decisions[pose_id].transition == "RETURN_NOW", (pose_id, decisions[pose_id].reason)

@@ -32,7 +32,7 @@
   "rotation_radius_cm": 12,
   "schema_version": "pose-drift-v1",
   "validated": true,
-  "xy_drift_cm_s": 0.1,
+  "xy_drift_cm_s": 0.05,
   "xy_drift_per_cm": 0.157471,
   "xy_drift_per_yaw_deg": 0.05
 }

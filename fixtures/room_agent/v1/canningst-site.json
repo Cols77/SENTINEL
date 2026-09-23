@@ -13,6 +13,11 @@
       "volume_id": "flight",
       "polygon_xy_cm": [[160, 160], [340, 160], [340, 300], [160, 300]],
       "z_interval_cm": [60, 180]
+    },
+    {
+      "volume_id": "observation",
+      "polygon_xy_cm": [[220, 160], [280, 160], [280, 300], [220, 300]],
+      "z_interval_cm": [60, 140]
     }
   ],
   "forbidden_volumes": [],
@@ -62,7 +67,7 @@
   ],
   "clearance_provenance": "mission-control-sites.v1 CanningSt: docs/wp5-flight1-site.json cube; WP5 flights 2026-09-21..23",
   "semantic_frame": {
-    "envelope_volume_id": "flight",
+    "envelope_volume_id": "observation",
     "left_to_right_axis_xy": [1.0, 0.0],
     "rear_to_front_axis_xy": [0.0, 1.0],
     "target_side": "FRONT",

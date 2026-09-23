@@ -216,6 +216,10 @@ def succeeded_observations(events):
             if code == "OBSERVE_SUCCEEDED"]
 
 
+PATH_REFUSALS = {("RETURN_NOW", "OPTIONAL_PATH_INVALID"), ("RETURN_NOW", "PROJECTED_TERMINATION_PATH_INVALID"),
+                 ("RETURN_NOW", "PROJECTED_TERMINATION_LANDING_INVALID")}
+
+
 def refusals(events):
     return {(e.payload.get("transition"), e.payload.get("reason")) for e in events
             if e.event_type == "SAFETY_ASSESSED" and e.payload.get("transition") == "RETURN_NOW"}
@@ -227,30 +231,31 @@ def landed_over_the_pad(outcome, tello):
             and abs(tello.x_cm - 250) < 1 and abs(tello.y_cm - 190) < 1)
 
 
-def test_with_the_regenerated_profiles_the_count_mission_observes_the_center_returns_and_lands(tmp_path, monkeypatch):
-    """The committed CanningSt profiles at 90 %: the center region is
-    observed (frame captured, detector run, detections grounded); left and
-    right are refused by the supervisor (their fixless out-and-back cannot
-    stay 12 cm + drift clear of the rear face 30 cm behind the pad), so the
-    aircraft returns over the pad and lands."""
+def test_with_the_committed_profiles_the_count_mission_flies_all_three_regions_then_returns_and_lands(
+        tmp_path, monkeypatch):
+    """Task B2 item 3 with the shipped artifacts only (no override): the
+    committed CanningSt profiles (history drift 0.157 cm/cm) and site
+    (observation envelope: poses at x 230/250/270, y 183, the takeoff height)
+    at 90 %: three region observations (frame, detector, grounded
+    detections), the count answer, the return and the landing over the pad."""
     outcome, tello, events, detector = run_mission(tmp_path, monkeypatch)
-    assert landed_over_the_pad(outcome, tello), outcome
-    assert succeeded_observations(events) == [CENTER] and detector.calls == 1
-    assert refusals(events) & {("RETURN_NOW", "OPTIONAL_PATH_INVALID"),
-                               ("RETURN_NOW", "PROJECTED_TERMINATION_PATH_INVALID")}
-
-
-def test_a_geometry_feasible_drift_flies_all_three_regions_then_returns_and_lands(tmp_path, monkeypatch):
-    """The full mission mechanics on the fake stack: three region
-    observations, the count answer, the return and the landing -- under a
-    drift small enough for CanningSt's left/right geometry (0.03 cm/cm,
-    0.005 deg/cm, 0.02 cm/s, 0.01 deg/s; the history does not support it)."""
-    outcome, tello, events, detector = run_mission(
-        tmp_path, monkeypatch, xy_drift_per_cm=0.03, heading_drift_per_cm=0.005, xy_drift_cm_s=0.02,
-        heading_drift_deg_s=0.01)
     assert landed_over_the_pad(outcome, tello), outcome
     assert sorted(succeeded_observations(events)) == sorted([CENTER, LEFT, RIGHT]) and detector.calls == 3
     assert ("ANSWER:COUNTS", "ANSWERED_COUNT") in tool_outcomes(events)
+    assert not refusals(events) & PATH_REFUSALS, refusals(events)
+    # The lateral legs the regions need (20 cm out, 40 across, 20 back).
+    assert [c for c in tello.sent if c.split()[0] in ("left", "right")] == ["left 20", "right 40", "left 20"]
+
+
+def test_with_an_absurd_drift_the_count_mission_observes_only_where_it_hovers(tmp_path, monkeypatch):
+    """The 0.45 cm/cm outlier of the excluded run, declared as the drift: the
+    supervisor refuses both lateral regions; the center (no translation from
+    the pad) is still observed, and the aircraft returns and lands."""
+    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch, xy_drift_per_cm=0.45)
+    assert landed_over_the_pad(outcome, tello), outcome
+    assert succeeded_observations(events) == [CENTER] and detector.calls == 1
+    assert refusals(events) & PATH_REFUSALS, refusals(events)
+    assert not any(c.split()[0] in ("left", "right") for c in tello.sent)
 
 
 def test_a_yaw_gust_that_loses_the_tags_is_recovered_by_a_yaw_to_the_mapped_heading_and_the_mission_resumes(
@@ -262,8 +267,7 @@ def test_a_yaw_gust_that_loses_the_tags_is_recovered_by_a_yaw_to_the_mapped_head
     the mapped-tag heading (ccw 15 to 90 deg), a tag fix is accepted there,
     and the count mission resumes: every region observed, return, landing."""
     outcome, tello, events, detector = run_mission(
-        tmp_path, monkeypatch, yaw_gust_after_capture=1, xy_drift_per_cm=0.03, heading_drift_per_cm=0.005,
-        xy_drift_cm_s=0.02, heading_drift_deg_s=0.01)
+        tmp_path, monkeypatch, yaw_gust_after_capture=1)
     assert_recovered_by_yaw(outcome, tello, events, recoveries=1)
 
 
@@ -273,8 +277,7 @@ def test_two_yaw_gusts_in_one_flight_are_both_recovered(tmp_path, monkeypatch):
     one behind the policy's back, leaving its episode closed-but-unsucceeded,
     and the second tag loss then landed in place)."""
     outcome, tello, events, detector = run_mission(
-        tmp_path, monkeypatch, yaw_gust_after_capture=(1, 3), xy_drift_per_cm=0.03, heading_drift_per_cm=0.005,
-        xy_drift_cm_s=0.02, heading_drift_deg_s=0.01)
+        tmp_path, monkeypatch, yaw_gust_after_capture=(1, 3))
     assert_recovered_by_yaw(outcome, tello, events, recoveries=2)
 
 

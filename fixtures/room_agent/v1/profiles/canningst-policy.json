@@ -23,6 +23,9 @@
       "justification": "Task B2: the worst single leg (0.45 cm/cm, 2026-09-23 12:21 first leg) comes from a run excluded above; the old per-leg ratio also divided by the straight-line distance from the previous waypoint, not the path flown since the last fix the tracker resets on. The robust statistic over the nominal legs is 0.1312 cm/cm; with a 20 % margin 0.1575."
     }
   },
+  "declared_notes": {
+    "xy_drift_cm_s": "Task B2 fix 1, operator judgment (not a measurement; the 0.1 it replaces was not one either): hover drift 0.05 cm/s. The history cannot measure it (the stop bursts last about 2 s, noise-dominated), and the robust per-leg statistic above already bounds every nominal leg's open-loop error, including the hover time inside that leg, without any hover term. The tracker charges this rate again over every command's worst-case bound (SET_SPEED 21 s, vertical telemetry 7 s, ...). At 0.1 cm/s no lateral CanningSt observation is admissible at the history drift; at 0.05 cm/s the left/right observations at x 226/274 are."
+  },
   "drift_limits": {
     "max_camera_age_s": 240,
     "max_fix_age_s": 300,
@@ -32,7 +35,7 @@
     "max_yaw_deg": 360,
     "max_xy_uncertainty_cm": 30,
     "max_heading_uncertainty_deg": 15,
-    "xy_drift_cm_s": 0.1,
+    "xy_drift_cm_s": 0.05,
     "xy_drift_per_yaw_deg": 0.05,
     "heading_drift_deg_s": 0.05,
     "heading_drift_per_yaw_deg": 0.02,
