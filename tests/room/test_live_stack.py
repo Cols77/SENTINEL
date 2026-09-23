@@ -703,3 +703,38 @@ def test_factory_exposes_the_recovery_adapter_to_the_live_session(tmp_path):
     stack, *_ = build_stack(tmp_path)
     assert stack.recovery_burst is not None
     assert stack.mapped_heading_tag_ids == ()  # no tag map bound in this fixture: no yaw scan
+
+
+# ---------------------------------------------------------------------------
+# Task B (L3): the live Jev judge and detector defaults
+# ---------------------------------------------------------------------------
+
+
+def test_default_jev_builds_the_openrouter_jev_judge_without_calling_it(monkeypatch):
+    monkeypatch.delenv("SENTINEL_SYSTEM_ONE_MODEL", raising=False)
+    judge = live_stack.default_jev(environ={live_stack.PROVIDER_KEY_ENV: "k"})
+    assert judge.identity.startswith("jev:")
+    inner = judge._judge
+    assert inner._api_key_env == live_stack.PROVIDER_KEY_ENV and inner._base_url == live_stack.JEV_BASE_URL
+    assert inner._timeout_s < 10  # below the controller's provider wait
+
+    calls = []
+    inner._transport = lambda payload: calls.append(payload) or {
+        "answers": {"room_action": {"choice": "A", "probabilities": {"A": 0.9, "B": 0.1}}}}
+    monkeypatch.setenv(live_stack.PROVIDER_KEY_ENV, "k")
+    answer = judge.choice({"s": 1}, "pick", criteria={"A": "a", "B": "b"}, name="room_action")
+    assert answer["value"] == "A" and len(calls) == 1
+
+
+def test_default_jev_and_detector_refuse_without_the_key_by_name():
+    with pytest.raises(live_stack.LiveStackError, match=live_stack.PROVIDER_KEY_ENV):
+        live_stack.default_jev(environ={})
+    with pytest.raises(live_stack.LiveStackError, match=live_stack.PROVIDER_KEY_ENV):
+        live_stack.default_detector(environ={})
+
+
+def test_default_detector_is_the_pinned_gemini_openrouter_detector_with_an_identity():
+    detector = live_stack.default_detector(environ={live_stack.PROVIDER_KEY_ENV: "k",
+                                                    live_stack.PROVIDER_MODEL_ENV: "google/gemini-test"})
+    assert detector.provider == "gemini-openrouter" and detector.model == "google/gemini-test"
+    assert detector.identity == "gemini-openrouter:google/gemini-test"

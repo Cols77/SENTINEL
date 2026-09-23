@@ -766,7 +766,8 @@ def test_live_full_flight_default_detector_factory_refuses(tmp_path, capsys):
                          client_factory=stack, jev_factory=lambda: live_fakes.PolicyJudge())
     err = capsys.readouterr().err
     assert exit_code == 2
-    assert "requires an injected detector_factory" in err
+    # Task B: the default is the live gemini-openrouter detector; without its key it refuses by name.
+    assert "OPENROUTER_API_KEY" in err
     assert stack.calls == []
 
 
@@ -1184,6 +1185,7 @@ def test_runbook_l0_sequence_runs_end_to_end_against_the_fake_transports(tmp_pat
 
     monkeypatch.chdir(tmp_path)
     (tmp_path / "runs").mkdir()
+    _copy_repo_files(tmp_path, "fixtures/room_agent/v1/canningst-site.json")
     store = SurveyStore.open(tmp_path / "runs" / "consent.sqlite3")
     record_consent(store, location="CanningSt", consent_date="2026-09-23", recorded_by="operator")
     store.connection.close()
@@ -1210,12 +1212,16 @@ def test_runbook_l0_sequence_runs_end_to_end_against_the_fake_transports(tmp_pat
     assert stack_fakes.sent_motor_commands(transport.tello.sent) == []
 
 
-def test_runbook_l0_preview_binds_the_named_site_fixture():
+def test_runbook_l0_preview_binds_the_canningst_site(monkeypatch):
+    # Task B item 7: L0 is bound to the CanningSt site L3 flies.
+    monkeypatch.chdir(REPO_ROOT)
     commands = _runbook_commands(_runbook_l0_section(), {})
     preview = next(argv for script, argv in commands if argv[0] == "preview")
     parsed = cli.build_parser().parse_args(preview)
-    assert "fixtures/room_agent/v1/semantic-site.json" in _runbook_l0_section()
-    assert (parsed.site_sha256, parsed.tag_map_sha256) == (SITE_SHA256, TAG_MAP_SHA256)
+    assert parsed.site == "fixtures/room_agent/v1/canningst-site.json"
+    site = json.loads((REPO_ROOT / parsed.site).read_text(encoding="utf-8"))
+    _, site_sha256, tag_map_sha256 = cli._preview_bindings(parsed)
+    assert (site_sha256, tag_map_sha256) == (site["cube_site_sha256"], site["tag_map_sha256"])
     assert parsed.capability == "connectivity"
 
 
@@ -1475,3 +1481,100 @@ def test_live_full_flight_takes_off_under_one_grant_bound_to_every_profile_file(
     assert exit_code == 0, err
     assert stack.executor.calls[0] == "TAKEOFF" and stack.executor.calls[-1] == "LAND"
     assert not stack.emergencies
+
+
+# ---------------------------------------------------------------------------
+# Task B item 7: the L3 runbook sequence
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+L3_PREP_HEADING = "## L3 preparation: history profiles and one TRIAL grant"
+L3_HEADING = "## L3: count-and-return acceptance trial (c)"
+
+
+def _copy_repo_files(root: Path, *relative: str) -> None:
+    for name in relative:
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((REPO_ROOT / name).read_bytes())
+
+
+def _runbook_section(heading: str) -> str:
+    text = RUNBOOK_PATH.read_text(encoding="utf-8")
+    start = text.index(heading)
+    end = text.find("\n## ", start + len(heading))
+    return text[start:] if end == -1 else text[start:end]
+
+
+def test_runbook_l3_sequence_runs_end_to_end_under_one_trial_grant(tmp_path, capsys, monkeypatch):
+    # The L3 sections' own copy-paste commands, in order, from a scratch root
+    # holding the site, tag map and history profiles: issue-trial, preview,
+    # the assurances, the live trial (fake flight stack, Jev, detector and
+    # probes -- no hardware, no provider) and the artifact check.
+    import scripts.room_assurance as assurance_cli
+    import scripts.room_capability as capability_cli
+    import scripts.room_profiles_from_history as history_cli
+    import scripts.room_verify_artifact as verify_cli
+    from sentinel.survey.consent import record_consent
+    from sentinel.survey.store import SurveyStore
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "runs").mkdir()
+    profiles = "fixtures/room_agent/v1/profiles"
+    _copy_repo_files(tmp_path, "fixtures/room_agent/v1/canningst-site.json", "docs/wp5-flight3-map.json",
+                     *(f"{profiles}/canningst-{name}.json"
+                       for name in ("drift", "energy", "command-limits", "flight-profile", "policy")))
+    capability_cli.main(["init", "--registry", "runs/registry.json"])
+    store = SurveyStore.open(tmp_path / "runs" / "consent.sqlite3")
+    record_consent(store, location="CanningSt", consent_date="2026-09-23", recorded_by="operator")
+    store.connection.close()
+    capsys.readouterr()
+    substitutions = {"$RUN": "l3-test", "$TODAY": "2026-09-23", "$EXPIRES": "2099-01-01T00:00:00Z",
+                     "$(git rev-parse HEAD)": "abc123"}
+    commands = [command for heading in (L3_PREP_HEADING, L3_HEADING)
+                for command in _runbook_commands(_runbook_section(heading), substitutions)]
+    assert [(script, argv[0]) for script, argv in commands] == [
+        ("scripts/room_profiles_from_history.py", "--trials-root"),
+        ("scripts/room_capability.py", "issue-trial"), ("scripts/room_session.py", "preview"),
+        ("scripts/room_assurance.py", "--site"), ("scripts/room_session.py", "live"),
+        ("scripts/room_verify_artifact.py", "--manifest")]
+    stack = live_fakes.FlightStackFactory()
+    judge = live_fakes.PolicyJudge("jev:typesafe-ai/jev")
+    mains = {"scripts/room_capability.py": capability_cli.main, "scripts/room_assurance.py": assurance_cli.main,
+             "scripts/room_verify_artifact.py": verify_cli.main,
+             "scripts/room_session.py": lambda argv: cli.main(
+                 argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+                 client_factory=stack, jev_factory=lambda: judge,
+                 detector_factory=_fake_collaborator("gemini-openrouter:google/gemini-test"))}
+    registry = lambda: json.loads((tmp_path / "runs" / "registry.json").read_text(encoding="utf-8"))
+    for script, argv in commands[1:]:  # the history re-derivation needs the real trials (tested elsewhere)
+        values = {"$GRANT": lambda: registry()["grants"][-1]["grant_sha256"],
+                  "$DIGEST": lambda: json.loads((tmp_path / "runs" / "l3-test.manifest.json")
+                                                .read_text(encoding="utf-8"))["authorization_digest"],
+                  "$TERMINAL": lambda: json.loads((tmp_path / "runs" / "l3-test" / "terminal.json")
+                                                  .read_text(encoding="utf-8"))["state"]}
+        argv = [values[token]() if token in values else token for token in argv]
+        exit_code = mains[script](argv)
+        out, err = capsys.readouterr()
+        assert exit_code == 0, (script, argv[0], err)
+        if argv[0] == "preview":
+            assert "missing gate" not in err  # the one TRIAL grant admits the acceptance manifest
+    grant, = registry()["grants"]
+    assert grant["state"] == "TRIAL" and grant["capability"] == "count_return"
+    terminal = json.loads((tmp_path / "runs" / "l3-test" / "terminal.json").read_text(encoding="utf-8"))
+    assert terminal["took_off"] is True and terminal["landing_state"] == "LANDED"
+    assert stack.executor.calls[0] == "TAKEOFF" and stack.executor.calls[-1] == "LAND"
+    assert "goal_family" in judge.names and "room_action" in judge.names
+
+
+def test_runbook_l3_states_the_checklist_before_the_motors_on_step():
+    section = _runbook_section(L3_HEADING)
+    checklist = section.index("Pre-flight checklist")
+    motors_on = section.index("python scripts/room_session.py live")
+    assert checklist < motors_on
+    for needle in ("at least **50 %**", "Clear distance **measured", "emergency stop",
+                   cli.DEFAULT_REQUEST_TEXT.split(",")[0]):
+        assert needle in " ".join(section.split()) or needle in section, needle
+    assert "L1" not in _runbook_section(L3_PREP_HEADING).replace("no L1 calibration", "")
+    text = RUNBOOK_PATH.read_text(encoding="utf-8")
+    assert text.index("## L2 safety trials (optional, after L3)") > text.index(L3_HEADING)

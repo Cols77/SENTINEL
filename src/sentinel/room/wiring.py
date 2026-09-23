@@ -158,6 +158,15 @@ def make_resolve_checkpoint(
 # ---------------------------------------------------------------------------
 
 
+def camera_model_sha256(camera: CameraModel = TELLO_MEASURED) -> str:
+    """The canonical hash of a camera model (the manifest's ``camera_sha256``
+    for a session that counts with it)."""
+    import hashlib
+    import json
+    return hashlib.sha256(json.dumps(asdict(camera), sort_keys=True, separators=(",", ":"))
+                          .encode("utf-8")).hexdigest()
+
+
 def make_count_geometry(site: RoomSite, *, camera: CameraModel = TELLO_MEASURED) -> CountGeometry:
     """Task B item 3: the production ``CountGeometry``.
 

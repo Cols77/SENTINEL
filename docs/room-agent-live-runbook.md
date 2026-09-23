@@ -32,22 +32,22 @@ session (`sentinel.room.live_session.run_count_return`):
 
 The Python-level hooks `client_factory`/`jev_factory`/`detector_factory`
 and the two connectivity probes are how real hardware and models are
-supplied. The two probes and `client_factory` default to the real-Tello
-adapters in `sentinel.room.live_stack` (Task A): a motors-off telemetry
-probe, an OpenRouter reachability probe, and a flight stack that shares the
-probe's one Tello connection. They are built only after every gate passes.
-`jev_factory` and `detector_factory` still refuse by default, so the CLI
-alone still never takes off. No test in this repository reaches hardware or
-a provider: the tests replace the adapters' transports with fakes.
+supplied. All five default to the real adapters in `sentinel.room.live_stack`:
+a motors-off telemetry probe, an OpenRouter reachability probe, a flight
+stack that shares the probe's one Tello connection (Task A), the live Jev
+judge (`JevJudge` over OpenRouter) and the `gemini-openrouter` detector
+(Task B). They are built only after every gate passes. No test in this
+repository reaches hardware or a provider: the tests replace the adapters'
+transports with fakes.
 
-**What a REAL-mode session can count today.** `RoomController` offers
-OBSERVE checkpoints only in `ExecutionMode.SIMULATION`
-(`_observation_enabled`, owned by Plan 03). A real session therefore takes
-off, reads, finds no count evidence, returns home, lands and reports
-`BLOCKED` (Jev asks for clarification). It does not answer a count. The
-composition is complete: once that controller gate admits promoted real
-profiles, the same invocation flies OBSERVE checkpoints through the
-already-wired `sentinel.room.wiring` collaborators. See "Known follow-ups".
+**What a REAL-mode session can do.** `RoomController` offers OBSERVE
+checkpoints in REAL mode only when the supervisor validated a `count_return`
+grant that is PROMOTED, or TRIAL inside its acceptance run (Task B item 2).
+Under such a grant a count flies the site's declared regions, and a
+"find the phone" request searches them (item 2b). Jev sees the localization
+health each turn and may choose an early, bounded `REANCHOR` (item 2c).
+Every observation is still admitted, or refused, by the `SafetySupervisor`;
+see "What L3 will do with the history profiles" below.
 
 Every live invocation (including `--check-connectivity-only`) requires
 `--run-root`: a `sentinel.room.artifacts.RunArtifacts` directory is opened
@@ -105,9 +105,9 @@ or an `rc` command, and it closes the connection before exiting. The
 provider half makes no paid call and sends no frame.
 
 L0 flies nothing, so it needs no capability grant, calibration profile, site
-assurance or tag map. Until the CanningSt site file exists, its manifest is
-bound to the site fixture `fixtures/room_agent/v1/semantic-site.json`
-(`cube_site_sha256` and `tag_map_sha256` below are that file's own values).
+assurance or tag map. Its manifest is bound to the CanningSt site
+`fixtures/room_agent/v1/canningst-site.json` (preview reads the site and tag
+map hashes from it), the same site L3 flies.
 
 ### Prerequisites
 
@@ -178,8 +178,7 @@ python scripts/room_session.py preview --target-mode live --run-id $RUN `
   --capability-grant-state DISABLED `
   --code-revision "$(git rev-parse HEAD)" --integration-revision "$(git rev-parse HEAD)" `
   --request-revision l0 --goal-parser-revision l0 `
-  --site-sha256 2bb3e7bc6bce4c3fd19d6501d6f178c220aa4f0ee610f54b1038b688daf940c0 `
-  --tag-map-sha256 422350233ea53a58daf129602b4219b07e811d85f3f4a4a3cff125cad98159c0 `
+  --site fixtures/room_agent/v1/canningst-site.json `
   --camera-sha256 0000000000000000000000000000000000000000000000000000000000000000 `
   --aircraft-id UNVERIFIED --firmware-version UNVERIFIED `
   --requested-jev-identity UNVERIFIED --requested-detector-identity UNVERIFIED `
@@ -270,6 +269,206 @@ Every refusal exits 2 and prints `refused: ...` on stderr.
 L0 attempt on this run failed (re-run step 4 until it prints
 `CONNECTIVITY_READY`), and with `run has no CONNECTIVITY_CHECKED event` when
 step 4 never reached the preflight.
+
+## L3 preparation: history profiles and one TRIAL grant
+
+There are no L1 calibration flights. The flight profiles come from the
+recorded CanningSt flights (`scripts/room_profiles_from_history.py`, Task B
+item 6), and one `count_return` TRIAL grant binds all of them and the site.
+
+### The profiles
+
+`fixtures/room_agent/v1/profiles/` holds what the script derived from the
+WP5 trials in `C:/coding/sentinel/.worktrees/integration/artifacts/trials/`
+(read-only):
+
+| File | What it is |
+|---|---|
+| `canningst-flight-profile.json` | `room-calibration-profile-v1`, kind `flight`, state `CALIBRATION` (legal only under a TRIAL grant), speeds 20/50 cm/s, the worst battery burn, the sampled pose-drift envelope |
+| `canningst-energy.json` | `EnergyProfile`, `execution_scope: CALIBRATION` (the supervisor admits it in REAL mode only under a TRIAL acceptance grant), aircraft `tello-canningst` |
+| `canningst-drift.json` | `pose-drift-v1`, measured `xy_drift_per_cm`, `heading_drift_per_cm`, `max_height_error_cm`; every other limit is declared in `canningst-policy.json` |
+| `canningst-command-limits.json` | `trim_rounds: 0`, `localise: false` (the supervisor refuses conditional trims) |
+| `canningst-policy.json` | the declared margins and limits the recordings cannot measure |
+
+To re-derive them (read-only on the history; same bytes as committed):
+
+```powershell
+python scripts/room_profiles_from_history.py --trials-root C:/coding/sentinel/.worktrees/integration/artifacts/trials --site fixtures/room_agent/v1/canningst-site.json --policy fixtures/room_agent/v1/profiles/canningst-policy.json --out-dir fixtures/room_agent/v1/profiles
+```
+
+It prints the profile hash and the measurements; a missing measurement or
+declaration refuses naming it.
+
+### What L3 will do with the history profiles
+
+Read this before flying. The measured worst open-loop drift is
+**0.45 cm per cm travelled** (2026-09-23 12:21 flight, first leg; the median
+leg is about 0.16). The supervisor forecasts that drift for every checkpoint
+and the route home, and the start pad is only 30 cm from the cube's rear
+face. Offline, with these files (the CanningSt admission check in
+`tests/room/test_canningst_site.py`, and the same check per region):
+
+- takeoff is admitted;
+- every declared observation region (`left/center/right-rear-middle`) is
+  refused (`RETURN_NOW`, `OPTIONAL_PATH_INVALID` or
+  `PROJECTED_TERMINATION_PATH_INVALID`): the forecast uncertainty on the way
+  back would not fit between the pad and the cube face.
+
+So an L3 run with the committed profiles takes off, is refused every
+observation, returns and lands, and ends `INCOMPLETE_RETURNED` (or
+`SAFE_LANDED`) without a count. That is the correct, safe result for these
+numbers. To see a count, one of these operator decisions is needed (none is
+made in this build):
+
+1. Accept a smaller per-centimetre drift for this trial: add
+   `"declared_overrides": {"xy_drift_per_cm": {"value": <v>, "justification": "<why>"}}`
+   to the policy and re-run the script. The override is named in the drift
+   profile's evidence (`operator-declared:xy_drift_per_cm`). Offline, 0.1
+   admits the center region; 0.05 is not enough for the left/right regions.
+   Then re-issue the grant (the profile hashes change).
+2. Move the start pad further from the cube's faces (a new Mission Control
+   start, then a new site file).
+
+### Issue the TRIAL grant (b)
+
+Session variables for L3 (a fresh `$RUN` per trial; the grant is bound to it):
+
+```powershell
+$env:PYTHONPATH = "src;."
+$RUN = "l3-$(Get-Date -Format yyyyMMdd-HHmmss)"
+$TODAY = Get-Date -Format yyyy-MM-dd
+$EXPIRES = (Get-Date).ToUniversalTime().AddHours(6).ToString("yyyy-MM-ddTHH:mm:ssZ")
+```
+
+Issue one `count_return` TRIAL grant bound to the four profile files and the
+site (registry from L0 step 2):
+
+```powershell
+python scripts/room_capability.py issue-trial --capability count_return --trial-protocol l3-canningst `
+  --aircraft-id tello-canningst --evidence-destination runs/$RUN --expires-at $EXPIRES `
+  --session-id $RUN --registry runs/registry.json `
+  --site fixtures/room_agent/v1/canningst-site.json `
+  --drift-profile fixtures/room_agent/v1/profiles/canningst-drift.json `
+  --energy-profile fixtures/room_agent/v1/profiles/canningst-energy.json `
+  --command-limits fixtures/room_agent/v1/profiles/canningst-command-limits.json `
+  --profile-file fixtures/room_agent/v1/profiles/canningst-flight-profile.json
+$GRANT = (Get-Content runs/registry.json -Raw | ConvertFrom-Json).grants[-1].grant_sha256
+```
+
+It prints the grant hash (the registry's last grant). One grant is enough:
+its binding is the calibration profile's hash plus the supervisor's
+`calibration_hashes` of exactly these drift/energy/limits files and the site.
+
+## L3: count-and-return acceptance trial (c)
+
+1. Preview the acceptance manifest, bound to the same files:
+
+```powershell
+python scripts/room_session.py preview --target-mode live --run-id $RUN `
+  --capability count_return --grant-registry runs/registry.json `
+  --capability-grant-sha256 $GRANT --capability-grant-state TRIAL `
+  --trial-protocol l3-canningst --evidence-destination runs/$RUN `
+  --code-revision "$(git rev-parse HEAD)" --integration-revision "$(git rev-parse HEAD)" `
+  --request-revision l3 --goal-parser-revision l3 `
+  --site fixtures/room_agent/v1/canningst-site.json `
+  --drift-profile fixtures/room_agent/v1/profiles/canningst-drift.json `
+  --energy-profile fixtures/room_agent/v1/profiles/canningst-energy.json `
+  --command-limits fixtures/room_agent/v1/profiles/canningst-command-limits.json `
+  --profile-file fixtures/room_agent/v1/profiles/canningst-flight-profile.json `
+  --aircraft-id tello-canningst --firmware-version UNVERIFIED `
+  --requested-jev-identity jev --requested-detector-identity gemini-openrouter `
+  --max-duration-s 600 --max-distance-cm 2000 --max-recovery-attempts 3 `
+  --consent-reference "CanningSt/$TODAY" --manifest-out runs/$RUN.manifest.json
+$DIGEST = (Get-Content runs/$RUN.manifest.json -Raw | ConvertFrom-Json).authorization_digest
+```
+
+   Expected: the manifest on stdout and **no** `missing gate:` line on
+   stderr (the TRIAL grant admits it), then the `next:` hint.
+
+2. Check the floor inside the cube is clear, then record the two site
+   assurances (30 minutes, the site's `max_assurance_age_ms`):
+
+```powershell
+python scripts/room_assurance.py --site fixtures/room_agent/v1/canningst-site.json --session-id $RUN --clock-domain-id operator-$RUN --out-dir runs --prefix $RUN
+```
+
+   It prints the two assurance file paths. Everything from here to landing
+   must happen inside those 30 minutes.
+
+3. **Pre-flight checklist (before the motors-on step).** Do not run step 4
+   until every line is true:
+
+   - [ ] Battery at least **50 %** (check in the Tello app or the L0 line
+         `battery=<n>%`). With the history energy profile each observation
+         reserves roughly 50-60 % of battery, so expect the supervisor to
+         refuse observations below about 75 %.
+   - [ ] The Tello sits on the start mark (250, 190 cm), nose toward the tag
+         stands, and both tags are in view of its camera.
+   - [ ] Clear distance **measured with the tape** in each move direction
+         from the pad: left and right at least 90 cm (to x 160 / 340 cm),
+         back at least 30 cm (to y 160 cm), forward at least 110 cm (to
+         y 300 cm), and up to 2 m. Nothing and nobody inside the cube.
+   - [ ] Operator's hand on the emergency stop: this terminal focused, ready
+         to press `E` (motor stop) as soon as the command prints
+         `EMERGENCY: press E to stop motors immediately.`
+   - [ ] Consent recorded for today (L0 step 1) and everyone in frame agreed.
+
+4. Run the trial (motors on):
+
+```powershell
+python scripts/room_session.py live --execute --manifest runs/$RUN.manifest.json --authorization-digest $DIGEST `
+  --capability count_return --grant-registry runs/registry.json `
+  --consent-db runs/consent.sqlite3 --location CanningSt --date $TODAY --i-authorise-paid-calls `
+  --site fixtures/room_agent/v1/canningst-site.json --tag-map docs/wp5-flight3-map.json `
+  --assurance runs/$RUN.nav.assurance.json --assurance runs/$RUN.energy.assurance.json `
+  --clock-domain-id operator-$RUN `
+  --drift-profile fixtures/room_agent/v1/profiles/canningst-drift.json `
+  --energy-profile fixtures/room_agent/v1/profiles/canningst-energy.json `
+  --command-limits fixtures/room_agent/v1/profiles/canningst-command-limits.json `
+  --profile-file fixtures/room_agent/v1/profiles/canningst-flight-profile.json `
+  --run-root runs --connectivity-timeout-s 20 --connectivity-max-age-s 90
+```
+
+   The request is always the standard one: "count the computers and phones
+   in the surveyed room, report uncertain detections as uncertain, then
+   return home". `--connectivity-max-age-s 90` (not L0's 30) because the
+   preflight must stay fresh through Jev's goal compilation, which is live
+   now. Expected: the preflight identity line, the E-stop line, takeoff, the
+   session, landing, then `{"run_id": "<run>", "terminal_state": "<state>"}`
+   on stdout, exit 0. `terminal.json` states `took_off`, the landing and the
+   terminal state.
+
+5. Verify the artifact:
+
+```powershell
+$TERMINAL = (Get-Content runs/$RUN/terminal.json -Raw | ConvertFrom-Json).state
+python scripts/room_verify_artifact.py --manifest runs/$RUN/manifest.json --expect-terminal $TERMINAL --expect-capability count_return --require-event TAKEOFF_AUTHORIZED --require-event GOAL_LEDGER_ACCEPTED --profile-file fixtures/room_agent/v1/profiles/canningst-flight-profile.json
+```
+
+   Expected: the run id, exit 0. A `COMPLETED` or `INCOMPLETE_RETURNED` state
+   also needs a confirmed landing time (`completed_at`), which the verifier
+   checks.
+
+### When L3 refuses before takeoff
+
+| Message | Meaning | What to do |
+|---|---|---|
+| `acceptance admission requires exactly one matching TRIAL grant ...` | The grant was issued for another `$RUN`, other files, or it expired. | Re-run "Issue the TRIAL grant" for this `$RUN`. |
+| `profile file ... is not among the manifest's profile_sha256s` | Preview and live were given different profile files. | Use the same four files in both. |
+| `site assurance for trigger ... is missing, expired or not uniquely current` | Step 2 is older than 30 minutes, or for another run. | Re-check the floor and re-run step 2. |
+| `the live Jev judge needs OPENROUTER_API_KEY to be set` / `... requires GEMINI_OPENROUTER_MODEL ...` | The key or detector model is not configured. | Set it in the environment or `.env`. |
+| `connectivity preflight expired before takeoff` | Goal compilation took longer than the max age. | Re-run step 4; if it repeats, raise `--connectivity-max-age-s`. |
+| `takeoff refused: start blocked: <reason>` | The supervisor refused the takeoff itself (for example `LOCALIZATION_LOST`: the pad does not see two tags). | Fix the cause (tags in view, battery), re-run. Nothing flew. |
+
+## L2 safety trials (optional, after L3)
+
+Optional; none is needed for L3. Each is its own TRIAL run with the same
+grant procedure:
+
+- a forced return (low battery reserve) from a hover, landing on the pad;
+- a tag-free hold that goes COASTING and is re-anchored (Jev's `REANCHOR`,
+  or the supervisor's mandatory recovery at `RECOVERY_REQUIRED`);
+- an operator `E` motor stop from a low hover over the pad.
 
 ## 1. Preview a manifest
 
@@ -370,7 +569,7 @@ python scripts/room_session.py live \
   --capability count_return --grant-registry path/to/registry.json \
   --consent-db path/to/consent.sqlite3 --location <site-name> --date <YYYY-MM-DD> --i-authorise-paid-calls \
   --profile-file path/to/profile.json \
-  --site path/to/semantic-site.json --tag-map path/to/tag-map.json \
+  --site fixtures/room_agent/v1/canningst-site.json --tag-map docs/wp5-flight3-map.json \
   --assurance path/to/navigation-assurance.json --assurance path/to/energy-assurance.json \
   --clock-domain-id <clock-domain-id> \
   --drift-profile path/to/drift-profile.json \
@@ -391,18 +590,21 @@ than raising it further blind.
 
 `--drift-profile` is a measured `pose-drift-v1` `DriftProfile` (every
 field required, `validated: true` with evidence refs). `--energy-profile`
-is a measured `EnergyProfile` with `execution_scope: PROMOTED` for this site
-and aircraft. `--command-limits` overrides `CommandLimits` fields; the
-defaults apply when it is omitted. The registry needs **two** grants for
-the capability:
+is a measured `EnergyProfile` for this site and aircraft: `execution_scope:
+PROMOTED` under a PROMOTED grant, or `CALIBRATION` (the history profiles)
+only under a TRIAL grant in its acceptance run. `--command-limits` overrides
+`CommandLimits` fields; the defaults apply when it is omitted.
 
-- the admission grant, bound to the manifest's `profile_sha256s`;
-- the flight-calibration grant that `SafetySupervisor.validate_bindings`
-  checks, bound to `sentinel.room.supervisor.calibration_hashes(energy,
-  drift, limits, site)` for exactly these files and `--site`.
-
-Without the second grant, live refuses before takeoff with `flight
-calibration refused: capability does not match ...`.
+**One grant per capability** (Task B item 5). `room_capability.py
+issue-trial` takes the same `--site`, `--drift-profile`, `--energy-profile`,
+`--command-limits` and `--profile-file` files and binds the grant to all of
+them at once: the calibration profiles' hashes plus
+`sentinel.room.supervisor.calibration_hashes(energy, drift, limits, site)`.
+`room_session.py preview` given the same files declares exactly that set as
+the manifest's `profile_sha256s`, so capability admission and
+`SafetySupervisor.validate_bindings` accept the one grant. (A separate
+flight-calibration grant bound to the calibration hashes alone is still
+accepted by the supervisor.)
 
 Gate order (each one runs before the next; the run artifact is opened only
 once every one of these passes, and a provider or drone client is never
@@ -421,7 +623,8 @@ constructed until connectivity does too):
    `--evidence-destination` at preview time) a unique matching `TRIAL`
    grant in acceptance mode.
 5. Matching calibration profiles: every `profile_sha256` the manifest
-   declares needs a `--profile-file` whose own hash matches and whose
+   declares, other than the flight files' own `calibration_hashes` (checked
+   after items 6 and 7 load them), needs a `--profile-file` whose own hash matches and whose
    state is admissible for the winning grant's state
    (`sentinel.room.calibration.admissible_for` -- `CALIBRATION` only for a
    `TRIAL`/acceptance grant, `PROMOTED` only for a `PROMOTED` grant).
@@ -492,30 +695,26 @@ run.
 
 ## Known follow-ups
 
-- **Real-mode counting.** `RoomController._observation_enabled` (Plan 03,
-  `controller.py`, pinned by
-  `tests/room/test_count_return.py::test_real_mode_never_offers_observation_candidate`)
-  offers OBSERVE only in SIMULATION. Until Plan 03 opens it for promoted
-  real profiles, a live session returns and lands safely but ends `BLOCKED`
-  without a count. Opening it needs no change here.
+- **Real-mode counting under the history profiles.** Observation is open
+  in REAL mode under `count_return` grants, but with the measured worst
+  drift the supervisor refuses every CanningSt region (see "What L3 will do
+  with the history profiles"). Counting needs an operator decision there.
 - **Pre-takeoff pose.** The default flight stack
   (`sentinel.room.live_stack`) anchors the tracker from a tag burst taken
-  on the pad, at pad height, before `SafetySupervisor.start` admits
-  takeoff. A flight site's home corridor must therefore reach down to the
-  pad level minus the drift profile's `max_height_error_cm`, or takeoff is
-  refused with `TERMINATION_PATH_INVALID`. The pad must also
-  see at least two mapped tags, or takeoff is refused with
-  `LOCALIZATION_LOST`.
+  on the pad, at pad height. Start admission assesses the return from the
+  airborne home the takeoff climbs to (the pad fix lifted to the home
+  route's altitude), and the CanningSt home corridor reaches the pad level
+  minus `max_height_error_cm`. The pad must see at least two mapped tags,
+  or takeoff is refused with `LOCALIZATION_LOST`.
 - **In-flight site assurance.** The verified `--assurance` records are
   adopted with their original monotonic window. Each contingency's
   `max_assurance_age_ms` (from the site survey) must cover the flight, or
   the supervisor lands on expiry. No live assurance observer renews them
   mid-flight.
-- **Flight-valid site.** `fixtures/room_agent/v1/semantic-site.json`'s home
-  route ends at (250, 190), not over its pad (250, 140), so
-  `SafetySupervisor` refuses to start from it (`TERMINATION_PATH_INVALID`).
-  It is a replay fixture, not a flight site; a real `--site` must end its
-  home route over the pad.
+- **Flight-valid site.** Fly `fixtures/room_agent/v1/canningst-site.json`
+  (provenance in `canningst-site.PROVENANCE.md`, `operator_confirm` values
+  listed there). `fixtures/room_agent/v1/semantic-site.json` is a replay
+  fixture, not a flight site: its home route does not end over its pad.
 - The CLI's site-assurance gate is a standalone re-check of
   `sentinel.room.site`'s per-trigger current-assurance rule. The supervisor
   then re-checks the adopted copies itself on every admission.

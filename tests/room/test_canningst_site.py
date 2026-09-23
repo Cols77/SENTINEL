@@ -188,3 +188,72 @@ def test_canningst_takeoff_is_admitted_under_one_trial_grant_with_the_history_pr
     finally:
         store.close()
         link.close()
+
+
+def _airborne_supervisor(tmp_path, drift_override=None):
+    """The CanningSt supervisor with the committed history profiles (drift
+    optionally overridden), airborne over the pad after the real stack's
+    takeoff; bindings are item 5's concern and are stubbed here."""
+    from dataclasses import replace
+    from sentinel.room import live_session
+    profiles = ROOT / "fixtures" / "room_agent" / "v1" / "profiles"
+    binding = live_session.load_flight_binding(
+        site_path=SITE_PATH, drift_profile_path=profiles / "canningst-drift.json",
+        energy_profile_path=profiles / "canningst-energy.json",
+        command_limits_path=profiles / "canningst-command-limits.json",
+        profile_paths=(profiles / "canningst-flight-profile.json",))
+    drift = binding.drift_profile if drift_override is None else replace(binding.drift_profile,
+                                                                          xy_drift_per_cm=drift_override)
+    clock = time.monotonic
+    tracker = LocalizationTracker(drift, clock=clock, real_mode=True)
+    link = live_stack.TelloLink(build_client=FakeTransport(battery=90), clock=clock)
+    stack = live_stack.TelloFlightStackFactory(
+        link=link, tag_map=None, run_id="run-0001", run_dir=tmp_path,
+        pose_burst=Bursts(reports(250, 190, 90.0)), home_settle_s=0.0)(tracker=tracker, clock=clock, site=binding.site)
+    store = RoomStore.open(tmp_path / "room.sqlite3")
+    store.create_session("run-0001", "request", CapabilityProfile(()))
+    supervisor = SafetySupervisor(
+        store=store, session_id="run-0001", site=binding.site, tracker=tracker,
+        reserve=ReserveGuard(binding.energy_profile, clock), limits=binding.limits,
+        aircraft_id=binding.energy_profile.aircraft_id, mode=ExecutionMode.REAL, refresh=stack.refresh,
+        emergency=stack.emergency, clock=clock, capability="count_return")
+    supervisor.validate_bindings = lambda active_site: None
+    for assurance in live_fakes.operator_assurances("run-0001", binding.site,
+                                                    clock_domain_id=supervisor.clock_domain_id):
+        store.append_contingency_assurance(assurance, expected_version=store.session_version("run-0001"))
+    stack.refresh()
+    supervisor.start(stack.executor)
+    return supervisor, store, link, binding
+
+
+def _admission(supervisor, store, binding, pose_id):
+    from types import SimpleNamespace
+    from sentinel.room import wiring
+    resolve = wiring.make_resolve_checkpoint(site=binding.site, profile=binding.calibration_profiles[0],
+                                             pose_source=lambda: supervisor.tracker.health, limits=binding.limits)
+    plan = resolve(SimpleNamespace(candidate_id=f"OBSERVE:g1:{pose_id}"), None)
+    return supervisor.prepare(snapshot_version=store.session_version("run-0001"), checkpoint=plan, provider_wait_s=10)
+
+
+def test_with_the_measured_history_drift_every_canningst_region_is_refused_after_takeoff(tmp_path):
+    """The runbook's "What L3 will do with the history profiles": the worst
+    measured drift (0.45 cm/cm) leaves no admissible observation between the
+    start pad and the cube's rear face, so L3 returns without a count."""
+    supervisor, store, link, binding = _airborne_supervisor(tmp_path)
+    try:
+        for pose_id, _ in binding.site.pose_visibility:
+            decision = _admission(supervisor, store, binding, pose_id)
+            assert decision.transition == "RETURN_NOW", (pose_id, decision.reason)
+    finally:
+        store.close()
+        link.close()
+
+
+def test_a_declared_smaller_drift_admits_the_center_region(tmp_path):
+    supervisor, store, link, binding = _airborne_supervisor(tmp_path, drift_override=0.1)
+    try:
+        decision = _admission(supervisor, store, binding, "center-rear-middle-toward_targets")
+        assert decision.transition == "CONTINUE", decision.reason
+    finally:
+        store.close()
+        link.close()

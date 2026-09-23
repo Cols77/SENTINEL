@@ -12,8 +12,10 @@ two probes and ``client_factory`` default to the real-Tello adapters in
 ``sentinel.room.live_stack`` -- a motors-off telemetry probe and a flight
 stack sharing one Tello connection, and an OpenRouter reachability probe.
 The full flight's default stack also needs ``--tag-map``, bound to the
-manifest's ``tag_map_sha256``. ``jev_factory``/``detector_factory`` still
-refuse by default. Every gate below (manifest authorization, capability
+manifest's ``tag_map_sha256``. Task B: ``jev_factory``/``detector_factory``
+default to the live Jev judge and the gemini-openrouter detector
+(``live_stack.default_jev``/``default_detector``), which refuse without
+``OPENROUTER_API_KEY``/``GEMINI_OPENROUTER_MODEL``. Every gate below (manifest authorization, capability
 admission, matching profiles, consent, site assurance, tag map,
 connectivity) is checked and enforced *before* any of those defaults is
 built or called.
@@ -44,7 +46,8 @@ from pathlib import Path
 from typing import Callable
 
 from sentinel.emergency import EmergencyHotkey
-from sentinel.room import artifacts, calibration, capabilities, connectivity, live_session, live_stack, replay
+from sentinel.room import (artifacts, calibration, capabilities, connectivity, live_session, live_stack, replay,
+                           wiring)
 from sentinel.room.artifacts import ArtifactError, ManifestError, SessionManifest
 from sentinel.room.site import ContingencyTrigger, RoomSite, parse_room_site
 from sentinel.room.supervisor import calibration_hashes
@@ -103,18 +106,14 @@ class _ArmedFlightStackFactory:
             self.hotkey.stop()
 
 
-def _refuse_jev() -> object:
-    raise RuntimeError(
-        "live flight requires an injected jev_factory; this build never constructs a "
-        "real judgment model on its own"
-    )
+def _default_jev() -> object:
+    """Task B (L3): the live Jev judge, built only after every gate and a ready preflight."""
+    return live_stack.default_jev()
 
 
-def _refuse_detector() -> object:
-    raise RuntimeError(
-        "live flight requires an injected detector_factory; this build never constructs a "
-        "real detector on its own"
-    )
+def _default_detector() -> object:
+    """Task B (L3): the live gemini-openrouter detector, built only after every gate."""
+    return live_stack.default_detector()
 
 
 def _parse_now(raw: str | None) -> datetime:
@@ -171,6 +170,17 @@ def _preview_bindings(args: argparse.Namespace) -> tuple[tuple[str, ...], str, s
     profiles = set(args.profile)
     site_sha256, tag_map_sha256 = args.site_sha256, args.tag_map_sha256
     files = (args.site, args.drift_profile, args.energy_profile)
+    if args.site and not (args.drift_profile or args.energy_profile or args.profile_file or args.command_limits):
+        # A site alone (the motors-off L0 manifest) binds only its own hashes.
+        try:
+            site = parse_room_site(json.loads(Path(args.site).read_text(encoding="utf-8")))
+        except (OSError, ValueError) as exc:
+            raise GateError(f"--site could not be loaded: {exc}") from exc
+        for name, value, derived in (("--site-sha256", site_sha256, site.cube_site_sha256),
+                                     ("--tag-map-sha256", tag_map_sha256, site.tag_map_sha256)):
+            if value is not None and value != derived:
+                raise GateError(f"{name} does not match --site")
+        return tuple(sorted(profiles)), site.cube_site_sha256, site.tag_map_sha256
     if any(files) or args.profile_file or args.command_limits:
         if not all(files):
             raise GateError("--site, --drift-profile and --energy-profile bind the grant together")
@@ -223,7 +233,8 @@ def _cmd_preview(args: argparse.Namespace) -> int:
             integration_revision=args.integration_revision, requested_capability=args.capability,
             capability_grant_sha256=args.capability_grant_sha256, capability_grant_state=args.capability_grant_state,
             request_revision=args.request_revision, goal_parser_revision=args.goal_parser_revision,
-            site_sha256=site_sha256, tag_map_sha256=tag_map_sha256, camera_sha256=args.camera_sha256,
+            site_sha256=site_sha256, tag_map_sha256=tag_map_sha256,
+            camera_sha256=args.camera_sha256 or wiring.camera_model_sha256(),
             profile_sha256s=profile_sha256s, aircraft_id=args.aircraft_id,
             firmware_version=args.firmware_version, requested_jev_identity=args.requested_jev_identity,
             resolved_jev_identity="UNVERIFIED", requested_detector_identity=args.requested_detector_identity,
@@ -693,7 +704,9 @@ def build_parser() -> argparse.ArgumentParser:
     preview_parser.add_argument("--energy-profile", default=None)
     preview_parser.add_argument("--command-limits", default=None)
     preview_parser.add_argument("--profile-file", action="append", default=[])
-    preview_parser.add_argument("--camera-sha256", required=True)
+    # Task B: defaults to the production camera model's hash (the one
+    # wiring.make_count_geometry places detections with).
+    preview_parser.add_argument("--camera-sha256", default=None)
     preview_parser.add_argument("--aircraft-id", required=True)
     preview_parser.add_argument("--firmware-version", required=True)
     preview_parser.add_argument("--requested-jev-identity", required=True)
@@ -770,8 +783,8 @@ def main(
     drone_probe: Callable[[], connectivity.ProbeResult] | None = None,
     provider_probe: Callable[[], connectivity.ProbeResult] | None = None,
     client_factory: Callable[..., "live_session.FlightStack"] | None = None,
-    jev_factory: Callable[[], object] = _refuse_jev,
-    detector_factory: Callable[[], object] = _refuse_detector,
+    jev_factory: Callable[[], object] = _default_jev,
+    detector_factory: Callable[[], object] = _default_detector,
     clock: Callable[[], float] = time.monotonic,
     wall_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> int:

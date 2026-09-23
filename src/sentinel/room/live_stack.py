@@ -249,6 +249,58 @@ def openrouter_provider_probe(*, environ: Mapping[str, str] | None = None, http_
 
 
 # ---------------------------------------------------------------------------
+# L3 defaults: the live Jev judge and the live detector
+# ---------------------------------------------------------------------------
+
+#: The same OpenRouter route ``scripts/survey_run.py --live-judge jev`` uses.
+JEV_BASE_URL = "https://openrouter.ai/api"
+#: Below the controller's provider wait (``live_session`` passes 10 s), so a
+#: slow reply fails as a provider error instead of preempting the turn.
+JEV_TIMEOUT_S = 9.0
+
+
+class IdentifiedJudge:
+    """A judgment model plus the ``.identity`` the CLI records before flight."""
+
+    def __init__(self, judge, identity: str) -> None:
+        self._judge, self.identity = judge, identity
+
+    def choice(self, state, instruction, **kwargs):
+        return self._judge.choice(state, instruction, **kwargs)
+
+
+def default_jev(*, environ: Mapping[str, str] | None = None) -> IdentifiedJudge:
+    """The live Jev judge (``sentinel.judgment.JevJudge`` over OpenRouter).
+
+    Built only by ``room_session.py live`` after every gate and a ready
+    preflight; building it makes no call. Refuses, naming the variable,
+    without ``OPENROUTER_API_KEY``. The model is JevJudge's own
+    (``SENTINEL_SYSTEM_ONE_MODEL`` or its default)."""
+    from sentinel.judgment import JevJudge
+
+    settings = provider_environ() if environ is None else environ
+    if not settings.get(PROVIDER_KEY_ENV):
+        raise LiveStackError(f"the live Jev judge needs {PROVIDER_KEY_ENV} to be set")
+    judge = JevJudge(api_key_env=PROVIDER_KEY_ENV, base_url=JEV_BASE_URL, timeout_s=JEV_TIMEOUT_S)
+    return IdentifiedJudge(judge, f"jev:{judge._model}")
+
+
+def default_detector(*, environ: Mapping[str, str] | None = None):
+    """The live detector: ``scripts.survey_run.build_provider_detector``'s
+    ``gemini-openrouter`` (the one sanctioned construction path), with the
+    ``.identity`` the CLI records. Building it makes no call."""
+    from scripts.survey_run import build_provider_detector
+
+    settings = provider_environ() if environ is None else environ
+    try:
+        detector = build_provider_detector("gemini-openrouter", environ=settings)
+    except RuntimeError as exc:
+        raise LiveStackError(str(exc)) from exc
+    detector.identity = f"gemini-openrouter:{detector.model}"
+    return detector
+
+
+# ---------------------------------------------------------------------------
 # bindings: tag map and commanded envelope
 # ---------------------------------------------------------------------------
 
