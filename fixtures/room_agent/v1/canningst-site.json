@@ -6,17 +6,17 @@
   "free_space_volumes": [
     {
       "volume_id": "cube",
-      "polygon_xy_cm": [[160, 160], [340, 160], [340, 300], [160, 300]],
+      "polygon_xy_cm": [[160, 120], [340, 120], [340, 300], [160, 300]],
       "z_interval_cm": [-20, 200]
     },
     {
       "volume_id": "flight",
-      "polygon_xy_cm": [[160, 160], [340, 160], [340, 300], [160, 300]],
+      "polygon_xy_cm": [[160, 120], [340, 120], [340, 300], [160, 300]],
       "z_interval_cm": [30, 180]
     },
     {
       "volume_id": "observation",
-      "polygon_xy_cm": [[220, 160], [280, 160], [280, 300], [220, 300]],
+      "polygon_xy_cm": [[200, 160], [300, 160], [300, 300], [200, 300]],
       "z_interval_cm": [30, 140]
     }
   ],
@@ -24,7 +24,7 @@
   "corridors": [
     {
       "volume_id": "home-corridor",
-      "polygon_xy_cm": [[160, 160], [340, 160], [340, 300], [160, 300]],
+      "polygon_xy_cm": [[160, 120], [340, 120], [340, 300], [160, 300]],
       "z_interval_cm": [-20, 200]
     }
   ],
@@ -46,7 +46,7 @@
       "contingency_id": "canningst-land-in-place-navigation",
       "trigger": "NAVIGATION_UNAVAILABLE",
       "kind": "LAND_IN_PLACE",
-      "landing_polygon_xy_cm": [[160, 160], [340, 160], [340, 300], [160, 300]],
+      "landing_polygon_xy_cm": [[160, 120], [340, 120], [340, 300], [160, 300]],
       "z_band_cm": [0, 200],
       "required_pose_state": "COASTING",
       "clearance_source": "operator-checked-clear-cube",
@@ -57,7 +57,7 @@
       "contingency_id": "canningst-land-in-place-energy",
       "trigger": "RETURN_ENERGY_UNAVAILABLE",
       "kind": "LAND_IN_PLACE",
-      "landing_polygon_xy_cm": [[160, 160], [340, 160], [340, 300], [160, 300]],
+      "landing_polygon_xy_cm": [[160, 120], [340, 120], [340, 300], [160, 300]],
       "z_band_cm": [0, 200],
       "required_pose_state": "COASTING",
       "clearance_source": "operator-checked-clear-cube",

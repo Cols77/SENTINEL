@@ -628,7 +628,7 @@ class SafetySupervisor:
         return result("CONTINUE", "ADMITTED")
 
     def prepare(self, *, snapshot_version, checkpoint=None, provider_wait_s=0, fallback=None,
-                remaining_commands=None, remaining_of=None, expected_fix=None):
+                remaining_commands=None, remaining_of=None, expected_fix=None, replan=None):
         """Effectful telemetry refresh and stream/clock observation before admission.
 
         ``remaining_of`` names the checkpoint the ``remaining_commands`` belong
@@ -670,6 +670,12 @@ class SafetySupervisor:
             if remaining_commands is not None:
                 checkpoint = self._plan(pose, remaining_commands,
                                         remaining_of.checkpoint_id if remaining_of is not None else "wait")
+            elif (replan is not None and checkpoint is not None
+                  and (checkpoint.start != pose.position or checkpoint.start_heading_deg != pose.heading_deg)):
+                # Live refreshes bring new tag fixes between planning and
+                # admission; re-plan from the refreshed pose rather than
+                # landing on STALE_CHECKPOINT_START.
+                checkpoint = replan()
             outcome = self.assess(SupervisorRequest(snapshot_version, checkpoint, provider_wait_s, pose, sample), self.site)
             if missed and outcome.transition == "RECOVER":
                 outcome = replace(outcome, reason="EXPECTED_REANCHOR_MISSING")

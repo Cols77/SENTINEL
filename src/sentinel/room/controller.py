@@ -1144,7 +1144,8 @@ class RoomController:
         # would misreport already-executed motion as a stale decision).
         try:
             admission = self.supervisor.prepare(snapshot_version=expected_version, checkpoint=plan,
-                                                provider_wait_s=self.provider_wait_s)
+                                                provider_wait_s=self.provider_wait_s,
+                                                replan=lambda: self.resolve_checkpoint(candidate, snapshot))
         except Exception:
             terminal = self.supervisor.refresh_failure(self.flight_executor)
             return self._preempted(session_id, None, terminal)
