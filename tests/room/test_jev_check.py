@@ -9,6 +9,14 @@ under test is the harness's own plumbing -- the fake supervisor/site/detector
 wiring, the event log it writes, and the Jev-call budget -- not Jev's own
 judgment, which the real run (``docs/reports/room-agent-jev-check.md``)
 covers separately.
+
+Every case here passes its own ``artifact_root`` (a ``tmp_path`` subdirectory)
+instead of relying on ``run_all``'s default. ``run_all``'s default is the
+same fixed ``artifacts/room-agent/jev-check/`` tree a real run under
+``scripts/room_jev_check.py main()`` writes its evidence to; a scripted,
+offline double's logs must never land there, or a later real run's evidence
+becomes indistinguishable from -- and can be silently overwritten by --
+``GreedyJudge``'s.
 """
 from __future__ import annotations
 
@@ -17,7 +25,7 @@ import json
 import pytest
 
 from sentinel.judgment import JudgeUnavailable
-from scripts.room_jev_check import (ARTIFACT_ROOT, BudgetedJudge, JevCheckRefused, build_real_jev_judge,
+from scripts.room_jev_check import (BudgetedJudge, JevCheckRefused, build_real_jev_judge,
                                     declared_regions, load_dotenv_nearest, load_site, run_all)
 
 
@@ -54,16 +62,17 @@ def test_load_site_prefers_canningst_and_declares_at_least_two_regions():
 
 
 def test_search_case_finds_the_phone_and_returns_home(tmp_path):
-    results = run_all(GreedyJudge, tmp_dir=tmp_path, cases=("search",))
+    artifact_root = tmp_path / "artifacts"
+    results = run_all(GreedyJudge, tmp_dir=tmp_path, cases=("search",), artifact_root=artifact_root)
     result = results[0]
     assert result.terminal_state == "COMPLETED", result.reason
     assert result.passed, result.reason
-    assert (ARTIFACT_ROOT / "search" / "events.jsonl").exists()
-    assert (ARTIFACT_ROOT / "search" / "jev_calls.jsonl").exists()
+    assert (artifact_root / "search" / "events.jsonl").exists()
+    assert (artifact_root / "search" / "jev_calls.jsonl").exists()
 
 
 def test_readonly_case_moves_nothing_and_answers_directly(tmp_path):
-    results = run_all(GreedyJudge, tmp_dir=tmp_path, cases=("readonly",))
+    results = run_all(GreedyJudge, tmp_dir=tmp_path, cases=("readonly",), artifact_root=tmp_path / "artifacts")
     result = results[0]
     assert result.terminal_state == "COMPLETED", result.reason
     assert result.passed, result.reason
@@ -71,7 +80,7 @@ def test_readonly_case_moves_nothing_and_answers_directly(tmp_path):
 
 
 def test_count_case_reaches_a_terminal_count_answer_with_no_invalid_choice(tmp_path):
-    results = run_all(GreedyJudge, tmp_dir=tmp_path, cases=("count",))
+    results = run_all(GreedyJudge, tmp_dir=tmp_path, cases=("count",), artifact_root=tmp_path / "artifacts")
     result = results[0]
     assert result.terminal_state == "COMPLETED"
     assert result.answer is not None and "phone" in result.answer
@@ -82,10 +91,11 @@ def test_count_case_reaches_a_terminal_count_answer_with_no_invalid_choice(tmp_p
 
 
 def test_staleness_case_either_reanchors_or_the_supervisor_forces_recovery(tmp_path):
-    results = run_all(GreedyJudge, tmp_dir=tmp_path, cases=("staleness",))
+    artifact_root = tmp_path / "artifacts"
+    results = run_all(GreedyJudge, tmp_dir=tmp_path, cases=("staleness",), artifact_root=artifact_root)
     result = results[0]
     assert "neither a voluntary REANCHOR nor a forced RECOVER" not in result.reason
-    log = (ARTIFACT_ROOT / "staleness" / "events.jsonl").read_text(encoding="utf-8")
+    log = (artifact_root / "staleness" / "events.jsonl").read_text(encoding="utf-8")
     event_types = {json.loads(line)["event_type"] for line in log.splitlines() if line.strip()}
     assert "POSE_REANCHORED" in event_types or any(
         json.loads(line).get("payload", {}).get("candidate_id") == "RECOVER"
@@ -93,7 +103,7 @@ def test_staleness_case_either_reanchors_or_the_supervisor_forces_recovery(tmp_p
 
 
 def test_all_four_cases_run_under_the_forty_call_budget(tmp_path):
-    for result in run_all(GreedyJudge, tmp_dir=tmp_path):
+    for result in run_all(GreedyJudge, tmp_dir=tmp_path, artifact_root=tmp_path / "artifacts"):
         assert result.jev_calls <= 40, f"{result.name} exceeded the Jev call budget: {result.jev_calls}"
 
 

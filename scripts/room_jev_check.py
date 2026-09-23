@@ -478,8 +478,9 @@ class CaseResult:
     answer: str | None = None
 
 
-def write_run_log(case_name: str, env: Environment, judge: BudgetedJudge) -> Path:
-    run_dir = ARTIFACT_ROOT / case_name
+def write_run_log(case_name: str, env: Environment, judge: BudgetedJudge, *,
+                  artifact_root: Path = ARTIFACT_ROOT) -> Path:
+    run_dir = artifact_root / case_name
     run_dir.mkdir(parents=True, exist_ok=True)
     events = [asdict(e) for e in env.store.events(SESSION)]
     (run_dir / "events.jsonl").write_text(
@@ -503,7 +504,7 @@ def _invalid_choice_events(env: Environment) -> list[dict]:
 
 
 def run_search_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
-                    found_region: str | None = None) -> CaseResult:
+                    found_region: str | None = None, artifact_root: Path = ARTIFACT_ROOT) -> CaseResult:
     env = build_environment(db_path=tmp_dir / "search.sqlite3")
     try:
         regions = declared_regions(env.site)
@@ -525,7 +526,7 @@ def run_search_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
         except JudgeUnavailable as exc:
             return CaseResult("search", False, f"Jev call budget exhausted: {exc}", None, len(judge.calls))
         finally:
-            write_run_log("search", env, judge)
+            write_run_log("search", env, judge, artifact_root=artifact_root)
 
         answer_event = next((e for e in reversed(env.store.events(SESSION))
                             if e.event_type == "ROOM_TOOL_OUTCOME" and e.payload.get("answer")), None)
@@ -547,7 +548,8 @@ def run_search_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
         env.store.close()
 
 
-def run_staleness_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path) -> CaseResult:
+def run_staleness_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
+                       artifact_root: Path = ARTIFACT_ROOT) -> CaseResult:
     env = build_environment(db_path=tmp_dir / "staleness.sqlite3")
     try:
         regions = declared_regions(env.site)
@@ -580,7 +582,7 @@ def run_staleness_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Pat
         except JudgeUnavailable as exc:
             return CaseResult("staleness", False, f"Jev call budget exhausted: {exc}", None, len(judge.calls))
         finally:
-            write_run_log("staleness", env, judge)
+            write_run_log("staleness", env, judge, artifact_root=artifact_root)
 
         events = env.store.events(SESSION)
         reanchored = any(e.event_type == "POSE_REANCHORED" for e in events)
@@ -607,7 +609,8 @@ def run_staleness_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Pat
         env.store.close()
 
 
-def run_count_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path) -> CaseResult:
+def run_count_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
+                   artifact_root: Path = ARTIFACT_ROOT) -> CaseResult:
     env = build_environment(db_path=tmp_dir / "count.sqlite3")
     try:
         regions = declared_regions(env.site)
@@ -632,7 +635,7 @@ def run_count_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path) -
         except JudgeUnavailable as exc:
             return CaseResult("count", False, f"Jev call budget exhausted: {exc}", None, len(judge.calls))
         finally:
-            write_run_log("count", env, judge)
+            write_run_log("count", env, judge, artifact_root=artifact_root)
 
         events = env.store.events(SESSION)
         answer_event = next((e for e in reversed(events)
@@ -658,7 +661,8 @@ def run_count_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path) -
         env.store.close()
 
 
-def run_readonly_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path) -> CaseResult:
+def run_readonly_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
+                      artifact_root: Path = ARTIFACT_ROOT) -> CaseResult:
     env = build_environment(db_path=tmp_dir / "readonly.sqlite3")
     try:
         set_ledger(env, (answer_state_objective(),), request_text="what is your battery level?")
@@ -672,7 +676,7 @@ def run_readonly_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path
         except JudgeUnavailable as exc:
             return CaseResult("readonly", False, f"Jev call budget exhausted: {exc}", None, len(judge.calls))
         finally:
-            write_run_log("readonly", env, judge)
+            write_run_log("readonly", env, judge, artifact_root=artifact_root)
 
         events = env.store.events(SESSION)
         answer_event = next((e for e in reversed(events)
@@ -702,8 +706,14 @@ CASES: dict[str, Callable[..., CaseResult]] = {
 
 
 def run_all(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
-           cases: tuple[str, ...] = tuple(CASES)) -> list[CaseResult]:
-    return [CASES[name](judge_factory, tmp_dir=tmp_dir) for name in cases]
+           cases: tuple[str, ...] = tuple(CASES),
+           artifact_root: Path = ARTIFACT_ROOT) -> list[CaseResult]:
+    """``artifact_root`` defaults to the real ``artifacts/room-agent/jev-check``
+    tree (what a real run under ``main()`` writes to). Callers that must not
+    disturb that tree's evidence -- notably the ``GreedyJudge`` regression
+    test, which used to silently overwrite a real run's logs by sharing this
+    same fixed path -- pass their own ``artifact_root`` instead."""
+    return [CASES[name](judge_factory, tmp_dir=tmp_dir, artifact_root=artifact_root) for name in cases]
 
 
 def main(argv: list[str] | None = None) -> int:

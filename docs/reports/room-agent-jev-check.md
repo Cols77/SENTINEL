@@ -20,71 +20,85 @@ capped at 40 Jev calls; none came close (5–11 calls each, 36 total).
 
 ## Results
 
+*(This table was rebuilt from the run recorded in this repository's
+`artifacts/room-agent/jev-check/<case>/{jev_calls,events}.jsonl` on
+2026-09-24 — see "Fix 1" below for why a prior version of this table did
+not match any evidence on disk.)*
+
 | Case | Expected (brief) | What happened | Verdict |
 |---|---|---|---|
-| 1. Search ("find the phone") | Jev picks regions one at a time, stops once found, names the region, returns home, no invalid choice | Jev explored regions in a sensible order and found the phone (region 3, p=0.90); no illegal/malformed choice at any turn; but it never *landed* on a final answer — its own confidence for `ANSWER:SEARCH` (p=0.77) sat just under the controller's 0.8 acceptance bar, so that turn was refused as `LOW_CONFIDENCE` and the session ran out of legal candidates before ever answering. Terminal: `BLOCKED`, not `COMPLETED`. | **FAIL** (controller-threshold/confidence-calibration mismatch, not an illegal or nonsensical choice — see "Jev's reasoning" below) |
-| 2. Staleness / re-anchor | Second observation triggers COASTING; Jev re-anchors or the supervisor forces recovery; search resumes and completes | Only **one** observation ever succeeded (the first two regions were themselves refused as `LOW_CONFIDENCE` before the third finally cleared the bar), so the harness's "after the second observation" staleness injection never fired — this scenario was not actually exercised against the real model in this run. Terminal: `BLOCKED`. | **NOT EXERCISED** (blocked upstream of the staleness injection point, same confidence-threshold cause as case 1) |
-| 3. Count ("count the phones") | Report 1 confirmed / 1 uncertain, coverage note, return home | Same confidence-threshold pattern: one region observed and accepted (p=0.94), the rest refused as `LOW_CONFIDENCE`, then `ANSWER:g1:INCOMPLETE` itself refused (p=0.66 < 0.8). Session ran out of candidates. Terminal: `BLOCKED`. Separately: even under the deterministic scripted-Jev regression test (see below), the fake detector's design (two single-view detections in different regions, never geometrically merged) produces "0 confirmed; 2 uncertain", not the brief's illustrative "1 confirmed; 1 uncertain" — a harness/geometry mismatch, not a controller defect. | **FAIL** (same confidence-threshold cause; count-merge expectation also does not hold under this harness's fake detector — see "Known gaps") |
-| 4. Read-only ("what is your battery level?") | Zero movement, direct answer | Jev picked `READ_DRONE` first (correct, p=0.61) but under the 0.8 bar, so it was refused; every subsequent read/clarify/escalate candidate was *also* refused as `LOW_CONFIDENCE` in turn, down to `READ_COUNTS` (`NO_EVIDENCE`, no legacy report exists) and `NO_LEGAL_CANDIDATES`. Zero movement held throughout (the executor was never called), but no answer was ever recorded. Terminal: `BLOCKED`. | **FAIL** (same confidence-threshold cause) |
+| 1. Search ("find the phone") | Jev picks regions one at a time, stops once found, names the region, returns home, no invalid choice | Jev's confidence for the region that actually held the phone (`center-rear-middle`) never cleared the bar (refused at confidence 0.41, then 0.24); the one region it *did* accept (`right-rear-middle`, confidence 0.88) held no detection. It then worked through `ANSWER:SEARCH` (confidence 0.72), `READ_DRONE` (0.31), `READ_OBSERVATIONS` (0.75), `ESCALATE` (0.09), `CLARIFY` (0.13) and finally `READ_COUNTS` (accepted, confidence 1.0, but failed execution — `NO_EVIDENCE`, no legacy report exists) before running out of candidates. The aircraft still landed; no answer was ever recorded. Terminal: `BLOCKED`, not `COMPLETED`. 11 Jev calls. | **FAIL** (confidence-threshold mismatch — see "Jev's reasoning" below; the phone itself was never actually re-visited once its region's first two offers were refused) |
+| 2. Staleness / re-anchor | Second observation triggers COASTING; Jev re-anchors or the supervisor forces recovery; search resumes and completes | Only **one** observation was ever accepted in this run (confidence 0.90, `right-rear-middle` — this case's designated phone region, so it *was* actually detected), so the harness's "after the second accepted observation" staleness injection never fired — this scenario was not exercised against the real model in this run. `ANSWER:SEARCH` was then refused at confidence 0.53 (probability 0.61); the run exhausted `READ_DRONE`/`READ_OBSERVATIONS`/`CLARIFY`/`ESCALATE`/`READ_COUNTS` the same way as case 1. Terminal: `BLOCKED`. 9 Jev calls. | **NOT EXERCISED** (blocked upstream of the staleness injection point, same confidence-threshold cause as case 1) |
+| 3. Count ("count the phones") | Report 1 confirmed / 1 uncertain, coverage note, return home | Same pattern: the one region accepted (`right-rear-middle`, confidence 0.94) held no detection — the two seeded detections were at `center-rear-middle` (high band) and `left-rear-middle` (low band), neither of which Jev's confidence for observing ever cleared 0.8. `ANSWER:g1:INCOMPLETE` was then refused at confidence 0.57 (probability 0.66); the run exhausted the remaining read/clarify/escalate candidates and blocked without ever recording a count answer. Terminal: `BLOCKED`. 11 Jev calls. | **FAIL** (same confidence-threshold cause; no count answer was reached in this run at all, so the brief's "1 confirmed/1 uncertain" wording was never put to the test here) |
+| 4. Read-only ("what is your battery level?") | Zero movement, direct answer | Jev picked `READ_DRONE` first (correct — probability 0.64) but at confidence 0.54, under the 0.8 bar, so it was refused; every subsequent candidate (`READ_OBSERVATIONS` 0.41, `CLARIFY` 0.23, `ESCALATE` 0.67) was refused the same way, down to `READ_COUNTS` (accepted, confidence 1.0, but `NO_EVIDENCE` — no legacy report exists) and `NO_LEGAL_CANDIDATES`. Zero movement held throughout (the executor was never called), but no answer was ever recorded. Terminal: `BLOCKED`. 5 Jev calls. | **FAIL** (same confidence-threshold cause) |
 
-**Zero invalid, malformed or illegal choices were recorded in any case** —
-every one of the 36 real calls returned a well-formed, legal answer;
+**36 real Jev calls total (11 + 9 + 11 + 5), well under the 40-per-case
+budget. Zero invalid, malformed or illegal choices were recorded in any
+case** — every one of the 36 calls returned a well-formed, legal answer;
 `assess_choice` never hit `ILLEGAL_OR_MALFORMED` or
-`MISSING_OR_NON_MAX_SELECTION` once. The failure mode across all four cases
-is the same and is not about Jev picking a *wrong* action: when it commits
-to an action instead of continuing to explore, that action is directionally
-correct in every case that reached a genuine decision point. The failure is
-that `RoomController`'s default `act_at=0.8` acceptance threshold is
-stricter than this model's typical self-reported confidence for these
-prompts, so it is very often refused for being under-confident rather than
-for being wrong, and the loop then works through every remaining legal
-candidate (also under-confident) until nothing is left and the session
-blocks. This is a genuine finding about Jev's calibration against this
-controller's defaults, not a bug in the harness or the controller's
-correctness logic — per the brief, it is reported here rather than "fixed"
-(e.g. by lowering `act_at` for this run, which would just be tuning the
-experiment to pass).
+`MISSING_OR_NON_MAX_SELECTION` once, in any case. But this run's failure
+mode is *not* simply "the right choice at the wrong confidence": in every
+case, the single `OBSERVE` candidate Jev's confidence actually cleared the
+0.8 bar was **not** the region holding the target detection (search, count)
+or was accepted after the phone was already found on the very first
+accepted look (staleness) — the model's per-region confidence in this run
+did not track which region was actually worth visiting. Once no further
+`OBSERVE` candidate could clear the bar, the loop fell through every
+remaining read/clarify/escalate/answer candidate (each also under-confident
+in turn) until nothing legal was left and the session blocked. This is a
+genuine finding about Jev's calibration against this controller's defaults
+— reported here rather than "fixed" (e.g. by lowering `act_at` for this
+run, which would just be tuning the experiment to pass), per the brief.
 
 ## Jev's reasoning (excerpts)
 
-**Case 1, turn 3 (the accepted observation, right-rear-middle):**
+**Case 1 (search), turn 3 (the only accepted observation — `right-rear-middle`, which did not hold the phone):**
 ```
 value: OBSERVE:g1:right-rear-middle-toward_targets
-probabilities: {right-rear-middle: 0.90, read_observations: 0.05, escalate: 0.02, read_counts: 0.00, clarify: 0.02, read_drone: 0.01}
-confidence: 0.89
+probabilities: {right-rear-middle: 0.90, read_drone: 0.01, escalate: 0.01, read_counts: 0.00, clarify: 0.02, read_observations: 0.06}
+confidence: 0.88
 ```
 
-**Case 1, turn 6 (the refused answer — this is the whole finding in one call):**
+**Case 1, turn 6 (the refused answer, offered before the phone's actual region was ever re-tried):**
 ```
 value: ANSWER:SEARCH
-probabilities: {ANSWER:SEARCH: 0.77, read_drone: 0.07, read_observations: 0.11, clarify: 0.03, read_counts: 0.00, escalate: 0.02}
-confidence: 0.73
+probabilities: {ANSWER:SEARCH: 0.76, read_observations: 0.11, clarify: 0.03, escalate: 0.02, read_counts: 0.00, read_drone: 0.08}
+confidence: 0.72
 ```
-`assess_choice` refuses this as `LOW_CONFIDENCE` because 0.77 < `act_at`
-(0.8) — one turn was doing the right thing at the wrong confidence.
+`assess_choice` refuses this as `LOW_CONFIDENCE` because 0.72 < `act_at`
+(0.8).
 
-**Case 3 (count), turn 4 (the accepted observation, right-rear-middle):**
+**Case 2 (staleness), turn 3 (the only accepted observation, `right-rear-middle` — this case's actual phone region):**
 ```
 value: OBSERVE:g1:right-rear-middle-toward_targets
-probabilities: {right-rear-middle: 0.94, ...}
-confidence: 0.92
+probabilities: {right-rear-middle: 0.92, read_drone: 0.01, read_observations: 0.04, read_counts: 0.00, clarify: 0.02, escalate: 0.01}
+confidence: 0.90
+```
+
+**Case 3 (count), turn 4 (the accepted observation, `right-rear-middle` — the one region with no seeded detection):**
+```
+value: OBSERVE:g1:right-rear-middle-toward_targets
+probabilities: {right-rear-middle: 0.94, escalate: 0.02, clarify: 0.02, read_drone: 0.01, read_counts: 0.01}
+confidence: 0.94
 ```
 
 **Case 4 (read-only), turn 1 (first, correct, but refused choice):**
 ```
 value: READ_DRONE
-probabilities: {READ_DRONE: 0.61, CLARIFY: 0.25, ESCALATE: 0.10, READ_COUNTS: 0.00, READ_OBSERVATIONS: n/a}
-confidence: 0.53
+probabilities: {READ_DRONE: 0.64, READ_OBSERVATIONS: 0.03, CLARIFY: 0.21, READ_COUNTS: 0.00, ESCALATE: 0.12}
+confidence: 0.54
 ```
 `READ_DRONE` is exactly the right first move for "what is your battery
 level?" — refused anyway for being under the acceptance bar, and every
-option offered afterward (`READ_OBSERVATIONS`, `CLARIFY`, `ESCALATE`) was
-refused the same way before the session ran out of candidates.
+option offered afterward (`READ_OBSERVATIONS`, `CLARIFY`, `ESCALATE`,
+`READ_COUNTS`) was refused or failed the same way before the session ran
+out of candidates.
 
 Full per-call logs (state, criteria, raw answer) are at
 `artifacts/room-agent/jev-check/<case>/jev_calls.jsonl`; full event streams
 at `artifacts/room-agent/jev-check/<case>/events.jsonl`. Neither is
-committed (`artifacts/` is gitignored).
+committed (`artifacts/` is gitignored) — see "Fix 1" below for why that
+matters and what changed as a result.
 
 ## How this was tested
 
@@ -99,7 +113,12 @@ committed (`artifacts/` is gitignored).
   finishes observing before answering and always re-anchors when offered —
   so the plumbing stays tested for free without paid calls. All four cases
   reach `COMPLETED` under `GreedyJudge`; 12/12 tests pass:
-  `python -m pytest tests/room/test_jev_check.py -q`.
+  `python -m pytest tests/room/test_jev_check.py -q`. Every test now passes
+  its own `artifact_root` (a `tmp_path` subdirectory) to `run_all(...)`
+  rather than relying on the default — the default is the *same* fixed
+  `artifacts/room-agent/jev-check/` tree a real run writes its evidence to,
+  and this test suite must never write `GreedyJudge`'s synthetic logs there
+  (see "Fix 1" in `task-V-report.md`).
 - **The gate itself is tested**, not just used: refusal without
   `SENTINEL_JEV_PROPOSER_CONSENT`, refusal with consent but no
   `OPENROUTER_API_KEY`, and the nearest-`.env` search logic each have their
@@ -138,6 +157,16 @@ committed (`artifacts/` is gitignored).
   `POSE_REANCHORED` or a forced `RECOVER`), but the real run's case 2 never
   reached a second accepted observation before running out of candidates,
   so the actual re-anchor decision was never put to the real model here.
+- **Confidence didn't track which region actually mattered.** In this run,
+  in both the search and count cases, the one `OBSERVE` candidate whose
+  confidence cleared 0.8 was consistently `right-rear-middle` — the region
+  with no seeded detection in either case — while the regions that actually
+  held a detection (`center-rear-middle`, `left-rear-middle`) were refused
+  at confidence 0.24–0.41 before ever being retried. This may be a
+  positional/ordering artifact of how criteria are presented rather than a
+  claim about Jev's search strategy in general; a repeat run with region
+  order randomized would help separate the two, but is out of this task's
+  scope.
 - **No .env, no real run at all, is also a supported and tested path.**
   `build_real_jev_judge()` refuses with a clear message before building any
   fixture if `SENTINEL_JEV_PROPOSER_CONSENT` or `OPENROUTER_API_KEY` is
