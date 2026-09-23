@@ -108,6 +108,26 @@ class UIStore:
             raise KeyError(run_id)
         return dict(row)
 
+    def profile_switch_reason(self, run_id, conn=None):
+        """One durable admission check, reusable inside the switch transaction."""
+        if conn is None:
+            with self.connection() as connection:
+                return self.profile_switch_reason(run_id, connection)
+        row = conn.execute('SELECT mode,status,decision_version FROM ui_runs WHERE run_id=?',
+                           (run_id,)).fetchone()
+        if (row is None or row['mode'] != 'LIVE' or
+                row['status'] != 'ACTIVE' or row['decision_version'] != 0):
+            return 'MISSION_NOT_IDLE'
+        for table, condition in (
+                ('ui_offers', 'run_id=?'),
+                ('ui_commands', 'run_id=?'),
+                ('ui_messages', 'run_id=?'),
+                ('ui_events', "run_id=? AND event_type!='SITE_PROFILE_CHANGED'")):
+            if conn.execute(f'SELECT 1 FROM {table} WHERE {condition} LIMIT 1',
+                            (run_id,)).fetchone() is not None:
+                return 'MISSION_NOT_IDLE'
+        return None
+
     def append_event(self, run_id, event_type, payload):
         with self.connection(write=True) as conn:
             return self.event_in(conn, run_id, event_type, payload)

@@ -1,12 +1,22 @@
 """Typed local routes; private errors never cross the HTTP boundary."""
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 
 def build_router(service):
     router=APIRouter(prefix='/api/v1')
     def result(body):
-        return JSONResponse(body,status_code={'CONFLICT':409,'IN_DOUBT':202,'UNAVAILABLE':503}.get(body.get('status'),200))
+        return JSONResponse(body,status_code={'CONFLICT':409,'INVALID':422,
+            'IN_DOUBT':202,'UNAVAILABLE':503}.get(body.get('status'),200))
+    @router.get('/site-profiles')
+    def site_profiles(): return service.site_profiles()
+    @router.post('/site-profiles/select')
+    async def select_site_profile(request: Request):
+        try:
+            command = await request.json()
+        except ValueError:
+            command = None
+        return result(service.select_site_profile(command))
     @router.get('/session')
     def session(): return service.session()
     @router.get('/runs/{run_id}/snapshot')

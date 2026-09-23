@@ -40,3 +40,30 @@ def test_command_result_is_durable(tmp_path):
     store.claim_command(command)
     store.settle_command('c', {'status': 'ACKNOWLEDGED'})
     assert UIStore.open(path).claim_command(command)['command']['result']['status'] == 'ACKNOWLEDGED'
+
+
+def test_profile_switch_history_ignores_only_profile_change_events(tmp_path):
+    store = UIStore.open(tmp_path / 'ui.sqlite')
+    store.ensure_run('s', 'r', 'LIVE')
+    assert store.profile_switch_reason('r') is None
+    store.append_event('r', 'SITE_PROFILE_CHANGED', {'summary': 'Selected profile Lab'})
+    assert store.profile_switch_reason('r') is None
+    store.append_event('r', 'CHAT', {'summary': 'Mission request refused'})
+    assert store.profile_switch_reason('r') == 'MISSION_NOT_IDLE'
+
+
+@pytest.mark.parametrize('activity', ['terminal', 'offer', 'command', 'message'])
+def test_profile_switch_history_rejects_prior_mission_activity(tmp_path, activity):
+    store = UIStore.open(tmp_path / 'ui.sqlite')
+    store.ensure_run('s', 'r', 'LIVE')
+    if activity == 'terminal':
+        with store.connection(write=True) as conn:
+            conn.execute("UPDATE ui_runs SET status='RECOVERY_REQUIRED' WHERE run_id='r'")
+    elif activity == 'offer':
+        with store.connection(write=True) as conn:
+            conn.execute("INSERT INTO ui_offers VALUES ('p','r','{}','CANCELLED',NULL)")
+    elif activity == 'command':
+        store.claim_command(dict(command_id='c', run_id='r', idempotency_key='k'))
+    else:
+        store.add_message('r', 'user', 'count computers')
+    assert store.profile_switch_reason('r') == 'MISSION_NOT_IDLE'

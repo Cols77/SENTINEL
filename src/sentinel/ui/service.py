@@ -2,6 +2,7 @@
 from io import BytesIO
 from pathlib import Path
 import hashlib
+import sqlite3
 from threading import RLock
 from uuid import uuid4
 from PIL import Image
@@ -20,8 +21,11 @@ _DISPATCH_FAILURES = {
 }
 
 class MissionControlService:
-    def __init__(self, *, config, adapters, readiness=None):
+    def __init__(self, *, config, adapters, readiness=None,
+                 site_profile_registry=None, profile_base_config=None):
         self.config,self.adapters=config,adapters
+        self.site_profile_registry = site_profile_registry
+        self.profile_base_config = profile_base_config or config
         self.readiness=readiness
         self._readiness_overlays={}
         self._readiness_lock=RLock()
@@ -99,6 +103,141 @@ class MissionControlService:
 
     def session(self):
         return dict(id=self.session_id,mode=self.config.mode,active_run_id=self.config.run_id)
+
+    def _profile_switch_reason(self, conn=None):
+        """Shared catalogue/admission predicate; caller holds readiness lock."""
+        if self.config.mode != 'LIVE' or self.site_profile_registry is None or self.closed:
+            return 'PROFILE_SWITCH_UNAVAILABLE'
+        run_id = self.config.run_id
+        with self.runtime.lock:
+            try:
+                reason = self.store.profile_switch_reason(run_id, conn)
+                if reason:
+                    return reason
+                if run_id in self.runtime.state or self.worker.active or \
+                        self.registry.get(run_id) is not None or \
+                        self.registry.emergency.is_set() or self.registry.closing or \
+                        self.safety._ledger or any(
+                            row.get('command_id') is not None
+                            for row in self.safety.state.values()):
+                    return 'MISSION_NOT_IDLE'
+                survey_path = Path(self.runtime.survey_db)
+                if survey_path.is_file():
+                    uri = survey_path.resolve().as_uri() + '?mode=ro'
+                    with sqlite3.connect(uri, uri=True, timeout=1.0) as survey:
+                        exists = survey.execute(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name='survey_runs'").fetchone()
+                        if exists and survey.execute(
+                                'SELECT 1 FROM survey_runs WHERE run_id=? LIMIT 1',
+                                (run_id,)).fetchone():
+                            return 'MISSION_NOT_IDLE'
+            except (OSError, sqlite3.Error):
+                return 'PROFILE_SWITCH_UNAVAILABLE'
+        return None
+
+    def _site_profile_catalogue(self, reason=None):
+        if self.site_profile_registry is None:
+            public = dict(version=None, selected_profile_id=None, profiles=[])
+        else:
+            public = self.site_profile_registry.public(self.config.site_profile_id)
+        if reason is None:
+            reason = self._profile_switch_reason()
+        return {**public, 'switch_allowed': reason is None,
+                'switch_reason': reason}
+
+    def site_profiles(self):
+        with self._readiness_lock:
+            return self._site_profile_catalogue()
+
+    @staticmethod
+    def _close_local_adapters(adapters):
+        for resource in (adapters.flight, adapters.pose_feed):
+            if resource is not None:
+                try:
+                    close = getattr(resource, 'close', None)
+                    if close is not None:
+                        close()
+                except Exception:
+                    # The committed selection cannot be undone by inert cleanup.
+                    pass
+
+    def select_site_profile(self, command):
+        if (not isinstance(command, dict) or set(command) != {'profile_id'} or
+                not isinstance(command['profile_id'], str) or
+                not command['profile_id'].strip()):
+            return dict(status='INVALID', reason_code='INVALID_PROFILE_REQUEST',
+                        **self.site_profiles())
+        with self._readiness_lock:
+            reason = self._profile_switch_reason()
+            if reason:
+                status = ('UNAVAILABLE' if reason == 'PROFILE_SWITCH_UNAVAILABLE'
+                          else 'CONFLICT')
+                return dict(status=status, reason_code=reason,
+                            **self._site_profile_catalogue(reason))
+            from .bootstrap import StartupError
+            from .site_profiles import apply_site_profile
+            from .readiness import evaluate_live_readiness
+            from .live import compose
+            try:
+                profile = self.site_profile_registry.require(command['profile_id'])
+                candidate_config = apply_site_profile(self.profile_base_config, profile)
+                from dataclasses import replace
+                candidate_config = replace(candidate_config, site_profile_id=profile.id)
+                candidate_readiness = evaluate_live_readiness(candidate_config)
+                candidate_adapters = compose(candidate_config, candidate_readiness)
+            except StartupError as exc:
+                code = str(exc)
+                if code not in {'SITE_PROFILE_NOT_FOUND', 'SITE_PROFILE_DISABLED',
+                                'SITE_PROFILE_INCOMPLETE',
+                                'INVALID_LIVE_SITE_OR_COVERAGE'}:
+                    code = 'SITE_PROFILE_INCOMPLETE'
+                return dict(status='INVALID', reason_code=code,
+                            **self._site_profile_catalogue())
+            except Exception:
+                return dict(status='INVALID', reason_code='SITE_PROFILE_INCOMPLETE',
+                            **self._site_profile_catalogue())
+
+            previous_adapters = self.adapters
+            previous = (self.config, self.adapters, self.runtime.adapters,
+                        self.pose_feed, self.artifacts, self.readiness,
+                        self._readiness_overlays.copy())
+            reason = None
+            with (self.runtime.lock, self.worker._lock,
+                  self.registry._lock, self.safety._lock):
+                try:
+                    with self.store.connection(write=True) as conn:
+                        reason = self._profile_switch_reason(conn)
+                        if reason is None:
+                            self.store.event_in(conn, self.config.run_id,
+                                'SITE_PROFILE_CHANGED',
+                                {'summary': 'Site profile changed'})
+                            candidate_adapters.flight.on_emergency_ready = self.safety.admit_emergency_sender
+                            candidate_adapters.flight.on_readiness_update = self._update_readiness
+                            self.config = candidate_config
+                            self.adapters = candidate_adapters
+                            self.runtime.adapters = candidate_adapters
+                            self.pose_feed = candidate_adapters.pose_feed
+                            self.artifacts = getattr(candidate_adapters.flight,
+                                                     'artifacts', {})
+                            self._readiness_overlays.clear()
+                            self.readiness = candidate_readiness
+                except Exception:
+                    (self.config, self.adapters, self.runtime.adapters,
+                     self.pose_feed, self.artifacts, self.readiness,
+                     self._readiness_overlays) = previous
+                    self._close_local_adapters(candidate_adapters)
+                    return dict(status='UNAVAILABLE',
+                                reason_code='PROFILE_SWITCH_UNAVAILABLE',
+                                **self._site_profile_catalogue(
+                                    'PROFILE_SWITCH_UNAVAILABLE'))
+            if reason is not None:
+                self._close_local_adapters(candidate_adapters)
+                return dict(status='CONFLICT', reason_code=reason,
+                            **self._site_profile_catalogue(reason))
+            self._close_local_adapters(previous_adapters)
+            return dict(status='ACKNOWLEDGED', reason_code=None,
+                        **self._site_profile_catalogue())
 
     def read_snapshot(self, run_id):
         if self.config.mode == 'LIVE':

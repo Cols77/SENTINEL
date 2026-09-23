@@ -285,11 +285,24 @@ def compose(config, readiness=None):
     tag_map=load_tag_map(str(config.tag_map_path))
     coverage=CoverageModel.from_files(site,config.tag_map_path)
     check_tag_map_matches_site(tag_map,site,tolerance_cm=5.0)
+    options=generate_options(envelope_from_site(site,300),TELLO_MEASURED)
     feed=LivePoseFeed(config.data_dir/'pose-images',site)
-    flight=LiveFlight(config,site,tag_map,feed,coverage=coverage)
+    flight=None
     model='configured' if config.detector_name in {'gemini-openrouter','gemini','moondream'} else 'unavailable'
-    return ScenarioAdapters(
-        generate_options(envelope_from_site(site,300),TELLO_MEASURED),
-        RuleProposer(),flight,detector,report_writer,TELLO_MEASURED,
-        'LIVE',None,feed,None,None,'F',
-        detector_name=config.detector_name,detector_model=model)
+    try:
+        flight=LiveFlight(config,site,tag_map,feed,coverage=coverage)
+        return ScenarioAdapters(
+            options, RuleProposer(),flight,detector,report_writer,TELLO_MEASURED,
+            'LIVE',None,feed,None,None,'F',
+            detector_name=config.detector_name,detector_model=model)
+    except Exception:
+        if flight is not None:
+            try:
+                flight.close()
+            except Exception:
+                pass
+        try:
+            feed.close()
+        except Exception:
+            pass
+        raise

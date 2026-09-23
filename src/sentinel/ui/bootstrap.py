@@ -51,6 +51,8 @@ def build_service(config):
     from .service import MissionControlService
     if config.host not in {'127.0.0.1', 'localhost', '::1'}:
         raise StartupError('LOCALHOST_REQUIRED')
+    profile_base_config = config
+    site_profile_registry = None
     if config.mode == 'REHEARSAL':
         adapters=build_rehearsal_adapters(config.scenario_path,config.artifact_root or config.data_dir/'images')
         readiness=None
@@ -58,8 +60,8 @@ def build_service(config):
         from .site_profiles import (SiteProfile, apply_site_profile,
                                     load_site_profiles, validate_site_profile)
         if config.site_profiles_path is not None:
-            profile = load_site_profiles(config.site_profiles_path).require(
-                config.site_profile_id)
+            site_profile_registry = load_site_profiles(config.site_profiles_path)
+            profile = site_profile_registry.require(config.site_profile_id)
             config = apply_site_profile(config, profile)
         else:
             validate_site_profile(SiteProfile(
@@ -73,4 +75,6 @@ def build_service(config):
         adapters=build_live_adapters(config,readiness)
     else:
         raise StartupError('INVALID_MODE')
-    return MissionControlService(config=config,adapters=adapters,readiness=readiness)
+    return MissionControlService(config=config,adapters=adapters,readiness=readiness,
+                                 site_profile_registry=site_profile_registry,
+                                 profile_base_config=profile_base_config)
