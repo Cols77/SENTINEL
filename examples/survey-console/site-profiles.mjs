@@ -70,7 +70,7 @@ export function createSiteProfileController(client,refreshSnapshot=async()=>{}){
      update(result);state={...state,pending:false};emit();
      try{await refreshSnapshot();}catch{state={...state,feedback:'Site changed; snapshot refresh unavailable.'};emit();}
     }else{
-     update(result);state={...state,selected_profile_id:previous,pending:false,feedback:feedback[result.reason_code]??'Site selection was refused.'};emit();
+     update(result);state={...state,selected_profile_id:Object.hasOwn(result,'selected_profile_id')?result.selected_profile_id:previous,pending:false,feedback:feedback[result.reason_code]??'Site selection was refused.'};emit();
     }
    }catch{
     state={...state,selected_profile_id:previous,pending:false,feedback:'Site selection could not be confirmed. Refresh the catalogue.'};emit();

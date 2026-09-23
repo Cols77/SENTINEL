@@ -55,6 +55,24 @@ test('typed failure retains previous selection and allowlisted feedback',async()
  assert.match(control.getState().feedback,/mission/i);
 });
 
+test('typed refusal retains the authoritative selection from its catalogue',async()=>{
+ const initial={...catalogue('A'),profiles:[
+  {id:'A',label:'A',enabled:true,setup_status:'Ready'},
+  {id:'B',label:'B',enabled:true,setup_status:'Ready'},
+  {id:'C',label:'C',enabled:true,setup_status:'Ready'},
+ ]};
+ const control=createSiteProfileController({
+  read_site_profiles:async()=>initial,
+  select_site_profile:async()=>({...initial,selected_profile_id:'B',
+   switch_allowed:false,switch_reason:'MISSION_NOT_IDLE',status:'CONFLICT',
+   reason_code:'MISSION_NOT_IDLE'}),
+ });
+ await control.load();await control.select('C');
+ assert.equal(control.getState().selected_profile_id,'B');
+ assert.equal(control.getState().switch_allowed,false);
+ assert.match(control.getState().feedback,/mission/i);
+});
+
 test('stale catalogue response cannot undo a successful selection',async()=>{
  let finish,reads=0;
  const control=createSiteProfileController({read_site_profiles:()=>++reads===1?new Promise(resolve=>finish=resolve):Promise.resolve(catalogue('Harbor')),select_site_profile:async()=>({...catalogue('Harbor'),status:'ACKNOWLEDGED',reason_code:null})});

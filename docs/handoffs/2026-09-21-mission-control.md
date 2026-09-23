@@ -28,8 +28,9 @@ the paid detector call after approved dispatch; standalone authorization gates r
 - Live detection supervision uses the integration `live_detect` subprocess design. Results are
   cached by run, sweep, path, and SHA-256 so survey ingestion cannot repeat a paid provider call.
   Process-tree cleanup is retained through service shutdown; malformed or failed results become
-  explicit analysis gaps without taking over flight. Paid calls require
-  `--i-authorise-paid-calls`.
+  explicit analysis gaps without taking over flight. Standalone paid-call commands require
+  `--i-authorise-paid-calls`; Mission Control detector authorization is implicit only for an
+  explicitly approved dispatch.
 - Live Mission Control follows integration's default `gemini-openrouter` detector and shared
   nearest-`.env` loading (`OPENROUTER_API_KEY` plus `GEMINI_OPENROUTER_MODEL`). Direct Gemini and
   Moondream remain explicit alternatives.

@@ -539,6 +539,62 @@ def test_profile_switch_rejects_malformed_json(tmp_path):
         service.close()
 
 
+@pytest.mark.parametrize(('content_type', 'origin'), [
+    ('text/plain', 'https://untrusted.example'),
+    ('text/plain', None),
+    ('application/x-www-form-urlencoded', None),
+    (None, None),
+])
+def test_profile_selection_requires_json_content_type_without_side_effects(
+        tmp_path, monkeypatch, content_type, origin):
+    service = _profile_service(tmp_path)
+    selection_calls = []
+    select_site_profile = service.select_site_profile
+    monkeypatch.setattr(service, 'select_site_profile',
+                        lambda command: (selection_calls.append(command),
+                                         select_site_profile(command))[1])
+    original = (service.config, service.adapters, service.runtime.adapters,
+                service.readiness, service.pose_feed, service.artifacts)
+    headers = {}
+    if content_type is not None:
+        headers['content-type'] = content_type
+    if origin is not None:
+        headers['origin'] = origin
+    try:
+        with TestClient(build_app(service, repository_root=Path.cwd())) as client:
+            response = client.post('/api/v1/site-profiles/select',
+                                   content='{"profile_id":"Second"}',
+                                   headers=headers)
+            assert response.status_code == 422
+            body = response.json()
+            assert body['status'] == 'INVALID'
+            assert body['reason_code'] == 'INVALID_PROFILE_REQUEST'
+            assert body['selected_profile_id'] == 'First'
+            assert set(body) == {
+                'status', 'reason_code', 'version', 'selected_profile_id',
+                'profiles', 'switch_allowed', 'switch_reason'}
+            assert selection_calls == []
+            assert (service.config, service.adapters, service.runtime.adapters,
+                    service.readiness, service.pose_feed, service.artifacts) == original
+            assert service.read_events('mission', 0, 200) == []
+    finally:
+        service.close()
+
+
+def test_profile_selection_accepts_json_content_type_parameters(tmp_path):
+    service = _profile_service(tmp_path)
+    try:
+        with TestClient(build_app(service, repository_root=Path.cwd())) as client:
+            response = client.post(
+                '/api/v1/site-profiles/select',
+                content='{"profile_id":"Second"}',
+                headers={'content-type': 'application/json; charset=utf-8'})
+            assert response.status_code == 200
+            assert response.json()['selected_profile_id'] == 'Second'
+    finally:
+        service.close()
+
+
 def test_profile_routes_fail_closed_for_rehearsal_and_legacy_live(tmp_path):
     rehearsal = build_service(SessionConfig(data_dir=tmp_path / 'rehearsal'))
     legacy = build_service(SessionConfig(

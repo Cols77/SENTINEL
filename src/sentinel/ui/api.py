@@ -13,6 +13,11 @@ def build_router(service):
     def site_profiles(): return service.site_profiles()
     @router.post('/site-profiles/select')
     async def select_site_profile(request: Request):
+        content_type = request.headers.get('content-type', '')
+        if content_type.split(';', 1)[0].strip().lower() != 'application/json':
+            return result(dict(status='INVALID',
+                               reason_code='INVALID_PROFILE_REQUEST',
+                               **service.site_profiles()))
         try:
             command = await request.json()
         except ValueError:
