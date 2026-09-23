@@ -16,6 +16,7 @@ from jsonschema import validate
 from sentinel.camera import TELLO_MEASURED
 from sentinel.cube.coverage import CoverageModel, check_tag_map_matches_site
 from sentinel.cube.site import load_site
+from sentinel.env_file import load_env_file
 from sentinel.pose.tagmap import load_tag_map
 from sentinel.survey.cube_bridge import envelope_from_site
 from sentinel.survey.options import generate_options
@@ -59,15 +60,26 @@ class LiveReadiness:
         }
 
 
-COMMAND_TEMPLATE = (
-    'Set GEMINI_API_KEY and GEMINI_MODEL, then run: sentinel mission-control '
-    '--mode live --site <SITE_JSON> --tag-map <TAG_MAP_JSON> '
-    '--pose-db <POSE_DB> --pose off --start-x-cm <X_CM> '
-    '--start-y-cm <Y_CM> --surface-z-cm <Z_CM> --detector gemini '
-    '--provider-profile <APPROVED_PROFILE_JSON> --survey-db <SURVEY_DB> '
-    '--location <LOCATION> --consent-date <YYYY-MM-DD> '
-    '--local-ip <LOCAL_IP> --confirm --i-authorise-paid-calls'
-)
+PROVIDER_ENV = {
+    'gemini-openrouter': ('OPENROUTER_API_KEY', 'GEMINI_OPENROUTER_MODEL'),
+    'gemini': ('GEMINI_API_KEY', 'GEMINI_MODEL'),
+    'moondream': ('MOONDREAM_API_KEY', 'MOONDREAM_MODEL'),
+}
+
+
+def _command_template(detector_name: str) -> str:
+    selected = detector_name if detector_name in PROVIDER_ENV else 'gemini-openrouter'
+    key_name, model_name = PROVIDER_ENV[selected]
+    return (
+        f'Ensure {key_name} and {model_name} are present in the environment '
+        'or nearest .env, then run: sentinel mission-control '
+        '--mode live --site <SITE_JSON> --tag-map <TAG_MAP_JSON> '
+        '--pose-db <POSE_DB> --pose off --start-x-cm <X_CM> '
+        f'--start-y-cm <Y_CM> --surface-z-cm <Z_CM> --detector {selected} '
+        '--provider-profile <APPROVED_PROFILE_JSON> --survey-db <SURVEY_DB> '
+        '--location <LOCATION> --consent-date <YYYY-MM-DD> '
+        '--local-ip <LOCAL_IP> --confirm --i-authorise-paid-calls'
+    )
 
 
 def _check(capability: Capability, ready: bool, reason_code: str,
@@ -152,17 +164,17 @@ def _has_recorded_consent_readonly(database_path: Path, location: str,
 
 
 def _detection(config: SessionConfig) -> ReadinessCheck:
-    if config.detector_name not in {'gemini', 'moondream'}:
+    if config.detector_name not in PROVIDER_ENV:
         return _check(
             'detection', False, 'LIVE_PROVIDER_REQUIRED',
-            'Select --detector gemini or --detector moondream; set '
-            'GEMINI_API_KEY and GEMINI_MODEL, or MOONDREAM_API_KEY and '
-            'MOONDREAM_MODEL.')
-    prefix = config.detector_name.upper()
-    if not os.environ.get(prefix + '_API_KEY') or not os.environ.get(prefix + '_MODEL'):
+            'Select --detector gemini-openrouter, gemini, or moondream. The '
+            'OpenRouter path uses OPENROUTER_API_KEY and GEMINI_OPENROUTER_MODEL.')
+    key_name, model_name = PROVIDER_ENV[config.detector_name]
+    if not os.environ.get(key_name) or not os.environ.get(model_name):
         return _check(
             'detection', False, 'LIVE_PROVIDER_ENV_REQUIRED',
-            f'Set {prefix}_API_KEY and {prefix}_MODEL; secret values are never displayed.')
+            f'Set {key_name} and {model_name} in the environment or nearest .env; '
+            'secret values are never displayed.')
     if not config.authorise_paid_calls:
         return _check(
             'detection', False, 'LIVE_PAID_CALL_AUTH_REQUIRED',
@@ -184,13 +196,13 @@ def _detection(config: SessionConfig) -> ReadinessCheck:
         validate(profile, schema)
         if (profile['approval_status'] != 'APPROVED' or
                 profile['provider'] != config.detector_name or
-                profile['model'] != os.environ[prefix + '_MODEL']):
+                profile['model'] != os.environ[model_name]):
             raise ValueError('profile mismatch')
     except Exception:
         return _check(
             'detection', False, 'APPROVED_PROVIDER_PROFILE_REQUIRED',
             'Check --provider-profile against the selected provider and '
-            f'{prefix}_MODEL.')
+            f'{model_name}.')
     survey_db = config.survey_db or config.data_dir / 'survey.sqlite'
     if not survey_db.is_file():
         return _check(
@@ -219,6 +231,9 @@ def _emergency(config: SessionConfig) -> ReadinessCheck:
 
 def evaluate_live_readiness(config: SessionConfig) -> LiveReadiness:
     """Return safe readiness facts without constructing operational adapters."""
+    # Match the integration CLI: explicit environment values win, otherwise
+    # populate missing names from the nearest .env without logging secrets.
+    load_env_file()
     checks = (_planning(config), _flight(config), _detection(config),
               _emergency(config))
     planning_ready = checks[0].ready
@@ -226,4 +241,4 @@ def evaluate_live_readiness(config: SessionConfig) -> LiveReadiness:
         'READY_TO_DISPATCH' if all(check.ready for check in checks) else
         'READY_TO_PLAN' if planning_ready else
         'NOT_READY')
-    return LiveReadiness(state, checks, COMMAND_TEMPLATE)
+    return LiveReadiness(state, checks, _command_template(config.detector_name))

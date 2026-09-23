@@ -35,21 +35,21 @@ The panel's launch template is guidance, not evidence of hardware readiness. Res
 Control after changing CLI configuration. A fully configured launch still remains unarmed:
 
 ```sh
-export GEMINI_API_KEY='...'
-export GEMINI_MODEL='your-approved-model'
+export OPENROUTER_API_KEY='...'
+export GEMINI_OPENROUTER_MODEL='google/gemini-2.5-flash'
 uv run sentinel mission-control --mode live --confirm \
   --data-dir artifacts/live-session \
   --survey-db /absolute/path/to/consented-survey.sqlite \
   --site /absolute/path/to/site.json \
   --tag-map /absolute/path/to/tag-map.json \
   --pose-db /absolute/path/to/pose.sqlite --pose passive \
-  --detector gemini --provider-profile /absolute/path/to/approved-profile.json \
+  --detector gemini-openrouter --provider-profile /absolute/path/to/approved-profile.json \
   --i-authorise-paid-calls \
   --location lecture-room --consent-date YYYY-MM-DD \
   --local-ip 192.168.10.2 --surface-z-cm 50
 ```
 
-Supply actual measured configuration. `--pose off` also requires `--start-x-cm` and `--start-y-cm`; both coordinates must lie inside the selected envelope. Reanchor retains the existing `--sr063-amended` gate. The provider profile must conform to `provider-profile.v1`, be approved, and match the selected provider/model. Moondream uses `MOONDREAM_API_KEY` and `MOONDREAM_MODEL`. Consent must already be recorded for that exact location/date in the survey database; the host does not record it on the operator's behalf. Configuration readiness enables proposal planning only; it does not arm the aircraft.
+Supply actual measured configuration. `--pose off` also requires `--start-x-cm` and `--start-y-cm`; both coordinates must lie inside the selected envelope. Reanchor retains the existing `--sr063-amended` gate. The default Live detector matches the integration branch: Gemini through OpenRouter. Mission Control loads missing environment names from the nearest `.env`, so the repository-root `OPENROUTER_API_KEY` and `GEMINI_OPENROUTER_MODEL` are discovered from an isolated worktree without displaying their values. The provider profile must conform to `provider-profile.v1`, be approved, and match `gemini-openrouter` plus that model. Direct Gemini remains available with `GEMINI_API_KEY` and `GEMINI_MODEL`; Moondream uses `MOONDREAM_API_KEY` and `MOONDREAM_MODEL`. Consent must already be recorded for that exact location/date in the survey database; the host does not record it on the operator's behalf. Configuration readiness enables proposal planning only; it does not arm the aircraft.
 
 The Mission Control browser projection is schema v3: route coverage and return-leg facts, commanded/measured freshness, capture detection progression, public proposer provenance, and explicit COMPLETE/ABORTED/RECOVERY_REQUIRED terminal states are rendered from validated backend facts. Live detection starts in a separate supervised process before capture, binds cached results to run/sweep/path/hash identity, and never repeats a provider call during survey ingestion. Detector failure is an explicit analysis gap and does not take over flight control. Paid calls remain refused without `--i-authorise-paid-calls`.
 

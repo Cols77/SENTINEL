@@ -13,8 +13,8 @@ from sentinel.survey.consent import record_consent
 def test_bare_live_readiness_is_ordered_actionable_and_secret_free(monkeypatch):
     from sentinel.ui.readiness import evaluate_live_readiness
 
-    monkeypatch.setenv('GEMINI_API_KEY', 'sentinel-secret-api-value')
-    monkeypatch.setenv('GEMINI_MODEL', 'sentinel-secret-model-value')
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'sentinel-secret-api-value')
+    monkeypatch.setenv('GEMINI_OPENROUTER_MODEL', 'sentinel-secret-model-value')
     readiness = evaluate_live_readiness(bootstrap.SessionConfig(mode='LIVE'))
 
     assert readiness.state == 'NOT_READY'
@@ -25,10 +25,37 @@ def test_bare_live_readiness_is_ordered_actionable_and_secret_free(monkeypatch):
     public = json.dumps(readiness.public())
     for required_name in ('--site', '--tag-map', '--pose-db', '--start-x-cm',
                           '--start-y-cm', '--surface-z-cm', '--confirm',
-                          '--local-ip', 'GEMINI_API_KEY', 'GEMINI_MODEL'):
+                          '--local-ip', 'OPENROUTER_API_KEY',
+                          'GEMINI_OPENROUTER_MODEL'):
         assert required_name in public
     assert 'sentinel-secret-api-value' not in public
     assert 'sentinel-secret-model-value' not in public
+
+
+def test_live_defaults_to_openrouter_gemini_and_loads_nearest_env(
+        tmp_path, monkeypatch):
+    from sentinel.ui.__main__ import parse_config
+    from sentinel.ui.readiness import evaluate_live_readiness
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv('OPENROUTER_API_KEY', raising=False)
+    monkeypatch.delenv('GEMINI_OPENROUTER_MODEL', raising=False)
+    (tmp_path / '.env').write_text(
+        'OPENROUTER_API_KEY=secret-from-env\n'
+        'GEMINI_OPENROUTER_MODEL=google/gemini-2.5-flash\n')
+
+    config = parse_config(['--mode', 'live'])
+    readiness = evaluate_live_readiness(config)
+    detection = next(check for check in readiness.checks
+                     if check.capability == 'detection')
+
+    assert config.detector_name == 'gemini-openrouter'
+    assert detection.reason_code == 'LIVE_PAID_CALL_AUTH_REQUIRED'
+    assert 'OPENROUTER_API_KEY' in readiness.command_template
+    assert 'GEMINI_OPENROUTER_MODEL' in readiness.command_template
+    assert '--detector gemini-openrouter' in readiness.command_template
+    assert 'secret-from-env' not in json.dumps(readiness.public())
+    assert parse_config(['--mode', 'rehearsal']).detector_name == 'scripted'
 
 @pytest.fixture
 def live_config(tmp_path, monkeypatch):

@@ -21,6 +21,9 @@ flight, coverage, proposer, localization, and live detection.
   Process-tree cleanup is retained through service shutdown; malformed or failed results become
   explicit analysis gaps without taking over flight. Paid calls require
   `--i-authorise-paid-calls`.
+- Live Mission Control follows integration's default `gemini-openrouter` detector and shared
+  nearest-`.env` loading (`OPENROUTER_API_KEY` plus `GEMINI_OPENROUTER_MODEL`). Direct Gemini and
+  Moondream remain explicit alternatives.
 - Closed Mission Control snapshot schema v3 with route coverage, tag predictions, trim and arrival
   facts, return leg, commanded/measured pose, freshness and vertical consistency, capture detection
   progression/latency, proposer provenance, escalation reasons, strict cross-references, and
@@ -79,8 +82,8 @@ Final verification on 2026-09-23:
 
 | Check | Result |
 |---|---|
-| `.venv\\Scripts\\python.exe -m pytest -q --ignore=fixtures` | **1631 passed, 3 skipped, 5 warnings**, 948.33s |
-| `node --test tests/survey_console/*.test.mjs` | **84 passed**, no failures/skips |
+| `.venv\\Scripts\\python.exe -m pytest -q --ignore=fixtures` | **1638 passed, 3 skipped, 5 warnings**, 1009.32s |
+| `node --test tests/survey_console/*.test.mjs` | **86 passed**, no failures/skips |
 | `uv run python scripts/ui_assets/check_assets.py` | **414 checks passed across 83 assets** |
 | `node scripts/ui_assets/verify_mission_control.cjs` | Passed clean, bare-Live readiness, uncertain-follow-up, and missing-analysis real-host scenarios |
 | `node scripts/ui_assets/verify_survey_console.cjs http://127.0.0.1:8772` | Passed all 8 retained fixture scenarios |

@@ -286,7 +286,7 @@ def compose(config, readiness=None):
     check_tag_map_matches_site(tag_map,site,tolerance_cm=5.0)
     feed=LivePoseFeed(config.data_dir/'pose-images',site)
     flight=LiveFlight(config,site,tag_map,feed,coverage=coverage)
-    model='configured' if config.detector_name in {'gemini','moondream'} else 'unavailable'
+    model='configured' if config.detector_name in {'gemini-openrouter','gemini','moondream'} else 'unavailable'
     return ScenarioAdapters(
         generate_options(envelope_from_site(site,300),TELLO_MEASURED),
         RuleProposer(),flight,detector,report_writer,TELLO_MEASURED,
