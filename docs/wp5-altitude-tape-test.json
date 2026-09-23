@@ -1,0 +1,48 @@
+{
+  "schema_version": "cube-mission-v1",
+  "_comment": "2026-09-23 altitude tape test. The 09-23 gate flight found the drone 28-41 cm above height? + the site's 18 cm offset, by two optically independent methods, with a residual that grows as the commanded height falls. This mission hovers still at two commanded heights so the operator can tape-measure the camera while it holds: no translation at all (every stop is the start pad, inside the 10 cm dead band), four localisation bursts per height, each logging tag_height_cm beside height?. Place the drone on a tape-marked spot at x 250, y 170 (1.7 m in front of the tag line, mid-width) facing the tags, and measure the lens centre above the floor at each hold. Legs 20 cm/s, one trim. Fly with docs/wp5-flight3-site.json and docs/wp5-flight3-map.json. The holds are at y 170 because the guard refuses a 130 cm hold nearer the tags than that.",
+  "max_trim_rounds": 1,
+  "leg_speed_cm_s": 20,
+  "start": {
+    "x_cm": 250,
+    "y_cm": 170
+  },
+  "waypoints": [
+    {
+      "name": "LOW_A",
+      "x_cm": 250,
+      "y_cm": 170,
+      "z_cm": 70
+    },
+    {
+      "name": "LOW_B",
+      "x_cm": 250,
+      "y_cm": 170,
+      "z_cm": 70
+    },
+    {
+      "name": "LOW_C",
+      "x_cm": 250,
+      "y_cm": 170,
+      "z_cm": 70
+    },
+    {
+      "name": "HIGH_A",
+      "x_cm": 250,
+      "y_cm": 170,
+      "z_cm": 130
+    },
+    {
+      "name": "HIGH_B",
+      "x_cm": 250,
+      "y_cm": 170,
+      "z_cm": 130
+    },
+    {
+      "name": "HIGH_C",
+      "x_cm": 250,
+      "y_cm": 170,
+      "z_cm": 130
+    }
+  ]
+}
