@@ -1,0 +1,33 @@
+{
+  "schema_version": "room-calibration-route-v1",
+  "route_id": "return-route",
+  "route_kind": "forced_return",
+  "site_sha256": "6284a284674d2a0b2b60cacf091b6180440b839c50f7e7ae4c703bfeb2226015",
+  "aircraft_id": "calibration-aircraft-1",
+  "firmware_version": "1.0.0",
+  "camera_sha256": "d853460349cda8c8ee29ec260d66bd7928c88f751a1ae0dd4e3604edd6cc276d",
+  "tag_map_sha256": "45164548c0f6a07efe7927bb561c6a7a3d2eafdbd1598fbf31c5564f930865a1",
+  "home": {
+    "pad_id": "calibration-pad-1",
+    "nominal_pose": {"x_cm": 0, "y_cm": 0, "z_cm": 80},
+    "heading_deg": 90.0,
+    "route_id": "return-route"
+  },
+  "checkpoints": [
+    {
+      "checkpoint_id": "outbound",
+      "target": {"x_cm": 200, "y_cm": 0, "z_cm": 80},
+      "speed_cm_s": 30,
+      "looks_deg": [],
+      "capture_count": 0
+    },
+    {
+      "checkpoint_id": "forced-return",
+      "target": {"x_cm": 0, "y_cm": 0, "z_cm": 80},
+      "speed_cm_s": 30,
+      "looks_deg": [],
+      "capture_count": 0,
+      "is_return_leg": true
+    }
+  ]
+}
