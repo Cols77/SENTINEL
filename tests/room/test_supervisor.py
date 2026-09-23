@@ -479,6 +479,82 @@ def test_supervisor_passes_landing_bound_and_session_deadline_to_real_executor(s
         executor.close()
 
 
+@pytest.mark.parametrize("change", ["valid", "expired", "revoked", "stale_telemetry", "descent_geometry",
+                                    "wrong_trigger", "low_energy", "emergency"])
+def test_exhausted_recovery_uses_its_contingency_only_after_fresh_descent_admission(safety, change):
+    from sentinel.cube.recovery import RecoveryController
+    supervisor, store, clock, samples, _, emergencies = safety
+    supervisor.tracker.profile = replace(supervisor.tracker.profile,
+        max_camera_age_s=80, max_recovery_attempts=1)
+    supervisor.validate_bindings = lambda active: None  # Changed synthetic recovery calibration.
+    executor, commands = real_executor(safety)
+    recovery = RecoveryController(supervisor.tracker, clock=clock,
+        burst_source=lambda action: (), energy_admits=lambda action: True)
+    supervisor.recovery = recovery
+    supervisor.mapped_heading_tag_ids = ((90, (1, 2)),)
+    decisions, landings = [], []
+    next_action, land = recovery.next_action, executor.land
+
+    def decide(*args):
+        action = next_action(*args)
+        if action.kind == "CONTINGENCY":
+            decisions.append(action)
+            if change == "expired":
+                clock.now = 15.1
+                samples["energy"] = EnergySample(80, clock())
+            elif change == "revoked":
+                store.append_contingency_assurance(assurance(assurance_id="NAVIGATION_UNAVAILABLE",
+                    state="REVOKED", clock_domain_id=supervisor.clock_domain_id),
+                    expected_version=store.session_version("session"))
+            elif change == "stale_telemetry":
+                samples["energy"] = EnergySample(80, 1)
+            elif change == "descent_geometry":
+                narrow = ((0, 0), (116.5, 0), (116.5, 200), (0, 200))
+                supervisor.site = replace(supervisor.site, terminal_contingencies=tuple(
+                    replace(entry, landing_polygon_xy_cm=narrow)
+                    if entry.contingency_id == action.contingency_id else entry
+                    for entry in supervisor.site.terminal_contingencies))
+            elif change == "wrong_trigger":
+                action = replace(action, contingency_id="RETURN_ENERGY_UNAVAILABLE")
+            elif change == "low_energy":
+                clock.now += .1
+                samples["energy"] = EnergySample(20, clock())
+            elif change == "emergency":
+                action = replace(action, kind="EMERGENCY", contingency_id=None)
+        return action
+
+    def bounded_land(**kwargs):
+        landings.append(kwargs)
+        return land(**kwargs)
+
+    recovery.next_action, executor.land = decide, bounded_land
+    try:
+        supervisor.start(executor)
+        first = supervisor.prepare(snapshot_version=store.session_version("session"), provider_wait_s=100)
+        assert first.transition == "RECOVER" and first.request.pose.state == LocalizationState.ANCHORED
+        assert supervisor.dispatch(first, executor).status == "RECOVERY_PENDING"
+        again = supervisor.prepare(snapshot_version=store.session_version("session"), provider_wait_s=100)
+        result = supervisor.dispatch(again, executor)
+        assert len(decisions) == 1 and decisions[0].reason == "recovery_exhausted"
+        assert decisions[0].contingency_id == "NAVIGATION_UNAVAILABLE"
+        terminal_audit = [e for e in store.events("session") if e.event_type == "SAFETY_ASSESSED"][-1]
+        assert terminal_audit.payload["reason"] == "recovery_exhausted"
+        if change == "valid":
+            assert result.state == "LANDED"
+            assert not emergencies and executor.client.commands.count("land") == 1
+            assert landings == [{"upper_bound_s": supervisor.landing_upper_bound_s, "deadline": executor.deadline}]
+            assert terminal_audit.payload["contingency_id"] == "NAVIGATION_UNAVAILABLE"
+            assert terminal_audit.payload["pose_forecast"]["projected"]["propagated_at"] == clock() + 10
+            assert dict(terminal_audit.payload["energy"]["components"])["contingency_landing_s"] == 10
+        else:
+            assert result.state == "EMERGENCY_ABORTED" and emergencies == [True]
+            assert "land" not in executor.client.commands
+            assert terminal_audit.payload["contingency_id"] is None
+        assert not commands
+    finally:
+        executor.close()
+
+
 def test_assessment_is_pure_and_prices_site_route_landing_and_wait(safety):
     supervisor, store, _, samples, refreshes, _ = safety
     req = request(safety, checkpoint(samples["pose"], command()), wait=1)
