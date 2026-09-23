@@ -252,8 +252,9 @@ def openrouter_provider_probe(*, environ: Mapping[str, str] | None = None, http_
 # L3 defaults: the live Jev judge and the live detector
 # ---------------------------------------------------------------------------
 
-#: The same OpenRouter route ``scripts/survey_run.py --live-judge jev`` uses.
-JEV_BASE_URL = "https://openrouter.ai/api"
+#: OpenRouter root: JevJudge appends ``/api/alpha/decisions`` itself (the
+#: proposer factory and ``room_jev_check.py`` use the same root).
+JEV_BASE_URL = "https://openrouter.ai"
 #: Below the controller's provider wait (``live_session`` passes 10 s), so a
 #: slow reply fails as a provider error instead of preempting the turn.
 JEV_TIMEOUT_S = 9.0
@@ -274,14 +275,16 @@ def default_jev(*, environ: Mapping[str, str] | None = None) -> IdentifiedJudge:
 
     Built only by ``room_session.py live`` after every gate and a ready
     preflight; building it makes no call. Refuses, naming the variable,
-    without ``OPENROUTER_API_KEY``. The model is JevJudge's own
-    (``SENTINEL_SYSTEM_ONE_MODEL`` or its default)."""
+    without ``OPENROUTER_API_KEY``. The model is pinned to the proposer's
+    ``JEV_PROPOSER_MODEL``: JevJudge's default alias is rejected by OpenRouter."""
+    from sentinel.coordinator.proposer_factory import JEV_PROPOSER_MODEL
     from sentinel.judgment import JevJudge
 
     settings = provider_environ() if environ is None else environ
     if not settings.get(PROVIDER_KEY_ENV):
         raise LiveStackError(f"the live Jev judge needs {PROVIDER_KEY_ENV} to be set")
-    judge = JevJudge(api_key_env=PROVIDER_KEY_ENV, base_url=JEV_BASE_URL, timeout_s=JEV_TIMEOUT_S)
+    judge = JevJudge(api_key_env=PROVIDER_KEY_ENV, base_url=JEV_BASE_URL, timeout_s=JEV_TIMEOUT_S,
+                     model=JEV_PROPOSER_MODEL)
     return IdentifiedJudge(judge, f"jev:{judge._model}")
 
 

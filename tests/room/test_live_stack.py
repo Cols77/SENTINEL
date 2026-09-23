@@ -733,6 +733,18 @@ def test_default_jev_builds_the_openrouter_jev_judge_without_calling_it(monkeypa
     assert inner._api_key_env == live_stack.PROVIDER_KEY_ENV and inner._base_url == live_stack.JEV_BASE_URL
     assert inner._timeout_s < 10  # below the controller's provider wait
 
+
+def test_default_jev_posts_to_the_pinned_openrouter_decisions_route(monkeypatch):
+    # Regression: the default alias ~typesafe/jev-latest and an ".../api" base
+    # (which JevJudge turned into /api/api/alpha/decisions) made every live
+    # goal compile fail with an HTTP error in Mission Control's Jev rehearsal.
+    from sentinel.coordinator.proposer_factory import JEV_PROPOSER_MODEL
+
+    judge = live_stack.default_jev(environ={live_stack.PROVIDER_KEY_ENV: "k"})
+    inner = judge._judge
+    assert judge.identity == f"jev:{JEV_PROPOSER_MODEL}"
+    assert f"{inner._base_url}{inner.ENDPOINT_PATH}" == "https://openrouter.ai/api/alpha/decisions"
+
     calls = []
     inner._transport = lambda payload: calls.append(payload) or {
         "answers": {"room_action": {"choice": "A", "probabilities": {"A": 0.9, "B": 0.1}}}}
