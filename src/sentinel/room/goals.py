@@ -126,18 +126,21 @@ class _Rejected(Exception):
         self.status = status
 
 
-#: Goal compilation only interprets the request; it moves nothing. 0.60 is the
-#: proposer arm's calibrated Jev gate. The real model reports ~0.64 for a plain
-#: "count the phones and computers" clause, which the old 0.8 always refused.
-GOAL_ACT_AT = 0.60
+#: Goal compilation only interprets the request; it moves nothing (the room
+#: loop's read/observe gate is also 0.5). Driving Mission Control's Jev
+#: rehearsal, the real model scored single steps of "count the phones and
+#: computers in the room" at 0.55-0.74, so 0.8 (and even 0.6) refused it.
+#: A below-gate lean toward a real label is re-asked once (``reasks``).
+GOAL_ACT_AT = 0.50
 
 
 class GoalCompiler:
     def __init__(
         self, judge: ChoiceJudge, store: RoomStore, *, input_limit_bytes: int,
         prompt_revision: str, act_at: float = GOAL_ACT_AT, min_margin: float = 0.15,
+        reasks: int = 1,
     ) -> None:
-        self.act_at, self.min_margin = act_at, min_margin
+        self.act_at, self.min_margin, self.reasks = act_at, min_margin, reasks
         if type(input_limit_bytes) is not int or input_limit_bytes <= 0:
             raise ValueError("input_limit_bytes must be a positive integer")
         if not isinstance(prompt_revision, str) or not prompt_revision.strip():
@@ -239,29 +242,39 @@ class _Compilation:
             "qualifiers and identity. Future result references are obligations, not verified evidence. "
             "Choose CLARIFICATION_REQUIRED for ambiguity and UNSUPPORTED for unavailable semantics."
         )
-        started = time.monotonic_ns()
-        provider_error = None
-        try:
-            answer = self.compiler.judge.choice(
-                deepcopy(state), instruction, criteria=dict(criteria), name=name,
+        for attempt in range(1 + self.compiler.reasks):
+            started = time.monotonic_ns()
+            provider_error = None
+            try:
+                answer = self.compiler.judge.choice(
+                    deepcopy(state), instruction, criteria=dict(criteria), name=name,
+                )
+            except Exception as exc:  # provider text/credentials must not enter audit records
+                provider_error = type(exc).__name__
+                answer = None
+            assessment = assess_choice(
+                answer, criteria, escalation_label="CLARIFICATION_REQUIRED",
+                act_at=self.compiler.act_at, min_margin=self.compiler.min_margin,
             )
-        except Exception as exc:  # provider text/credentials must not enter audit records
-            provider_error = type(exc).__name__
-            answer = None
-        assessment = assess_choice(
-            answer, criteria, escalation_label="CLARIFICATION_REQUIRED",
-            act_at=self.compiler.act_at, min_margin=self.compiler.min_margin,
-        )
-        audit_assessment = asdict(assessment)
-        # Labels remain values, never provider-controlled payload keys/header pairs.
-        audit_assessment["probabilities"] = [
-            {"label": label, "probability": probability} for label, probability in assessment.probabilities
-        ]
-        self.attempts.append({
-            "name": name, "state": state, "instruction": instruction, "criteria": criteria,
-            "assessment": audit_assessment, "provider_error": provider_error,
-            "latency_ms": (time.monotonic_ns() - started) // 1_000_000,
-        })
+            audit_assessment = asdict(assessment)
+            # Labels remain values, never provider-controlled payload keys/header pairs.
+            audit_assessment["probabilities"] = [
+                {"label": label, "probability": probability} for label, probability in assessment.probabilities
+            ]
+            self.attempts.append({
+                "name": name, "state": state, "instruction": instruction, "criteria": criteria,
+                "assessment": audit_assessment, "provider_error": provider_error, "attempt": attempt + 1,
+                "latency_ms": (time.monotonic_ns() - started) // 1_000_000,
+            })
+            # Re-ask once only when the model leaned to a real label but below the gate
+            # (or the provider failed); an explicit CLARIFICATION/UNSUPPORTED stands.
+            retryable = provider_error is not None or (
+                assessment.outcome == "LOW_CONFIDENCE" and assessment.selected_label not in _SAFE)
+            if assessment.final_label not in _SAFE or not retryable:
+                break
+            instruction = (instruction + " A previous answer for " + name + " leaned to "
+                           + str(assessment.selected_label) + " without enough confidence; "
+                           "re-read the request and answer again.")
         if assessment.final_label in _SAFE:
             raise _Rejected(provider_error or assessment.outcome, GoalStatus(assessment.final_label))
         self.accepted_choices.append({

@@ -324,15 +324,16 @@ def test_final_inconsistency_discards_tentative_ledger(tmp_path):
     assert_audit(store, judge, ledger, accepted=False)
 
 
-@pytest.mark.parametrize("response", [
-    RuntimeError("provider unavailable"),
-    {"value": "NEXT_OBJECTIVE:c1", "confidence": 0.1, "probabilities": {"NEXT_OBJECTIVE:c1": 0.99}},
-    {"value": "NEXT_OBJECTIVE:c1", "probabilities": {"NEXT_OBJECTIVE:c1": 0.51, "DONE": 0.49}},
-    {"value": "arbitrary command", "probabilities": {"arbitrary command": 0.99}},
+@pytest.mark.parametrize("response,asked", [
+    # Provider failures and below-gate leans to a real label are re-asked once.
+    (RuntimeError("provider unavailable"), 2),
+    ({"value": "NEXT_OBJECTIVE:c1", "confidence": 0.1, "probabilities": {"NEXT_OBJECTIVE:c1": 0.99}}, 2),
+    ({"value": "NEXT_OBJECTIVE:c1", "probabilities": {"NEXT_OBJECTIVE:c1": 0.51, "DONE": 0.49}}, 1),
+    ({"value": "arbitrary command", "probabilities": {"arbitrary command": 0.99}}, 1),
 ])
-def test_provider_failure_and_gate_rejection_are_audited_without_defaults(tmp_path, response):
+def test_provider_failure_and_gate_rejection_are_audited_without_defaults(tmp_path, response, asked):
     request = "Follow him"
-    compiler, judge, store = setup(tmp_path, request, [("next_objective", response)])
+    compiler, judge, store = setup(tmp_path, request, [("next_objective", response)] * asked)
     ledger = compiler.compile("session-1", request, snapshot())
     assert ledger.status == GoalStatus.CLARIFICATION_REQUIRED
     assert ledger.physical_objectives == ()
@@ -751,5 +752,5 @@ def test_subject_pronoun_without_antecedent_cannot_invent_an_actor(tmp_path, pro
 def test_goal_compiler_default_gate_is_the_calibrated_jev_gate():
     # The real Jev model reports ~0.64 for a plain count clause; 0.8 refused it.
     from sentinel.room.goals import GOAL_ACT_AT, GoalCompiler
-    assert GOAL_ACT_AT == 0.60
+    assert GOAL_ACT_AT == 0.50
     assert GoalCompiler.__init__.__kwdefaults__["act_at"] == GOAL_ACT_AT
