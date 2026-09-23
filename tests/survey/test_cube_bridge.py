@@ -363,3 +363,25 @@ def test_observer_managed_flight_rejects_failed_runner_without_legacy_callbacks(
     option = SweepOption('ONE', 'one', ((150, 300),), 120, (0,), 100, 22, (), 300)
     with pytest.raises(RuntimeError, match='FLIGHT_FAILED'):
         flight.fly(option)
+
+
+def test_observed_checkpoint_capture_publishes_typed_frames_and_lifecycle(tmp_path):
+    """Merge: the room agent's checkpoint ``_capture`` still publishes Mission
+    Control's FrameCapturedEvent per look, inside the runner lifecycle."""
+    from sentinel.mission_observer import (FrameCapturedEvent, RunnerLifecycleEvent,
+                                           StopProgressEvent)
+    events = []
+    observer = SimpleNamespace(observe=events.append)
+    flight = _flight(tmp_path)
+    flight.observer = observer
+    option = SweepOption('TWO_LOOKS', 'two looks', ((150, 300),), 120, (0, 20), 100, 22, (), 300)
+    assert flight.fly(option).status == "COMPLETED"
+    frames = [event for event in events if isinstance(event, FrameCapturedEvent)]
+    assert len(frames) == 2
+    assert all(event.run_id == "RUN1" and event.pose["x_cm"] == 150 for event in frames)
+    lifecycle = [event.status for event in events if isinstance(event, RunnerLifecycleEvent)]
+    assert lifecycle == ["STARTED", "PASS"]
+    assert any(isinstance(event, StopProgressEvent) and event.stop == "TWO_LOOKS_0"
+               for event in events)
+    kinds = [type(event).__name__ for event in events]
+    assert kinds.index("FrameCapturedEvent") > kinds.index("RunnerLifecycleEvent")

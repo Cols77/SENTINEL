@@ -333,6 +333,40 @@ def test_follower_writes_correlated_inbox_and_skips_partial_last_record(tmp_path
     assert live_detect_script.build_parser().parse_args(["--inbox", str(inbox)]).inbox == inbox
 
 
+def test_follower_keeps_both_room_inbox_and_mission_control_identity(tmp_path, monkeypatch):
+    """Merge: the room agent's inbox/provider arguments and Mission Control's
+    run/sweep identity reach the same follower row and the script forwards all."""
+    from sentinel.room.ingest import result_from_dict
+    record = _correlated_record(tmp_path)
+    frames, inbox, output = tmp_path / "frames.jsonl", tmp_path / "inbox.jsonl", tmp_path / "out.jsonl"
+    frames.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    batch = DetectionBatch((), "OK", raw={"model": "pinned-model"})
+    assert follow(frames, output, FakeDetector([batch]), done=lambda: True, inbox_log=inbox,
+                  provider="fixture", run_id="MC-RUN", sweep_id="MC-SWEEP",
+                  print_fn=lambda _: None) == 1
+    row = json.loads(output.read_text())
+    assert (row["run_id"], row["sweep_id"]) == ("MC-RUN", "MC-SWEEP")
+    result = result_from_dict(json.loads(inbox.read_text()))
+    assert result.status == "SUCCEEDED" and result.provider == "fixture"
+
+    from sentinel.survey.store import SurveyStore
+    from sentinel.survey.consent import record_consent
+    db = tmp_path / "c.sqlite3"
+    record_consent(SurveyStore.open(db), "home-office", "2026-09-22", "test")
+    forwarded = []
+    monkeypatch.setattr(live_detect_script, "follow",
+                        lambda *args, **kwargs: forwarded.append(kwargs) or 0)
+    assert live_detect_script.main(
+        ["--consent-db", str(db), "--location", "home-office", "--date", "2026-09-22",
+         "--i-authorise-paid-calls", "--frames-log", str(frames), "--out", str(output),
+         "--done-file", str(tmp_path / "done"), "--inbox", str(inbox),
+         "--run-id", "MC-RUN", "--sweep-id", "MC-SWEEP"],
+        build_detector=lambda name: object()) == 0
+    assert {key: forwarded[0][key] for key in ("inbox_log", "provider", "run_id", "sweep_id")} == {
+        "inbox_log": inbox, "provider": "gemini-openrouter", "run_id": "MC-RUN",
+        "sweep_id": "MC-SWEEP"}
+
+
 def test_producer_assigns_unique_correlation_at_capture(tmp_path):
     runner = CubeMissionRunner(
         DryRunClient(), "dry-run", mission=MISSION, site=SITE, run_id="RUN",

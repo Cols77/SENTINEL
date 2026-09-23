@@ -123,6 +123,35 @@ def test_aborted_partial_flight_keeps_evidence_but_never_reports_success(tmp_pat
     assert store.connection.execute("SELECT count(*) FROM sightings").fetchone()[0] == 1
 
 
+def test_sweep_events_keep_analysis_completed_while_status_comes_from_the_flight(tmp_path):
+    """Merge of the room agent (terminal sweep status from the flight result)
+    with Mission Control (ANALYSIS_COMPLETED between frames and merge)."""
+    class PartialFrames(list):
+        status = "ABORTED"
+
+    class PartialFlight(_StaticFlight):
+        def fly(self, option):
+            return PartialFrames(super().fly(option)[:1])
+
+    for name, flight, expected in (("clean", _StaticFlight(), "FLOWN"),
+                                   ("partial", PartialFlight(), "ABORTED")):
+        store = SurveyStore.open(tmp_path / f"{name}.sqlite3")
+        events = []
+        run_survey(store=store, run_id=name.upper(), request_text="count the computers",
+                   options=OPTIONS, policy=RuleProposer(), flight=flight,
+                   detector=ScriptedDetector(_one_computer_script()),
+                   on_approval=lambda call: True, writer=_writer([]),
+                   emit=lambda kind, payload: events.append(kind))
+        sweep_events = [kind for kind in events
+                        if kind in {"SWEEP_STARTED", "FRAME_CAPTURED", "ANALYSIS_COMPLETED",
+                                    "MERGE_COMPLETED"}]
+        assert sweep_events[0] == "SWEEP_STARTED"
+        assert sweep_events[-2:] == ["ANALYSIS_COMPLETED", "MERGE_COMPLETED"]
+        assert "FRAME_CAPTURED" in sweep_events
+        assert store.connection.execute(
+            "SELECT status FROM sweeps").fetchone()[0] == expected
+
+
 def test_a_refused_proposal_ends_the_run_without_flying(tmp_path):
     store = SurveyStore.open(tmp_path / "s.sqlite3")
     flight = _StaticFlight()

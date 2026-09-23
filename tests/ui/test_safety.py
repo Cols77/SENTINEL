@@ -70,3 +70,34 @@ def test_service_shutdown_lands_active_runner_before_cleanup(tmp_path):
     assert not runner.emergency_triggered
     with pytest.raises(EmergencyAborted):
         service.registry.bind('mission',FlightTestRunner(_FakeClient(),'dry-run'))
+
+
+# -- merge integration: Mission Control safety over the room agent's StepExecutor --
+
+def test_independent_emergency_latch_terminates_the_shared_step_executor():
+    """The UI emergency path latches runners without calling trigger_emergency;
+    the connected step executor must still become terminal so no further
+    checkpoint or supervisor work is admitted."""
+    from sentinel.cube.step_executor import ExecutorState
+    runner = FlightTestRunner(_FakeClient(), 'dry-run')
+    runner.step_executor.start_legacy()
+    assert runner.step_executor.state is ExecutorState.AIRBORNE
+    registry = SafetyRegistry()
+    registry.bind('r', runner)
+    adapter = RunnerSafetyAdapter(registry, lambda: 9, 's')
+    identity = dict(command_id='c', correlation_id='x', idempotency_key='k')
+    assert adapter.trigger_emergency('s', identity, 'r')['status'] == 'ACKNOWLEDGED'
+    assert runner.step_executor.state is ExecutorState.TERMINAL
+    runner.step_executor.close()
+    assert 'land' not in [r.command for r in runner.client.records]
+
+
+def test_controlled_land_is_sent_once_even_when_the_step_executor_cleans_up():
+    runner = FlightTestRunner(_FakeClient(), 'dry-run')
+    runner.step_executor.start_legacy()
+    runner.request_controlled_land()
+    assert runner.land_status == 'ACKNOWLEDGED'
+    runner.step_executor.close()
+    assert [r.command for r in runner.client.records].count('land') == 1
+    assert not runner.emergency_triggered
+    assert runner.client.closed
