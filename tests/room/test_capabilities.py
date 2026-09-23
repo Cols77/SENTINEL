@@ -560,6 +560,9 @@ def test_script_promote_writes_promoted_grant_and_leaves_trial_intact(tmp_path, 
         "--trial-grant-sha256", trial_digest,
         "--evidence-index", str(evidence_index_path),
         "--expires-at", FUTURE,
+        # Pinned: FUTURE is an hour after the fixed NOW, so the real clock
+        # would expire the trial on the afternoon of 2026-09-23.
+        "--now", NOW.isoformat(),
     ])
     out = capsys.readouterr().out.strip()
     assert exit_code == 0
