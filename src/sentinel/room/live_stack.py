@@ -36,6 +36,7 @@ from typing import Callable, Mapping
 from sentinel.cube.checkpoint import CommandOutcome, HomeDefinition, PlannedCommand
 from sentinel.cube.energy import EnergySample
 from sentinel.cube.localization import PoseFix
+from sentinel.cube.recovery import PoseReport
 from sentinel.cube.mission import BURST_MAX_S, BURST_TARGET_REPORTS, CM_PER_UNIT, SETTLE_S, _StreamHeld
 from sentinel.cube.site import MAX_LEG_CM
 from sentinel.cube.step_executor import HeightTelemetry, HomeState, StepExecutor
@@ -264,6 +265,22 @@ def load_bound_tag_map(path: str | Path, *, expected_sha256: str) -> TagMap:
         raise LiveStackError(f"tag map {str(path)!r} is invalid: {exc}") from exc
 
 
+def mapped_heading_tag_ids(tag_map: TagMap | None) -> tuple[tuple[float, tuple[int, ...]], ...]:
+    """The headings (room convention: degrees CCW from +x) at which two or
+    more mapped tags face the camera, for the recovery policy's yaw scan.
+
+    A wall tag's ``yaw_deg`` is the direction it faces; the aircraft sees it
+    by looking the opposite way. Headings with fewer than two tags cannot
+    give a joint-tag fix and are left out; no tag map means no scan."""
+    if tag_map is None:
+        return ()
+    by_heading: dict[float, set[int]] = {}
+    for tag in tag_map.doc.get("tags", ()):
+        heading = float((round(float(tag["yaw_deg"])) + 180) % 360)
+        by_heading.setdefault(heading, set()).add(int(tag["tag_id"]))
+    return tuple(sorted((heading, tuple(sorted(tags))) for heading, tags in by_heading.items() if len(tags) >= 2))
+
+
 def site_envelope(site: RoomSite) -> FlightEnvelope:
     """The runner's commanded envelope: the site's semantic envelope volume.
 
@@ -303,6 +320,10 @@ def wp5_pose_burst(client, tag_map: TagMap, conn: sqlite3.Connection, *, run_id:
     return run_pose_stream(_StreamHeld(client), tag_map, conn, run_id=run_id, max_frames=None,
                            duration_s=duration_s, source_kind="LIVE",
                            on_frame=lambda _frame: count["n"] < BURST_TARGET_REPORTS, on_report=on_report)
+
+
+#: ``_TelloStack._tag_fix``'s answer when the video reader is already busy.
+_BUSY = object()
 
 
 @dataclass(frozen=True)
@@ -358,9 +379,15 @@ class _TelloStack:
             raise LiveStackError(f"invalid height telemetry: {height!r}")
         return height + self._pad_z_cm
 
-    def _tag_fix(self, duration_s: float) -> _TagFix | None:
-        with self._burst_lock:  # one video reader at a time
+    def _tag_fix(self, duration_s: float, *, blocking: bool = True) -> _TagFix | None | object:
+        """A tag fix from one burst; with ``blocking`` False, ``_BUSY`` when
+        another burst (a recovery burst) already holds the video reader."""
+        if not self._burst_lock.acquire(blocking=blocking):
+            return _BUSY
+        try:  # one video reader at a time
             burst = list(self._burst(self.client, duration_s=duration_s))
+        finally:
+            self._burst_lock.release()
         result = localise(burst)
         if not isinstance(result, LocalisationFix):
             return None
@@ -426,8 +453,13 @@ class _TelloStack:
         recorded as an intentional look, so it never counts as an estimator
         failure.
         """
-        fix = self._tag_fix(REFRESH_BURST_S)
-        if fix is None:
+        # Non-blocking: while a recovery burst holds the video reader, the
+        # watchdog's refresh must neither starve it nor count the skipped
+        # burst as an estimator failure; the tracker keeps propagating.
+        fix = self._tag_fix(REFRESH_BURST_S, blocking=False)
+        if fix is _BUSY:
+            pass
+        elif fix is None:
             self.tracker.note_camera(self.clock(), estimator_failed=True,
                                      intentional_look_away=self._looking_away)
         else:
@@ -436,6 +468,35 @@ class _TelloStack:
             self.tracker.accept_fix(fix.pose_fix(z_cm))
         battery = self.runner._call(self.client.battery)
         return self.tracker.health, EnergySample(battery, self.clock())
+
+    def recovery_burst(self, action) -> tuple[PoseReport, ...]:
+        """One stationary tag burst as ``PoseReport``s for the recovery policy.
+
+        ``RecoveryController.assess_burst`` judges the reports itself (count,
+        spread, mapped tags, containment); this only converts the WP5 burst.
+        Only a report that itself saw two or more mapped tags is joint-tag
+        evidence. Height comes from the passive state stream: this runs as a
+        supervised wait operation, which must return data and never issue an
+        SDK command. An unreliable burst returns no reports (never a guess).
+        """
+        duration_s = max(0.5, self._within(float(action.upper_bound_s)) - HEIGHT_READ_SLACK_S)
+        with self._burst_lock:
+            burst = list(self._burst(self.client, duration_s=duration_s))
+        result = localise(burst)
+        if not isinstance(result, LocalisationFix):
+            return ()
+        joint = [report for report in burst if report.heading_deg is not None
+                 and len({obs.tag_id for obs in report.tag_observations}) >= 2]
+        if not joint:
+            return ()
+        deltas = sorted(abs(heading_delta_deg(report.heading_deg, result.heading_deg)) for report in joint)
+        heading_uncertainty = deltas[int(0.95 * (len(deltas) - 1))]
+        z_cm = self._passive_height_cm()
+        measured_at = self.clock()
+        return tuple(PoseReport(str(report.report_id), PoseFix(
+            Position(round(report.point[0] * CM_PER_UNIT), round(report.point[1] * CM_PER_UNIT), z_cm),
+            report.heading_deg % 360, measured_at, result.spread_p95_cm, heading_uncertainty,
+            tuple(sorted({obs.tag_id for obs in report.tag_observations})))) for report in joint)
 
     def measure_home(self, definition: HomeDefinition) -> HomeState:
         """The airborne home: position and heading from tags, height from the state stream.
@@ -570,4 +631,5 @@ class TelloFlightStackFactory:
         stack.executor = executor
         runner._call(client.stream_on)
         return FlightStack(executor=executor, refresh=stack.refresh, emergency=stack.emergency, frame_source=client,
-                           trigger_emergency=runner.trigger_emergency)
+                           trigger_emergency=runner.trigger_emergency, recovery_burst=stack.recovery_burst,
+                           mapped_heading_tag_ids=mapped_heading_tag_ids(self.tag_map))

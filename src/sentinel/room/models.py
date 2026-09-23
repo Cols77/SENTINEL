@@ -29,6 +29,9 @@ class CandidateKind(StrEnum):
     FOLLOW_STEP = "FOLLOW_STEP"
     LAND_AT_ZONE = "LAND_AT_ZONE"
     RETURN_HOME = "RETURN_HOME"
+    #: Task B item 2c: a Jev-chosen, supervisor-admitted bounded re-anchor
+    #: (the supervisor's own stationary recovery, run early and voluntarily).
+    REANCHOR = "REANCHOR"
     ANSWER = "ANSWER"
     CLARIFY = "CLARIFY"
     ESCALATE = "ESCALATE"

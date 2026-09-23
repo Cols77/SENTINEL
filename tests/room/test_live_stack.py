@@ -644,3 +644,62 @@ def test_default_burst_runs_the_wp5_pose_stream_and_persists_reports(tmp_path):
     assert len(found) == 3
     assert client.video_enabled is True
     assert conn.execute("SELECT COUNT(*) FROM pose_events WHERE run_id = 'burst'").fetchone()[0] == 3
+
+
+# ---------------------------------------------------------------------------
+# Task B item 2c: the recovery adapter the supervisor re-anchors with
+# ---------------------------------------------------------------------------
+
+
+def test_recovery_burst_returns_one_joint_tag_pose_report_per_frame(tmp_path):
+    from sentinel.cube.recovery import PoseReport, RecoveryAction
+    stack, tello, tracker, site, _ = build_stack(tmp_path, bursts=Bursts(reports(120, 150, 91.0)))
+    tello.sent.clear()
+    action = RecoveryAction("a1", "STATIONARY_BURST", 90.0, upper_bound_s=5.0)
+    found = stack.recovery_burst(action)
+    assert len(found) == 10 and all(isinstance(report, PoseReport) for report in found)
+    fix = found[0].fix
+    assert (fix.position.x_cm, fix.position.y_cm) == (120, 150)
+    assert fix.tag_ids == (1, 2) and fix.source == "mapped_joint_tags"
+    assert len({report.report_id for report in found}) == 10
+    assert tello.sent == []  # a supervised wait operation: data only, no SDK command
+
+
+def test_recovery_burst_never_turns_single_tag_or_unreliable_bursts_into_reports(tmp_path):
+    from sentinel.cube.recovery import RecoveryAction
+    action = RecoveryAction("a1", "STATIONARY_BURST", 90.0, upper_bound_s=5.0)
+    single, *_ = build_stack(tmp_path, bursts=Bursts(reports(tags=(1,))))
+    assert single.recovery_burst(action) == ()
+    short, *_ = build_stack(tmp_path, bursts=Bursts(reports(n=3)))
+    assert short.recovery_burst(action) == ()
+
+
+def test_refresh_skips_its_burst_while_a_recovery_burst_holds_the_video_reader(tmp_path):
+    bursts = Bursts(reports())
+    stack, _, tracker, *_ = build_stack(tmp_path, bursts=bursts)
+    inner = _inner(stack)
+    before = tracker.health.estimator_failures
+    with inner._burst_lock:
+        stack.refresh()
+    assert bursts.durations == []  # never waited for, never read the stream
+    assert tracker.health.estimator_failures == before  # a skipped burst is not an estimator failure
+
+
+def test_mapped_heading_tag_ids_faces_the_wall_tags():
+    from sentinel.pose.tagmap import TagMap
+    doc = {"schema_version": "tag-map-v1", "tags": [
+        {"tag_id": 2, "zone_id": "S0", "x_units": 21.56, "y_units": 40.0, "z_units": 0.53, "yaw_deg": -90.0,
+         "size_m": 0.192, "mounting": "WALL"},
+        {"tag_id": 0, "zone_id": "S1", "x_units": 28.44, "y_units": 40.0, "z_units": 0.53, "yaw_deg": -90.0,
+         "size_m": 0.192, "mounting": "WALL"},
+        {"tag_id": 7, "zone_id": "S2", "x_units": 0.0, "y_units": 20.0, "z_units": 0.53, "yaw_deg": 0.0,
+         "size_m": 0.192, "mounting": "WALL"}],
+        "camera_calibration": {"fx": 1, "fy": 1, "cx": 1, "cy": 1, "dist_coeffs": [0, 0, 0, 0, 0]}}
+    assert live_stack.mapped_heading_tag_ids(TagMap(doc)) == ((90.0, (0, 2)),)
+    assert live_stack.mapped_heading_tag_ids(None) == ()
+
+
+def test_factory_exposes_the_recovery_adapter_to_the_live_session(tmp_path):
+    stack, *_ = build_stack(tmp_path)
+    assert stack.recovery_burst is not None
+    assert stack.mapped_heading_tag_ids == ()  # no tag map bound in this fixture: no yaw scan

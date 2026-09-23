@@ -705,8 +705,14 @@ class SafetySupervisor:
             fresh=fresh, causation_id=event.event_id if event is not None else None,
             assessed_snapshot_version=admitted.request.snapshot_version)
 
-    def _recover(self, current, executor):
-        """Use the cube recovery policy; publish only a timely validated burst."""
+    def _recover(self, current, executor, *, voluntary=False):
+        """Use the cube recovery policy; publish only a timely validated burst.
+
+        ``voluntary`` (Task B item 2c, a Jev-chosen early re-anchor): an
+        attempt that merely cannot be carried out -- no rotation bound, a
+        burst wait that failed -- is refused without landing; the aircraft
+        was never required to recover. Integrity failures (a contradictory
+        or unsynchronizable re-anchor) still stop exactly as before."""
         recovery = self.recovery
         if recovery.tracker is not self.tracker:
             raise ValueError("recovery must own the active localization tracker")
@@ -727,6 +733,9 @@ class SafetySupervisor:
             navigation_contingency_id=navigation.contingency_id, now_monotonic_ms=self.clock() * 1000,
             mapped_heading_tag_ids=self.mapped_heading_tag_ids)
         def stop(reason):
+            if voluntary and reason in {"RECOVERY_ROTATION_BOUND_UNAVAILABLE", "RECOVERY_WAIT_FAILED"}:
+                return CheckpointOutcome("VOLUNTARY_REANCHOR_REFUSED", (), (), None,
+                                         self.tracker.health.position, True)
             terminal = replace(current, transition="LAND_CONTINGENCY", reason=reason,
                                invalidates_snapshot=True, contingency_id=None)
             event = self._audit(terminal)
@@ -809,6 +818,90 @@ class SafetySupervisor:
                                    self.tracker.health.position, True)
         self._record_completion(result, current, event, executor)
         return result
+
+    def voluntary_reanchor(self, executor, *, snapshot_version):
+        """Task B item 2c: a Jev-chosen, bounded re-anchor before it is mandatory.
+
+        Runs the existing stationary recovery (settle, then the recovery
+        policy's own mapped-tag yaw scan, accepting or refusing each burst)
+        through this supervisor's admission, but under a *fresh* recovery
+        episode so a voluntary attempt can never consume or reset the
+        mandatory episode's attempts. It is never allowed to land: when the
+        policy runs out of admissible actions the attempt is simply refused
+        and the flight continues under the unchanged safety floor
+        (RECOVERY_REQUIRED still forces the mandatory recovery, LOST still
+        lands). A mandatory transition found at any admission is dispatched
+        exactly as everywhere else and reported as ``PREEMPTED``.
+
+        Returns ``(code, result)``: ``REANCHORED`` (accepted fix, committed
+        with its candidate invalidations), ``REANCHOR_REFUSED``,
+        ``REANCHOR_UNAVAILABLE`` (no recovery adapter / not coasting or
+        anchored), or ``PREEMPTED`` with the dispatched mandatory result.
+        """
+        from sentinel.cube.recovery import RecoveryController
+
+        mandatory = self.recovery
+        if mandatory is None or self.tracker.profile is None:
+            return "REANCHOR_UNAVAILABLE", None
+        with self._dispatch_lock:
+            settle = PlannedCommand("SETTLE", (), self.tracker.profile.recovery_action_upper_bound_s, True)
+            current = self.prepare(snapshot_version=snapshot_version, remaining_commands=[settle])
+            if current.transition != "CONTINUE":
+                # Mandatory (including an already-required recovery): the
+                # supervisor's own path owns it, exactly as for any action.
+                return "PREEMPTED", self.dispatch(current, executor)
+            if current.request.pose.state not in {LocalizationState.ANCHORED, LocalizationState.COASTING}:
+                return "REANCHOR_UNAVAILABLE", None
+            voluntary = RecoveryController(self.tracker, clock=mandatory.clock,
+                                           burst_source=mandatory.burst_source,
+                                           energy_admits=mandatory.energy_admits)
+            navigation = next(e for e in self.site.terminal_contingencies
+                              if e.trigger == ContingencyTrigger.NAVIGATION_UNAVAILABLE)
+            self.recovery = voluntary
+            preempted = None
+            try:
+                code, result = self._voluntary_attempts(voluntary, current, executor, navigation)
+                if code == "_DISPATCH":
+                    preempted, code, result = result, "PREEMPTED", None
+            finally:
+                self.recovery = mandatory
+            if preempted is not None:
+                # Dispatched only once the mandatory recovery adapter is back.
+                result = self.dispatch(preempted, executor)
+            return code, result
+
+    def _voluntary_attempts(self, voluntary, current, executor, navigation):
+        """The bounded attempt loop of ``voluntary_reanchor``; a mandatory
+        transition found between attempts is handed back as ``_DISPATCH``."""
+        revision = self.tracker.health.pose_revision
+        for _ in range(max(1, voluntary.max_attempts)):
+            try:
+                environment = adapt_recovery_environment(self.site, self._assurances(),
+                    session_id=self.session_id, clock_domain_id=self.clock_domain_id,
+                    navigation_contingency_id=navigation.contingency_id,
+                    now_monotonic_ms=self.clock() * 1000, mapped_heading_tag_ids=self.mapped_heading_tag_ids)
+            except (TypeError, ValueError):
+                return "REANCHOR_REFUSED", None
+            # Peek the policy's next action: a voluntary attempt that has run
+            # out of admissible actions is refused here and never reaches
+            # _recover's contingency/emergency landing.
+            action = voluntary.next_action(current.request.pose, environment, ())
+            if action.kind in {"CONTINGENCY", "EMERGENCY"}:
+                return "REANCHOR_REFUSED", None
+            result = self._recover(current, executor, voluntary=True)
+            if isinstance(result, TerminalOutcome) or self._returning or self._terminal:
+                # _recover itself dispatched a mandatory return/landing.
+                return "PREEMPTED", result
+            health = self.tracker.health
+            if (result.status == "COMPLETED" and result.completion_known and health.pose_revision > revision
+                    and health.state == LocalizationState.ANCHORED):
+                return "REANCHORED", result
+            if result.status != "RECOVERY_PENDING":
+                return "REANCHOR_REFUSED", result
+            current = self.prepare(snapshot_version=self.store.session_version(self.session_id))
+            if current.transition != "CONTINUE":
+                return "_DISPATCH", current
+        return "REANCHOR_REFUSED", None
 
     def _recovery_contingency(self, action, current, executor):
         """A recovery ID selects a policy; fresh descent admission authorizes it."""

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
+import hashlib
+import json
 import math
 import re
 import time
@@ -22,7 +24,7 @@ from .candidates import (build_candidates, build_observation_candidates, count_a
 from .coverage import CellObservation, CoverageProjection, project_coverage, render_coverage_note
 from .grounding import CountGeometry, ground_frame, project_objective_count, render_objective_count
 from .ingest import ingest_result
-from .models import CandidateKind, GoalKind, GoalStatus, RoomCandidate, TerminalState
+from .models import CandidateKind, GoalKind, GoalStatus, PhysicalCost, RoomCandidate, TerminalState
 from .queries import READ_KINDS, ReadFact, ReadQueries, ReadSnapshot, ToolOutcome, relevant_hash, render_answer
 from .semantic import resolve_pose_id, semantic_region_of
 from .spatial import PoseEvidence, semantic_heading_to_compass_deg
@@ -400,12 +402,81 @@ class RoomController:
             sections.append("\n".join(lines))
         return sections, conclusive
 
+    # -- Task B item 2c: localization health Jev can see, and REANCHOR ----------
+
+    def localization_health(self) -> dict | None:
+        """The Jev-facing localization summary for this turn, or None without
+        a supervisor. State (ANCHORED/COASTING/...), the age of the last
+        accepted tag fix, the current position uncertainty and the margin
+        left before the calibrated RECOVERY_REQUIRED threshold -- plain
+        numbers only, never coordinates."""
+        if self.supervisor is None:
+            return None
+        tracker = self.supervisor.tracker
+        health, profile = tracker.health, tracker.profile
+        margins = []
+        if profile is not None:
+            for field in ("camera_age_s", "fix_age_s", "estimator_failures", "look_away_s", "translation_cm",
+                          "yaw_deg", "xy_uncertainty_cm", "heading_uncertainty_deg"):
+                limit = getattr(profile, "max_" + field)
+                if limit:
+                    margins.append(max(0.0, 1.0 - getattr(health, field) / limit))
+        return {
+            "state": health.state.value,
+            "last_tag_fix_age_s": round(max(0.0, health.fix_age_s), 1),
+            "position_uncertainty_cm": round(max(0.0, health.xy_uncertainty_cm), 1),
+            "margin_before_mandatory_recovery_pct": round(100 * min(margins)) if margins else None,
+        }
+
+    def _reanchor_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
+        """A Jev-selectable bounded re-anchor, offered while COASTING (or while
+        ANCHORED on a fix older than half the calibrated limit), only when a
+        supervisor recovery adapter exists and the aircraft is airborne. It
+        never replaces the safety floor: RECOVERY_REQUIRED is still recovered
+        by the supervisor before Jev is asked, and LOST still lands."""
+        if (self.supervisor is None or self.flight_executor is None
+                or getattr(self.supervisor, "recovery", None) is None
+                or self.flight_executor.state != ExecutorState.AIRBORNE):
+            return ()
+        tracker = self.supervisor.tracker
+        health, profile = tracker.health, tracker.profile
+        aged = profile is not None and health.fix_age_s >= profile.max_fix_age_s / 2
+        if not (health.state == LocalizationState.COASTING
+                or (health.state == LocalizationState.ANCHORED and aged)):
+            return ()
+        digest = hashlib.sha256(json.dumps({"candidate_id": "REANCHOR", "pose_revision": health.pose_revision,
+                                            "state": health.state.value}, sort_keys=True).encode()).hexdigest()
+        if any(o.candidate_id == "REANCHOR" and o.relevant_state_sha256 == digest and o.refusal_code is not None
+               for o in snapshot.outcomes):
+            return ()
+        summary = self.localization_health()
+        description = (f"Re-anchor now: hover and re-acquire the mapped tags (bounded, supervisor-admitted). "
+                       f"Localization is {summary['state']}; last tag fix {summary['last_tag_fix_age_s']} s ago; "
+                       f"{summary['margin_before_mandatory_recovery_pct']}% margin left before a mandatory "
+                       f"recovery.")
+        return (RoomCandidate("REANCHOR", CandidateKind.REANCHOR, snapshot.state_version, digest, description,
+                              description, (), (), PhysicalCost(requires_airborne=True)),)
+
+    def _execute_reanchor(self, session_id, expected_version):
+        """Run the voluntary re-anchor; a dict payload, or a TurnOutcome when
+        a mandatory transition preempted it (reported like any preemption)."""
+        try:
+            code, result = self.supervisor.voluntary_reanchor(self.flight_executor, snapshot_version=expected_version)
+        except VersionConflict:
+            return {"code": "STALE_DECISION", "refusal": "STALE_DECISION"}
+        if code == "PREEMPTED":
+            terminal = result if isinstance(result, TerminalOutcome) else None
+            return self._preempted(session_id, self.supervisor.last_preemption, terminal_outcome=terminal)
+        if code == "REANCHORED":
+            return {"code": "REANCHORED"}
+        return {"code": code, "refusal": code}
+
     def _legal_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
         base = build_candidates(snapshot)
         if self._legacy_count_answer_blocked(snapshot):
             base = tuple(c for c in base if c.kind != CandidateKind.ANSWER)
         return (*base, *self._observation_candidates(snapshot), *self._count_answer_candidates(snapshot),
-               *self._closer_unavailable_candidates(snapshot))
+               *self._closer_unavailable_candidates(snapshot), *self._reanchor_candidates(snapshot))
 
     def _local_terminal(self, terminal, candidate_id):
         if not isinstance(terminal, TerminalOutcome):
@@ -668,6 +739,10 @@ class RoomController:
                                            code="NO_LEGAL_CANDIDATES", requested_terminal=TerminalState.BLOCKED)
         criteria = {key: c.description for key, c in candidates.items()}
         state = asdict(snapshot)
+        if self.supervisor is not None:
+            # Task B item 2c: this turn's localization health, so Jev can
+            # choose an early bounded re-anchor (never coordinates).
+            state["localization"] = self.localization_health()
         provider_error = None
         started = time.monotonic_ns()
         def choose(cancel):
@@ -747,6 +822,17 @@ class RoomController:
                 payload = self._outcome(snapshot, candidate_id, kind, digest, outcome["code"],
                                         refusal=outcome.get("refusal"), observed_at=outcome.get("observed_at"),
                                         count_evidence=outcome.get("count_evidence"))
+                return self._record(snapshot, correlation, payload, prior=prior)
+            elif selected.kind == CandidateKind.REANCHOR:
+                # Task B item 2c: the supervisor's own stationary recovery,
+                # chosen early by Jev and admitted like any other action. An
+                # accepted fix commits its candidate invalidations; the typed
+                # outcome is what Jev sees next turn.
+                outcome = self._execute_reanchor(session_id, expected_version)
+                if isinstance(outcome, TurnOutcome):
+                    return replace(outcome, event_ids=tuple(e.event_id for e in prior) + outcome.event_ids)
+                payload = self._outcome(snapshot, candidate_id, kind, digest, outcome["code"],
+                                        refusal=outcome.get("refusal"))
                 return self._record(snapshot, correlation, payload, prior=prior)
             elif selected.kind == CandidateKind.ANSWER:
                 # Fix round 1 (Q1, Q3): a terminal answer -- plain or the

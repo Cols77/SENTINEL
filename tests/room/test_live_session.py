@@ -272,3 +272,50 @@ def test_adopt_assurances_rekeys_verified_evidence_without_renewing_any_deadline
             assert f"operator-assurance:{original.assurance_id}" in copy.evidence_refs
     finally:
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# Task B item 2c: a stack with a recovery adapter gives the supervisor one
+# ---------------------------------------------------------------------------
+
+
+def _prepare_with(tmp_path, stack_factory):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    site = fixture_site()
+    store = RoomStore.open(tmp_path / "room.sqlite3")
+    manifest = SimpleNamespace(run_id="run-0001", aircraft_id=AIRCRAFT_ID, requested_capability="count_return",
+                               mode="live", requested_detector_identity="detector", goal_parser_revision="rev-1")
+    store.create_session(manifest.run_id, "request", CapabilityProfile((flight_grant(site),)))
+    prepared = live_session._prepare(
+        store=store, manifest=manifest, site=site, drift_profile=drift_profile(), energy_profile=energy_profile(site),
+        limits=command_limits(), calibration_profiles=(SimpleNamespace(speeds_cm_s=(20,)),),
+        flight_stack_factory=stack_factory, judge=PolicyJudge(), detector=object(),
+        assurances=operator_assurances(manifest.run_id, site), request_text="count the computers",
+        frames_dir=tmp_path / "frames", clock=time.monotonic,
+        wall_clock=lambda: datetime(2026, 9, 23, tzinfo=timezone.utc), landing_upper_bound_s=10.0)
+    return store, prepared
+
+
+def test_a_stack_with_a_recovery_adapter_gives_the_supervisor_its_recovery_policy(tmp_path):
+    inner = FlightStackFactory()
+
+    def with_recovery(**kwargs):
+        stack = inner(**kwargs)
+        return replace(stack, recovery_burst=lambda action: (), mapped_heading_tag_ids=((90.0, (0, 2)),))
+
+    store, (supervisor, stack, ledger, collaborators) = _prepare_with(tmp_path, with_recovery)
+    try:
+        assert supervisor.recovery is not None and supervisor.recovery.tracker is supervisor.tracker
+        assert supervisor.recovery.burst_source is stack.recovery_burst
+        assert supervisor.mapped_heading_tag_ids == ((90.0, (0, 2)),)
+    finally:
+        store.close()
+
+
+def test_a_stack_without_a_recovery_adapter_keeps_recovery_unavailable(tmp_path):
+    store, (supervisor, *_rest) = _prepare_with(tmp_path, FlightStackFactory())
+    try:
+        assert supervisor.recovery is None and supervisor.mapped_heading_tag_ids == ()
+    finally:
+        store.close()

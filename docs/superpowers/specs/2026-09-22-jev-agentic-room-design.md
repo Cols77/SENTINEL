@@ -39,7 +39,7 @@ Snapshots separate goal progress, pose health, home/route state, energy, coverag
 
 Expose typed reads for drone status, observations, counts, target evidence and coverage. Deterministic queries and templates produce grounded answers with observation time, scope and uncertainty. Existing fresh evidence can answer without flight. Jev never authors SQL, raw SDK commands, coordinates or unsupported factual claims.
 
-Candidates include read, observe semantic region, validate detection, verify relationship, reacquire target, bounded follow step, approach certified landing zone, return, land, answer, clarify and escalate. Candidates carry stable IDs, snapshot version, evidence references, prerequisites, predicted benefit and conservative physical cost. Mandatory pose recovery and reserve return are supervisor actions, not optional Jev choices.
+Candidates include read, observe semantic region, validate detection, verify relationship, reacquire target, bounded follow step, approach certified landing zone, return, land, answer, clarify and escalate. Candidates carry stable IDs, snapshot version, evidence references, prerequisites, predicted benefit and conservative physical cost. Jev sees localization health and may choose a bounded re-anchor; mandatory pose recovery at the RECOVERY_REQUIRED threshold and reserve return remain supervisor actions.
 
 ## Turn and progress contract
 

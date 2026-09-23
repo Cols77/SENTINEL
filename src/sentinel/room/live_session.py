@@ -42,6 +42,7 @@ from typing import Callable, Iterable
 from sentinel.cube.checkpoint import CommandLimits, TransportLimits
 from sentinel.cube.energy import EnergyProfile, ExecutionMode, ReserveGuard
 from sentinel.cube.localization import DriftProfile, LocalizationTracker
+from sentinel.cube.recovery import RecoveryController
 from sentinel.cube.step_executor import ExecutorState, TerminalOutcome
 
 from . import wiring
@@ -85,6 +86,15 @@ class FlightStack:
     emergency: Callable[[object], TerminalOutcome]
     frame_source: object
     trigger_emergency: Callable[[], None] | None = None
+    #: Task B item 2c: a stationary tag burst as ``PoseReport``s for the
+    #: supervisor's recovery policy (``RecoveryController.burst_source``),
+    #: and the headings at which two or more mapped tags are visible. When
+    #: both are present the supervisor gets a recovery adapter, so a
+    #: RECOVERY_REQUIRED pose is re-anchored instead of landed and Jev may
+    #: choose an early bounded re-anchor. ``None``/``()`` keeps the old
+    #: behaviour (mandatory recovery unavailable -> forced landing).
+    recovery_burst: Callable[[object], tuple] | None = None
+    mapped_heading_tag_ids: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -288,12 +298,20 @@ def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, ca
         raise LiveSessionError(str(exc)) from exc
     if not isinstance(stack, FlightStack):
         raise LiveSessionError("client_factory must return a live_session.FlightStack")
+    recovery = None
+    if stack.recovery_burst is not None and stack.mapped_heading_tag_ids:
+        # Energy is admitted by the supervisor itself (every recovery rotation
+        # and burst goes through prepare()'s reserve assessment), so the
+        # policy's own energy hook defers to it.
+        recovery = RecoveryController(tracker, clock=clock, burst_source=stack.recovery_burst,
+                                      energy_admits=lambda action: True)
     supervisor = SafetySupervisor(
         store=store, session_id=session_id, site=site, tracker=tracker, reserve=reserve, limits=limits,
         aircraft_id=manifest.aircraft_id, mode=ExecutionMode.REAL, refresh=stack.refresh,
         emergency=stack.emergency, clock=clock, wall_clock=wall_clock,
         capability=manifest.requested_capability, acceptance_manifest=acceptance_manifest_for(manifest),
-        landing_upper_bound_s=landing_upper_bound_s,
+        landing_upper_bound_s=landing_upper_bound_s, recovery=recovery,
+        mapped_heading_tag_ids=tuple(stack.mapped_heading_tag_ids) if recovery is not None else (),
     )
     try:
         supervisor.validate_bindings(site)
