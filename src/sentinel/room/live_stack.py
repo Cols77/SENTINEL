@@ -254,10 +254,16 @@ def openrouter_provider_probe(*, environ: Mapping[str, str] | None = None, http_
 
 
 def load_bound_tag_map(path: str | Path, *, expected_sha256: str) -> TagMap:
-    """The tag map whose file bytes hash to the manifest's ``tag_map_sha256``."""
+    """The tag map whose file bytes hash to the manifest's ``tag_map_sha256``.
+
+    Task B item 4: the hash of the LF-normalized bytes (the git blob content,
+    what ``canningst-site.json`` binds) is accepted as well as the raw
+    bytes, so a Windows checkout's CRLF working copy of the same committed
+    map still binds. Any other content change still refuses."""
     raw = Path(path).read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
-    if digest != expected_sha256:
+    normalized = hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
+    if expected_sha256 not in (digest, normalized):
         raise LiveStackError(f"tag map {str(path)!r} (sha256 {digest}) is not the manifest's tag_map_sha256")
     try:
         return TagMap(json.loads(raw.decode("utf-8")))

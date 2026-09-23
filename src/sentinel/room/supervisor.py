@@ -273,9 +273,14 @@ class SafetySupervisor:
             if (home or require_descent) and entry.kind == ContingencyKind.EMERGENCY:
                 # Emergency escalation is not verified landing geometry.
                 continue
+            # Task B item 4: the checkpoint planner deliberately leaves an
+            # offset within its dead band uncorrected, so a return that ends
+            # "at" home lands within that band of it -- never exactly on a
+            # measured position. Exact equality refused every real landing.
+            tolerance = max(1e-6, float(getattr(self.limits, "dead_band_cm", 0)))
             if home and (entry.z_band_cm[0] != site.home.nominal_pose.z_cm
-                         or not math.isclose(pose.position.x_cm, home_pose.x_cm, abs_tol=1e-6)
-                         or not math.isclose(pose.position.y_cm, home_pose.y_cm, abs_tol=1e-6)):
+                         or not math.isclose(pose.position.x_cm, home_pose.x_cm, abs_tol=tolerance)
+                         or not math.isclose(pose.position.y_cm, home_pose.y_cm, abs_tol=tolerance)):
                 # The policy must describe the actual pad and touchdown level.
                 continue
             try:
@@ -488,10 +493,29 @@ class SafetySupervisor:
                     outcome = replace(outcome, request=replace(outcome.request, pose=validated))
             return outcome
 
+    def _pre_takeoff_pose(self, pose, site):
+        """Task B item 4: before takeoff the real stack anchors the tracker on
+        the pad, at pad height. Takeoff is a vertical climb over that measured
+        pad position to the surveyed home hover (the home route's final
+        checkpoint altitude), not a planned translation, so start admission
+        assesses the return/landing from that airborne home -- the measured
+        x/y, heading and uncertainty unchanged, only the altitude lifted. A
+        pose already airborne (above the pad band) is assessed as measured."""
+        profile = self.tracker.profile
+        route = next((r for r in site.routes if r.route_id == site.home.route_id), None)
+        if route is None or profile is None:
+            return pose
+        pad_z = site.home.nominal_pose.z_cm
+        if pose.position.z_cm > pad_z + profile.max_height_error_cm:
+            return pose
+        return replace(pose, position=replace(pose.position, z_cm=route.checkpoints[-1].z_cm))
+
     def validate_start(self, site=None):
         active = site or self.site
         self._site_current(active, self.clock())
         pose, sample = self.refresh()
+        if self._measured_home is None:
+            pose = self._pre_takeoff_pose(pose, active)
         outcome = self.assess(SupervisorRequest(self.store.session_version(self.session_id), None, 0, pose, sample), active)
         if outcome.transition != "CONTINUE":
             raise ValueError(f"start blocked: {outcome.reason}")

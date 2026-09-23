@@ -1,0 +1,100 @@
+{
+  "schema_version": "room-site-base-v1",
+  "site_id": "canningst",
+  "cube_site_sha256": "0770fca67cdbf6d94ec8e65b6586196d260f962a7dee2f3f126d9935662d83b2",
+  "tag_map_sha256": "b78f12620ee0e6df80c3b3e740c7d22b4d4c9ed1c65df78ec9c42558c885f80a",
+  "free_space_volumes": [
+    {
+      "volume_id": "cube",
+      "polygon_xy_cm": [[160, 160], [340, 160], [340, 300], [160, 300]],
+      "z_interval_cm": [-20, 200]
+    },
+    {
+      "volume_id": "flight",
+      "polygon_xy_cm": [[160, 160], [340, 160], [340, 300], [160, 300]],
+      "z_interval_cm": [60, 180]
+    }
+  ],
+  "forbidden_volumes": [],
+  "corridors": [
+    {
+      "volume_id": "home-corridor",
+      "polygon_xy_cm": [[160, 160], [340, 160], [340, 300], [160, 300]],
+      "z_interval_cm": [-20, 200]
+    }
+  ],
+  "routes": [
+    {
+      "route_id": "home-route",
+      "checkpoints": [{"x_cm": 250, "y_cm": 190, "z_cm": 80}],
+      "corridor_volume_ids": ["home-corridor"]
+    }
+  ],
+  "home": {
+    "pad_id": "canningst-start",
+    "nominal_pose": {"x_cm": 250, "y_cm": 190, "z_cm": 0},
+    "heading_deg": 90,
+    "route_id": "home-route"
+  },
+  "terminal_contingencies": [
+    {
+      "contingency_id": "canningst-land-in-place-navigation",
+      "trigger": "NAVIGATION_UNAVAILABLE",
+      "kind": "LAND_IN_PLACE",
+      "landing_polygon_xy_cm": [[160, 160], [340, 160], [340, 300], [160, 300]],
+      "z_band_cm": [0, 200],
+      "required_pose_state": "COASTING",
+      "clearance_source": "operator-checked-clear-cube",
+      "assurance_policy_id": "operator-clear-floor-check",
+      "max_assurance_age_ms": 1800000
+    },
+    {
+      "contingency_id": "canningst-land-in-place-energy",
+      "trigger": "RETURN_ENERGY_UNAVAILABLE",
+      "kind": "LAND_IN_PLACE",
+      "landing_polygon_xy_cm": [[160, 160], [340, 160], [340, 300], [160, 300]],
+      "z_band_cm": [0, 200],
+      "required_pose_state": "COASTING",
+      "clearance_source": "operator-checked-clear-cube",
+      "assurance_policy_id": "operator-clear-floor-check",
+      "max_assurance_age_ms": 1800000
+    }
+  ],
+  "clearance_provenance": "mission-control-sites.v1 CanningSt: docs/wp5-flight1-site.json cube; WP5 flights 2026-09-21..23",
+  "semantic_frame": {
+    "envelope_volume_id": "flight",
+    "left_to_right_axis_xy": [1.0, 0.0],
+    "rear_to_front_axis_xy": [0.0, 1.0],
+    "target_side": "FRONT",
+    "landmarks": []
+  },
+  "coverage_cells": [
+    {
+      "cell_id": "left-strip",
+      "polygon_xy_cm": [[190, 190], [230, 190], [230, 270], [190, 270]],
+      "z_band_cm": [0, 80],
+      "required_classes": ["computer", "phone"]
+    },
+    {
+      "cell_id": "center-strip",
+      "polygon_xy_cm": [[230, 190], [270, 190], [270, 270], [230, 270]],
+      "z_band_cm": [0, 80],
+      "required_classes": ["computer", "phone"]
+    },
+    {
+      "cell_id": "right-strip",
+      "polygon_xy_cm": [[270, 190], [310, 190], [310, 270], [270, 270]],
+      "z_band_cm": [0, 80],
+      "required_classes": ["computer", "phone"]
+    }
+  ],
+  "pose_visibility": [
+    ["center-rear-middle-toward_targets", ["center-strip"]],
+    ["left-rear-middle-toward_targets", ["left-strip"]],
+    ["right-rear-middle-toward_targets", ["right-strip"]]
+  ],
+  "support_planes": [
+    {"plane_id": "FLOOR", "z_cm": 0, "classes": []},
+    {"plane_id": "demo-surface", "z_cm": 50, "classes": ["computer", "phone", "pen"]}
+  ]
+}
