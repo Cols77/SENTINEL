@@ -1186,6 +1186,48 @@ def test_observe_success_persists_grounded_count_evidence(safety, tmp_path):
     assert outcome.count_evidence is not None and outcome.count_evidence.estimates[0].class_name == "computer"
 
 
+# --- 26b. grounding uses the health snapshot captured at dispatch, not later
+
+def test_ground_observation_uses_the_health_snapshot_captured_at_dispatch(safety, tmp_path):
+    """Fix round 4 (Q2): the tracker's heading/source/state must be captured
+    once, right after dispatch -- the same sample the measured-pose match
+    check verifies against -- and threaded into grounding, never re-read
+    later (after the perception wait, which can run for up to
+    ``provider_wait_s``). Mutate the tracker's heading from inside
+    ``perception_capture`` -- the controller only calls this collaborator
+    after dispatch and the measured-pose check have already run, i.e. after
+    this fix's capture point -- and assert the persisted pose still carries
+    the capture-time heading, not the later one."""
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set(POSE_A, grounded_result(tmp_path, supervisor.site, POSE_A, (("computer", "high", (100, 600)),),
+                                    captured_at=T0))
+    captured_heading = supervisor.tracker.health.heading_deg
+    original_capture = rig.capture
+
+    def capture(candidate, checkpoint_outcome, snapshot):
+        request = original_capture(candidate, checkpoint_outcome, snapshot)
+        # A heading update lands after the checkpoint's own measured-pose
+        # match already verified the capture-time heading (fix round 4, Q2's
+        # capture point) but before/while perception is awaited.
+        supervisor.tracker._health = replace(supervisor.tracker.health, heading_deg=captured_heading + 45.0)
+        return request
+
+    rig.capture = capture
+    controller, executor = make_controller(safety, Judge(f"OBSERVE:g1:{POSE_A}"), rig,
+                                           count_geometry=COUNT_GEOMETRY)
+    assert controller.step(SESSION).accepted
+    payload = store.events(SESSION)[-1].payload
+    assert payload["code"] == "OBSERVE_SUCCEEDED"
+    expected = semantic_heading_to_compass_deg(captured_heading)
+    later = semantic_heading_to_compass_deg(captured_heading + 45.0)
+    assert expected != later
+    assert payload["count_evidence"]["pose"]["heading_deg"] == expected
+
+
 # --- 27. region-scope objectives answer with viewpoint-scoped counts -------
 
 def test_region_scope_objectives_answer_with_viewpoint_scoped_grounded_counts(safety, tmp_path):
@@ -1269,6 +1311,11 @@ def test_low_confidence_detections_stay_uncertain_in_the_terminal_answer(safety,
 # --- 30. without count geometry, detections are reported unplaced ----------
 
 def test_detections_without_count_geometry_are_reported_unplaced_not_zero(safety, tmp_path):
+    """Fix round 4 (Q4): an unplaced sighting of a target class is still
+    evidence the object may exist -- once every declared cell is visited,
+    ANSWER:COUNTS must never be legal while that sighting is unaccounted
+    for; only the explicit incomplete route is offered, and the terminal
+    state must never claim COMPLETED."""
     supervisor, store, clock, *_ = safety
     supervisor.site = room_site(coverage=True)
     supervisor.validate_bindings = lambda site: None
@@ -1277,12 +1324,78 @@ def test_detections_without_count_geometry_are_reported_unplaced_not_zero(safety
     rig.set(POSE_A, grounded_result(tmp_path, supervisor.site, POSE_A, (("computer", "high", (100, 600)),),
                                     captured_at=T0))
     rig.set(POSE_B, grounded_result(tmp_path, supervisor.site, POSE_B, (), captured_at=T1))
-    judge = Judge(f"OBSERVE:g1:{POSE_A}", f"OBSERVE:g1:{POSE_B}", "ANSWER:COUNTS")
+
+    def incomplete(state, criteria):
+        assert "ANSWER:COUNTS" not in criteria
+        return "ANSWER:g1:INCOMPLETE"
+
+    judge = Judge(f"OBSERVE:g1:{POSE_A}", f"OBSERVE:g1:{POSE_B}", incomplete)
     controller, executor = make_controller(safety, judge, rig)
-    assert controller.run_until_terminal(SESSION) == TerminalState.COMPLETED
-    answer = store.events(SESSION)[-1].payload["answer"]
+    assert controller.run_until_terminal(SESSION) == TerminalState.INCOMPLETE_RETURNED
+    payload = store.events(SESSION)[-1].payload
+    assert payload["code"] == "ANSWERED_INCOMPLETE"
+    answer = payload["answer"]
     assert ("computer: 0 confirmed; 0 uncertain; 1 detection could not be placed in room coordinates "
             "and is not counted") in answer
+
+
+# --- 32. a room count for a class no coverage cell requires never completes
+
+def test_room_count_target_class_with_no_declared_coverage_never_completes(safety, tmp_path):
+    """Fix round 4 (Q3): a room-wide count for a class no coverage cell
+    requires anywhere -- here the site's cells only ever require "computer"
+    -- must never complete with a confident zero once the declared
+    "computer" coverage happens to resolve; nothing ever established
+    anything about the requested "phone" class."""
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM", classes=("phone",)),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
+    rig.set("right-front-top-toward_targets", make_result(tmp_path, SESSION, "right-front-top-toward_targets"))
+
+    def incomplete(state, criteria):
+        assert "ANSWER:COUNTS" not in criteria
+        return "ANSWER:g1:INCOMPLETE"
+
+    judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets", "OBSERVE:g1:right-front-top-toward_targets",
+                 incomplete)
+    controller, executor = make_controller(safety, judge, rig, count_geometry=COUNT_GEOMETRY)
+    assert controller.run_until_terminal(SESSION) == TerminalState.INCOMPLETE_RETURNED
+    from sentinel.room.queries import ReadQueries
+    snapshot = ReadQueries(store).project(SESSION)
+    assert controller._coverage(snapshot).complete  # the declared "computer" cells did resolve
+    payload = store.events(SESSION)[-1].payload
+    assert payload["code"] == "ANSWERED_INCOMPLETE"
+    assert "no declared coverage for this class; a zero does not mean none are present" in payload["answer"]
+
+
+# --- 33. a stale-pose frame's declared cells are never credited ------------
+
+def test_stale_pose_observation_never_credits_coverage(safety):
+    """Fix round 4 (Q4): a frame grounded from a pose already known stale at
+    capture time placed nothing (spatial.py invalidates every estimate
+    outright for it) -- crediting its declared cells would let a room report
+    "complete" while none of that frame's detections were ever counted."""
+    from sentinel.room.grounding import FrameCountEvidence
+    from sentinel.room.queries import ToolOutcome
+    from sentinel.room.spatial import PoseEvidence
+    from types import SimpleNamespace
+
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    controller, executor = make_controller(safety, Judge())
+
+    stale_pose = PoseEvidence(0.0, 0.0, 50.0, 0.0, captured_at=T0, stale=True)
+    evidence = FrameCountEvidence("obs-1", "frame-1", "left-rear-bottom-toward_targets", T0, stale_pose)
+    outcome = ToolOutcome(f"OBSERVE:g1:{POSE_A}", "OBSERVE", "digest", "OBSERVE_SUCCEEDED",
+                          observed_at=T0, count_evidence=evidence)
+    snapshot = SimpleNamespace(outcomes=(outcome,))
+    coverage = controller._coverage(snapshot)
+    assert not coverage.complete
+    assert "cell1:computer" in coverage.uncovered
 
 
 # --- 31. the room-wide incomplete answer carries the grounded counts too ---

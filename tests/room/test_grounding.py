@@ -171,6 +171,24 @@ def test_one_object_seen_from_two_distinct_views_is_one_confirmed_object():
     assert "Coverage for the room is complete" in text
 
 
+def test_two_visits_to_the_same_declared_pose_with_measured_drift_stay_one_view():
+    """Fix round 4 (Q1): confirmation is keyed on the frame's *declared*
+    pose_id, never the measured-pose view_id -- a few centimetres of hover
+    drift between two visits to the same declared pose (e.g. a room
+    objective and a region objective both offered ``...:POSE_A``) must never
+    look like two distinct corroborating views."""
+    first = _frame("a", pose(0.0, 0.0, captured_at="2026-09-23T00:00:00+00:00"), (40.0, 300.0))
+    first = replace(first, pose_id="POSE_A")
+    # A second visit to the *same declared pose*; the aircraft's measured
+    # pose drifts a few centimetres between hovers (spatial._view_id rounds
+    # to 1 cm / 0.1 deg, so this alone would mint a second view_id).
+    second = _frame("b", pose(3.0, 2.0, captured_at="2026-09-23T00:00:05+00:00"), (40.0, 300.0))
+    second = replace(second, pose_id="POSE_A")
+    projected = project_objective_count(count_objective(), (first, second), complete_coverage(), scope="ROOM")
+    computer, = projected.counts
+    assert (computer.confirmed, computer.uncertain) == (0, 1)
+
+
 def test_low_confidence_sightings_never_confirm_an_object_even_from_two_views():
     first = _frame("a", pose(0.0, 0.0, captured_at="2026-09-23T00:00:00+00:00"), (40.0, 300.0), band="low")
     second = _frame("b", pose(80.0, 0.0, captured_at="2026-09-23T00:00:05+00:00"), (40.0, 300.0), band="low")

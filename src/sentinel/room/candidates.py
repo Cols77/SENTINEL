@@ -126,18 +126,59 @@ def _observed(outcomes: tuple[ToolOutcome, ...], candidate_id: str) -> bool:
     return any(o.candidate_id == candidate_id and o.code == "OBSERVE_SUCCEEDED" for o in outcomes)
 
 
+def _room_classes_have_coverage(objective: GoalObjective, coverage: CoverageProjection) -> bool:
+    """Fix round 4 (Q3): whether every static class this objective targets
+    actually has a declared coverage row somewhere in the room. A site whose
+    cells only ever require "computer" declares no coverage at all for
+    "phone" -- ``coverage.complete`` is vacuously true for a class no cell
+    mentions, so without this a requested class with zero declared coverage
+    would complete with a confident zero that nothing ever established."""
+    classes = {c for c in objective.target_classes if c != "person"}
+    covered = {cell_class for _, cell_class, _ in coverage.by_cell_and_class}
+    return classes <= covered
+
+
+def _unplaced_classes(outcomes: tuple[ToolOutcome, ...], *, pose_id: str | None = None) -> frozenset[str]:
+    """Fix round 4 (Q4): the static classes with a detection this session
+    saw but could not place in room coordinates, within scope -- every
+    ``OBSERVE_SUCCEEDED`` frame for a room-wide count, or only the frames
+    captured at ``pose_id`` for a region count. An unplaced sighting is still
+    evidence an object may exist; a count that silently ignores it must
+    never be offered as complete."""
+    classes = set()
+    for outcome in outcomes:
+        if outcome.code != "OBSERVE_SUCCEEDED" or outcome.count_evidence is None:
+            continue
+        if pose_id is not None and outcome.count_evidence.pose_id != pose_id:
+            continue
+        classes.update(item.class_name for item in outcome.count_evidence.unplaced)
+    return frozenset(classes)
+
+
 def count_objective_ready(objective: GoalObjective, coverage: CoverageProjection,
                           outcomes: tuple[ToolOutcome, ...]) -> bool:
     """Whether a COUNT objective can be answered as complete: a room-wide
-    count once declared coverage is complete, a region count once its
-    requested region was actually observed (``OBSERVE_SUCCEEDED``, which the
-    controller records only after verifying pose, capture and authorized
-    perception)."""
+    count once declared coverage is complete *and* every target class this
+    objective actually names has some declared coverage (fix round 4, Q3), a
+    region count once its requested region was actually observed
+    (``OBSERVE_SUCCEEDED``, which the controller records only after
+    verifying pose, capture and authorized perception). Either scope is
+    withheld while any of this objective's target classes still has a
+    detection this session could not place (fix round 4, Q4) -- that
+    sighting is evidence the count is not actually done, never silently
+    reported as a confident zero."""
     scope, pose_id = count_scope(objective)
+    classes = {c for c in objective.target_classes if c != "person"}
     if scope == "ROOM":
-        return coverage.complete
+        unplaced = _unplaced_classes(outcomes)
+        if unplaced if not classes else (unplaced & classes):
+            return False
+        return coverage.complete and _room_classes_have_coverage(objective, coverage)
     if scope == "VIEWPOINT":
-        return _observed(outcomes, f"OBSERVE:{objective.objective_id}:{pose_id}")
+        if not _observed(outcomes, f"OBSERVE:{objective.objective_id}:{pose_id}"):
+            return False
+        unplaced = _unplaced_classes(outcomes, pose_id=pose_id)
+        return not (unplaced if not classes else (unplaced & classes))
     return False
 
 
@@ -271,6 +312,17 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
         pose_id = _region_pose_id(objective.spatial_scope)
         if pose_id is not None:
             if _observed(outcomes, f"OBSERVE:{objective.objective_id}:{pose_id}"):
+                # Fix round 4 (Q4): the region was actually flown, but a
+                # detection of one of its target classes still could not be
+                # placed -- never leave this objective with no route at all;
+                # offer the explicit incomplete answer instead of silently
+                # stalling (count_answer_candidate withholds ANSWER:COUNTS
+                # while any pending COUNT objective is not ready).
+                if not count_objective_ready(objective, coverage, outcomes):
+                    candidate = _incomplete_answer_candidate(objective, coverage, outcomes, snapshot_version,
+                                                             region_pose_id=pose_id)
+                    if candidate is not None:
+                        region_candidates.append(candidate)
                 continue
             description = f"Observe declared pose {pose_id}, the region requested for objective {objective.objective_id}."
             candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version)
@@ -296,7 +348,15 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
                 scored.append((benefit, candidate))
         scored.sort(key=lambda item: (-item[0], item[1].physical_cost.distance_cm, item[1].candidate_id))
         objective_candidates = [candidate for _, candidate in scored]
-        if not objective_candidates and not coverage.complete:
+        # Fix round 4 (Q3/Q4): fall back to the explicit incomplete answer
+        # whenever this objective is not ready to complete -- not only when
+        # declared cell coverage itself is incomplete, but also when a
+        # target class has no declared coverage at all, or a detection of
+        # one of its target classes could not be placed. Every one of those
+        # cases already has no further scored OBSERVE candidate to offer
+        # instead (no pose can newly resolve a class no cell declares, or an
+        # already-unplaceable detection).
+        if not objective_candidates and not count_objective_ready(objective, coverage, outcomes):
             fallback = _incomplete_answer_candidate(objective, coverage, outcomes, snapshot_version)
             if fallback is not None:
                 objective_candidates = [fallback]

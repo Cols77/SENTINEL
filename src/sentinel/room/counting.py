@@ -62,6 +62,12 @@ class ClassCount:
     #: plane, stale pose, ...). They cannot be associated, so they are never
     #: counted as objects -- but they are reported, never silently dropped.
     unplaced: int = 0
+    #: Fix round 4 (Q3): true when the declared coverage geometry has no row
+    #: at all for this class -- no cell anywhere ever required or resolved
+    #: it. Distinct from ``not_resolvable_cells`` (which names cells that
+    #: *do* declare this class but can never resolve it): here nothing was
+    #: ever checked for it, so a zero must never read as a resolved count.
+    no_declared_coverage: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "evidence_refs", tuple(self.evidence_refs))
@@ -111,6 +117,7 @@ def _static_counts(objects, coverage: CoverageProjection, requested_classes: tup
     for class_name in _static_class_names(objects, coverage, requested_classes, unplaced_by_class):
         matching = [obj for obj in objects if obj.class_name == class_name]
         unplaced = unplaced_by_class.get(class_name, 0)
+        has_coverage_rows = any(cell_class == class_name for _, cell_class, _ in coverage.by_cell_and_class)
         if _not_resolvable(class_name, coverage) and not matching and not unplaced:
             # A NOT_RESOLVABLE verdict with no associated evidence at all is
             # a pure geometry fact: this class can never be resolved here,
@@ -132,7 +139,7 @@ def _static_counts(objects, coverage: CoverageProjection, requested_classes: tup
         uncertain = [obj for obj in matching if _view_count(obj, corroborating_views) <= 1]
         evidence = tuple(sorted({ref for obj in matching for ref in obj.evidence_refs}))
         counts.append(ClassCount(class_name, len(confirmed), len(uncertain), "GROUNDED_STATIC", evidence,
-                                 _not_resolvable_cells(class_name, coverage), unplaced))
+                                 _not_resolvable_cells(class_name, coverage), unplaced, not has_coverage_rows))
     return tuple(counts)
 
 
@@ -192,6 +199,8 @@ def _render_line(count: ClassCount) -> str:
         detail = ("detection could not be placed in room coordinates and is not counted" if count.unplaced == 1
                   else "detections could not be placed in room coordinates and are not counted")
         line += f"; {count.unplaced} {detail}"
+    if count.no_declared_coverage:
+        line += "; no declared coverage for this class; a zero does not mean none are present"
     if count.not_resolvable_cells:
         line += (f"; not resolvable from the declared views in {', '.join(count.not_resolvable_cells)}, "
                  f"so this class may be undercounted there")

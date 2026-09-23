@@ -193,6 +193,15 @@ class RoomController:
         for outcome in snapshot.outcomes:
             if outcome.kind != CandidateKind.OBSERVE.value or outcome.code != "OBSERVE_SUCCEEDED":
                 continue
+            if outcome.count_evidence is not None and outcome.count_evidence.pose.stale:
+                # Fix round 4 (Q4): a frame grounded from a pose already
+                # known stale at capture time placed nothing (spatial.py
+                # invalidates every estimate outright for it) -- crediting
+                # its declared cells would let the room report "complete"
+                # while none of that frame's detections were ever counted.
+                # An outcome persisted before this fix carries no
+                # count_evidence at all and is still credited, unchanged.
+                continue
             observed_pose_id = outcome.candidate_id.rsplit(":", 1)[-1]
             if pose_id is not None and observed_pose_id != pose_id:
                 continue
@@ -714,7 +723,7 @@ class RoomController:
         target = Position(resolved.x_cm, resolved.y_cm, resolved.z_cm)
         return plan.target == target and _heading_within_tolerance(plan.terminal_heading_deg, resolved.yaw_deg)
 
-    def _measured_pose_matches_declared_pose(self, resolved, result) -> bool:
+    def _measured_pose_matches_declared_pose(self, resolved, result, health) -> bool:
         """Fix round 3 (F3): a checkpoint plan that *declares* the correct
         target/heading (``_checkpoint_targets_declared_pose``) can still fail
         to actually reach it -- nothing before this checked that the
@@ -725,14 +734,20 @@ class RoomController:
         post-checkpoint position (``CheckpointOutcome.pose``) and the
         tracker's current heading to be within tolerance of the resolved
         pose's own declared endpoint/heading before coverage is ever
-        credited."""
+        credited.
+
+        Fix round 4 (Q2): ``health`` is the tracker snapshot the caller
+        captured once, right after dispatch -- never re-read here -- so this
+        check and ``_ground_observation`` (which the caller also feeds this
+        same snapshot) always agree on which pose sample the checkpoint
+        actually reached."""
         pose = result.pose
         if pose is None:
             return False
         distance_cm = math.hypot(pose.x_cm - resolved.x_cm, pose.y_cm - resolved.y_cm)
         if distance_cm > _POSE_POSITION_TOLERANCE_CM or abs(pose.z_cm - resolved.z_cm) > _POSE_POSITION_TOLERANCE_CM:
             return False
-        return _heading_within_tolerance(self.supervisor.tracker.health.heading_deg, resolved.yaw_deg)
+        return _heading_within_tolerance(health.heading_deg, resolved.yaw_deg)
 
     def _capture_completed(self, plan, result) -> bool:
         """Fix round 2 (Q5): a dispatched ``CheckpointOutcome`` can report
@@ -854,7 +869,18 @@ class RoomController:
             # is never treated as a success, and never releases a second
             # optional checkpoint this turn.
             return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
-        if not self._measured_pose_matches_declared_pose(resolved, result):
+        # Fix round 4 (Q2): capture the tracker's health exactly once, here,
+        # right after dispatch -- the same sample the measured-pose check
+        # below uses -- and thread it through to grounding. Previously
+        # ``_ground_observation`` re-read ``self.supervisor.tracker.health``
+        # after the perception wait (which can last up to
+        # ``provider_wait_s``), so a heading update or re-anchor during that
+        # wait could place every persisted estimate at a different heading
+        # than the one this checkpoint was actually verified against, and
+        # could even change the reported provenance for a position that
+        # never moved.
+        health = self.supervisor.tracker.health
+        if not self._measured_pose_matches_declared_pose(resolved, result, health):
             # Fix round 3 (F3): the plan declared the right target/heading,
             # but the aircraft's own measured post-dispatch pose does not
             # actually match it -- never credit coverage off a checkpoint
@@ -902,7 +928,7 @@ class RoomController:
         # support declarations are persisted with the outcome, so later
         # counts are a pure projection of append-only session state.
         try:
-            count_evidence = self._ground_observation(resolved, result, request, perception_result)
+            count_evidence = self._ground_observation(resolved, result, request, perception_result, health)
         except Exception:
             return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
         # Fix round 1 (Q12): carry the perception's own measured capture time
@@ -911,16 +937,22 @@ class RoomController:
         return {"code": "OBSERVE_SUCCEEDED", "observed_at": perception_result.completed_at,
                 "count_evidence": count_evidence.to_payload()}
 
-    def _ground_observation(self, resolved, result, request, perception_result):
+    def _ground_observation(self, resolved, result, request, perception_result, health):
         """Residual F2: turn one authorized observation into persisted count
         evidence. The camera position is the checkpoint's *measured*
         post-dispatch position (already verified against the declared pose,
         see ``_measured_pose_matches_declared_pose``) and the tracker's
-        current heading, converted once into the compass convention
+        heading, converted once into the compass convention
         ``estimate_detection`` uses. A tag-anchored pose is MEASURED; any
         other pose source is dead-reckoned (COMMANDED, wider covariance); a
-        pose needing recovery or lost is stale, so nothing is placed from it."""
-        health = self.supervisor.tracker.health
+        pose needing recovery or lost is stale, so nothing is placed from it.
+
+        Fix round 4 (Q2): ``health`` is the tracker snapshot the caller
+        captured once, right after dispatch -- never a fresh read taken here
+        after the perception wait, which can run for up to
+        ``provider_wait_s`` and could otherwise report a different
+        heading/source/state than the one this checkpoint was verified
+        against."""
         pose = PoseEvidence(
             result.pose.x_cm, result.pose.y_cm, result.pose.z_cm,
             semantic_heading_to_compass_deg(health.heading_deg), 0.0,

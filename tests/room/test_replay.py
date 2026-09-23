@@ -378,7 +378,9 @@ def test_replay_rejects_an_answer_whose_count_section_was_rewritten(tmp_path):
     record["event_sha256"] = _resign(record)
     mutated[victim] = json.dumps(record)
     manifest_path = _write_mutated(tmp_path, lines=mutated)
-    with pytest.raises(ReplayIntegrityError, match="does not contain the count section"):
+    # Fix round 4 (Q5): the whole answer is now rebuilt and compared for
+    # equality, not merely checked for containing the count section.
+    with pytest.raises(ReplayIntegrityError, match="does not match the answer re-derived"):
         replay_fixture(manifest_path)
 
 
@@ -419,10 +421,104 @@ def test_render_report_rejects_an_answered_outcome_when_no_facts_survive_replay(
         _render_report(snapshot, overclaiming)
 
 
+# --- Fix round 4 (Q5): count_projection is required, exact, and complete --
+
+def _two_count_objectives_snapshot():
+    """A synthetic snapshot with two ROOM COUNT objectives and one grounded
+    frame, standing in for a ledger the frozen golden fixture (a single
+    COUNT objective) cannot represent -- used to probe the "exactly one
+    entry per COUNT objective" requirement directly."""
+    from sentinel.room.goals import GoalLedger, GoalObjective
+    from sentinel.room.grounding import FrameCountEvidence
+    from sentinel.room.models import GoalKind, GoalStatus
+    from sentinel.room.queries import ToolOutcome
+    from sentinel.room.spatial import PoseEvidence
+
+    g1 = GoalObjective("g1", 1, GoalKind.COUNT, ("computer",), None, None, "ROOM", "REPORTED", None, None, ())
+    g2 = GoalObjective("g2", 2, GoalKind.COUNT, ("phone",), None, None, "ROOM", "REPORTED", None, None, ())
+    ledger = GoalLedger("count computers and phones", (g1, g2), GoalStatus.PENDING)
+    pose = PoseEvidence(0.0, 0.0, 50.0, 0.0, captured_at="2026-09-23T00:00:00+00:00")
+    evidence = FrameCountEvidence("obs-1", "frame-1", "pose-1", "2026-09-23T00:00:00+00:00", pose)
+    outcome = ToolOutcome("OBSERVE:g1:pose-1", "OBSERVE", "digest", "OBSERVE_SUCCEEDED",
+                          observed_at="2026-09-23T00:00:00+00:00", count_evidence=evidence)
+    return SimpleNamespace(facts=(), terminal_state=TerminalState.COMPLETED, ledger=ledger, outcomes=(outcome,))
+
+
+def _two_count_objectives_payload(snapshot):
+    from sentinel.room.candidates import count_scope
+    from sentinel.room.coverage import project_coverage
+    from sentinel.room.grounding import project_objective_count, render_objective_count
+
+    coverage = project_coverage((), ())
+    frames = tuple(o.count_evidence for o in snapshot.outcomes if o.count_evidence is not None)
+    sections, projections = [], []
+    for objective in sorted(snapshot.ledger.objectives, key=lambda o: o.ordinal):
+        scope, pose_id = count_scope(objective)
+        derived = project_objective_count(objective, frames, coverage, scope=scope, pose_id=pose_id)
+        projections.append(derived)
+        sections.append(render_objective_count(derived))
+    # Round-trip through JSON, exactly as a real persisted/parsed record
+    # would be (tuples become lists) -- otherwise this synthetic payload's
+    # native-Python tuples would never structurally equal the re-derived,
+    # already-JSON-parsed projection replay compares it against.
+    return json.loads(json.dumps({
+        "candidate_id": "ANSWER:COUNTS", "code": "ANSWERED_COUNT", "terminal_state": "COMPLETED",
+        "answer": "\n\n".join(sections), "count_projection": [p.to_payload() for p in projections],
+    }))
+
+
+def _terminal_records(payload):
+    return [{"record_type": "ROOM_EVENT", "event_type": "ROOM_TOOL_OUTCOME", "payload": payload}]
+
+
+def test_render_report_accepts_a_well_formed_two_objective_count_answer():
+    from sentinel.room.replay import _render_report
+    snapshot = _two_count_objectives_snapshot()
+    payload = _two_count_objectives_payload(snapshot)
+    assert _render_report(snapshot, _terminal_records(payload)) == payload["answer"]
+
+
+def test_render_report_rejects_a_count_answer_with_its_projection_removed():
+    """Q5: a terminal ANSWERED_COUNT outcome whose count_projection field was
+    stripped must never be accepted as recorded text on trust -- previously
+    the check only ran "if count_projection in payload"."""
+    from sentinel.room.replay import ReplayIntegrityError, _render_report
+    snapshot = _two_count_objectives_snapshot()
+    payload = _two_count_objectives_payload(snapshot)
+    del payload["count_projection"]
+    with pytest.raises(ReplayIntegrityError, match="malformed or missing count projection"):
+        _render_report(snapshot, _terminal_records(payload))
+
+
+def test_render_report_rejects_a_count_answer_missing_one_objectives_entry():
+    """Q5: exactly one projection entry is required per COUNT objective on
+    the ledger -- a recorded projection naming only some of them (here g2's
+    entry is dropped) must be rejected, not silently accepted for whichever
+    objectives happen to be present."""
+    from sentinel.room.replay import ReplayIntegrityError, _render_report
+    snapshot = _two_count_objectives_snapshot()
+    payload = _two_count_objectives_payload(snapshot)
+    payload["count_projection"] = [payload["count_projection"][0]]
+    with pytest.raises(ReplayIntegrityError, match="exactly one entry per COUNT objective"):
+        _render_report(snapshot, _terminal_records(payload))
+
+
+def test_render_report_rejects_a_count_answer_with_appended_text():
+    """Q5: the whole answer is rebuilt and compared for equality -- extra
+    claims appended after a legitimate count section must never pass merely
+    because the real section is still present somewhere inside it."""
+    from sentinel.room.replay import ReplayIntegrityError, _render_report
+    snapshot = _two_count_objectives_snapshot()
+    payload = _two_count_objectives_payload(snapshot)
+    payload["answer"] += "\n\nAlso: 100 confirmed sightings of a dragon."
+    with pytest.raises(ReplayIntegrityError, match="does not match the answer re-derived"):
+        _render_report(snapshot, _terminal_records(payload))
+
+
 def test_render_report_requires_recorded_text_for_a_non_answered_terminal_outcome():
     from sentinel.room.replay import _render_report
 
-    snapshot = SimpleNamespace(facts=(), terminal_state=TerminalState.BLOCKED)
+    snapshot = SimpleNamespace(facts=(), terminal_state=TerminalState.BLOCKED, ledger=None)
     blank = [{"record_type": "ROOM_EVENT", "event_type": "ROOM_TOOL_OUTCOME",
              "payload": {"terminal_state": "BLOCKED", "code": "CLARIFICATION_REQUIRED", "answer": ""}}]
     with pytest.raises(ReplayIntegrityError, match="no recorded answer text"):

@@ -66,22 +66,52 @@ until Plan 06 promotes matching pose/energy/site profiles.
   unplaced.
 - **Answer routes for a `COUNT` objective, once observation is enabled:**
   - `ANSWER:COUNTS` (terminal `COMPLETED`, code `ANSWERED_COUNT`): offered
-    only when every pending `COUNT` objective is ready -- a room-wide
-    objective once declared coverage is complete, a region objective
+    only when every pending `COUNT` objective is ready
+    (`candidates.count_objective_ready`) -- a room-wide objective once
+    declared coverage is complete *and* every one of its target classes
+    actually has a declared coverage row somewhere in the room (fix round 4,
+    Q3: a class no cell anywhere requires would otherwise complete with a
+    confident zero that nothing ever established), a region objective
     (`"left/rear/bottom"`-style scope) once its requested region's `OBSERVE`
-    has succeeded -- and every other objective is answerable from persisted
+    has succeeded -- and either way, only while none of the objective's
+    target classes still has a detection this session saw but could not
+    place (fix round 4, Q4: an unplaced sighting is still evidence an object
+    may exist) -- and every other objective is answerable from persisted
     reads. A region answer is `VIEWPOINT`-scoped: it counts only that pose's
     frames against that pose's own declared cells.
   - `ANSWER:<objective>:INCOMPLETE` (terminal `INCOMPLETE_RETURNED`): a
-    room-wide objective whose coverage no remaining legal view can improve, or
-    a region objective whose region can no longer be observed (refused or
-    unresolvable) without ever having succeeded. Its answer carries the same
-    grounded count sections, each with its incomplete-coverage caveat.
+    room-wide objective whose coverage no remaining legal view can improve,
+    whose target classes are not all covered, or that still has an unplaced
+    detection of a target class; or a region objective whose region can no
+    longer be observed (refused or unresolvable) without ever having
+    succeeded, or that was observed but still has an unplaced detection of a
+    target class. Its answer carries the same grounded count sections, each
+    with its incomplete-coverage caveat and, for a class no cell ever
+    declared, an explicit "no declared coverage for this class" caveat (fix
+    round 4, Q3).
   - The plain legacy `ANSWER` is never offered for a pending `COUNT`
     objective while observation is enabled (`RoomController._legacy_count_answer_blocked`),
     even when a `READ_COUNTS` survey report has been read
     (`test_completed_coverage_answers_and_stops_offering_observation`).
   Both answer routes request a supervisor-owned safe return first.
+- A frame grounded from a pose already known stale at capture time credits no
+  coverage at all for its declared cells (fix round 4, Q4): such a frame
+  placed nothing, so crediting it would let a room report "complete" while
+  none of that frame's detections were ever counted
+  (`RoomController._coverage`).
+- Confirmation ("seen from more than one distinct view") is keyed on the
+  frame's *declared* pose, not the measured-pose view identity (fix round 4,
+  Q1): two visits to one declared pose -- the same objective revisiting it,
+  or a different objective re-offered the same region -- can measure a few
+  centimetres of hover drift apart, which must never mint a second
+  corroborating view for an object seen only once.
+- The camera pose used to ground a frame (position, heading, source,
+  staleness) is the tracker snapshot captured once, right after dispatch --
+  the same sample the measured-pose match check verifies against -- never a
+  later re-read after the perception wait (fix round 4, Q2), which can run
+  for up to `provider_wait_s` and could otherwise place a frame's estimates,
+  or label their provenance, off a different sample than the one the
+  checkpoint was actually verified against.
 - Legacy `READ_COUNTS` (merged multi-view survey reports from
   `sentinel.survey`'s `SurveyStore`) remains a *read*. It can still complete a
   `COUNT` objective through the plain `ANSWER` only in a read-only session
@@ -191,7 +221,11 @@ never complete, and the only legal route to a terminal answer is the explicit
 a supervisor-owned safe return, and completes as
 `TerminalState.INCOMPLETE_RETURNED` once the landing is confirmed.
 (Regenerated for Plan 03 residual task R; `PROJECTOR_REVISION` is now
-`room-projectors-v2`, since `ReadQueries.project` restores count evidence.)
+`room-projectors-v3`, since `ReadQueries.project` restores count evidence and
+`ClassCount` gained a `no_declared_coverage` field, fix round 4 Q3. The
+scenario, its declared site and its one recorded observation are otherwise
+unchanged from the `v2` fixture; only the persisted `ClassCount` shape and
+the replay verification below it changed.)
 The golden fixture's `expected` block is `replay_fixture`'s own output
 against this one frozen trace (computed once, then bound into the manifest),
 not an independently re-derived value.
@@ -257,6 +291,22 @@ replay: byte-stable reproduction of a frozen trace through the store/query
 projectors, not an independent re-derivation of the decisions or coverage
 recorded in it.
 
+**Fix round 4 (Q5) correction:** `_verify_count_projection` previously ran
+only "if `count_projection` is present" on the recorded payload, and checked
+each present entry independently by substring containment against the
+recorded answer. A terminal `ANSWERED_COUNT` outcome whose `count_projection`
+had been stripped, or that named only some of the ledger's `COUNT`
+objectives, replayed as recorded text with no verification at all, and the
+substring check let extra claims be appended after a legitimate count
+section undetected. Replay now requires a count projection whenever the code
+is `ANSWERED_COUNT`, or `ANSWERED_INCOMPLETE` on a ledger with `COUNT`
+objectives; requires exactly one entry per `COUNT` objective, with that
+objective's own scope/pose_id; and rebuilds the *whole* expected answer
+(every objective's re-derived section, plus any other objectives' rendered
+facts) and compares it for equality, not containment
+(`tests/room/test_replay.py`'s removed-projection/missing-entry/appended-text
+tamper tests).
+
 ## Limitations
 
 - No fresh model or provider call is made anywhere in this plan's replay
@@ -291,5 +341,5 @@ recorded in it.
   projection) and `tests/room/test_count_return.py` tests 25-31 (residual
   task R: NB1 and the grounded count answer routes).
 - `rtk proxy C:\coding\sentinel\.venv\Scripts\python.exe -m pytest tests/room tests/cube tests/survey/test_live_detect.py tests/survey/test_cube_bridge.py tests/survey/test_loop.py -q --tb=short -o addopts='' -p no:cacheprovider`
-  — 1207 passed at the residual task R commit (see
+  — 1216 passed after fix round 4 (Q1-Q5) (see
   `.superpowers/sdd/2026-09-22-jev-room-agent-03-count-closer-return/task-R-report.md`).

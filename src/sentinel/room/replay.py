@@ -30,10 +30,11 @@ import json
 from pathlib import Path
 import tempfile
 
+from .candidates import count_scope
 from .coverage import CoverageProjection
 from .grounding import project_objective_count, render_objective_count
 from .ingest import ingest_result, result_from_dict
-from .models import CapabilityProfile, TerminalState
+from .models import CandidateKind, GoalKind, CapabilityProfile, TerminalState
 from .queries import ReadQueries, render_answer
 from .store import RoomStore, _canonical_json, _canonical_payload, _event_sha256
 
@@ -46,7 +47,15 @@ from .store import RoomStore, _canonical_json, _canonical_payload, _event_sha256
 #: v2 (Plan 03 residual task R, F2): ``ReadQueries.project`` restores each
 #: OBSERVE_SUCCEEDED outcome's grounded count evidence, and a terminal
 #: outcome's recorded COUNT fact is re-derived from it on replay.
-PROJECTOR_REVISION = "room-projectors-v2"
+#: v3 (Plan 03 residual task R, fix round 4, Q3/Q5): ``ClassCount`` gained a
+#: ``no_declared_coverage`` field, changing every recorded count
+#: projection's shape, and ``_verify_count_projection`` now requires a
+#: count projection whenever the terminal code is ANSWERED_COUNT or
+#: ANSWERED_INCOMPLETE on a ledger with COUNT objectives, requires exactly
+#: one entry per COUNT objective with the objective's own scope/pose_id, and
+#: rebuilds and compares the whole answer for equality rather than
+#: containment.
+PROJECTOR_REVISION = "room-projectors-v3"
 
 _REQUIRED_MANIFEST_KEYS = (
     "session_id", "request_text", "label", "room_schema_revision", "projector_revision", "files", "expected",
@@ -382,6 +391,14 @@ def _render_report(snapshot, records: list[dict]) -> str:
     recompute it against; that text is still required to be present, but
     only as the recorded report, never disguised as an independently
     verified one.
+
+    Fix round 4 (Q5): a count answer's ``count_projection`` is no longer
+    optional -- it is required whenever the code is ANSWERED_COUNT, or
+    ANSWERED_INCOMPLETE on a ledger that has COUNT objectives, never merely
+    checked "if present". Previously a terminal ANSWERED_COUNT outcome whose
+    ``count_projection`` field had been stripped (or that named only some of
+    the ledger's COUNT objectives) was accepted as recorded text with no
+    verification at all.
     """
     terminal_record = next(
         (record for record in reversed(records)
@@ -393,7 +410,8 @@ def _render_report(snapshot, records: list[dict]) -> str:
         return f"NO_ANSWER_TEXT; terminal_state={snapshot.terminal_state}"
     payload = terminal_record["payload"]
     recorded_answer = payload.get("answer")
-    if payload.get("code") == "ANSWERED":
+    code = payload.get("code")
+    if code == "ANSWERED":
         try:
             rendered = render_answer(snapshot.facts)
         except ValueError as exc:
@@ -406,8 +424,10 @@ def _render_report(snapshot, records: list[dict]) -> str:
         return rendered
     if not isinstance(recorded_answer, str) or not recorded_answer:
         raise ReplayIntegrityError("terminal outcome carries no recorded answer text")
-    if "count_projection" in payload:
-        _verify_count_projection(snapshot, payload["count_projection"], recorded_answer)
+    count_objectives = tuple(o for o in (snapshot.ledger.objectives if snapshot.ledger else ())
+                             if o.kind == GoalKind.COUNT)
+    if code == "ANSWERED_COUNT" or (code == "ANSWERED_INCOMPLETE" and count_objectives):
+        _verify_count_projection(snapshot, payload, recorded_answer, count_objectives)
     return recorded_answer
 
 
@@ -417,38 +437,83 @@ def _coverage_from_payload(body: dict) -> CoverageProjection:
                               body["analysed_frames"], body["unanalysed_frames"])
 
 
-def _verify_count_projection(snapshot, recorded, answer: str) -> None:
-    """Residual F2: a terminal count answer records its COUNT fact -- one
-    grounded projection per objective. Re-derive each objective's counts
-    from the replayed observation evidence (every ``OBSERVE_SUCCEEDED``
-    outcome's persisted ``count_evidence``, restored by
-    ``ReadQueries.project``) and require the recorded projection, and the
-    section of the recorded answer rendered from it, to match exactly. The
-    recorded *coverage* rows are taken as given: re-deriving coverage needs
-    the site binding replay does not have (the F10 limitation, see the
+def _verify_count_projection(snapshot, payload: dict, answer: str, count_objectives: tuple) -> None:
+    """Fix round 4 (Q5), building on residual F2: a terminal count answer
+    records its COUNT fact -- one grounded projection per objective. Beyond
+    re-deriving each objective's counts from the replayed observation
+    evidence (every ``OBSERVE_SUCCEEDED`` outcome's persisted
+    ``count_evidence``, restored by ``ReadQueries.project``), this now also
+    requires:
+
+    * the recorded projection to be present at all (never merely checked
+      "if present" -- the caller only calls this when the terminal code
+      requires one);
+    * exactly one entry per COUNT objective on the ledger, each carrying
+      that objective's own ``scope``/``pose_id`` (``count_scope``) -- never
+      fewer entries than objectives, nor an entry naming an objective the
+      ledger does not have;
+    * the *whole* recorded answer, rebuilt section by section exactly as the
+      live controller assembles it, to match byte-for-byte -- never merely
+      containment, which let extra claims be appended undetected.
+
+    The recorded *coverage* rows are taken as given: re-deriving coverage
+    needs the site binding replay does not have (the F10 limitation, see the
     readiness report)."""
+    recorded = payload.get("count_projection")
     if not isinstance(recorded, list):
-        raise ReplayIntegrityError("terminal outcome carries a malformed count projection")
-    objectives = {o.objective_id: o for o in (snapshot.ledger.objectives if snapshot.ledger else ())}
+        raise ReplayIntegrityError("terminal count outcome carries a malformed or missing count projection")
+    by_id: dict[str, list] = {}
+    for entry in recorded:
+        if not isinstance(entry, dict) or not isinstance(entry.get("objective_id"), str):
+            raise ReplayIntegrityError("terminal outcome carries a malformed count projection")
+        by_id.setdefault(entry["objective_id"], []).append(entry)
+    objectives = {o.objective_id: o for o in count_objectives}
+    if set(by_id) != set(objectives) or any(len(entries) != 1 for entries in by_id.values()):
+        raise ReplayIntegrityError(
+            "recorded count projection does not carry exactly one entry per COUNT objective")
     frames = tuple(o.count_evidence for o in snapshot.outcomes
                    if o.kind == "OBSERVE" and o.code == "OBSERVE_SUCCEEDED" and o.count_evidence is not None)
-    for entry in recorded:
+    sections = []
+    for objective_id in sorted(objectives, key=lambda oid: objectives[oid].ordinal):
+        objective = objectives[objective_id]
+        entry = by_id[objective_id][0]
+        expected_scope, expected_pose_id = count_scope(objective)
+        if entry.get("scope") != expected_scope or entry.get("pose_id") != expected_pose_id:
+            raise ReplayIntegrityError(
+                f"recorded count projection for objective {objective_id!r} does not match its own scope")
         try:
-            objective = objectives[entry["objective_id"]]
-            scope, pose_id = entry["scope"], entry["pose_id"]
-            scoped = frames if scope == "ROOM" else tuple(f for f in frames if f.pose_id == pose_id)
+            scoped = frames if expected_scope == "ROOM" else tuple(f for f in frames if f.pose_id == expected_pose_id)
             derived = project_objective_count(objective, scoped, _coverage_from_payload(entry["coverage"]),
-                                              scope=scope, pose_id=pose_id)
+                                              scope=expected_scope, pose_id=expected_pose_id)
         except (KeyError, TypeError, ValueError) as exc:
             raise ReplayIntegrityError("terminal outcome carries a malformed count projection") from exc
         if json.loads(_canonical_json(derived.to_payload())) != entry:
             raise ReplayIntegrityError(
-                f"recorded count projection for objective {entry['objective_id']!r} does not match the counts "
+                f"recorded count projection for objective {objective_id!r} does not match the counts "
                 "re-derived from the replayed observation evidence")
-        if render_objective_count(derived) not in answer:
-            raise ReplayIntegrityError(
-                f"recorded answer does not contain the count section re-derived for objective "
-                f"{entry['objective_id']!r}")
+        sections.append(render_objective_count(derived))
+    expected_answer = _expected_count_answer(snapshot, payload, sections)
+    if answer != expected_answer:
+        raise ReplayIntegrityError(
+            "recorded answer does not match the answer re-derived from the replayed observation evidence")
+
+
+def _expected_count_answer(snapshot, payload: dict, sections: list[str]) -> str:
+    """Rebuild the full terminal answer text exactly as
+    ``RoomController._decide`` assembles it for the ``ANSWER:COUNTS`` and
+    ``ANSWER:<objective>:INCOMPLETE`` routes, so the recorded text can be
+    compared for equality rather than mere containment."""
+    if payload.get("code") == "ANSWERED_COUNT":
+        other_objectives = tuple(o for o in (snapshot.ledger.objectives if snapshot.ledger else ())
+                                 if o.kind != GoalKind.COUNT)
+        other_facts = tuple(f for f in snapshot.facts if f.kind != CandidateKind.READ_COUNTS)
+        if other_objectives and other_facts:
+            sections = (*sections, render_answer(other_facts))
+        return "\n\n".join(sections)
+    objective_id = payload.get("candidate_id", "").removeprefix("ANSWER:").removesuffix(":INCOMPLETE")
+    return "\n\n".join((
+        f"Objective {objective_id} cannot be completed with the declared legal views "
+        f"available in this session.", *sections))
 
 
 def _sha_bytes(data: bytes) -> str:

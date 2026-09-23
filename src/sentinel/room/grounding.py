@@ -221,8 +221,16 @@ def project_objective_count(objective, frames, coverage: CoverageProjection, *,
     frames = tuple(frames)
     estimates = tuple(estimate for frame in frames for estimate in frame.estimates)
     low = {estimate_id for frame in frames for estimate_id in frame.low_confidence_estimate_ids}
-    corroborating = {estimate.estimate_id: estimate.view_id or estimate.captured_at
-                     for estimate in estimates if estimate.estimate_id not in low}
+    # Fix round 4 (Q1): the corroborating-view identity is the *declared*
+    # pose the frame was taken from (FrameCountEvidence.pose_id), never the
+    # measured-pose view_id spatial.py derives -- two visits to one declared
+    # pose (the same objective revisiting it, or a different objective
+    # re-offered the same region) can measure a few centimetres of hover
+    # drift apart, which would otherwise mint two distinct view_ids for what
+    # is honestly one view and wrongly confirm an object seen only once.
+    corroborating = {estimate.estimate_id: frame.pose_id
+                     for frame in frames for estimate in frame.estimates
+                     if estimate.estimate_id not in low}
     people = tuple(FramePeople(frame.frame_id, frame.pose_id, frame.captured_at,
                                frame.people_confirmed, frame.people_uncertain)
                    for frame in frames if frame.people_confirmed or frame.people_uncertain)

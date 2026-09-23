@@ -344,3 +344,21 @@ def test_requested_class_with_no_cells_and_no_objects_still_gets_a_line():
     assert phone.method == "GROUNDED_STATIC"
     text = render_count_answer(counts, coverage, scope="ROOM")
     assert "phone" in text
+
+
+def test_class_with_no_declared_coverage_carries_an_explicit_caveat():
+    """Fix round 4 (Q3): a class no coverage cell anywhere requires must
+    never read as a confidently resolved zero -- ``no_declared_coverage`` is
+    set and the rendered line says so, distinct from a class that *does*
+    have declared cells but they turned out NOT_RESOLVABLE."""
+    coverage = project_coverage((_PHONE_CELL,), (CellObservation("cell-1", "phone", "p1", "OBSERVED", "t0", ("e",)),))
+    counts = project_counts((), (), coverage, requested_classes=("phone", "pen"))
+    phone = next(c for c in counts if c.class_name == "phone")
+    pen = next(c for c in counts if c.class_name == "pen")
+    assert phone.no_declared_coverage is False
+    assert pen.no_declared_coverage is True
+    text = render_count_answer(counts, coverage, scope="ROOM")
+    pen_line = next(line for line in text.splitlines() if line.startswith("pen:"))
+    assert "no declared coverage for this class" in pen_line
+    phone_line = next(line for line in text.splitlines() if line.startswith("phone:"))
+    assert "no declared coverage" not in phone_line
