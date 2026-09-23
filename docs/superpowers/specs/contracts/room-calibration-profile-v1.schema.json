@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "room-calibration-profile-v1.schema.json",
+  "title": "Room-agent calibration profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "kind", "state", "site_sha256", "aircraft_id", "firmware_version",
+    "camera_sha256", "tag_map_sha256", "speeds_cm_s", "battery", "pose_envelope",
+    "training_run_ids", "holdout_run_ids", "profile_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "room-calibration-profile-v1"},
+    "kind": {"enum": ["flight", "tracker"]},
+    "state": {"enum": ["SIMULATION_ONLY", "CALIBRATION", "PROMOTED"]},
+    "site_sha256": {"$ref": "#/$defs/nullableHash"},
+    "aircraft_id": {"$ref": "#/$defs/nullableId"},
+    "firmware_version": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+    "camera_sha256": {"$ref": "#/$defs/nullableHash"},
+    "tag_map_sha256": {"$ref": "#/$defs/nullableHash"},
+    "speeds_cm_s": {"type": "array", "items": {"type": "integer", "exclusiveMinimum": 0}},
+    "battery": {"anyOf": [{"$ref": "#/$defs/battery"}, {"type": "null"}]},
+    "pose_envelope": {"type": "array", "items": {"$ref": "#/$defs/poseEnvelopePoint"}},
+    "training_run_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "holdout_run_ids": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "profile_sha256": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullableHash": {"anyOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+    "nullableId": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+    "battery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "worst_observed_percent_per_s", "margin_percent_per_s",
+        "quantization_allowance_percent", "landing_floor_percent"
+      ],
+      "properties": {
+        "worst_observed_percent_per_s": {"type": "number", "minimum": 0},
+        "margin_percent_per_s": {"type": "number", "minimum": 0},
+        "quantization_allowance_percent": {"type": "number", "minimum": 0},
+        "landing_floor_percent": {"type": "number", "minimum": 0}
+      }
+    },
+    "poseEnvelopePoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["distance_cm", "time_s", "yaw_deg", "drift_cm"],
+      "properties": {
+        "distance_cm": {"type": "number", "minimum": 0},
+        "time_s": {"type": "number", "minimum": 0},
+        "yaw_deg": {"type": "number", "minimum": 0},
+        "drift_cm": {"type": "number", "minimum": 0}
+      }
+    }
+  }
+}
