@@ -7,7 +7,21 @@ already-collected evidence: parsing, canonicalising, aggregating and hashing doc
 nothing in this module ever constructs a provider, drone client or network object
 itself. ``record`` cannot invoke Jev or any detector: the only side-effecting object it
 touches is whatever ``executor_factory`` returns, and the executor's public surface
-(``start``/``execute``/``land``/``close``) has no Jev/detector call anywhere in it.
+(``start``/``execute``/``return_home``/``reanchor``/``land``/``close``) has no
+Jev/detector call anywhere in it. On any exception after ``start`` is invoked (start
+itself included), ``record`` makes a best-effort ``land`` call before ``close`` --
+never relies on ``close`` alone to put the aircraft down.
+
+A trial's evidence is only as trustworthy as its provenance: ``record`` marks a trial
+"HARDWARE" only when the injected executor declares an explicit
+``hardware_provenance`` (a ``HardwareProvenance``) bound to the route's own
+aircraft/firmware, and "SIMULATION" otherwise. ``fit`` refuses to call a profile
+CALIBRATION unless every training trial is "HARDWARE" -- anything else is
+SIMULATION_ONLY, and SIMULATION_ONLY can never be promoted. ``promote`` never trusts a
+candidate file as written: it re-derives the candidate from the same predeclared
+training evidence in the evidence index and requires an exact match, refuses any
+holdout trial whose measured content (by content hash, not by run id) duplicates a
+training trial's, and refuses holdout evidence that is not itself "HARDWARE".
 
 Reuses ``sentinel.room.artifacts`` for canonical JSON and atomic writes (one
 definition of "canonical form" in this packet, not a second one that could drift), and
@@ -63,14 +77,61 @@ TRACKER_DEFERRED_MESSAGE = "tracker calibration deferred (Plan 05)"
 # Conservative constants for the flight battery bound. Not calibrated per-site; they
 # widen the worst *observed* rate the same way for every fit, which is what makes the
 # bound "worst observed plus a declared margin and quantization allowance" rather than
-# a bare average of trials.
+# a bare average of trials. The quantization allowance is an absolute-percent reading
+# error, so it is folded into each trial's own rate (allowance / that trial's own
+# elapsed time) before taking the worst rate across trials -- never added to a rate a
+# second time as a bare percent (that was a unit bug; see BatteryBound below).
 _BATTERY_MARGIN_PERCENT_PER_S = 0.02
 _BATTERY_QUANTIZATION_ALLOWANCE_PERCENT = 1.0
 _BATTERY_LANDING_FLOOR_PERCENT = 15.0
 
+# Pose envelope combination buckets. A holdout leg's wall-clock timing will not land on
+# the exact float a training leg happened to report, so the envelope key rounds each
+# dimension to a fixed bucket before matching -- still "only sampled combinations, no
+# interpolation" (a holdout combination outside every trained bucket is still refused),
+# just without demanding bit-identical timing between two flights of the "same" leg.
+_DISTANCE_BUCKET_CM = 5.0
+_TIME_BUCKET_S = 0.5
+_YAW_BUCKET_DEG = 5.0
+
+_TRIAL_PROVENANCES = frozenset({"HARDWARE", "SIMULATION"})
+
 
 class CalibrationError(ValueError):
     """A calibration manifest, route, trial, evidence index or profile is refused."""
+
+
+@dataclass(frozen=True)
+class HardwareProvenance:
+    """A controller-signed declaration that a trial was flown on real hardware.
+
+    ``record`` never constructs this itself: it can only come from whatever
+    ``executor_factory`` returns, as an ``executor.hardware_provenance`` attribute.
+    Anything else -- absent, the wrong type, or bound to a different aircraft/firmware
+    than the route actually being flown -- marks the trial ``SIMULATION``. An executor
+    cannot claim hardware provenance for a route it isn't bound to, and a caller cannot
+    get ``HARDWARE`` provenance by accident: it has to be deliberately declared.
+    """
+
+    aircraft_id: str
+    firmware_version: str
+    controller_signoff: str
+
+    def __post_init__(self) -> None:
+        for name in ("aircraft_id", "firmware_version", "controller_signoff"):
+            if not getattr(self, name):
+                raise CalibrationError(f"hardware provenance requires a nonempty {name}")
+
+
+def _trial_provenance(executor: object, route: "CalibrationRoute") -> str:
+    declared = getattr(executor, "hardware_provenance", None)
+    if (
+        isinstance(declared, HardwareProvenance)
+        and declared.aircraft_id == route.aircraft_id
+        and declared.firmware_version == route.firmware_version
+    ):
+        return "HARDWARE"
+    return "SIMULATION"
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +226,15 @@ class CalibrationCheckpointSpec:
     speed_cm_s: int
     looks_deg: tuple[int, ...] = ()
     capture_count: int = 0
+    #: This is the controller-owned forced-return leg: ``record`` flies it through
+    #: ``executor.return_home`` (the RETURNING latch), never a plain ``execute``, so a
+    #: promoted profile's forced-return evidence actually exercised the return path.
+    is_return_leg: bool = False
+    #: This leg ends with a tag observation: ``record`` flies it through
+    #: ``executor.reanchor``, and pose drift is measured as the reanchor correction
+    #: (propagated belief vs. the anchor-corrected ground truth), never the estimator's
+    #: own propagated pose compared to the commanded target.
+    reanchor: bool = False
 
 
 @dataclass(frozen=True)
@@ -241,9 +311,27 @@ def parse_route(raw: bytes) -> CalibrationRoute:
                 speed_cm_s=int(entry["speed_cm_s"]),
                 looks_deg=tuple(int(value) for value in entry.get("looks_deg", ())),
                 capture_count=int(entry.get("capture_count", 0)),
+                is_return_leg=bool(entry.get("is_return_leg", False)),
+                reanchor=bool(entry.get("reanchor", False)),
             ))
         except (KeyError, TypeError, ValueError) as exc:
             raise CalibrationError(f"invalid route checkpoint: {exc}") from exc
+    if route_kind == "forced_return":
+        return_legs = [checkpoint for checkpoint in checkpoints if checkpoint.is_return_leg]
+        if len(return_legs) != 1:
+            raise CalibrationError(
+                "a forced-return route must mark exactly one checkpoint is_return_leg=true, "
+                "so record() actually exercises the return path (StepExecutor.return_home), "
+                "not a plain checkpoint"
+            )
+    if route_kind == "tag_free":
+        reanchor_legs = [checkpoint for checkpoint in checkpoints if checkpoint.reanchor]
+        if len(reanchor_legs) != 1:
+            raise CalibrationError(
+                "a tag-free route must mark exactly one checkpoint reanchor=true, so pose "
+                "drift is measured against a tag-anchored ground truth, not the estimator's "
+                "own propagated belief"
+            )
     return CalibrationRoute(
         schema_version=_ROUTE_SCHEMA_VERSION, route_id=route_id, route_kind=route_kind,
         site_sha256=document["site_sha256"], aircraft_id=document["aircraft_id"],
@@ -311,14 +399,32 @@ class CalibrationTrial:
     camera_sha256: str
     tag_map_sha256: str
     speeds_cm_s: tuple[int, ...]
+    #: Trial-level battery readings: one taken at/just before takeoff (from
+    #: ``executor.start``'s return) and one at landing (``TerminalOutcome.battery``).
+    #: The battery bound is derived from these two readings over the trial's own
+    #: ``total_elapsed_s`` window, not from a mismatched slice of the per-leg samples.
+    battery_before_percent: int | None
+    battery_after_percent: int | None
+    #: "HARDWARE" only when the executor that produced this trial declared, and was
+    #: bound to, real-hardware provenance (see ``HardwareProvenance``); otherwise
+    #: "SIMULATION". A profile fit only from "SIMULATION" evidence is SIMULATION_ONLY
+    #: and can never be promoted (see ``_fit_flight_profile``/``promote``).
+    provenance: str
     samples: tuple[LegSample, ...]
+
+    def __post_init__(self) -> None:
+        if self.provenance not in _TRIAL_PROVENANCES:
+            raise CalibrationError(f"unknown trial provenance {self.provenance!r}")
 
     def to_document(self) -> dict:
         body = {
             "aircraft_id": self.aircraft_id,
+            "battery_after_percent": self.battery_after_percent,
+            "battery_before_percent": self.battery_before_percent,
             "camera_sha256": self.camera_sha256,
             "firmware_version": self.firmware_version,
             "manifest_authorization_digest": self.manifest_authorization_digest,
+            "provenance": self.provenance,
             "route_id": self.route_id,
             "route_kind": self.route_kind,
             "run_id": self.run_id,
@@ -354,12 +460,29 @@ _TRIAL_DOCUMENT_FIELDS = frozenset(CalibrationTrial(
     schema_version=_TRIAL_SCHEMA_VERSION, run_id="r", route_id="return-route", route_kind="forced_return",
     trial_role="training", split_id="s", manifest_authorization_digest="0" * 64, terminal_state="LANDED",
     total_elapsed_s=0.0, site_sha256="0" * 64, aircraft_id="a", firmware_version="1", camera_sha256="0" * 64,
-    tag_map_sha256="0" * 64, speeds_cm_s=(), samples=(),
+    tag_map_sha256="0" * 64, speeds_cm_s=(), battery_before_percent=None, battery_after_percent=None,
+    provenance="SIMULATION", samples=(),
 ).to_document().keys()) - {"trial_sha256"}
 
 
 def canonical_trial_sha256(trial: CalibrationTrial) -> str:
     return trial.to_document()["trial_sha256"]
+
+
+def _evidence_signature(trial: CalibrationTrial) -> str:
+    """A hash of everything a trial actually *measured*, excluding its identity
+    (run id / role / split id / manifest binding / its own trial_sha256).
+
+    Two trials with the same signature are the same underlying flight data -- reused
+    or copied evidence wearing a different role label -- not independent evidence.
+    ``promote`` refuses a holdout trial whose signature matches a training trial's:
+    binding source trials by content, not by ``run_id`` (which is derived from the
+    manifest, not the measurement, and so cannot detect a copied/replayed trial).
+    """
+    body = trial.to_document()
+    for key in ("run_id", "trial_role", "split_id", "manifest_authorization_digest", "trial_sha256"):
+        body.pop(key, None)
+    return hashlib.sha256(canonical_bytes(body)).hexdigest()
 
 
 def parse_trial(raw: bytes) -> CalibrationTrial:
@@ -400,6 +523,9 @@ def parse_trial(raw: bytes) -> CalibrationTrial:
             site_sha256=document["site_sha256"], aircraft_id=document["aircraft_id"],
             firmware_version=document["firmware_version"], camera_sha256=document["camera_sha256"],
             tag_map_sha256=document["tag_map_sha256"], speeds_cm_s=tuple(document["speeds_cm_s"]),
+            battery_before_percent=document["battery_before_percent"],
+            battery_after_percent=document["battery_after_percent"],
+            provenance=document["provenance"],
             samples=samples,
         )
     except (KeyError, TypeError) as exc:
@@ -452,15 +578,34 @@ def record(
             "authorization_digest does not match the manifest bound at preview time; refusing to record"
         )
     route = load_route(route_path)
+    trial_path = _trial_path_for(manifest_path)
+    if trial_path.exists():
+        # A manifest (trial_role + split_id) authorizes exactly one physical
+        # recording, and run artifacts are append-only: never silently overwrite an
+        # existing trial just because the same manifest was recorded again.
+        raise CalibrationError(
+            f"trial {trial_path!s} already exists; a manifest authorizes exactly one recording"
+        )
     plans = _build_plans(route)
     executor = executor_factory()
     samples: list[LegSample] = []
-    start_wall = clock()
-    executor.start(route.home)
+    battery_before_percent: int | None = None
+    provenance = "SIMULATION"
+    terminal = None
     try:
+        start_wall = clock()
+        home_reading = executor.start(route.home)
+        if isinstance(home_reading, Telemetry):
+            battery_before_percent = home_reading.battery_percent
+        provenance = _trial_provenance(executor, route)
         for spec, plan in zip(route.checkpoints, plans):
             leg_start = clock()
-            outcome = executor.execute(plan)
+            if spec.reanchor:
+                outcome = executor.reanchor(plan)
+            elif spec.is_return_leg:
+                outcome = executor.return_home(plan)
+            else:
+                outcome = executor.execute(plan)
             leg_elapsed = clock() - leg_start
             if outcome.status != "COMPLETED":
                 raise CalibrationError(
@@ -469,27 +614,45 @@ def record(
             battery_percent = (
                 outcome.telemetry.battery_percent if isinstance(outcome.telemetry, Telemetry) else None
             )
-            drift_cm = None
-            if outcome.pose is not None:
-                drift_cm = math.dist(
-                    (spec.target.x_cm, spec.target.y_cm, spec.target.z_cm),
-                    (outcome.pose.x_cm, outcome.pose.y_cm, outcome.pose.z_cm),
-                )
             distance_cm = math.dist(
                 (plan.start.x_cm, plan.start.y_cm, plan.start.z_cm),
                 (plan.target.x_cm, plan.target.y_cm, plan.target.z_cm),
             )
             yaw_deg = float(max((abs(look) for look in spec.looks_deg), default=0))
+            if spec.reanchor:
+                propagated = getattr(outcome, "propagated_pose", None)
+                anchored = outcome.pose
+                if propagated is None or anchored is None:
+                    raise CalibrationError(
+                        f"reanchor leg {spec.checkpoint_id!r} must report both a propagated pose "
+                        "and an anchor-corrected pose; a tag-free drift measurement needs real "
+                        "ground truth, not just the estimator's own belief"
+                    )
+                drift_cm = math.dist(
+                    (propagated.x_cm, propagated.y_cm, propagated.z_cm),
+                    (anchored.x_cm, anchored.y_cm, anchored.z_cm),
+                )
+            else:
+                drift_cm = None
             samples.append(LegSample(
                 checkpoint_id=spec.checkpoint_id, route_kind=route.route_kind,
                 distance_cm=distance_cm, elapsed_s=leg_elapsed, yaw_deg=yaw_deg,
                 battery_percent=battery_percent, drift_cm=drift_cm,
             ))
         terminal = executor.land()
+    except Exception:
+        # Best-effort: get the aircraft down before closing out, even though a leg
+        # failed (or start() itself failed) -- never rely on close() alone to land.
+        try:
+            executor.land()
+        except Exception:
+            pass
+        raise
     finally:
         executor.close()
     if terminal.state != "LANDED":
         raise CalibrationError(f"calibration route did not land cleanly: {terminal.state}")
+    battery_after_percent = getattr(terminal, "battery", None)
     total_elapsed_s = clock() - start_wall
     # One manifest (trial_role + split_id) authorizes exactly one physical trial
     # recording, so the manifest's own digest is a stable, unique run id for it.
@@ -501,9 +664,10 @@ def record(
         firmware_version=route.firmware_version, camera_sha256=route.camera_sha256,
         tag_map_sha256=route.tag_map_sha256,
         speeds_cm_s=tuple(sorted({checkpoint.speed_cm_s for checkpoint in route.checkpoints})),
-        samples=tuple(samples),
+        battery_before_percent=battery_before_percent, battery_after_percent=battery_after_percent,
+        provenance=provenance, samples=tuple(samples),
     )
-    write_trial(_trial_path_for(manifest_path), trial)
+    write_trial(trial_path, trial)
     return trial
 
 
@@ -530,7 +694,11 @@ class BatteryBound:
 
     @property
     def conservative_percent_per_s(self) -> float:
-        return self.worst_observed_percent_per_s + self.margin_percent_per_s + self.quantization_allowance_percent
+        # quantization_allowance_percent is already folded into worst_observed_percent_per_s
+        # (see _battery_bound_from_trials): it is an absolute-percent reading error, so it is
+        # divided by each trial's own elapsed time -- a rate -- before the worst-case is taken,
+        # never added again here as a bare percent (that mixed units: %/s + %/s + %).
+        return self.worst_observed_percent_per_s + self.margin_percent_per_s
 
 
 @dataclass(frozen=True)
@@ -772,13 +940,20 @@ def _consistent_binding(trials: Sequence[CalibrationTrial], field_name: str) -> 
 def _battery_bound_from_trials(trials: Sequence[CalibrationTrial]) -> BatteryBound:
     worst_rate = 0.0
     for trial in trials:
-        readings = [sample.battery_percent for sample in trial.samples if sample.battery_percent is not None]
-        if len(readings) < 2 or trial.total_elapsed_s <= 0:
-            raise CalibrationError(f"forced-return trial {trial.run_id!r} has insufficient battery telemetry")
-        consumed = readings[0] - readings[-1]
+        if trial.battery_before_percent is None or trial.battery_after_percent is None:
+            raise CalibrationError(
+                f"forced-return trial {trial.run_id!r} is missing a pre-takeoff or landing battery reading"
+            )
+        if trial.total_elapsed_s <= 0:
+            raise CalibrationError(f"forced-return trial {trial.run_id!r} reports nonpositive elapsed time")
+        consumed = trial.battery_before_percent - trial.battery_after_percent
         if consumed < 0:
             raise CalibrationError(f"forced-return trial {trial.run_id!r} reports battery increasing; refused")
-        worst_rate = max(worst_rate, consumed / trial.total_elapsed_s)
+        # The allowance is an absolute-percent reading error; dividing it by this
+        # trial's own elapsed time turns it into the rate contribution it actually
+        # represents, over the same before/after-takeoff interval as `consumed`.
+        rate = (consumed + _BATTERY_QUANTIZATION_ALLOWANCE_PERCENT) / trial.total_elapsed_s
+        worst_rate = max(worst_rate, rate)
     return BatteryBound(
         worst_observed_percent_per_s=worst_rate, margin_percent_per_s=_BATTERY_MARGIN_PERCENT_PER_S,
         quantization_allowance_percent=_BATTERY_QUANTIZATION_ALLOWANCE_PERCENT,
@@ -786,14 +961,35 @@ def _battery_bound_from_trials(trials: Sequence[CalibrationTrial]) -> BatteryBou
     )
 
 
+def _pose_envelope_key(distance_cm: float, elapsed_s: float, yaw_deg: float) -> tuple[float, float, float]:
+    def _bucket(value: float, size: float) -> float:
+        return round(value / size) * size
+
+    return (
+        _bucket(distance_cm, _DISTANCE_BUCKET_CM), _bucket(elapsed_s, _TIME_BUCKET_S),
+        _bucket(yaw_deg, _YAW_BUCKET_DEG),
+    )
+
+
 def _pose_envelope_from_trials(trials: Sequence[CalibrationTrial]) -> tuple[PoseEnvelopePoint, ...]:
-    points = set()
+    # Only samples from a reanchor leg carry a ground-truth-anchored drift measurement
+    # (see `record`); other legs' samples have drift_cm == None and are not evidence
+    # for the pose envelope at all, so they are skipped rather than treated as an error.
+    buckets: dict[tuple[float, float, float], float] = {}
     for trial in trials:
         for sample in trial.samples:
             if sample.drift_cm is None:
-                raise CalibrationError(f"tag-free trial {trial.run_id!r} is missing measured drift")
-            points.add((sample.distance_cm, sample.elapsed_s, sample.yaw_deg, sample.drift_cm))
-    return tuple(PoseEnvelopePoint(*point) for point in sorted(points))
+                continue
+            key = _pose_envelope_key(sample.distance_cm, sample.elapsed_s, sample.yaw_deg)
+            # Conservative: a bucket's bound is the worst (largest) drift observed for
+            # any sample landing in it, never an average.
+            buckets[key] = max(buckets.get(key, 0.0), sample.drift_cm)
+    if not buckets:
+        raise CalibrationError("tag-free training evidence has no measured (reanchor) drift")
+    return tuple(
+        PoseEnvelopePoint(distance_cm=key[0], time_s=key[1], yaw_deg=key[2], drift_cm=drift)
+        for key, drift in sorted(buckets.items())
+    )
 
 
 def _fit_flight_profile(trials: Sequence[CalibrationTrial]) -> CalibrationProfile:
@@ -811,8 +1007,12 @@ def _fit_flight_profile(trials: Sequence[CalibrationTrial]) -> CalibrationProfil
     battery = _battery_bound_from_trials(forced_return)
     pose_envelope = _pose_envelope_from_trials(tag_free)
     training_run_ids = tuple(sorted({trial.run_id for trial in trials}))
+    # Synthetic or self-validating evidence cannot produce a CALIBRATION (and so never
+    # a PROMOTED) profile: a candidate fit from any non-hardware-provenanced trial is
+    # SIMULATION_ONLY, full stop -- not relabelled later, not overridable by promote.
+    state = "CALIBRATION" if all(trial.provenance == "HARDWARE" for trial in trials) else "SIMULATION_ONLY"
     return CalibrationProfile(
-        schema_version=SCHEMA_VERSION, kind="flight", state="CALIBRATION", speeds_cm_s=speeds_cm_s,
+        schema_version=SCHEMA_VERSION, kind="flight", state=state, speeds_cm_s=speeds_cm_s,
         battery=battery, pose_envelope=pose_envelope, training_run_ids=training_run_ids,
         holdout_run_ids=(), **bindings,
     )
@@ -862,14 +1062,27 @@ def _validate_flight_holdout(candidate: CalibrationProfile, holdout_trials: Sequ
                 raise CalibrationError(
                     f"holdout trial {trial.run_id!r} disagrees with the candidate on {name}"
                 )
+    for trial in holdout_trials:
+        unbound_speeds = set(trial.speeds_cm_s) - set(candidate.speeds_cm_s)
+        if unbound_speeds:
+            raise CalibrationError(
+                f"holdout trial {trial.run_id!r} was flown at speed(s) {sorted(unbound_speeds)} "
+                "the candidate was never calibrated for"
+            )
     assert candidate.battery is not None
     for trial in forced_return:
-        readings = [sample.battery_percent for sample in trial.samples if sample.battery_percent is not None]
-        if len(readings) < 2 or trial.total_elapsed_s <= 0:
+        if trial.battery_before_percent is None or trial.battery_after_percent is None:
             raise CalibrationError(f"holdout trial {trial.run_id!r} has insufficient battery telemetry")
+        if trial.total_elapsed_s <= 0:
+            raise CalibrationError(f"holdout trial {trial.run_id!r} reports nonpositive elapsed time")
         if trial.terminal_state != "LANDED":
             raise CalibrationError(f"holdout trial {trial.run_id!r} did not report a clean forced return")
-        observed_rate = (readings[0] - readings[-1]) / trial.total_elapsed_s
+        if trial.battery_after_percent < candidate.battery.landing_floor_percent:
+            raise CalibrationError(
+                f"holdout trial {trial.run_id!r} landed at {trial.battery_after_percent}%, below the "
+                f"candidate's landing floor of {candidate.battery.landing_floor_percent}%"
+            )
+        observed_rate = (trial.battery_before_percent - trial.battery_after_percent) / trial.total_elapsed_s
         if observed_rate > candidate.battery.conservative_percent_per_s:
             raise CalibrationError(
                 f"holdout trial {trial.run_id!r} exceeded the candidate's conservative battery bound"
@@ -878,10 +1091,27 @@ def _validate_flight_holdout(candidate: CalibrationProfile, holdout_trials: Sequ
     for trial in tag_free:
         for sample in trial.samples:
             if sample.drift_cm is None:
-                raise CalibrationError(f"holdout trial {trial.run_id!r} is missing measured drift")
-            bound = envelope.get((sample.distance_cm, sample.elapsed_s, sample.yaw_deg))
+                continue
+            key = _pose_envelope_key(sample.distance_cm, sample.elapsed_s, sample.yaw_deg)
+            bound = envelope.get(key)
             if bound is None or sample.drift_cm > bound:
                 raise CalibrationError(f"holdout trial {trial.run_id!r} exceeded the candidate's pose envelope")
+
+
+def admissible_for(profile: CalibrationProfile, *, grant_state: str) -> bool:
+    """Whether *profile* may legally back a capability grant in state *grant_state*.
+
+    A CALIBRATION profile is legal only inside a TRIAL/acceptance grant with matching
+    bindings -- never live use. A PROMOTED profile is legal only for live use.
+    SIMULATION_ONLY is never admissible for either. This is a pure predicate over
+    calibration's own state; wiring it into ``sentinel.room.capabilities``' admission
+    path (``admit_live``) is a Task 4 obligation -- see the Plan 06 ledger.
+    """
+    if grant_state == "TRIAL":
+        return profile.state == "CALIBRATION"
+    if grant_state == "PROMOTED":
+        return profile.state == "PROMOTED"
+    return False
 
 
 def promote(
@@ -899,21 +1129,63 @@ def promote(
         )
     if candidate.state != "CALIBRATION":
         raise CalibrationError(f"only a CALIBRATION candidate can be promoted (state={candidate.state!r})")
+
     index = load_evidence_index(evidence_index_path)
+
+    # A candidate profile is a plain file, hashed with an unkeyed profile_sha256: it
+    # cannot be trusted as written. Re-derive it from the same predeclared training
+    # evidence it claims to be fit from (in this same evidence index) and require an
+    # exact match -- a profile record can never approve itself.
+    training_entries = [entry for entry in index.entries if entry.role == "training"]
+    if not training_entries:
+        raise CalibrationError(
+            "promote requires the candidate's training evidence in the same evidence index, "
+            "so the candidate can be re-derived rather than trusted as written"
+        )
+    training_trials = []
+    seen_training_ids: set[str] = set()
+    for entry in training_entries:
+        _, trial = _load_and_check_pair(entry, expected_role="training")
+        if trial.run_id in seen_training_ids:
+            raise CalibrationError(f"duplicate training run id {trial.run_id!r}")
+        seen_training_ids.add(trial.run_id)
+        training_trials.append(trial)
+    refit = _fit_flight_profile(training_trials)
+    if refit != candidate:
+        raise CalibrationError(
+            "candidate does not match a fresh fit of its declared training evidence "
+            "(bindings, margins, quantization/landing-floor constants, or the evidence "
+            "itself have drifted); a profile record cannot approve itself"
+        )
+
     holdout_entries = [entry for entry in index.entries if entry.role == "holdout"]
     if len(holdout_entries) < 2:
         raise CalibrationError("promote requires distinct holdout manifests in the evidence index")
     holdout_trials = []
-    seen_run_ids: set[str] = set()
+    seen_holdout_ids: set[str] = set()
     for entry in holdout_entries:
         _, trial = _load_and_check_pair(entry, expected_role="holdout")
         if trial.run_id in candidate.training_run_ids:
             raise CalibrationError(f"holdout run {trial.run_id!r} was already used during fitting; refused")
-        if trial.run_id in seen_run_ids:
+        if trial.run_id in seen_holdout_ids:
             raise CalibrationError(f"duplicate holdout run id {trial.run_id!r}")
-        seen_run_ids.add(trial.run_id)
+        seen_holdout_ids.add(trial.run_id)
         holdout_trials.append(trial)
+
+    training_signatures = {_evidence_signature(trial) for trial in training_trials}
+    for trial in holdout_trials:
+        if _evidence_signature(trial) in training_signatures:
+            raise CalibrationError(
+                f"holdout trial {trial.run_id!r} duplicates a training trial's measured content; "
+                "reused or copied evidence cannot serve as independent holdout"
+            )
+        if trial.provenance != "HARDWARE":
+            raise CalibrationError(
+                f"holdout trial {trial.run_id!r} is not hardware-provenanced; simulated evidence "
+                "can never promote a profile"
+            )
+
     _validate_flight_holdout(candidate, holdout_trials)
-    promoted = replace(candidate, state="PROMOTED", holdout_run_ids=tuple(sorted(seen_run_ids)))
+    promoted = replace(candidate, state="PROMOTED", holdout_run_ids=tuple(sorted(seen_holdout_ids)))
     write_profile(output_path, promoted)
     return promoted

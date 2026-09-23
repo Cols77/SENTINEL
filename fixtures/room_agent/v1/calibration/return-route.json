@@ -26,7 +26,8 @@
       "target": {"x_cm": 0, "y_cm": 0, "z_cm": 80},
       "speed_cm_s": 30,
       "looks_deg": [],
-      "capture_count": 0
+      "capture_count": 0,
+      "is_return_leg": true
     }
   ]
 }

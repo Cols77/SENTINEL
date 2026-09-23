@@ -19,7 +19,8 @@
       "target": {"x_cm": 0, "y_cm": 0, "z_cm": 100},
       "speed_cm_s": 20,
       "looks_deg": [45, -45, 90],
-      "capture_count": 3
+      "capture_count": 3,
+      "reanchor": true
     }
   ]
 }
