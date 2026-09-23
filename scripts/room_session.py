@@ -49,6 +49,7 @@ from sentinel.emergency import EmergencyHotkey
 from sentinel.room import (artifacts, calibration, capabilities, connectivity, live_session, live_stack, replay,
                            wiring)
 from sentinel.room.artifacts import ArtifactError, ManifestError, SessionManifest
+from sentinel.room.controller import AcceptancePolicy
 from sentinel.room.site import ContingencyTrigger, RoomSite, parse_room_site
 from sentinel.room.supervisor import calibration_hashes
 from sentinel.survey.live_detect import LiveDetectRefused, check_gates as check_consent_gates
@@ -565,6 +566,11 @@ def _cmd_live(
         # the refuse-by-default factories) and their own reported identities
         # are durably recorded before anything can fly.
         try:
+            acceptance = AcceptancePolicy(**json.loads(getattr(args, "jev_acceptance_json", None) or "{}"))
+        except (TypeError, ValueError) as exc:
+            print(f"refused: invalid --jev-acceptance-json: {exc}", file=sys.stderr)
+            return 2
+        try:
             judge = jev_factory()
             detector = detector_factory()
         except Exception as exc:
@@ -619,7 +625,7 @@ def _cmd_live(
                     flight_stack_factory=armed_factory, judge=judge, detector=detector,
                     assurances=verified_assurances, request_text=DEFAULT_REQUEST_TEXT,
                     frames_dir=run.root / "frames", clock=clock, wall_clock=wall_clock,
-                    before_takeoff=before_takeoff,
+                    before_takeoff=before_takeoff, acceptance=acceptance,
                 )
             except live_session.LiveSessionError as exc:
                 try:
@@ -750,6 +756,9 @@ def build_parser() -> argparse.ArgumentParser:
     live_parser.add_argument("--local-ip", default=None)
     live_parser.add_argument("--check-connectivity-only", action="store_true")
     live_parser.add_argument("--connectivity-max-age-s", type=float, default=5.0)
+    # Task V2: the room loop's per-kind Jev acceptance thresholds, as a JSON
+    # object of AcceptancePolicy fields (default: the room-loop policy).
+    live_parser.add_argument("--jev-acceptance-json", default=None)
     live_parser.add_argument("--connectivity-timeout-s", type=float, default=5.0)
     # The durable run-artifact root (RunArtifacts.open lays out
     # root/manifest.run_id/{manifest.json, raw.jsonl, session.sqlite3, ...}).

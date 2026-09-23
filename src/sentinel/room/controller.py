@@ -89,6 +89,58 @@ def real_observation_admitted(supervisor) -> bool:
 
 
 @dataclass(frozen=True)
+class AcceptancePolicy:
+    """Task V2: per-kind acceptance thresholds for Jev's top legal choice.
+
+    The room loop's candidates are bounded: an OBSERVE is one supervised
+    checkpoint, a REANCHOR is the supervisor's own stationary recovery, a
+    read changes nothing, and physical safety never rests on Jev (every
+    movement is admitted or refused by the SafetySupervisor; mandatory
+    recovery and return bypass Jev). Those kinds accept at a lower
+    confidence; a final ANSWER slightly higher; anything else -- CLARIFY and
+    ESCALATE end the session, and any other kind -- keeps the strict bar.
+    A choice below its bar is re-asked once with the refusal as feedback
+    (``reask_once``) before the turn counts as refused; never more.
+    """
+
+    strict_act_at: float = .8
+    observe_act_at: float = .5
+    reanchor_act_at: float = .5
+    read_act_at: float = .5
+    answer_act_at: float = .6
+    min_margin: float = .15
+    reask_once: bool = True
+
+    def __post_init__(self):
+        for name in ("strict_act_at", "observe_act_at", "reanchor_act_at", "read_act_at", "answer_act_at",
+                     "min_margin"):
+            value = getattr(self, name)
+            if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError(f"acceptance threshold {name} must be a finite probability")
+        if type(self.reask_once) is not bool:
+            raise ValueError("reask_once must be a boolean")
+
+    @classmethod
+    def strict(cls, act_at: float = .8, min_margin: float = .15) -> "AcceptancePolicy":
+        """One bar for every kind, no re-ask (the controller's original policy)."""
+        return cls(act_at, act_at, act_at, act_at, act_at, min_margin, False)
+
+    def act_at_for(self, kind) -> float:
+        if kind == CandidateKind.OBSERVE:
+            return self.observe_act_at
+        if kind == CandidateKind.REANCHOR:
+            return self.reanchor_act_at
+        if kind in READ_KINDS:
+            return self.read_act_at
+        if kind == CandidateKind.ANSWER:
+            return self.answer_act_at
+        return self.strict_act_at
+
+    def as_config(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class TurnOutcome:
     candidate_id: str
     accepted: bool
@@ -108,10 +160,17 @@ class RoomController:
                  ingest_pending: Callable[[str], object] | None = None,
                  supervisor=None, flight_executor=None, provider_wait_s: float = 10.0,
                  resolve_checkpoint=None, perception_capture=None, perception_provider=None,
-                 count_geometry: CountGeometry | None = None):
+                 count_geometry: CountGeometry | None = None, acceptance: AcceptancePolicy | None = None):
         for value in (act_at, min_margin):
             if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
                 raise ValueError("choice thresholds must be finite probabilities")
+        if acceptance is not None and not isinstance(acceptance, AcceptancePolicy):
+            raise ValueError("acceptance must be an AcceptancePolicy")
+        #: Task V2: without an explicit policy every kind keeps ``act_at``
+        #: and nothing is re-asked (the original behaviour).
+        self.acceptance = acceptance if acceptance is not None else AcceptancePolicy.strict(act_at, min_margin)
+        if acceptance is not None:
+            act_at, min_margin = acceptance.strict_act_at, acceptance.min_margin
         self.store, self.judge = store, judge
         query_clock = ({"clock": supervisor.clock, "clock_domain_id": supervisor.clock_domain_id}
                        if supervisor is not None else {})
@@ -743,31 +802,69 @@ class RoomController:
             # Task B item 2c: this turn's localization health, so Jev can
             # choose an early bounded re-anchor (never coordinates).
             state["localization"] = self.localization_health()
-        provider_error = None
         started = time.monotonic_ns()
-        def choose(cancel):
+        policy = self.acceptance
+
+        def ask(asked_state):
+            def choose(cancel):
+                try:
+                    return self.judge.choice(deepcopy(asked_state),
+                        "Choose one legal action. Reads are historical. Never compose factual values.",
+                        criteria=dict(criteria), name="room_action"), None
+                except Exception as exc:
+                    return None, type(exc).__name__
+            waited = self.wait_for_perception(choose, session_id=session_id)
+            if waited.status == "PREEMPTED":
+                return None
+            if waited.status == "COMPLETED":
+                answer, error = waited.value
+            else:
+                answer, error = None, waited.status
+            # Task V2: the bar is the one for the kind Jev actually chose.
             try:
-                return self.judge.choice(deepcopy(state),
-                    "Choose one legal action. Reads are historical. Never compose factual values.",
-                    criteria=dict(criteria), name="room_action"), None
-            except Exception as exc:
-                return None, type(exc).__name__
-        waited = self.wait_for_perception(choose, session_id=session_id)
-        if waited.status == "PREEMPTED":
+                label = answer.get("value") if isinstance(answer, dict) else None
+            except Exception:
+                label = None
+            chosen = candidates.get(label) if type(label) is str else None
+            act_at = policy.act_at_for(chosen.kind if chosen is not None else None)
+            assessment = assess_choice(answer, criteria, escalation_label="ESCALATE",
+                                       act_at=act_at, min_margin=policy.min_margin)
+            return assessment, error, act_at
+
+        def audit(assessment):
+            audited = asdict(assessment)
+            audited["probabilities"] = [{"label": label, "probability": probability}
+                                        for label, probability in assessment.probabilities]
+            return audited
+
+        asked = ask(state)
+        if asked is None:
             return self._preempted(session_id, self.supervisor.last_preemption)
-        if waited.status == "COMPLETED":
-            answer, provider_error = waited.value
-        else:
-            answer, provider_error = None, waited.status
-        assessment = assess_choice(answer, criteria, escalation_label="ESCALATE",
-                                   act_at=self.act_at, min_margin=self.min_margin)
-        audited = asdict(assessment)
-        audited["probabilities"] = [{"label": label, "probability": probability}
-                                    for label, probability in assessment.probabilities]
+        assessment, provider_error, act_at = asked
+        reask = None
+        if (policy.reask_once and not provider_error
+                and assessment.outcome in ("LOW_CONFIDENCE", "THIN_MARGIN")):
+            # Task V2: one re-ask with the refusal as feedback, never a loop.
+            feedback = {"refused_choice": assessment.selected_label, "refusal": assessment.outcome,
+                        "confidence": assessment.confidence, "required_confidence": act_at,
+                        "margin": assessment.margin, "required_margin": policy.min_margin,
+                        "acceptance_thresholds": policy.as_config(),
+                        "note": ("Your previous choice was refused: below the acceptance threshold for its "
+                                 "kind. Choose once more from the same legal actions. Repeat it only if you "
+                                 "are confident it is the right next action; this is the last ask this turn.")}
+            reask = {"first_assessment": audit(assessment), "first_act_at": act_at, "feedback": feedback}
+            asked = ask({**state, "previous_refusal": feedback})
+            if asked is None:
+                return self._preempted(session_id, self.supervisor.last_preemption)
+            assessment, provider_error, act_at = asked
+        audited = audit(assessment)
         attempt = {"snapshot_version": snapshot.state_version, "state": state,
                    "candidates": [asdict(c) for c in candidates.values()], "assessment": audited,
-                   "provider_error": provider_error, "act_at": self.act_at, "min_margin": self.min_margin,
+                   "provider_error": provider_error, "act_at": act_at, "min_margin": policy.min_margin,
+                   "acceptance_policy": policy.as_config(),
                    "latency_ms": (time.monotonic_ns() - started) // 1_000_000}
+        if reask is not None:
+            attempt["reask"] = reask
         selected = candidates.get(assessment.selected_label)
         # Illegal provider labels are one failed decision operation. Retain the
         # actual proposed label in the assessment, but do not let arbitrary new

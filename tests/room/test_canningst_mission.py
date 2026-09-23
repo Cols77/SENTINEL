@@ -53,6 +53,11 @@ class FlyingTello(FakeTello):
         self.tag_view_deg = 180.0
         self.glimpses = 0  # bursts that still see the tags while yawed away
         self.bursts: list[float] = []
+        #: Task V2: at this x (a region's checkpoint) the tags are out of view
+        #: for ``blind_bursts`` bursts (None: always).
+        self.blind_x_cm: float | None = None
+        self.blind_bursts: int | None = None
+        self.blind_hits = 0
 
     def takeoff(self):
         self.flying = True
@@ -79,6 +84,10 @@ class FlyingTello(FakeTello):
 
     def burst(self, client, *, duration_s):
         self.bursts.append(self.heading_deg)
+        if (self.blind_x_cm is not None and abs(self.x_cm - self.blind_x_cm) < 1
+                and (self.blind_bursts is None or self.blind_hits < self.blind_bursts)):
+            self.blind_hits += 1
+            return []
         off = abs((self.heading_deg - 90.0 + 180.0) % 360.0 - 180.0)
         if off > self.tag_view_deg:
             if not self.glimpses:
@@ -140,18 +149,21 @@ class ObservingJudge(live_fakes.PolicyJudge):
         return super().choice(state, instruction, criteria=criteria, name=name)
 
 
-def binding(**drift_changes):
+def binding(site_changes=None, **drift_changes):
     loaded = live_session.load_flight_binding(
         site_path=SITE_PATH, drift_profile_path=PROFILES / "canningst-drift.json",
         energy_profile_path=PROFILES / "canningst-energy.json",
         command_limits_path=PROFILES / "canningst-command-limits.json",
         profile_paths=(PROFILES / "canningst-flight-profile.json",))
+    if site_changes:
+        loaded = replace(loaded, site=replace(loaded.site, **site_changes))
     if drift_changes:
         loaded = replace(loaded, drift_profile=replace(loaded.drift_profile, **drift_changes))
     return loaded
 
 
-def run_mission(tmp_path, monkeypatch, *, battery=90, yaw_gust_after_capture=None, **drift_changes):
+def run_mission(tmp_path, monkeypatch, *, battery=90, yaw_gust_after_capture=None, site_changes=None,
+                blind_x_cm=None, blind_bursts=None, **drift_changes):
     """Fly the CanningSt count mission; returns (outcome, tello, store events, detector).
 
     ``yaw_gust_after_capture``: right after that many captures, a gust yaws
@@ -160,8 +172,9 @@ def run_mission(tmp_path, monkeypatch, *, battery=90, yaw_gust_after_capture=Non
     of view until the aircraft faces them again."""
     # No real waiting: SETTLE/capture windows collapse to zero on the fake stack.
     monkeypatch.setattr(live_stack._TelloStack, "_within", staticmethod(lambda upper_bound_s: 0.0))
-    flight = binding(**drift_changes)
+    flight = binding(site_changes, **drift_changes)
     tello = FlyingTello(battery=battery)
+    tello.blind_x_cm, tello.blind_bursts = blind_x_cm, blind_bursts
     client = DjitellopyClient(local_ip="192.168.10.2", tello_factory=lambda **_: tello, video_factory=Video,
                               socket_factory=lambda *a, **k: FakeEmergencySocket())
     link = live_stack.TelloLink(build_client=lambda: client, clock=time.monotonic)
@@ -243,6 +256,9 @@ def test_with_the_committed_profiles_the_count_mission_flies_all_three_regions_t
     assert sorted(succeeded_observations(events)) == sorted([CENTER, LEFT, RIGHT]) and detector.calls == 3
     assert ("ANSWER:COUNTS", "ANSWERED_COUNT") in tool_outcomes(events)
     assert not refusals(events) & PATH_REFUSALS, refusals(events)
+    # Task V2: the session records the room loop's Jev acceptance thresholds.
+    policy = [e.payload for e in events if e.event_type == "ROOM_ACCEPTANCE_POLICY"]
+    assert len(policy) == 1 and policy[0]["observe_act_at"] == .5 and policy[0]["answer_act_at"] == .6
     # The lateral legs the regions need (20 cm out, 40 across, 20 back).
     assert [c for c in tello.sent if c.split()[0] in ("left", "right")] == ["left 20", "right 40", "left 20"]
 
@@ -301,3 +317,89 @@ def assert_recovered_by_yaw(outcome, tello, events, *, recoveries):
 def test_at_30_percent_battery_the_mission_is_refused_before_takeoff(tmp_path, monkeypatch):
     with pytest.raises(live_session.LiveSessionError, match="takeoff refused"):
         run_mission(tmp_path, monkeypatch, battery=30)
+
+
+# ---------------------------------------------------------------------------
+# Task V2: the expected re-anchor at a tag-visible checkpoint, flown
+# ---------------------------------------------------------------------------
+
+#: The pre-fix-1 declared hover drift (0.1 cm/s): with a fixless out-and-back
+#: no lateral region is admissible at it, so it isolates the credit. The
+#: drift per cm stays the history value (0.157 cm/cm).
+DOUBLED_HOVER = {"xy_drift_cm_s": 0.1}
+
+
+def credited(events):
+    return {e.payload.get("expected_reanchor") for e in events
+            if e.event_type == "SAFETY_ASSESSED" and e.payload.get("expected_reanchor")}
+
+
+def safety_reasons(events):
+    return [(e.payload.get("transition"), e.payload.get("reason")) for e in events
+            if e.event_type == "SAFETY_ASSESSED"]
+
+
+def test_with_the_expected_reanchor_the_doubled_hover_drift_still_observes_a_lateral_region(
+        tmp_path, monkeypatch):
+    """At twice the committed hover drift the left checkpoint (both mapped
+    wall tags declared in view) is admitted on its expected re-anchor: its
+    landing and drift budget are judged from the fix it gets there. The 40 cm
+    leg on to the right region is still refused, because the corridor home is
+    always judged from the fixless forecast. (With the committed profiles all
+    three regions fly without any credit: the first test of this file.)"""
+    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch, **DOUBLED_HOVER)
+    assert landed_over_the_pad(outcome, tello), outcome
+    assert succeeded_observations(events) == [CENTER, LEFT] and detector.calls == 2
+    assert credited(events) == {LEFT}
+    assert ("RETURN_NOW", "PROJECTED_TERMINATION_PATH_INVALID") in safety_reasons(events)
+    assert not any(reason == "EXPECTED_REANCHOR_MISSING" for _, reason in safety_reasons(events))
+
+
+def test_without_the_declared_tags_the_doubled_hover_drift_observes_only_the_center(tmp_path, monkeypatch):
+    """The control: the same mission with no tag visibility declared credits
+    no re-anchor, and the lateral regions are refused as before."""
+    outcome, tello, events, detector = run_mission(
+        tmp_path, monkeypatch, site_changes={"pose_tag_visibility": ()}, **DOUBLED_HOVER)
+    assert landed_over_the_pad(outcome, tello), outcome
+    assert succeeded_observations(events) == [CENTER] and not credited(events)
+    assert not any(c.split()[0] in ("left", "right") for c in tello.sent)
+
+
+def test_an_expected_fix_that_never_comes_runs_the_yaw_scan_recovery_then_lands_without_translating(
+        tmp_path, monkeypatch):
+    """Task V2 item 0: the left checkpoint was admitted on an expected
+    re-anchor, but the tags are never in view there. On arrival the pose is
+    latched RECOVERY_REQUIRED (EXPECTED_REANCHOR_MISSING): the supervisor's
+    stationary burst and yaw scan run (not Jev), fail, and the aircraft lands
+    in place -- no translation after the arrival at the left checkpoint."""
+    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch, blind_x_cm=230.0, **DOUBLED_HOVER)
+    reasons = safety_reasons(events)
+    assert ("RECOVER", "EXPECTED_REANCHOR_MISSING") in reasons, reasons
+    arrived = tello.sent.index("left 20")
+    assert not any(c.split()[0] in ("left", "right", "forward", "back") for c in tello.sent[arrived + 1:]), tello.sent
+    # The arrival refresh, then the recovery's stationary burst and its yaw
+    # burst at the mapped heading (the one it already faces: no SDK yaw).
+    assert tello.blind_hits >= 3 and 90.0 in tello.bursts
+    assert ("LAND_CONTINGENCY", "no_admissible_heading") in reasons, reasons
+    assert outcome.landing is not None and outcome.landing.state == "LANDED"
+    assert not tello.flying and "land" in tello.sent[arrived:] and abs(tello.x_cm - 230) < 1
+    assert LEFT not in succeeded_observations(events)
+    assert not [e for e in events if e.event_type == "POSE_REANCHORED"]
+
+
+def test_an_expected_fix_that_comes_late_is_recovered_and_the_mission_goes_on(tmp_path, monkeypatch):
+    """Both refreshes after the arrival at the left checkpoint (the arrival's
+    completion record and the next command's admission) miss the tags; the
+    supervisor's stationary recovery burst then re-anchors (POSE_REANCHORED)
+    before any translation; the interrupted capture is a TOOL_FAILURE, and
+    the mission goes on (the next leg is judged from the new fix) and home."""
+    outcome, tello, events, detector = run_mission(
+        tmp_path, monkeypatch, blind_x_cm=230.0, blind_bursts=2, **DOUBLED_HOVER)
+    reasons = safety_reasons(events)
+    assert ("RECOVER", "EXPECTED_REANCHOR_MISSING") in reasons, reasons
+    assert len([e for e in events if e.event_type == "POSE_REANCHORED"]) == 1
+    assert tello.blind_hits == 2
+    assert landed_over_the_pad(outcome, tello), outcome
+    assert (f"OBSERVE:g1:c1:{LEFT}", "TOOL_FAILURE") in tool_outcomes(events)
+    arrived = tello.sent.index("left 20")
+    assert "right 20" in tello.sent[arrived + 1:]  # the leg home, flown only after the re-anchor

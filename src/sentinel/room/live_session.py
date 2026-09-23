@@ -46,7 +46,7 @@ from sentinel.cube.recovery import RecoveryController
 from sentinel.cube.step_executor import ExecutorState, TerminalOutcome
 
 from . import wiring
-from .controller import RoomController
+from .controller import AcceptancePolicy, RoomController
 from .goals import GoalCompiler
 from .models import (AcceptanceManifest, CapabilityProfile, GoalStatus, TerminalState,
                      canonical_acceptance_manifest_sha256)
@@ -268,6 +268,16 @@ def adopt_assurances(store: RoomStore, *, session_id: str, clock_domain_id: str,
     return tuple(adopted)
 
 
+def record_acceptance_policy(store: RoomStore, session_id: str, acceptance: AcceptancePolicy) -> None:
+    """Task V2: append the session's Jev acceptance thresholds as a
+    ``ROOM_ACCEPTANCE_POLICY`` config event (every choice attempt also
+    carries them)."""
+    correlation = f"acceptance-policy:{session_id}"
+    store.append_event(session_id=session_id, expected_version=store.session_version(session_id),
+                       event_type="ROOM_ACCEPTANCE_POLICY", payload=acceptance.as_config(),
+                       correlation_id=correlation, causation_id=None, idempotency_key=correlation)
+
+
 def _calibration_profile_sha256s(profiles) -> tuple[str, ...]:
     from . import calibration
     return tuple(sorted(calibration.canonical_profile_sha256(p) for p in profiles
@@ -289,7 +299,7 @@ def run_count_return(
     assurances: Iterable[ContingencyAssurance], request_text: str, frames_dir: str | Path,
     clock: Callable[[], float], wall_clock: Callable[[], datetime],
     before_takeoff: Callable[[], None], landing_upper_bound_s: float = 10.0,
-    provider_wait_s: float = 10.0,
+    provider_wait_s: float = 10.0, acceptance: AcceptancePolicy | None = None,
 ) -> LiveSessionOutcome:
     """Build, take off, run to a terminal state and return the outcome.
 
@@ -307,6 +317,11 @@ def run_count_return(
             wall_clock=wall_clock, landing_upper_bound_s=landing_upper_bound_s)
         if isinstance(prepared, LiveSessionOutcome):
             return prepared
+        # Task V2: the room loop's per-kind Jev acceptance thresholds (and
+        # the one re-ask), recorded in the session ledger as this session's
+        # config before anything flies.
+        acceptance = acceptance if acceptance is not None else AcceptancePolicy()
+        record_acceptance_policy(store, manifest.run_id, acceptance)
         before_takeoff()
     except LiveSessionError:
         raise
@@ -329,7 +344,7 @@ def run_count_return(
 
     controller = RoomController(
         store, judge, supervisor=supervisor, flight_executor=stack.executor, provider_wait_s=provider_wait_s,
-        **collaborators,
+        acceptance=acceptance, **collaborators,
     )
     try:
         terminal = controller.run_until_terminal(manifest.run_id)
