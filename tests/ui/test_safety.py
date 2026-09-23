@@ -101,3 +101,52 @@ def test_controlled_land_is_sent_once_even_when_the_step_executor_cleans_up():
     assert [r.command for r in runner.client.records].count('land') == 1
     assert not runner.emergency_triggered
     assert runner.client.closed
+
+
+def test_acknowledged_controlled_land_records_landed_on_the_shared_step_executor():
+    """A UI-initiated controlled Land must make the shared StepExecutor
+    terminal immediately and record LANDED, not LANDING_FAILED, on
+    acknowledgement -- room/controller.py and the supervisor read this
+    terminal outcome to decide SAFE_LANDED versus ABORTED."""
+    from sentinel.cube.step_executor import ExecutorState
+    runner = FlightTestRunner(_FakeClient(), 'dry-run')
+    runner.step_executor.start_legacy()
+    runner.request_controlled_land()
+    assert runner.step_executor.state is ExecutorState.TERMINAL
+    outcome = runner.step_executor.land()
+    assert outcome.state == 'LANDED'
+    assert outcome.reason == 'OPERATOR_LAND'
+
+
+def test_emergency_latch_failure_does_not_block_the_independent_send():
+    """`SafetyRegistry.latch_all` must not let one runner's executor hook
+    raise or block the still-pending emergency transport send."""
+    class _RaisingExecutor:
+        def note_emergency(self):
+            raise RuntimeError('boom')
+
+    runner = FlightTestRunner(_FakeClient(), 'dry-run')
+    runner._step_executor = _RaisingExecutor()
+    registry = SafetyRegistry()
+    registry.bind('r', runner)
+    calls = []
+    adapter = RunnerSafetyAdapter(registry, lambda: calls.append('sent') or 9, 's')
+    identity = dict(command_id='c', correlation_id='x', idempotency_key='k')
+    result = adapter.trigger_emergency('s', identity, 'r')
+    assert result['status'] == 'ACKNOWLEDGED'
+    assert calls == ['sent']
+    assert runner.emergency_triggered
+
+
+def test_latch_all_does_not_propagate_a_runner_whose_latch_itself_raises():
+    """Even if `latch_emergency` itself raises, `latch_all` must not
+    propagate that failure -- the caller (the independent emergency
+    transport send) must still run."""
+    class _BrokenRunner:
+        def latch_emergency(self):
+            raise RuntimeError('latch failed')
+
+    registry = SafetyRegistry()
+    registry.bind('broken', _BrokenRunner())
+    registry.latch_all()  # must not raise
+    assert registry.emergency.is_set()

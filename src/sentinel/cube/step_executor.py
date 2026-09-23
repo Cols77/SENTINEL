@@ -241,6 +241,32 @@ class StepExecutor:
                 self._transition_locked(ExecutorState.TERMINAL, invalidate=True)
                 self._terminal_reason = "OPERATOR_EMERGENCY"
 
+    def note_controlled_land(self, acknowledged: bool) -> None:
+        """Record an operator Land sent outside the executor's own SDK lock.
+
+        Mission Control's controlled-Land path calls the client directly so a
+        blocked move can still be interrupted; it does not take
+        ``command_lock``. Without this hook the executor never learns the
+        landing happened, so its own cleanup lands nowhere (``land`` is
+        already latched) and its later ``_land_locked`` attempt races the
+        already-sent command and records the terminal outcome as
+        LANDING_FAILED even though the operator's Land was acknowledged. This
+        makes the executor terminal immediately and, if nothing has already
+        settled a terminal outcome (an emergency or another land already
+        completed one), records LANDED on acknowledgement and LANDING_FAILED
+        otherwise, so every reader of the shared terminal outcome (the room
+        controller, the supervisor) sees the safe landing.
+        """
+        with self._state_lock:
+            if self._state is ExecutorState.CLOSED:
+                return
+            self._land_attempted = True
+            self._may_be_airborne = False
+            self._transition_locked(ExecutorState.TERMINAL, invalidate=True)
+            if self._terminal is None:
+                self._terminal_reason = "OPERATOR_LAND"
+                self._terminal = self._terminal_outcome("LANDED" if acknowledged else "LANDING_FAILED")
+
     def start(self, home_definition: HomeDefinition) -> HomeState:
         if self.measure_home is None:
             raise ValueError("start requires a measured home source")

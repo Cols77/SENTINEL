@@ -159,7 +159,18 @@ class FlightTestRunner:
                 # Both the direct motor-stop path and an independent emergency
                 # transport latch here, so the shared step executor always
                 # becomes terminal before any further SDK work is admitted.
-                self.step_executor.note_emergency()
+                # Read the slot directly rather than the lazy `step_executor`
+                # property: a bare latch must never construct an executor
+                # (which can block on `_state_lock`) or raise and abort the
+                # caller's transport send. A later `start`/`start_legacy`
+                # fails closed on EmergencyAborted regardless, since
+                # `_emergency()` reads `runner.emergency_triggered`.
+                executor = self._step_executor
+                if executor is not None:
+                    try:
+                        executor.note_emergency()
+                    except BaseException:
+                        pass
             return fresh
 
     def request_controlled_land(self) -> None:
@@ -171,14 +182,23 @@ class FlightTestRunner:
                 raise EmergencyAborted("emergency already latched")
             self.land_event.set()
             self.land_status = "REQUESTED"
+            acknowledged = False
             try:
                 response = self.client.land()
-                if not self._is_ok(response):
+                acknowledged = self._is_ok(response)
+                if not acknowledged:
                     raise RuntimeError("LAND_NOT_ACKNOWLEDGED")
                 self.land_status = "ACKNOWLEDGED"
             except Exception:
                 self.land_status = "FAILED"
                 raise
+            finally:
+                # The shared StepExecutor must record this Land as its own
+                # terminal outcome: its cleanup never sends a second `land`
+                # (the next `_call` raises ControlledLandRequested), so
+                # without this it would otherwise report LANDING_FAILED even
+                # though the operator's Land was acknowledged.
+                self.step_executor.note_controlled_land(acknowledged)
 
     def trigger_emergency(self) -> None:
         """Latch emergency state before sending the direct motor-stop command.

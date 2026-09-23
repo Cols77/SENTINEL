@@ -56,7 +56,13 @@ class SafetyRegistry:
         with self._lock:
             self.emergency.set()
             for runner in self._runners.values():
-                runner.latch_emergency()
+                # Each runner latches independently: one runner's latch must
+                # never stop the others from latching or block the caller's
+                # (still-pending) emergency transport send.
+                try:
+                    runner.latch_emergency()
+                except BaseException:
+                    pass
 
 
 class RunnerSafetyAdapter:
