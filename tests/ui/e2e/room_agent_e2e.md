@@ -85,6 +85,20 @@ browser_evaluate   () => ['room-status','room-answer','room-returned-home','room
                          .map(t => t + ': ' + document.querySelector(`[data-testid=${t}]`).innerText).join('\n')
 ```
 
+**Jev rehearsal (real Jev model over OpenRouter, fake drone), verified 2026-09-24 via Playwright MCP**
+(start Mission Control with `--i-authorise-paid-calls`, select `JEV_REHEARSAL`):
+- scenario (b), "count the phones and computers in the room":
+  - Jev chose observe right, then left, then center (p 0.56–0.60);
+  - mid-mission it went COASTING → RECOVERY_REQUIRED → a stationary burst with no tags → `Yaw rotation ccw 15 deg -> heading 90 deg` → tags 0 and 2 → re-anchor accepted;
+  - it answered `phones: 1 confirmed, 1 uncertain; computers: 2 confirmed`;
+  - `COMPLETED · LANDED`, `Returned home`.
+- scenario (a), "find the phone": observe center → `ANSWERED_SEARCH`, a high-confidence phone on the demo surface at left-front plus an uncertain one; returned home and LANDED.
+- Getting there required fixing, in `fc2cec2`..`22a09a8`:
+  - the live Jev model and route;
+  - the goal-compile gate (0.5 plus one re-ask);
+  - resolving named classes in code;
+  - single-option confirmations.
+
 Verified by hand on 2026-09-23 through the Playwright MCP browser: scenario (a)
 answered `phones: 1 confirmed, 1 uncertain; computers: 2 confirmed`, `Returned
 home`, `Landing: LANDED (REQUESTED)`; scenario (b) logged the COASTING and
