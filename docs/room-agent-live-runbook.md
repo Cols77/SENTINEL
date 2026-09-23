@@ -7,7 +7,7 @@ only (Plan 05 tracker/following is deferred); the CLI's built-in help
 
 ## Scope of this build
 
-`scripts/room_session.py --mode live` gates a session all the way through
+`scripts/room_session.py live` gates a session all the way through
 manifest authorization, capability admission, matching calibration
 profiles, provider/filming consent, site assurance and a motors-off
 connectivity preflight -- and stops there. **Actual autonomous flight
@@ -84,12 +84,17 @@ Preview also prints, to stderr:
   whether any `--consent-reference` was declared at all). An empty
   registry, an expired/mismatched grant, or no consent reference each show
   up here -- preview never fails just because a gate is unmet; it reports.
-- `next: python scripts/room_session.py --mode live --execute --manifest
-  ... --authorization-digest ... --capability ... --grant-registry ...`,
-  the exact command to run next, once every reported gate is clear and
-  `--manifest-out` was given. This is the ready-to-run live/connectivity
-  command; add `--check-connectivity-only` (and consent/profile/site
-  flags -- see below) as needed.
+- `next: python scripts/room_session.py live --execute --manifest ...
+  --authorization-digest ... --capability ... --grant-registry ...
+  --consent-db <...> --location <...> --date <...> --i-authorise-paid-calls
+  --profile-file <...> --site <...> --assurance <...> --clock-domain-id
+  <...>`, the exact, actually-runnable command to run next (positional
+  `live`, not a `--mode` flag), once every reported gate is clear and
+  `--manifest-out` was given. The `<...>` placeholders are the
+  consent/profile/site/assurance evidence files preview does not itself
+  take (see below); fill them in with real paths. Add
+  `--check-connectivity-only` for the motors-off diagnostic instead of a
+  full flight.
 
 `--target-mode simulate` previews a manifest for the (currently deferred)
 simulate mode instead; capability admission never applies to it.

@@ -25,8 +25,9 @@ from pathlib import Path
 from typing import Callable, Mapping
 import uuid
 
-from sentinel.cube.checkpoint import CheckpointPlan, CommandLimits, plan_checkpoint
+from sentinel.cube.checkpoint import CheckpointPlan, CommandLimits, PlannedCommand, plan_checkpoint
 from sentinel.models import Position
+from sentinel.motion_bounds import rotate_reply_upper_bound_s
 from sentinel.survey.live_detect import LIVE_CLASSES, detect_frame
 
 from . import calibration
@@ -45,18 +46,50 @@ class WiringError(ValueError):
 # resolve_checkpoint: semantic pose_id -> cube checkpoint plan
 # ---------------------------------------------------------------------------
 
-#: A single straight-ahead capture. Real waypoint look-arcs (multiple looks
-#: per checkpoint) are a later task; this wiring only needs a checkpoint that
-#: actually reaches the declared pose and captures once there, matching what
-#: the controller's own pose-verification guard requires
-#: (``_checkpoint_targets_declared_pose``/``_measured_pose_matches_declared_pose``).
-_SINGLE_CAPTURE_LOOKS_DEG: tuple[int, ...] = (0,)
+#: A single capture, facing the resolved pose's own declared yaw (never a
+#: fixed offset -- see ``make_resolve_checkpoint``). Real waypoint look-arcs
+#: (multiple looks per checkpoint) are a later task; this wiring only needs a
+#: checkpoint that actually reaches the declared pose and captures once
+#: there, matching what the controller's own pose-verification guard
+#: requires (``_checkpoint_targets_declared_pose``/``_measured_pose_matches_declared_pose``).
 _SINGLE_CAPTURE_COUNT = 1
+
+
+def _retarget_terminal_heading(plan: CheckpointPlan, target_heading_deg: float, limits: CommandLimits) -> CheckpointPlan:
+    """Extend *plan* with one more ROTATE to *target_heading_deg*, if it doesn't already end there.
+
+    ``plan_checkpoint`` always ends a plan back at its own
+    ``limits.canonical_heading_deg`` (the one heading its axis-mapped MOVE
+    commands are geometrically valid at -- see ``make_resolve_checkpoint``);
+    it refuses outright to be given a different ``terminal_heading_deg``. The
+    controller's declared-pose check (``_checkpoint_targets_declared_pose``)
+    requires the opposite: the checkpoint must end facing the *pose's* own
+    declared yaw. This reconciles the two by appending one more rotate after
+    ``plan_checkpoint`` has already built a geometrically-correct translation
+    plan, rather than touching ``plan_checkpoint``'s own invariant or its
+    private rotation helper.
+    """
+    delta = (target_heading_deg - plan.terminal_heading_deg + 180.0) % 360.0 - 180.0
+    if abs(delta) < 1e-9:
+        return plan
+    direction = "ccw" if delta > 0 else "cw"
+    rotate = PlannedCommand.from_mapping(
+        "ROTATE", {"degrees": abs(delta), "direction": direction, "phase": "retarget"},
+        upper_bound_s=rotate_reply_upper_bound_s(
+            degrees=abs(delta), base_timeout_s=limits.transport_limits.reply_timeout_s,
+        ),
+        interruptible=False,
+    )
+    return CheckpointPlan(
+        checkpoint_id=plan.checkpoint_id, start=plan.start, target=plan.target,
+        start_heading_deg=plan.start_heading_deg, terminal_heading_deg=target_heading_deg,
+        commands=plan.commands + (rotate,), worst_case_s=plan.worst_case_s + rotate.upper_bound_s,
+    )
 
 
 def make_resolve_checkpoint(
     *, site: RoomSite, profile: calibration.CalibrationProfile,
-    pose_source: Callable[[], object],
+    pose_source: Callable[[], object], limits: CommandLimits,
 ) -> Callable[[object, object], CheckpointPlan]:
     """Build the production ``resolve_checkpoint`` collaborator.
 
@@ -67,12 +100,27 @@ def make_resolve_checkpoint(
     this factory ran. ``profile`` supplies the only site speed this wiring
     ever commands: the slowest one the calibration profile actually
     validated (``profile.speeds_cm_s``), never a guessed or hardcoded
-    default. Each checkpoint's own canonical/terminal heading is the
-    resolved pose's declared yaw -- the checkpoint holds that heading
-    throughout, exactly like a calibration route (see calibration.py) -- so
-    the controller's declared-pose heading check
-    (``_checkpoint_targets_declared_pose``) can pass without this wiring
-    ever emitting a sustained off-canonical heading.
+    default. ``limits`` is the SafetySupervisor's own injected
+    ``CommandLimits`` (fix round 1, Q3) -- the same calibrated constants
+    ``calibration_hashes`` binds the grant to and ``SafetySupervisor._path_clear``
+    assesses every plan against -- used here unchanged, never a fresh
+    default ``CommandLimits()`` a supervisor was never calibrated to accept.
+
+    Every translation is planned at ``limits.canonical_heading_deg`` (fix
+    round 1, Q1): ``plan_checkpoint``'s axis-to-direction mapping (x ->
+    left/right, y -> back/forward) is only geometrically valid while the
+    aircraft actually holds that one heading -- ``LocalizationTracker``
+    resolves a MOVE's displacement relative to whatever heading the aircraft
+    is *currently at*, not a fixed world frame. Planning translations at the
+    resolved pose's own declared yaw instead (the prior bug) silently
+    rotated every commanded displacement by ``pose_yaw - canonical``,
+    landing the aircraft anywhere but the declared target for any pose whose
+    look is not the canonical direction. The single capture instead faces
+    the pose's own yaw via a ``looks_deg`` offset from canonical, and the
+    checkpoint holds that yaw as its terminal heading (added back on with
+    ``_retarget_terminal_heading``) -- so the controller's declared-pose
+    check (``_checkpoint_targets_declared_pose``) still sees the checkpoint
+    end exactly where its candidate ID says it will.
 
     Raises ``WiringError`` immediately (never lazily, inside the returned
     closure) if *profile* has no validated speed to fly at.
@@ -80,6 +128,7 @@ def make_resolve_checkpoint(
     if not profile.speeds_cm_s:
         raise WiringError("resolve_checkpoint requires a calibration profile with a validated speed")
     speed_cm_s = min(profile.speeds_cm_s)
+    canonical_heading_deg = limits.canonical_heading_deg
 
     def resolve_checkpoint(candidate, snapshot) -> CheckpointPlan:
         pose_id = candidate.candidate_id.rsplit(":", 1)[-1]
@@ -88,14 +137,15 @@ def make_resolve_checkpoint(
             raise WiringError(f"pose_id {pose_id!r} does not resolve against this site's semantic frame")
         pose = pose_source()
         target = Position(resolved.x_cm, resolved.y_cm, resolved.z_cm)
-        heading_deg = float(resolved.yaw_deg)
-        limits = CommandLimits(canonical_heading_deg=heading_deg)
-        return plan_checkpoint(
+        pose_yaw_deg = float(resolved.yaw_deg)
+        look_deg = pose_yaw_deg - canonical_heading_deg
+        plan = plan_checkpoint(
             checkpoint_id=candidate.candidate_id, start=pose.position, target=target,
-            start_heading_deg=pose.heading_deg, terminal_heading_deg=heading_deg,
-            speed_cm_s=speed_cm_s, looks_deg=_SINGLE_CAPTURE_LOOKS_DEG,
+            start_heading_deg=pose.heading_deg, terminal_heading_deg=canonical_heading_deg,
+            speed_cm_s=speed_cm_s, looks_deg=(look_deg,),
             capture_count=_SINGLE_CAPTURE_COUNT, limits=limits,
         )
+        return _retarget_terminal_heading(plan, pose_yaw_deg, limits)
 
     return resolve_checkpoint
 

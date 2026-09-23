@@ -162,6 +162,14 @@ def _cmd_preview(args: argparse.Namespace) -> int:
             trial_protocol=args.trial_protocol, evidence_destination=args.evidence_destination,
         )
         raw = manifest.canonical_bytes()
+        # Fix round 1 (Q5): apply the exact same fail-closed check live's own
+        # parse_manifest(read_bytes()) will apply later (JSON Schema, not just
+        # SessionManifest's own dataclass invariants -- artifacts.write_manifest
+        # exists for precisely this reason). Without this, preview could print
+        # and write a manifest/digest that live then refuses at run time (a
+        # non-hex grant/profile hash, an out-of-range duration, ...), and the
+        # operator would only find out after copying the printed command.
+        artifacts.parse_manifest(raw)
     except (ManifestError, ArtifactError) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
@@ -176,12 +184,29 @@ def _cmd_preview(args: argparse.Namespace) -> int:
     for gate in gates:
         print(f"missing gate: {gate}", file=sys.stderr)
     if not gates and args.manifest_out:
-        print(
-            "next: python scripts/room_session.py --mode live --execute "
+        # Fix round 1 (S1/Q4): `room_session.py`'s parser uses positional
+        # subcommands (preview|live|replay|simulate), not a `--mode` flag --
+        # the previous "--mode live --execute" text was not runnable
+        # (argparse: "unrecognized arguments: --mode"). This is the exact
+        # positional syntax live actually accepts, with every flag a
+        # flight-capable live invocation requires: the two this preview run
+        # already knows (--manifest/--authorization-digest/--capability/
+        # --grant-registry) plus explicit `<...>` placeholders for the
+        # evidence files/consent flags preview never takes (it binds to
+        # concrete files an operator does not necessarily have yet at preview
+        # time -- see the runbook's "Known follow-ups"), so the operator
+        # knows exactly what to fill in rather than discovering a missing
+        # flag only when live refuses.
+        next_command = (
+            "python scripts/room_session.py live --execute "
             f"--manifest {args.manifest_out} --authorization-digest {digest} "
-            f"--capability {args.capability} --grant-registry {args.grant_registry}",
-            file=sys.stderr,
+            f"--capability {args.capability} --grant-registry {args.grant_registry} "
+            "--consent-db <consent-db-path> --location <location> --date <YYYY-MM-DD> "
+            "--i-authorise-paid-calls --profile-file <profile-file-path> "
+            "--site <site-path> --assurance <assurance-file-path> "
+            "--clock-domain-id <clock-domain-id>"
         )
+        print(f"next: {next_command}", file=sys.stderr)
     return 0
 
 
@@ -224,7 +249,8 @@ def _load_assurance(path: str):
 
 
 def _check_site_assurance(site_path: str | None, assurance_paths: list[str], *,
-                          clock_domain_id: str | None, now_monotonic_ms: int) -> None:
+                          manifest: SessionManifest, clock_domain_id: str | None,
+                          now_monotonic_ms: int) -> None:
     if site_path is None:
         raise GateError("--site is required to verify site assurance before a live flight")
     if not clock_domain_id:
@@ -233,12 +259,26 @@ def _check_site_assurance(site_path: str | None, assurance_paths: list[str], *,
         site: RoomSite = parse_room_site(json.loads(Path(site_path).read_text(encoding="utf-8")))
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise GateError(f"--site could not be loaded: {exc}") from exc
+    # Fix round 1 (Q6): the site-assurance gate previously checked the *shape*
+    # of --site's terminal contingencies without ever binding --site itself to
+    # the manifest's own declared site_sha256/tag_map_sha256 -- an operator
+    # could point --site at any site file at all. Refuse unless it is the same
+    # site the manifest was authorized against.
+    if site.cube_site_sha256 != manifest.site_sha256 or site.tag_map_sha256 != manifest.tag_map_sha256:
+        raise GateError(
+            "--site does not match the manifest's bound site_sha256/tag_map_sha256"
+        )
     assurances = tuple(_load_assurance(path) for path in assurance_paths)
     for trigger in ContingencyTrigger:
         entries = [entry for entry in site.terminal_contingencies if entry.trigger == trigger]
         entries_by_id = {entry.contingency_id: entry for entry in entries}
+        # Fix round 1 (Q6): an assurance not recorded for *this* run's
+        # session_id (manifest.run_id) must never count toward clearing a
+        # trigger -- otherwise a stale or another session's assurance file
+        # could authorize this one.
         matching = [a for a in assurances
-                   if a.clock_domain_id == clock_domain_id and a.contingency_id in entries_by_id]
+                   if a.clock_domain_id == clock_domain_id and a.contingency_id in entries_by_id
+                   and a.session_id == manifest.run_id]
         revoked_ids = {a.assurance_id for a in matching if a.state == "REVOKED"}
         current = []
         for assurance in matching:
@@ -259,6 +299,7 @@ def _cmd_live(
     client_factory: Callable[[], object],
     jev_factory: Callable[[], object],
     clock: Callable[[], float],
+    wall_clock: Callable[[], datetime],
 ) -> int:
     try:
         _check_capability_available(args.capability)
@@ -281,11 +322,10 @@ def _cmd_live(
     if manifest.requested_capability != args.capability:
         print("refused: --capability does not match the manifest's requested_capability", file=sys.stderr)
         return 2
-    try:
-        now = _parse_now(args.now)
-    except ValueError as exc:
-        print(f"refused: {exc}", file=sys.stderr)
-        return 2
+    # Fix round 1 (Q7): wall time for a flight-capable live invocation (grant
+    # expiry) comes from an injected clock, never an operator-supplied --now --
+    # a back-dated --now could otherwise admit an expired PROMOTED/TRIAL grant.
+    now = wall_clock()
     # Provider/filming consent: required for every live invocation, including
     # the motors-off connectivity-only diagnostic (the sole capability-grant
     # exemption -- consent is never exempted).
@@ -307,8 +347,14 @@ def _cmd_live(
             return 2
         try:
             _check_profiles(manifest, args.profile_file, grant_state=winning_grant.state)
-            _check_site_assurance(args.site, args.assurance, clock_domain_id=args.clock_domain_id,
-                                  now_monotonic_ms=int(now.timestamp() * 1000))
+            # Fix round 1 (Q6): site-assurance freshness is a monotonic-clock-domain
+            # comparison (assured_monotonic_ms/expires_monotonic_ms) -- evaluate it
+            # against the injected monotonic `clock`, the same one connectivity below
+            # uses, never wall-clock epoch milliseconds (a different clock domain
+            # entirely; a real monotonic assurance would never compare sanely against it).
+            _check_site_assurance(args.site, args.assurance, manifest=manifest,
+                                  clock_domain_id=args.clock_domain_id,
+                                  now_monotonic_ms=int(clock() * 1000))
         except GateError as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 2
@@ -437,7 +483,12 @@ def build_parser() -> argparse.ArgumentParser:
     live_parser.add_argument("--check-connectivity-only", action="store_true")
     live_parser.add_argument("--connectivity-max-age-s", type=float, default=5.0)
     live_parser.add_argument("--connectivity-timeout-s", type=float, default=5.0)
-    live_parser.add_argument("--now", default=None)
+    # Fix round 1 (Q7): live never takes an operator-supplied --now. A
+    # flight-capable invocation's wall time (grant expiry) comes only from
+    # main()'s injected `wall_clock`, which tests can override but which a
+    # real invocation always resolves to actual wall time -- a back-dated
+    # --now could otherwise admit an expired PROMOTED/TRIAL grant or stale
+    # site assurance.
     live_parser.set_defaults(func=None)
 
     replay_parser = subparsers.add_parser("replay", help="replay a frozen fixture")
@@ -458,12 +509,14 @@ def main(
     client_factory: Callable[[], object] = _refuse_client,
     jev_factory: Callable[[], object] = _refuse_jev,
     clock: Callable[[], float] = time.monotonic,
+    wall_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.mode == "live":
         return _cmd_live(args, drone_probe=drone_probe, provider_probe=provider_probe,
-                         client_factory=client_factory, jev_factory=jev_factory, clock=clock)
+                         client_factory=client_factory, jev_factory=jev_factory, clock=clock,
+                         wall_clock=wall_clock)
     return args.func(args)
 
 

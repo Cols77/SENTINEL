@@ -53,9 +53,32 @@ _SAFE_TERMINATION_STATES = frozenset({
     TerminalState.SAFE_LANDED.value, TerminalState.LANDED_AT_CERTIFIED_ZONE.value,
 })
 
+#: Fix round 1 (Q8): terminal.json's own ``completed_at`` key is a
+#: caller-supplied mapping -- nothing in this build's production code writes
+#: it yet, so a truthy value there alone is not evidence of anything. Reuse
+#: the same durable-event predicate ``sentinel.room.queries.ReadQueries.project``
+#: (and ``sentinel.room.supervisor.SafetySupervisor.__init__``'s own
+#: ``_terminal`` latch) already treat as a confirmed safe landing: a
+#: ``DRONE_STATE_RECORDED`` event whose measured state reports
+#: ``terminal_state == "LANDED"`` with ``completion_known`` true -- an
+#: SDK-uncertain completion is never durable landing evidence.
+_LANDED_TERMINAL_STATE = "LANDED"
+
 
 class VerificationError(RuntimeError):
     """A run artifact failed one of this script's independent checks."""
+
+
+def _has_durable_landing_evidence(events) -> bool:
+    for event in events:
+        if event.event_type != "DRONE_STATE_RECORDED":
+            continue
+        state = event.payload.get("state")
+        if not isinstance(state, dict):
+            continue
+        if state.get("terminal_state") == _LANDED_TERMINAL_STATE and state.get("completion_known"):
+            return True
+    return False
 
 
 def _resolved_identities_from_events(events) -> dict:
@@ -117,6 +140,16 @@ def verify(*, manifest_path: Path, expect_terminal: str, expect_capability: str,
         store.close()
     if not events:
         raise VerificationError("run has zero durable events")
+    # Fix round 1 (Q8): a gap in sequence_no (an event deleted straight from
+    # the SQLite file, bypassing the store's own append-only write path) is
+    # otherwise invisible to every check below -- each remaining event's own
+    # hash still recomputes fine, and the resolved-identity/require-event
+    # checks only ever look for presence, never completeness.
+    sequence_numbers = sorted(event.sequence_no for event in events)
+    if sequence_numbers != list(range(1, len(events) + 1)):
+        raise VerificationError(
+            "durable event sequence_no is not contiguous from 1 (a gap indicates deleted or reordered events)"
+        )
     for event in events:
         recomputed = store_event_sha256(
             session_id=event.session_id, event_type=event.event_type,
@@ -125,6 +158,11 @@ def verify(*, manifest_path: Path, expect_terminal: str, expect_capability: str,
         )
         if recomputed != event.event_sha256:
             raise VerificationError(f"event {event.event_id} hash does not match its durable content")
+    if state in _SAFE_TERMINATION_STATES and not _has_durable_landing_evidence(events):
+        raise VerificationError(
+            f"terminal state {state!r} is a safe-termination state but the durable event log has no "
+            "DRONE_STATE_RECORDED evidence of a confirmed landing (terminal_state=LANDED, completion_known)"
+        )
 
     resolved = _resolved_identities_from_events(events)
     if resolved != terminal_document.get("resolved_identities", {}):
@@ -147,6 +185,31 @@ def verify(*, manifest_path: Path, expect_terminal: str, expect_capability: str,
     for event_type in require_event:
         if not any(event.event_type == event_type for event in events):
             raise VerificationError(f"required event type {event_type!r} is missing from the run")
+
+    # Fix round 1 (Q8): cross-check summary.json (RunArtifacts.finalize's own
+    # second, independently-written record of this run) against what was just
+    # independently verified above, rather than trusting terminal.json alone.
+    summary_path = run_dir / "summary.json"
+    if not summary_path.exists():
+        raise VerificationError("run directory has no summary.json")
+    try:
+        summary_document = json.loads(summary_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise VerificationError(f"summary.json is not valid JSON: {exc}") from exc
+    if not isinstance(summary_document, dict):
+        raise VerificationError("summary.json must be a JSON object")
+    if summary_document.get("run_id") != run_id:
+        raise VerificationError("summary.json run_id does not match the manifest's run_id")
+    if summary_document.get("terminal_state") != state:
+        raise VerificationError(
+            f"summary.json terminal_state {summary_document.get('terminal_state')!r} "
+            f"does not match terminal.json's state {state!r}"
+        )
+    if summary_document.get("event_count") != len(events):
+        raise VerificationError(
+            f"summary.json event_count ({summary_document.get('event_count')!r}) does not match "
+            f"the durable event log ({len(events)} events)"
+        )
 
     return run_id
 

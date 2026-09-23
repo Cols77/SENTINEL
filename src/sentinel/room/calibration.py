@@ -976,23 +976,48 @@ def _pose_envelope_key(distance_cm: float, elapsed_s: float, yaw_deg: float) -> 
     )
 
 
+def _bucket_ceil(value: float, size: float) -> float:
+    """Round *value* up to the next bucket multiple, never down.
+
+    Used only for a *query* in ``envelope_bound_for`` -- never for the training
+    samples that build an envelope (``_pose_envelope_key``, unchanged, still
+    rounds to nearest so a bucket's own label reflects its center). Rounding a
+    query to nearest (fix round 1, Q9) let a query up to half a bucket beyond a
+    sampled maximum register as "dominated": ``round(102.5 cm / 5 cm) * 5 cm ==
+    100 cm``, so a 102.5 cm query was silently treated as no more demanding than
+    a 100 cm-labeled sample it was never actually tested against. Ceiling never
+    understates a query: it either lands on the query's own bucket (a query
+    already at a bucket boundary, or one *below* it, still matches -- preserving
+    absorption of small negative reading jitter) or pushes it to the next bucket
+    up, which then correctly fails to be dominated by a lower-labeled sample. A
+    small epsilon guards against float noise nudging an exact multiple up an
+    extra bucket (e.g. ``30 / 5`` landing on ``5.999999999`` instead of ``6``).
+    """
+    return math.ceil(value / size - 1e-9) * size
+
+
 def envelope_bound_for(
     envelope: Sequence[PoseEnvelopePoint], *, distance_cm: float, time_s: float, yaw_deg: float,
 ) -> float | None:
     """The conservative drift bound (cm) admissible for a query point, or ``None`` if
     no sampled combination in *envelope* dominates it.
 
-    The query is bucketed the same way training samples are (absorbing wall-clock/
-    reading jitter, not changing what "dominates" means), then a sampled point
-    ``p`` dominates it when ``p.distance_cm >= distance_cm``, ``p.time_s >= time_s``
-    and ``abs(p.yaw_deg) >= abs(yaw_deg)`` -- every dimension of that sample is at
+    The query is bucketed conservatively -- rounded *up* to the bucket grid
+    (``_bucket_ceil``), never down -- so it can absorb small reading
+    undershoot (a query landing just below a bucket boundary still matches
+    that boundary) without ever treating a query above a sampled maximum as
+    dominated by it. A sampled point ``p`` dominates the bucketed query when
+    ``p.distance_cm >= distance_cm``, ``p.time_s >= time_s`` and
+    ``abs(p.yaw_deg) >= abs(yaw_deg)`` -- every dimension of that sample is at
     least as demanding as the query. The bound returned is the worst (largest) drift
     among every dominating sample, never an average and never an interpolation. A
     query that exceeds every sampled combination's maximum in even one dimension
     dominates nothing and is refused (``None``): this fails closed, it never
     extrapolates beyond what was actually sampled.
     """
-    distance_b, time_b, yaw_b = _pose_envelope_key(distance_cm, time_s, abs(yaw_deg))
+    distance_b = _bucket_ceil(distance_cm, _DISTANCE_BUCKET_CM)
+    time_b = _bucket_ceil(time_s, _TIME_BUCKET_S)
+    yaw_b = _bucket_ceil(abs(yaw_deg), _YAW_BUCKET_DEG)
     dominating = [
         point.drift_cm for point in envelope
         if point.distance_cm >= distance_b and point.time_s >= time_b and abs(point.yaw_deg) >= yaw_b

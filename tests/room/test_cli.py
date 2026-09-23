@@ -26,6 +26,13 @@ FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "room_agent" / 
 SITE_PATH = FIXTURE_DIR / "semantic-site.json"
 REPLAY_MANIFEST_PATH = FIXTURE_DIR / "manifest.json"
 
+# Fix round 1 (Q6): the site-assurance gate now binds --site to the manifest's
+# declared site_sha256/tag_map_sha256, so any test that exercises that gate to
+# success must use *this* fixture's real hashes, not an arbitrary placeholder.
+_SITE_DOCUMENT = json.loads(SITE_PATH.read_text(encoding="utf-8"))
+SITE_SHA256 = _SITE_DOCUMENT["cube_site_sha256"]
+TAG_MAP_SHA256 = _SITE_DOCUMENT["tag_map_sha256"]
+
 NOW = "2026-09-23T12:00:00+00:00"
 
 
@@ -176,8 +183,53 @@ def test_preview_reports_no_missing_gates_and_prints_the_next_command_when_admis
     out, err = capsys.readouterr()
     assert exit_code == 0
     assert "missing gate" not in err
-    assert "next: python scripts/room_session.py --mode live --execute" in err
+    assert "next: python scripts/room_session.py live --execute" in err
     assert str(manifest_out) in err
+
+
+def test_preview_next_command_actually_parses_as_a_live_invocation(tmp_path, capsys):
+    # Fix round 1 (S1/Q4): room_session.py's parser uses positional subcommands
+    # (preview|live|replay|simulate), not a --mode flag -- the old "--mode live
+    # --execute" text argparse-rejected with "unrecognized arguments: --mode".
+    # Feed the printed command's own tokens back through the real parser to
+    # prove it is actually executable, not just string-matched.
+    site_sha256, aircraft_id = _hash("site"), "aircraft-1"
+    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
+                            profile_sha256s=())
+    _registry_with_grant(tmp_path, grant)
+    manifest_out = tmp_path / "manifest.json"
+    exit_code = cli.main(_preview_argv(tmp_path, **{
+        "--capability-grant-sha256": grant.grant_sha256, "--consent-reference": ["consent-1"],
+        "__flags__": ["--manifest-out", str(manifest_out)],
+    }))
+    assert exit_code == 0
+    err = capsys.readouterr().err
+    next_line = next(line for line in err.splitlines() if line.startswith("next: "))
+    command_text = next_line[len("next: "):]
+    tokens = command_text.split()  # no quoting in the printed command; a Windows path can contain "\"
+    assert tokens[:2] == ["python", "scripts/room_session.py"]
+    parsed = cli.build_parser().parse_args(tokens[2:])  # must not raise/SystemExit
+    assert parsed.mode == "live"
+    assert parsed.execute is True
+    assert parsed.manifest == str(manifest_out)
+    assert parsed.capability == "count_return"
+    assert parsed.grant_registry == str(tmp_path / "registry.json")
+
+
+def test_preview_refuses_a_manifest_the_json_schema_rejects(tmp_path, capsys):
+    # Fix round 1 (Q5): SessionManifest's own __post_init__ never enforced the
+    # schema's max_duration_s > 0 bound, so preview could print and
+    # --manifest-out write a manifest+digest that live's own parse_manifest
+    # (which does apply the schema) would refuse -- an operator would only
+    # discover the mismatch after copying the printed live command.
+    _empty_registry(tmp_path)
+    manifest_out = tmp_path / "manifest.json"
+    exit_code = cli.main(_preview_argv(tmp_path, **{
+        "--max-duration-s": "0.0", "__flags__": ["--manifest-out", str(manifest_out)],
+    }))
+    assert exit_code == 2
+    assert "refused" in capsys.readouterr().err
+    assert not manifest_out.exists()
 
 
 def test_preview_invalid_json_option_is_refused(tmp_path, capsys):
@@ -212,10 +264,12 @@ def _write_manifest(tmp_path, **overrides) -> tuple[Path, str]:
 
 
 def _live_argv(manifest_path, digest, tmp_path, **overrides) -> list[str]:
+    # Fix round 1 (Q7): live no longer takes --now (main()'s injected wall_clock
+    # takes its place; every grant/assurance fixture here is valid against real
+    # wall time regardless, so the tests need no fixed wall_clock override).
     args = {
         "--manifest": str(manifest_path), "--authorization-digest": digest,
         "--capability": "count_return", "--grant-registry": str(tmp_path / "registry.json"),
-        "--now": NOW,
     }
     args.update(overrides)
     flags = args.pop("__flags__", ["--execute"])
@@ -345,17 +399,18 @@ def test_connectivity_only_refuses_a_stale_probe(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 
-_NOW_MONOTONIC_MS = int(datetime.fromisoformat(NOW).timestamp() * 1000)
-
-
 def _assurance_file(tmp_path, *, name, contingency_id, clock_domain_id):
-    # assured just before NOW, well inside the fixture site's 5000ms
-    # max_assurance_age_ms window (site_session_assurance semantics --
-    # see sentinel.room.site.admit_terminal_contingency).
+    # Fix round 1 (Q6): assurance freshness is checked against the injected
+    # monotonic `clock` (real time.monotonic() by default, the same clock
+    # connectivity uses), not wall-clock epoch milliseconds -- so this fixture
+    # must be assured in that same monotonic domain, just before *real* now,
+    # well inside the fixture site's 5000ms max_assurance_age_ms window
+    # (site_session_assurance semantics -- see sentinel.room.site.admit_terminal_contingency).
+    now_monotonic_ms = int(time.monotonic() * 1000)
     document = {
         "assurance_id": f"a-{name}", "contingency_id": contingency_id, "session_id": "run-0001",
         "clock_domain_id": clock_domain_id, "state": "CURRENT", "assured_at": NOW,
-        "assured_monotonic_ms": _NOW_MONOTONIC_MS - 100, "expires_monotonic_ms": _NOW_MONOTONIC_MS + 10 ** 9,
+        "assured_monotonic_ms": now_monotonic_ms - 100, "expires_monotonic_ms": now_monotonic_ms + 10 ** 9,
         "evidence_refs": ["ev-1"],
     }
     path = tmp_path / f"assurance-{name}.json"
@@ -379,7 +434,7 @@ def _full_gate_argv(tmp_path, manifest_path, digest, *, grant, profile_path, ext
 
 
 def test_live_full_flight_gates_pass_then_refuses_at_the_unwired_controller_boundary(tmp_path, capsys):
-    site_sha256, aircraft_id = _hash("site"), "aircraft-1"
+    site_sha256, aircraft_id = SITE_SHA256, "aircraft-1"
     profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
     profile_hash = calibration.canonical_profile_sha256(profile)
     profile_path = tmp_path / "profile.json"
@@ -389,6 +444,7 @@ def test_live_full_flight_gates_pass_then_refuses_at_the_unwired_controller_boun
     _registry_with_grant(tmp_path, grant)
     manifest_path, digest = _write_manifest(tmp_path, **{
         "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
+        "--site-sha256": SITE_SHA256, "--tag-map-sha256": TAG_MAP_SHA256,
     })
     argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
     exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
@@ -440,16 +496,22 @@ def test_live_full_flight_refuses_without_site_assurance(tmp_path, capsys):
     assert "site assurance" in err or "--site is required" in err
 
 
-def test_live_full_flight_refuses_without_a_unique_matching_grant(tmp_path, capsys):
-    manifest_path, digest = _write_manifest(tmp_path)  # registry is empty
-    argv = _live_argv(manifest_path, digest, tmp_path, **{"__flags__": ["--execute", *_consent_flags(tmp_path)]})
-    exit_code = cli.main(argv)
-    err = capsys.readouterr().err
-    assert exit_code == 2
-    assert "no unique matching" in err or "refused" in err
+def test_live_refuses_a_now_flag_as_unrecognized(tmp_path):
+    # Fix round 1 (Q7): live never accepts --now (main()'s injected wall_clock
+    # takes its place). A back-dated --now could otherwise admit an expired
+    # PROMOTED/TRIAL grant or stale site assurance.
+    manifest_path, digest = _write_manifest(tmp_path)
+    with pytest.raises(SystemExit):
+        cli.main(["live", "--execute", "--manifest", str(manifest_path), "--authorization-digest", digest,
+                 "--capability", "count_return", "--grant-registry", str(tmp_path / "registry.json"),
+                 "--now", "2026-01-01T00:00:00+00:00"])
 
 
-def test_live_default_client_and_jev_factories_refuse_real_construction(tmp_path, capsys):
+def test_live_full_flight_refuses_when_site_does_not_match_the_manifest(tmp_path, capsys):
+    # Fix round 1 (Q6): --site must be bound to the manifest's own declared
+    # site_sha256/tag_map_sha256. grant/profile/manifest all agree on a
+    # placeholder site_sha256 here (so admission and the profile gate both
+    # pass); only --site (SITE_PATH, whose real hash differs) mismatches.
     site_sha256, aircraft_id = _hash("site"), "aircraft-1"
     profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
     profile_hash = calibration.canonical_profile_sha256(profile)
@@ -460,6 +522,74 @@ def test_live_default_client_and_jev_factories_refuse_real_construction(tmp_path
     _registry_with_grant(tmp_path, grant)
     manifest_path, digest = _write_manifest(tmp_path, **{
         "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
+    })  # default --site-sha256/--tag-map-sha256 (== _hash("site")/_hash("tagmap")) left in place
+
+    def forbidden():
+        raise AssertionError("must never reach connectivity when --site does not match the manifest")
+
+    argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
+    exit_code = cli.main(argv, drone_probe=forbidden, provider_probe=forbidden)
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "does not match the manifest" in err
+
+
+def test_live_full_flight_refuses_an_assurance_recorded_for_a_different_session(tmp_path, capsys):
+    # Fix round 1 (Q6): an assurance whose session_id is not this run's
+    # manifest.run_id must never count toward clearing a trigger.
+    site_sha256, aircraft_id = SITE_SHA256, "aircraft-1"
+    profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
+    profile_hash = calibration.canonical_profile_sha256(profile)
+    profile_path = tmp_path / "profile.json"
+    calibration.write_profile(profile_path, profile)
+    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
+                            profile_sha256s=(profile_hash,))
+    _registry_with_grant(tmp_path, grant)
+    manifest_path, digest = _write_manifest(tmp_path, **{
+        "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
+        "--site-sha256": SITE_SHA256, "--tag-map-sha256": TAG_MAP_SHA256,
+    })
+    consent = _consent_flags(tmp_path)
+    nav = _assurance_file(tmp_path, name="nav", contingency_id="NAVIGATION_UNAVAILABLE", clock_domain_id="cd-1")
+    document = json.loads(nav.read_text(encoding="utf-8"))
+    document["session_id"] = "some-other-run"
+    nav.write_text(json.dumps(document), encoding="utf-8")
+    energy = _assurance_file(tmp_path, name="energy", contingency_id="RETURN_ENERGY_UNAVAILABLE", clock_domain_id="cd-1")
+
+    def forbidden():
+        raise AssertionError("must never reach connectivity when an assurance belongs to a different session")
+
+    argv = _live_argv(manifest_path, digest, tmp_path, **{
+        "__flags__": ["--execute", *consent, "--profile-file", str(profile_path), "--site", str(SITE_PATH),
+                     "--assurance", str(nav), "--assurance", str(energy), "--clock-domain-id", "cd-1"],
+    })
+    exit_code = cli.main(argv, drone_probe=forbidden, provider_probe=forbidden)
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "site assurance" in err
+
+
+def test_live_full_flight_refuses_without_a_unique_matching_grant(tmp_path, capsys):
+    manifest_path, digest = _write_manifest(tmp_path)  # registry is empty
+    argv = _live_argv(manifest_path, digest, tmp_path, **{"__flags__": ["--execute", *_consent_flags(tmp_path)]})
+    exit_code = cli.main(argv)
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "no unique matching" in err or "refused" in err
+
+
+def test_live_default_client_and_jev_factories_refuse_real_construction(tmp_path, capsys):
+    site_sha256, aircraft_id = SITE_SHA256, "aircraft-1"
+    profile = _promoted_profile(site_sha256=site_sha256, aircraft_id=aircraft_id)
+    profile_hash = calibration.canonical_profile_sha256(profile)
+    profile_path = tmp_path / "profile.json"
+    calibration.write_profile(profile_path, profile)
+    grant = _promoted_grant(capability="count_return", site_sha256=site_sha256, aircraft_id=aircraft_id,
+                            profile_sha256s=(profile_hash,))
+    _registry_with_grant(tmp_path, grant)
+    manifest_path, digest = _write_manifest(tmp_path, **{
+        "--capability-grant-sha256": grant.grant_sha256, "--profile": [profile_hash],
+        "--site-sha256": SITE_SHA256, "--tag-map-sha256": TAG_MAP_SHA256,
     })
     argv = _full_gate_argv(tmp_path, manifest_path, digest, grant=grant, profile_path=profile_path)
     # No drone_probe/provider_probe/client_factory/jev_factory overrides at all:

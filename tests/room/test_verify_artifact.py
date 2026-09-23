@@ -46,10 +46,25 @@ def _open_run(tmp_path, **overrides) -> "artifacts.RunArtifacts":
     return artifacts.RunArtifacts.open(tmp_path, _manifest(**overrides), now=NOW)
 
 
-def _finished_run(tmp_path, *, state="COMPLETED", completed_at=1.0, **overrides):
+_SAFE_TERMINATION_STATES = frozenset({"COMPLETED", "INCOMPLETE_RETURNED", "SAFE_LANDED", "LANDED_AT_CERTIFIED_ZONE"})
+
+
+def _finished_run(tmp_path, *, state="COMPLETED", completed_at=1.0, record_landing=None, **overrides):
     run = _open_run(tmp_path, **overrides)
     run.record_resolved_identity(role="jev", resolved="jev-vendor-x", observed_at=NOW)
     run.append_event("CHECKPOINT_COMPLETED", {"i": 1}, now=NOW)
+    # Fix round 1 (Q8): a safe-termination state now requires durable
+    # DRONE_STATE_RECORDED evidence of a confirmed landing, not just a
+    # caller-supplied terminal.json completed_at key.
+    if record_landing is None:
+        record_landing = state in _SAFE_TERMINATION_STATES
+    if record_landing:
+        run.append_event(
+            "DRONE_STATE_RECORDED",
+            {"observed_at": NOW.isoformat(), "scope": f"aircraft:{run.manifest.run_id}", "uncertainty": "measured",
+             "state": {"terminal_state": "LANDED", "completion_known": True, "flight_state": "LANDED"}},
+            now=NOW,
+        )
     run.finalize({"state": state, "completed_at": completed_at}, now=NOW)
     run.close()
     return tmp_path / "run-0001" / "manifest.json"
@@ -148,6 +163,19 @@ def test_verify_refuses_a_safe_termination_state_with_no_completed_at_evidence(t
     assert "safe-termination" in capsys.readouterr().err
 
 
+def test_verify_refuses_a_safe_termination_state_with_completed_at_but_no_durable_landing_event(tmp_path, capsys):
+    # Fix round 1 (Q8): terminal.json's completed_at is a caller-supplied
+    # mapping nothing durable backs it -- a run claiming COMPLETED with a
+    # truthy completed_at but no DRONE_STATE_RECORDED landing evidence in the
+    # durable event log must still be refused.
+    manifest_path = _finished_run(tmp_path, state="COMPLETED", completed_at=1.0, record_landing=False)
+    exit_code = verify_cli.main([
+        "--manifest", str(manifest_path), "--expect-terminal", "COMPLETED", "--expect-capability", "count_return",
+    ])
+    assert exit_code == 2
+    assert "no DRONE_STATE_RECORDED evidence" in capsys.readouterr().err
+
+
 def test_verify_accepts_a_non_safe_terminal_state_with_no_completed_at(tmp_path):
     # BLOCKED/ABORTED/etc never require completed_at evidence -- only the
     # states controller.py only ever reaches after a confirmed landing do.
@@ -166,6 +194,51 @@ def test_verify_refuses_a_missing_required_event(tmp_path, capsys):
     ])
     assert exit_code == 2
     assert "OBSERVE_SUCCEEDED" in capsys.readouterr().err
+
+
+def test_verify_refuses_a_gap_in_durable_event_sequence_numbers(tmp_path, capsys):
+    # Fix round 1 (Q8): a gap in sequence_no (here simulated by renumbering one
+    # event outside the store's append-only write path, the same
+    # trigger-dropping technique the pre-existing tampered-hash test uses)
+    # leaves every remaining event's own hash intact -- only an explicit
+    # contiguity check catches it.
+    manifest_path = _finished_run(tmp_path)
+    sqlite_path = manifest_path.parent / "session.sqlite3"
+    connection = sqlite3.connect(sqlite_path)
+    try:
+        connection.execute("DROP TRIGGER room_events_no_update")
+        connection.execute("UPDATE room_events SET sequence_no = 999 WHERE event_type = 'CHECKPOINT_COMPLETED'")
+        connection.commit()
+    finally:
+        connection.close()
+    exit_code = verify_cli.main([
+        "--manifest", str(manifest_path), "--expect-terminal", "COMPLETED", "--expect-capability", "count_return",
+    ])
+    assert exit_code == 2
+    assert "sequence_no is not contiguous" in capsys.readouterr().err
+
+
+def test_verify_refuses_a_summary_event_count_mismatch(tmp_path, capsys):
+    manifest_path = _finished_run(tmp_path)
+    summary_path = manifest_path.parent / "summary.json"
+    document = json.loads(summary_path.read_text(encoding="utf-8"))
+    document["event_count"] = document["event_count"] + 1
+    summary_path.write_text(json.dumps(document), encoding="utf-8")
+    exit_code = verify_cli.main([
+        "--manifest", str(manifest_path), "--expect-terminal", "COMPLETED", "--expect-capability", "count_return",
+    ])
+    assert exit_code == 2
+    assert "event_count" in capsys.readouterr().err
+
+
+def test_verify_refuses_a_missing_summary_json(tmp_path, capsys):
+    manifest_path = _finished_run(tmp_path)
+    (manifest_path.parent / "summary.json").unlink()
+    exit_code = verify_cli.main([
+        "--manifest", str(manifest_path), "--expect-terminal", "COMPLETED", "--expect-capability", "count_return",
+    ])
+    assert exit_code == 2
+    assert "summary.json" in capsys.readouterr().err
 
 
 def test_verify_refuses_a_tampered_durable_event_hash(tmp_path, capsys):
@@ -192,6 +265,12 @@ def test_verify_refuses_a_tampered_durable_event_hash(tmp_path, capsys):
 def test_verify_refuses_a_terminal_identity_mismatch(tmp_path, capsys):
     run = _open_run(tmp_path)
     run.record_resolved_identity(role="jev", resolved="jev-vendor-x", observed_at=NOW)
+    run.append_event(
+        "DRONE_STATE_RECORDED",
+        {"observed_at": NOW.isoformat(), "scope": "aircraft:run-0001", "uncertainty": "measured",
+         "state": {"terminal_state": "LANDED", "completion_known": True, "flight_state": "LANDED"}},
+        now=NOW,
+    )
     run.finalize({"state": "COMPLETED", "completed_at": 1.0}, now=NOW)
     run.close()
     manifest_path = tmp_path / "run-0001" / "manifest.json"

@@ -130,7 +130,13 @@ TAG_FREE_CLOCK = (0.0, 0.0, 5.0, 5.0)  # one leg, 5s
 # holdout legs a different wall-clock timing than training's, while still landing in
 # the same pose-envelope bucket (Q2) and comfortably inside the battery bound.
 _HOLDOUT_RETURN_ROUTE_CLOCK = (0.0, 0.0, 9.0, 9.0, 24.0, 24.0)  # leg1 9s, leg2 15s, total 24s
-_HOLDOUT_TAG_FREE_CLOCK = (0.0, 0.0, 5.1, 5.1)  # 5.1s -- same 5.0s bucket as training's 5.0s
+# 4.9s -- a hair *under* training's 5.0s bucket, so it still ceils to that same
+# bucket (fix round 1, Q9: the query is bucketed conservatively, ceiling up, never
+# down -- a holdout leg that completed no slower than the trained leg is never more
+# demanding than what training covered, but one that ran *longer* than 5.0s must not
+# be silently treated as dominated by a 5.0s sample it was never actually tested
+# against).
+_HOLDOUT_TAG_FREE_CLOCK = (0.0, 0.0, 4.9, 4.9)
 
 
 def _return_executor(before=80, after=74):
@@ -749,10 +755,12 @@ def test_promote_writes_a_promoted_profile_from_passing_holdout_evidence(tmp_pat
 
 
 def test_promote_accepts_a_holdout_whose_timing_lands_in_the_same_bucket_as_training(tmp_path):
-    # 5.2s (not 5.0s) still buckets to 5.0s: real-hardware timing jitter between two
-    # flights of the "same" nominal leg must not force an exact-float replay.
+    # 4.6s (not 5.0s) still ceils to the 5.0s bucket: real-hardware timing jitter that
+    # completes no slower than the nominal calibrated leg must not force an exact-float
+    # replay -- but (fix round 1, Q9) it must never go the other way: a holdout leg
+    # that runs *longer* than every trained sample is a genuinely untested combination.
     candidate_path, _, training_index_path = _fit_candidate(tmp_path)
-    holdout_index_path = _holdout_index(tmp_path, tag_free_clock=(0.0, 0.0, 5.2, 5.2))
+    holdout_index_path = _holdout_index(tmp_path, tag_free_clock=(0.0, 0.0, 4.6, 4.6))
     promoted = _promote(
         tmp_path, candidate_path=candidate_path, training_index_path=training_index_path,
         holdout_index_path=holdout_index_path,
@@ -1111,12 +1119,30 @@ def test_envelope_bound_for_treats_yaw_as_an_absolute_magnitude():
     assert bound == pytest.approx(5.0)
 
 
-def test_envelope_bound_for_absorbs_sub_bucket_jitter_like_the_old_lookup():
-    # 5.2s still buckets to the same 5.0s combination as training (regression: the
-    # dominance rewrite must not lose the jitter tolerance the bucketing already gave).
+def test_envelope_bound_for_absorbs_sub_bucket_undershoot_jitter():
+    # 4.8s (just under the 5.0s bucket boundary) still ceils to the same 5.0s
+    # combination as training: small reading undershoot is absorbed without ever
+    # admitting a query *above* a sampled maximum (fix round 1, Q9 -- the old
+    # round()-based bucketing also absorbed *overshoot* up to half a bucket past
+    # the sampled maximum, which was extrapolation, not jitter tolerance).
     envelope = (calibration.PoseEnvelopePoint(distance_cm=0.0, time_s=5.0, yaw_deg=90.0, drift_cm=5.0),)
-    bound = calibration.envelope_bound_for(envelope, distance_cm=0.0, time_s=5.2, yaw_deg=90.0)
+    bound = calibration.envelope_bound_for(envelope, distance_cm=0.0, time_s=4.8, yaw_deg=90.0)
     assert bound == pytest.approx(5.0)
+
+
+def test_envelope_bound_for_refuses_a_query_just_above_the_sampled_bucket_maximum():
+    # 102 cm is only 2 cm past the 100 cm-labeled sample -- well within what the
+    # old round()-based query bucketing (half a 5 cm bucket = 2.5 cm) would have
+    # silently admitted as "dominated". Ceiling refuses it: no extrapolation
+    # beyond the sampled maximum (Ruling 3).
+    envelope = (calibration.PoseEnvelopePoint(distance_cm=100.0, time_s=5.0, yaw_deg=90.0, drift_cm=8.0),)
+    assert calibration.envelope_bound_for(envelope, distance_cm=102.0, time_s=3.0, yaw_deg=30.0) is None
+
+
+def test_envelope_bound_for_admits_a_query_exactly_at_the_sampled_bucket_maximum():
+    envelope = (calibration.PoseEnvelopePoint(distance_cm=100.0, time_s=5.0, yaw_deg=90.0, drift_cm=8.0),)
+    bound = calibration.envelope_bound_for(envelope, distance_cm=100.0, time_s=5.0, yaw_deg=90.0)
+    assert bound == pytest.approx(8.0)
 
 
 # ---------------------------------------------------------------------------
