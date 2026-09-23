@@ -20,6 +20,37 @@ sentinel mission-control --mode live --site-profile CanningSt --data-dir artifac
 
 Live startup refuses before binding unless the selected profile is enabled and physically valid. The profile selector can switch profiles while the session is pristine; after mission activity or evidence, it locks. See the setup guide for readiness, provider, consent, and calibration details.
 
+### Room agent (Jev adaptive) in Mission Control
+
+Pick **Room agent (Jev adaptive)** in the *Architecture* selector, choose a run mode, type a request (for example "count the phones and computers in the room"), press *Propose run*, then *Approve*. Nothing that can fly, open the drone link or make a paid call is built before you approve. The panel shows the localization state and fix age, each re-anchor and recovery step (yaw rotations with their heading, tag bursts with the tags seen), Jev's action and reason on each turn, the regions, detections, answer, return home and landing. *Land* lands through the room executor (it is recorded as LANDED). *EMERGENCY STOP* stops the motors and latches the session; restart Mission Control after using it.
+
+- **Rehearsal** (fake drone, fake detector, scripted Jev) and **Jev rehearsal** (the same fakes with the real Jev over OpenRouter):
+
+  ```powershell
+  $env:PYTHONPATH = "src;."
+  python -m sentinel.ui --mode rehearsal --data-dir artifacts/room-rehearsal            # add --i-authorise-paid-calls for Jev rehearsal
+  ```
+
+  Scenario (a) spreads phones and computers over three regions, with one low-confidence phone. Scenario (b) yaws the aircraft away from the tags after the second observation, so the recovery's mapped-tag yaw scan runs before the mission resumes.
+
+- **Live** (real Tello, real detector, real Jev) runs `scripts/room_session.py live` with all of its gates. First prepare the L3 inputs with [the runbook](docs/room-agent-live-runbook.md): the TRIAL grant (`room_capability.py issue-trial`), the manifest preview, and the two site assurances. The assurances are valid for 30 minutes. Then write a pack and start Mission Control with it:
+
+  ```powershell
+  @{ manifest = "runs/$RUN.manifest.json"; authorization_digest = $DIGEST; grant_registry = "runs/registry.json"
+     consent_db = "runs/consent.sqlite3"; location = "CanningSt"; date = $TODAY; clock_domain_id = "operator-$RUN"
+     assurances = @("runs/$RUN.nav.assurance.json", "runs/$RUN.energy.assurance.json"); run_root = "runs"
+     local_ip = "192.168.10.2" } | ConvertTo-Json | Set-Content -Encoding utf8 runs/$RUN.pack.json
+  $env:PYTHONPATH = "src;."
+  python -m sentinel.ui --mode live --site-profile CanningSt --data-dir artifacts/room-live `
+    --room-live-config runs/$RUN.pack.json --i-authorise-paid-calls
+  ```
+
+  The site, tag map and CanningSt profiles default to `fixtures/room_agent/v1/` and `docs/wp5-flight3-map.json`. The pack can override `site`, `tag_map`, `drift_profile`, `energy_profile`, `command_limits`, `profile_files`, `connectivity_timeout_s` (default 20) and `connectivity_max_age_s` (default 90). `local_ip` is optional and can also be typed in the panel. The automatic adapter selection now probes a 192.168.10.x adapter a second time before it refuses. While the Live run is flying, pressing `E` in the Mission Control terminal also stops the motors.
+
+- **Takeoff check.** Run this by hand, with the Tello on the pad and the cube clear: `python scripts/room_takeoff_check.py --execute [--local-ip 192.168.10.2]`. It connects over the live stack, takes off, hovers about 3 s at the takeoff height and lands. `E` stops the motors. Without `--execute` it refuses.
+
+The browser E2E steps and their selectors are listed in [tests/ui/e2e/room_agent_e2e.md](tests/ui/e2e/room_agent_e2e.md).
+
 ## V0 demonstration loop
 
 ```text

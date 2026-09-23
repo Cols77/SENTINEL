@@ -202,7 +202,7 @@ class RoomAgentService:
     # -- catalogue ------------------------------------------------------------
     def modes(self):
         available = ["REHEARSAL", "JEV_REHEARSAL"]
-        if self.mission.config.mode == "LIVE" or self.live_config_path is not None:
+        if self.live_config_path is not None:
             available.append("LIVE")
         return available
 
@@ -210,7 +210,7 @@ class RoomAgentService:
         return dict(
             architectures=list(ARCHITECTURES),
             modes=[dict(id=m, label=MODES[m], available=m in self.modes(),
-                        reason=None if m in self.modes() else "Start Mission Control with --mode live "
+                        reason=None if m in self.modes() else "Start Mission Control with "
                                                                 "--room-live-config <pack.json>")
                    for m in MODES],
             scenarios=[dict(id=s.scenario_id, label=s.label, description=s.description)
@@ -454,7 +454,8 @@ class RoomAgentService:
                 return None
             raise RuntimeError("ROOM_LIVE_CONFIG_REQUIRED")
         try:
-            pack = json.loads(Path(path).read_text(encoding="utf-8"))
+            # utf-8-sig: PowerShell 5.1's Set-Content -Encoding utf8 writes a BOM.
+            pack = json.loads(Path(path).read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             if optional:
                 return None
@@ -471,7 +472,10 @@ class RoomAgentService:
             p = Path(value)
             if p.is_absolute():
                 return str(p)
-            return str((base / p) if (base / p).exists() else (root / p))
+            for candidate in (Path.cwd() / p, base / p, root / p):
+                if candidate.exists():
+                    return str(candidate)
+            return str(root / p)
 
         def path(key, default=None):
             value = pack.get(key, default)
