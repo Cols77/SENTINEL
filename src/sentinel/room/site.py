@@ -147,6 +147,45 @@ def _evidence_refs(values) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _unit_axis(axis) -> bool:
+    return (len(axis) == 2 and all(math.isfinite(v) for v in axis)
+            and math.isclose(math.hypot(axis[0], axis[1]), 1.0, rel_tol=1e-6, abs_tol=1e-6))
+
+
+@dataclass(frozen=True)
+class SemanticFrame:
+    """A declared 3-axis vocabulary (left/right, rear/front, bottom/top) for one envelope.
+
+    Landmarks and axes are surveyed once, alongside the rest of the site, and
+    are the sole source of truth for semantic pose resolution (see
+    sentinel.room.semantic). This class only validates its own internal
+    consistency; RoomSite.validate() checks that envelope_volume_id resolves
+    to a declared free-space volume -- never a forbidden or corridor volume.
+    """
+    envelope_volume_id: str
+    left_to_right_axis_xy: tuple[float, float]
+    rear_to_front_axis_xy: tuple[float, float]
+    target_side: Literal["FRONT"]
+    landmarks: tuple[tuple[str, Position], ...]
+
+    def __post_init__(self):
+        if not self.envelope_volume_id:
+            raise ValueError("semantic frame needs an envelope volume")
+        if self.target_side != "FRONT":
+            raise ValueError("semantic frame target side must be FRONT")
+        if not _unit_axis(self.left_to_right_axis_xy) or not _unit_axis(self.rear_to_front_axis_xy):
+            raise ValueError("semantic frame axes must be normalized unit vectors")
+        dot = (self.left_to_right_axis_xy[0] * self.rear_to_front_axis_xy[0]
+               + self.left_to_right_axis_xy[1] * self.rear_to_front_axis_xy[1])
+        if not math.isclose(dot, 0.0, abs_tol=1e-6):
+            raise ValueError("semantic frame axes must be orthogonal")
+        landmark_ids = [landmark_id for landmark_id, _ in self.landmarks]
+        if any(not landmark_id for landmark_id in landmark_ids):
+            raise ValueError("landmark needs an identity")
+        if len(set(landmark_ids)) != len(landmark_ids):
+            raise ValueError("duplicate landmark identity")
+
+
 @dataclass(frozen=True)
 class RoomSite:
     site_id: str
@@ -159,6 +198,7 @@ class RoomSite:
     home: HomeDefinition
     terminal_contingencies: tuple[TerminalContingency, ...]
     clearance_provenance: str
+    semantic_frame: SemanticFrame | None = None
 
     def validate(self, *, real_mode: bool = True) -> None:
         if not self.site_id or not self.clearance_provenance.strip() or not self.free_space_volumes:
@@ -188,10 +228,18 @@ class RoomSite:
             raise ValueError("duplicate terminal contingency identity")
         if real_mode and {entry.trigger for entry in self.terminal_contingencies} != set(ContingencyTrigger):
             raise ValueError("real mode requires both condition-specific terminal contingencies")
+        if (self.semantic_frame is not None
+                and self.semantic_frame.envelope_volume_id not in {v.volume_id for v in self.free_space_volumes}):
+            raise ValueError("semantic frame envelope must be a declared free-space volume")
 
 
 def _contains(volume, position):
     return contains_disk(RecoveryVolume(volume.volume_id, volume.polygon_xy_cm, volume.z_interval_cm), position, 0)
+
+
+def volume_contains(volume: Volume3D, position: Position) -> bool:
+    """Public containment check, reused by sentinel.room.semantic for endpoint validation."""
+    return _contains(volume, position)
 
 
 def _overlaps(a, b):
@@ -207,11 +255,17 @@ def _overlaps(a, b):
 
 
 def room_site_document(site: RoomSite) -> dict:
-    return json.loads(json.dumps({"schema_version": "room-site-base-v1", **asdict(site)}, allow_nan=False))
+    fields_dict = asdict(site)
+    if fields_dict.get("semantic_frame") is None:
+        fields_dict.pop("semantic_frame", None)
+    return json.loads(json.dumps({"schema_version": "room-site-base-v1", **fields_dict}, allow_nan=False))
 
 
-def _keys(doc, cls):
-    if not isinstance(doc, dict) or set(doc) != {field.name for field in fields(cls)}:
+def _keys(doc, cls, optional=()):
+    if not isinstance(doc, dict):
+        raise ValueError(f"incorrect {cls.__name__} contract fields")
+    names = {field.name for field in fields(cls)}
+    if set(doc) - names or (names - set(optional)) - set(doc):
         raise ValueError(f"incorrect {cls.__name__} contract fields")
     return doc
 
@@ -221,7 +275,8 @@ def parse_room_site(doc: dict, *, real_mode: bool = True) -> RoomSite:
     try:
         if doc.get("schema_version") != "room-site-base-v1":
             raise ValueError("unsupported room site version")
-        raw = _keys({key: value for key, value in doc.items() if key != "schema_version"}, RoomSite)
+        raw = _keys({key: value for key, value in doc.items() if key != "schema_version"}, RoomSite,
+                    optional=("semantic_frame",))
 
         def volume(item):
             item = _keys(item, Volume3D)
@@ -241,6 +296,12 @@ def parse_room_site(doc: dict, *, real_mode: bool = True) -> RoomSite:
                 "kind": ContingencyKind(item["kind"]), "landing_polygon_xy_cm": tuple(tuple(p) for p in item["landing_polygon_xy_cm"]),
                 "z_band_cm": tuple(item["z_band_cm"])})
 
+        def semantic_frame(item):
+            item = _keys(item, SemanticFrame)
+            return SemanticFrame(item["envelope_volume_id"],
+                tuple(item["left_to_right_axis_xy"]), tuple(item["rear_to_front_axis_xy"]),
+                item["target_side"], tuple((entry[0], position(entry[1])) for entry in item["landmarks"]))
+
         home = _keys(raw["home"], HomeDefinition)
         result = RoomSite(**{**raw,
             "free_space_volumes": tuple(volume(item) for item in raw["free_space_volumes"]),
@@ -248,7 +309,8 @@ def parse_room_site(doc: dict, *, real_mode: bool = True) -> RoomSite:
             "corridors": tuple(volume(item) for item in raw["corridors"]),
             "routes": tuple(route(item) for item in raw["routes"]),
             "home": HomeDefinition(**{**home, "nominal_pose": position(home["nominal_pose"])}),
-            "terminal_contingencies": tuple(contingency(item) for item in raw["terminal_contingencies"])})
+            "terminal_contingencies": tuple(contingency(item) for item in raw["terminal_contingencies"]),
+            **({"semantic_frame": semantic_frame(raw["semantic_frame"])} if "semantic_frame" in raw else {})})
         result.validate(real_mode=real_mode)
         return result
     except (KeyError, TypeError, AttributeError, OverflowError) as exc:

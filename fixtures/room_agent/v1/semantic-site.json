@@ -1,0 +1,181 @@
+{
+  "schema_version": "room-site-base-v1",
+  "site_id": "wp5-flight3-semantic",
+  "cube_site_sha256": "2bb3e7bc6bce4c3fd19d6501d6f178c220aa4f0ee610f54b1038b688daf940c0",
+  "tag_map_sha256": "422350233ea53a58daf129602b4219b07e811d85f3f4a4a3cff125cad98159c0",
+  "free_space_volumes": [
+    {
+      "volume_id": "room",
+      "polygon_xy_cm": [
+        [
+          150,
+          120
+        ],
+        [
+          350,
+          120
+        ],
+        [
+          350,
+          260
+        ],
+        [
+          150,
+          260
+        ]
+      ],
+      "z_interval_cm": [
+        60,
+        140
+      ]
+    }
+  ],
+  "forbidden_volumes": [],
+  "corridors": [
+    {
+      "volume_id": "corridor",
+      "polygon_xy_cm": [
+        [
+          150,
+          120
+        ],
+        [
+          350,
+          120
+        ],
+        [
+          350,
+          260
+        ],
+        [
+          150,
+          260
+        ]
+      ],
+      "z_interval_cm": [
+        60,
+        140
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "route_id": "home-route",
+      "checkpoints": [
+        {
+          "x_cm": 250,
+          "y_cm": 190,
+          "z_cm": 90
+        }
+      ],
+      "corridor_volume_ids": [
+        "corridor"
+      ]
+    }
+  ],
+  "home": {
+    "pad_id": "pad",
+    "nominal_pose": {
+      "x_cm": 250,
+      "y_cm": 140,
+      "z_cm": 90
+    },
+    "heading_deg": 90,
+    "route_id": "home-route"
+  },
+  "terminal_contingencies": [
+    {
+      "contingency_id": "NAVIGATION_UNAVAILABLE",
+      "trigger": "NAVIGATION_UNAVAILABLE",
+      "kind": "LAND_IN_PLACE",
+      "landing_polygon_xy_cm": [
+        [
+          150,
+          120
+        ],
+        [
+          350,
+          120
+        ],
+        [
+          350,
+          260
+        ],
+        [
+          150,
+          260
+        ]
+      ],
+      "z_band_cm": [
+        60,
+        140
+      ],
+      "required_pose_state": "COASTING",
+      "clearance_source": "survey",
+      "assurance_policy_id": "checked-clear",
+      "max_assurance_age_ms": 5000
+    },
+    {
+      "contingency_id": "RETURN_ENERGY_UNAVAILABLE",
+      "trigger": "RETURN_ENERGY_UNAVAILABLE",
+      "kind": "LAND_IN_PLACE",
+      "landing_polygon_xy_cm": [
+        [
+          150,
+          120
+        ],
+        [
+          350,
+          120
+        ],
+        [
+          350,
+          260
+        ],
+        [
+          150,
+          260
+        ]
+      ],
+      "z_band_cm": [
+        60,
+        140
+      ],
+      "required_pose_state": "COASTING",
+      "clearance_source": "survey",
+      "assurance_policy_id": "checked-clear",
+      "max_assurance_age_ms": 5000
+    }
+  ],
+  "clearance_provenance": "wp5-flight3-survey-2026-09-22",
+  "semantic_frame": {
+    "envelope_volume_id": "room",
+    "left_to_right_axis_xy": [
+      1.0,
+      0.0
+    ],
+    "rear_to_front_axis_xy": [
+      0.0,
+      1.0
+    ],
+    "target_side": "FRONT",
+    "landmarks": [
+      [
+        "table",
+        {
+          "x_cm": 250,
+          "y_cm": 250,
+          "z_cm": 90
+        }
+      ],
+      [
+        "window",
+        {
+          "x_cm": 150,
+          "y_cm": 190,
+          "z_cm": 120
+        }
+      ]
+    ]
+  }
+}

@@ -22,7 +22,8 @@
         {"contains": {"properties": {"trigger": {"const": "RETURN_ENERGY_UNAVAILABLE"}}, "required": ["trigger"]}}
       ]
     },
-    "clearance_provenance": {"$ref": "#/$defs/id"}
+    "clearance_provenance": {"$ref": "#/$defs/id"},
+    "semantic_frame": {"$ref": "#/$defs/semantic_frame"}
   },
   "$defs": {
     "id": {"type": "string", "minLength": 1, "pattern": "\\S"},
@@ -85,6 +86,23 @@
           "assurance_policy_id": {"$ref": "#/$defs/id"}
         }}
       }]
+    },
+    "semantic_frame": {
+      "type": "object", "additionalProperties": false,
+      "required": ["envelope_volume_id", "left_to_right_axis_xy", "rear_to_front_axis_xy", "target_side", "landmarks"],
+      "properties": {
+        "envelope_volume_id": {"$ref": "#/$defs/id"},
+        "left_to_right_axis_xy": {"$ref": "#/$defs/xy"},
+        "rear_to_front_axis_xy": {"$ref": "#/$defs/xy"},
+        "target_side": {"const": "FRONT"},
+        "landmarks": {
+          "type": "array",
+          "items": {
+            "type": "array", "prefixItems": [{"$ref": "#/$defs/id"}, {"$ref": "#/$defs/position"}],
+            "items": false, "minItems": 2, "maxItems": 2
+          }
+        }
+      }
     }
   }
 }
