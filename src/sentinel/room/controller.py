@@ -140,6 +140,32 @@ class AcceptancePolicy:
         return asdict(self)
 
 
+def observe_kind_gate(assessment, candidates, act_at: float, min_margin: float):
+    """Accept Jev's top OBSERVE when observing, as a kind, is the confident choice.
+
+    Equivalent regions split Jev's probability (live 2026-09-24: center 0.44,
+    right 0.21, left 0.20 -- 0.85 on observing), so the per-label gate refused
+    a decision Jev was confident in. The kind's summed probability must clear
+    the observe bar and lead every other kind's sum by the margin; Jev's own
+    top label (always the argmax, see ``assess_choice``) is the one flown.
+    """
+    if assessment.outcome not in ("LOW_CONFIDENCE", "THIN_MARGIN"):
+        return assessment
+    chosen = candidates.get(assessment.selected_label)
+    if chosen is None or chosen.kind != CandidateKind.OBSERVE:
+        return assessment
+    mass: dict = {}
+    for label, probability in assessment.probabilities:
+        candidate = candidates.get(label)
+        kind = candidate.kind if candidate is not None else label
+        mass[kind] = mass.get(kind, 0.0) + probability
+    observe = mass.pop(CandidateKind.OBSERVE, 0.0)
+    if observe < act_at or observe - max(mass.values(), default=0.0) < min_margin:
+        return assessment
+    return replace(assessment, final_label=assessment.selected_label, outcome="ACCEPTED",
+                   confidence=observe, confidence_source="KIND_MASS")
+
+
 @dataclass(frozen=True)
 class TurnOutcome:
     candidate_id: str
@@ -829,7 +855,7 @@ class RoomController:
             act_at = policy.act_at_for(chosen.kind if chosen is not None else None)
             assessment = assess_choice(answer, criteria, escalation_label="ESCALATE",
                                        act_at=act_at, min_margin=policy.min_margin)
-            return assessment, error, act_at
+            return observe_kind_gate(assessment, candidates, act_at, policy.min_margin), error, act_at
 
         def audit(assessment):
             audited = asdict(assessment)

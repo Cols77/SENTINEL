@@ -347,11 +347,11 @@ class _Compilation:
         dependencies: tuple[str, ...] = ()
         target = None
         if kind == GoalKind.ANSWER_STATE:
-            self.choose("entity_reference", {"CURRENT_DRONE": self.drone.ref_id})
+            self.decide_in_code("entity_reference", "CURRENT_DRONE")
             subject = target = self.drone
         elif kind in _PHYSICAL:
             if relation == "NEXT_TO_DRONE":
-                self.choose("relative_reference", {"CURRENT_DRONE": self.drone.ref_id})
+                self.decide_in_code("relative_reference", "CURRENT_DRONE")
             target, producer = self.bind_target(classes, relative_drone=relation == "NEXT_TO_DRONE")
             if producer is None:
                 producer = self.observation(
@@ -384,7 +384,7 @@ class _Compilation:
                 qualifier = qualifier or producer.qualifier
         elif _reference_pronouns(self.clause.text, relative_drone=relation == "NEXT_TO_DRONE"):
             if relation == "NEXT_TO_DRONE":
-                self.choose("relative_reference", {"CURRENT_DRONE": self.drone.ref_id})
+                self.decide_in_code("relative_reference", "CURRENT_DRONE")
             target, producer = self.bind_target(classes, relative_drone=relation == "NEXT_TO_DRONE")
             subject = target
             dependencies = tuple(dict.fromkeys((target.source_objective_id, producer.objective_id)))
@@ -407,9 +407,21 @@ class _Compilation:
         else:
             observed = self.observation(objective_id, classes, qualifier, relation, scope)
             subject, target = observed.subject_ref, observed.target_ref
-        terminal = self.choose("terminal_condition", {
-            label: label.replace("_", " ").lower() for label in _TERMINALS[kind]
-        })
+        text = self.clause.text.lower() if self.clause else ""
+        if kind == GoalKind.COUNT:
+            # The request's own wording decides it; the real model split
+            # REPORTED/RETURN_HOME at 0.49-0.66 (8/17 re-asked) on "count the
+            # phones and computers in the room", which says neither.
+            returns = re.search(r"\b(return|come\s+back|go\s+back|home)\b", self.request, re.IGNORECASE)
+            terminal = self.decide_in_code("terminal_condition", "RETURN_HOME" if returns else "REPORTED")
+        elif (kind == GoalKind.FIND_OBSERVE and relation is None
+              and not re.search(r"\b(validat|verif|confirm|double.?check|closer|inspect|zoom|"
+                                r"return|come\s+back|go\s+back|home)", text)):
+            terminal = self.decide_in_code("terminal_condition", "OBSERVED")
+        else:
+            terminal = self.choose("terminal_condition", {
+                label: label.replace("_", " ").lower() for label in _TERMINALS[kind]
+            })
         if relation == "HOLDS_PHONE" and kind == GoalKind.FIND_OBSERVE and terminal not in (
             "RELATION_VERIFIED", "RETURN_HOME",
         ):
@@ -418,6 +430,14 @@ class _Compilation:
             objective_id, len(self.goals) + 1, kind, classes, qualifier, relation, scope, terminal,
             subject, target, dependencies,
         ))
+
+    def decide_in_code(self, name: str, label: str) -> str:
+        """A choice the request's structure already determines: recorded, never asked."""
+        self.accepted_choices.append({
+            "clause_id": self.clause.clause_id if self.clause else None,
+            "name": name, "label": "CODE:" + label,
+        })
+        return label
 
     def select_classes(self) -> tuple[str, ...]:
         selected = self.choose("target_classes", {
@@ -474,20 +494,20 @@ class _Compilation:
             if classes != ("person",):
                 raise _Rejected("HOLDING_REQUIRES_PERSON_SUBJECT")
             if not bind_new:
-                self.choose("entity_reference", {
-                    "DESIGNATED_PERSON": "A designated person result after holding-relation verification.",
-                })
+                self.decide_in_code("entity_reference", "DESIGNATED_PERSON")
             role = "VERIFIED_DESIGNATED_PERSON"
             target = EntityRef(objective_id + ":phone", objective_id, "RELATED_PHONE", None)
         elif relation == "NEXT_TO_DRONE":
             if classes != ("phone",):
                 raise _Rejected("NEXT_TO_DRONE_REQUIRES_PHONE")
             if not bind_new:
-                self.choose("entity_reference", {"CURRENT_DRONE": self.drone.ref_id})
+                self.decide_in_code("entity_reference", "CURRENT_DRONE")
             role, target, relative_to = "NEAREST_PHONE", self.drone, self.drone.ref_id
         else:
             if not bind_new:
-                self.choose("entity_reference", {"NEW_ENTITY": "A new result hypothesis for this objective only."})
+                # One structurally determined answer: asking it scored the real
+                # model's lowest confidence (NEW_ENTITY p 0.56-0.59, scalar 0.34).
+                self.decide_in_code("entity_reference", "NEW_ENTITY")
         return GoalObjective(
             objective_id, len(self.goals) + 1, GoalKind.FIND_OBSERVE, classes, qualifier, relation, scope,
             "RELATION_VERIFIED" if relation == "HOLDS_PHONE" else "OBSERVED",

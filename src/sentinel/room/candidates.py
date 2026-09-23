@@ -69,6 +69,11 @@ def can_answer_objectives(snapshot: ReadSnapshot, objectives: tuple[GoalObjectiv
     return True
 
 
+#: A count is answered in flight either way; the capability returns home
+#: after the answer, so an explicit "and return home" count is answerable too.
+_COUNT_TERMINALS = ("REPORTED", "OBSERVED", "RETURN_HOME")
+
+
 def build_candidates(snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
     if snapshot.terminal_state:
         return ()
@@ -194,7 +199,7 @@ def count_answer_candidate(snapshot: ReadSnapshot, coverage: CoverageProjection)
     if snapshot.terminal_state or ledger is None or ledger.status != GoalStatus.PENDING:
         return None
     counts = tuple(o for o in ledger.objectives if o.kind == GoalKind.COUNT)
-    if not counts or any(o.relation or o.qualifier or o.terminal_condition not in ("REPORTED", "OBSERVED")
+    if not counts or any(o.relation or o.qualifier or o.terminal_condition not in _COUNT_TERMINALS
                          for o in counts):
         return None
     if not all(count_objective_ready(o, coverage, snapshot.outcomes) for o in counts):
@@ -379,7 +384,7 @@ def search_answer_candidate(snapshot: ReadSnapshot, site: RoomSite,
     if not searches or not all(search_objective_ready(o, site, coverage, snapshot.outcomes) for o in searches):
         return None
     counts = tuple(o for o in ledger.objectives if o.kind == GoalKind.COUNT)
-    if any(o.relation or o.qualifier or o.terminal_condition not in ("REPORTED", "OBSERVED")
+    if any(o.relation or o.qualifier or o.terminal_condition not in _COUNT_TERMINALS
            or not count_objective_ready(o, coverage, snapshot.outcomes) for o in counts):
         return None
     others = tuple(o for o in ledger.objectives if o.kind != GoalKind.COUNT and not is_search_objective(o))

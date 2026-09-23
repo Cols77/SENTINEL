@@ -5,7 +5,7 @@
 **Demo:** 2026-09-25, so the goal is tomorrow's demo. Aim for low-hanging fruit and working behaviour, not a redesign.
 
 **Where to work:**
-- Start from branch `claude/room-agent-ui` at `c4c6c02` (worktree `C:\coding\sentinel\.worktrees\jev-agentic-room-loop`).
+- Start from the head of branch `claude/room-agent-ui` (the commit that adds this file's confidence section; worktree `C:\coding\sentinel\.worktrees\jev-agentic-room-loop`).
 - Create your own branch from it, for example `codex/room-agent-coverage`.
 - Do not push to `claude/room-agent-ui` or `feat/jev-agentic-room-loop`.
 
@@ -51,10 +51,10 @@ Proven on the real aircraft:
 
 **Not yet proven live:** a complete observation (capture → detector → count → answer). The last flight started at 49 % battery and was correctly sent home. Each observation needs about 55–60 % battery before it is admitted.
 
-**Known test debt: 11 failures on `c4c6c02`.**
-- Ten are in `tests/room/test_canningst_site.py` and `tests/room/test_canningst_mission.py`. Their expectations were computed from the old site geometry and battery thresholds.
+**Known test debt: 12 failures on the current head.**
+- Eleven are in `tests/room/test_canningst_site.py` and `tests/room/test_canningst_mission.py`. Their expectations were computed from the old site geometry and battery thresholds.
 - One is `tests/room/test_cli.py::test_live_default_flight_stack_shares_the_probe_connection_and_never_takes_off_without_tag_poses`, which asserts the old rule that takeoff needs a pad fix. It now takes off and lands if no airborne fix comes.
-- Update all 11 to the new site, with a brief reason in each.
+- Update all 12 to the new site, with a brief reason in each.
 
 ## 3. The measured free space (from the operator, 2026-09-24)
 
@@ -117,8 +117,36 @@ Proven on the real aircraft:
 - Keep the fixed-choice contract: Jev returns a candidate ID, never coordinates.
 - **Acceptance:** in the real-Jev rehearsal, Jev does not choose Escalate on the first turn of a count and keeps observing until coverage is complete or the battery sends it home. In the one live run where Jev had a turn, it chose Escalate first at p 0.36.
 
+### Task 4b: quick Jev confidence wins
+
+**What the live runs recorded (9 runs, 2026-09-24).** Each row is the probability of the chosen answer: median, lowest.
+- Confident: goal_family COUNT 0.98/0.98; spatial_scope ROOM 0.98; qualifier/relation NONE ≥ 0.90; consistency 0.93/0.78; next_objective 0.82/0.71.
+- Weak:
+  - terminal_condition 0.66/0.49, with 8 of 17 low-confidence re-asks;
+  - entity_reference NEW_ENTITY 0.59/0.56, with Jev's self-rating at 0.34–0.38;
+  - one MALFORMED target_classes reply.
+- In-flight turn 1: center 0.44, right 0.21, left 0.20, read 0.07, escalate 0.04, so LOW_CONFIDENCE, although 0.85 was on "observe". The re-ask then chose right at 0.72.
+
+**Already done on `claude/room-agent-ui`** (do not redo):
+- **Action-type gate.** `controller.observe_kind_gate` accepts Jev's top OBSERVE when the summed OBSERVE probability clears the observe bar and leads every other kind by the margin. It is audited as `confidence_source="KIND_MASS"`.
+- **Code-decided goal questions.** `goals._Compilation.decide_in_code` records a `CODE:` accepted choice with no Jev call for:
+  - single-option entity/relative references (NEW_ENTITY, CURRENT_DRONE, DESIGNATED_PERSON);
+  - a COUNT's terminal condition: RETURN_HOME if the request says return/come back/home, else REPORTED;
+  - a plain FIND_OBSERVE's terminal: OBSERVED, unless validate/verify wording.
+- Count answers now also accept a RETURN_HOME terminal (`candidates._COUNT_TERMINALS`). Before, a "count … and return home" request could never be answered.
+
+**Quick wins for you, in order:**
+1. **A low-confidence refusal must not burn the region.** After turn 1 was refused, the center region disappeared from the candidates for the rest of the session ("Center region: LOW_CONFIDENCE"). A refusal caused by the confidence gate (LOW_CONFIDENCE/THIN_MARGIN) should leave the candidate legal. Only physical or tool refusals should suppress it. Find where refused outcomes are excluded (`candidates._observe_candidate` / outcomes filtering).
+2. **Candidate descriptions that differ.** State per OBSERVE the unexplored cells and classes it resolves, the distance and the approximate battery cost. Jev then has a reason to prefer one (see Task 4).
+3. **Hide reads during a physical mission** unless they add something: READ_OBSERVATIONS/READ_COUNTS took 0.07–0.11 of Jev's probability each turn. Offer them only when there is new evidence since the last read, or drop them while an OBSERVE is legal.
+4. **Retry a malformed or illegal reply once.** MALFORMED_ANSWER / ILLEGAL_OR_MALFORMED is currently scored as a refusal with no retry (goal compile: `goals.py` choose loop; room turn: `controller._decide` re-asks only LOW_CONFIDENCE/THIN_MARGIN).
+5. **Show the real choice in the UI decision log.** A refused turn shows as "1. Escalate — … (p 0.36)", although Jev chose center at 0.44. Show the refused label, its probability and the refusal reason, and the kind mass when KIND_MASS accepted.
+6. **A replay script for calibration** (small, offline, paid). Replay recorded `GOAL_CHOICE_ATTEMPT` / `ROOM_CHOICE_ATTEMPT` states from `runs/*/session.sqlite3` through Jev N times. Report agreement and probability spread per question, and suggest per-kind thresholds from the data instead of the hand-set 0.5/0.6. Gate it behind `--i-authorise-paid-calls`.
+
+**Longer term:** self-consistency (ask 2–3 times and vote) on the few questions that stay uncertain after the above.
+
 ### Task 5: tests
-- Fix the 11 failing tests (§2).
+- Fix the 12 failing tests (§2).
 - Add tests for the generator (Task 2), the sweep (Task 3: three captures, three requests, headings recorded) and the prompt (Task 4: unexplored cells appear in the instruction).
 - Run `tests/room`, `tests/cube` and `tests/ui` with the venv below. Node tests: `node --test tests/survey_console/room-agent.test.mjs`.
 
