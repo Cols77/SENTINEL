@@ -17,6 +17,7 @@ from typing import Callable
 
 from sentinel.client import EmergencyAborted
 from sentinel.cube.checkpoint import CheckpointPlan, CommandOutcome, HomeDefinition, PlannedCommand
+from sentinel.cube.localization import LocalizationState, PoseHealth
 from sentinel.cube.supervised_wait import SupervisedWait, WaitOutcome
 from sentinel.models import Position, Telemetry
 
@@ -299,16 +300,48 @@ class StepExecutor:
         if (any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
                 for v in values) or measured.measured_at < 0
                 or measured.route_id != definition.route_id
-                or math.dist((measured.pose.x_cm, measured.pose.y_cm, measured.pose.z_cm),
-                             (definition.nominal_pose.x_cm, definition.nominal_pose.y_cm,
-                              definition.nominal_pose.z_cm)) > self.home_tolerance_cm
+                or math.dist((measured.pose.x_cm, measured.pose.y_cm),
+                             (definition.nominal_pose.x_cm, definition.nominal_pose.y_cm)) > self.home_tolerance_cm
                 or abs((measured.heading_deg - definition.heading_deg + 180) % 360 - 180)
                 > self.home_heading_tolerance_deg):
             raise ValueError("measured home disagrees with static home definition")
+        # The surveyed pad is a touchdown reference. After takeoff, altitude
+        # belongs to the configured airborne envelope, not pad XYZ tolerance.
         self.runner.envelope.validate_position(measured.pose)
 
     def execute(self, plan: CheckpointPlan) -> CheckpointOutcome:
         return self._execute(plan, ExecutorState.AIRBORNE)
+
+    def apply_reanchor(self, pose: PoseHealth | Position, *, persist: Callable[[], object]) -> None:
+        """Commit trusted reanchor evidence before publishing its executor pose.
+
+        The caller owns the ledger; cube owns validation, lifecycle exclusion,
+        and invalidation. A failed durable append leaves executor state intact.
+        Any failure after append latches terminal so the caller can escalate.
+        """
+        with self._operation_lock, self._state_lock:
+            if self._state not in {ExecutorState.AIRBORNE, ExecutorState.RETURNING}:
+                raise RuntimeError("reanchor requires an airborne executor")
+            position = pose.position if isinstance(pose, PoseHealth) else pose
+            if not self._valid_pose(position):
+                raise ValueError("invalid reanchor position")
+            if isinstance(pose, PoseHealth):
+                values = (pose.heading_deg, pose.measured_at, pose.camera_at, pose.propagated_at,
+                          pose.camera_age_s, pose.fix_age_s, pose.look_away_s, pose.translation_cm,
+                          pose.yaw_deg, pose.xy_uncertainty_cm, pose.heading_uncertainty_deg)
+                if (pose.state != LocalizationState.ANCHORED
+                        or any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in values)
+                        or any(type(v) is not int or v < 0
+                               for v in (pose.pose_revision, pose.estimator_failures))):
+                    raise ValueError("invalid reanchor health")
+            persist()
+            try:
+                self._commit_pose_locked(position)
+                self._transition_locked(self._state, invalidate=True)
+            except BaseException:
+                self._terminal_reason = "REANCHOR_SYNC_FAILED"
+                self._transition_locked(ExecutorState.TERMINAL, invalidate=True)
+                raise
 
     def return_home(self, plan: CheckpointPlan) -> CheckpointOutcome:
         """Latch return; a stale start/revision yields REPLAN_REQUIRED without motion."""
@@ -319,9 +352,9 @@ class StepExecutor:
             revision = self._pose_revision
         return self._execute(plan, ExecutorState.RETURNING, admitted=True, return_revision=revision)
 
-    def execute_legacy(self, plan: CheckpointPlan, sink: Callable[[PlannedCommand], object]) -> None:
+    def execute_legacy(self, plan: CheckpointPlan, sink: Callable[[PlannedCommand], object]) -> CheckpointOutcome:
         """Preserve historical exception/log semantics through the same iterator."""
-        self._execute(plan, ExecutorState.AIRBORNE, legacy_sink=sink)
+        return self._execute(plan, ExecutorState.AIRBORNE, legacy_sink=sink)
 
     def _outcome(self, status, states, observations=(), *, known=True):
         with self._state_lock:
@@ -337,13 +370,16 @@ class StepExecutor:
     def _execute(self, plan, required_state, *, legacy_sink=None, admitted=False, return_revision=None):
         # Reject terminal work before waiting behind a pending SDK command's
         # cleanup. Otherwise the supervisor itself could block on that reply.
-        if self.state is not required_state:
-            if admitted:
-                return self._preempted_outcome()
-            raise RuntimeError(f"execute requires {required_state.value}")
+        with self._state_lock:
+            if self._state is not required_state:
+                if admitted:
+                    return self._preempted_outcome()
+                raise RuntimeError(f"execute requires {required_state.value}")
+            admitted_generation = self._generation
         with self._operation_lock:
-            if self.state is not required_state:
-                return self._preempted_outcome()
+            with self._state_lock:
+                if self._state is not required_state or self._generation != admitted_generation:
+                    return self._preempted_outcome()
             states, observations = [], []
             try:
                 with self._state_lock:
@@ -380,6 +416,7 @@ class StepExecutor:
                     interruptible = command.interruptible and command.kind not in {
                         "MOVE", "ROTATE", "SET_SPEED", "LAND",
                     }
+                    legacy_errors = []
 
                     def operation(cancellation, command=command, publication=publication,
                                   interruptible=interruptible):
@@ -387,7 +424,12 @@ class StepExecutor:
                         # movement lock. Its result is published only by run().
                         context = self.client_call() if not interruptible else nullcontext()
                         with context:
-                            return self._dispatch_current(command, cancellation, publication)
+                            try:
+                                return self._dispatch_current(command, cancellation, publication, legacy_sink)
+                            except BaseException as exc:
+                                if legacy_sink is not None:
+                                    legacy_errors.append(exc)
+                                raise
 
                     def on_deadline(publication=publication, owned=deadline_owned, interruptible=interruptible):
                         with self._state_lock:
@@ -400,13 +442,9 @@ class StepExecutor:
 
                     # A native SETTLE *is* a timed delay: its own timer ends it
                     # successfully. The session deadline still preempts it.
-                    settle_timer = (command.kind == "SETTLE" and self.command_sink is None
+                    settle_timer = (command.kind == "SETTLE" and self.command_sink is None and legacy_sink is None
                                     and (self.deadline is None or deadline < self.deadline))
-                    if legacy_sink is not None:
-                        with self.client_call():
-                            value = self._dispatch_current(command, Event(), publication, legacy_sink)
-                        result = WaitOutcome("COMPLETED", value, started, self.clock(), True)
-                    elif command.upper_bound_s == 0 and command.kind in {"WATCHDOG", "TRIM_ALLOWANCE"}:
+                    if command.upper_bound_s == 0 and command.kind in {"WATCHDOG", "TRIM_ALLOWANCE"}:
                         result = WaitOutcome("COMPLETED", CommandOutcome(), started, started, True)
                     else:
                         cancellation = Event()
@@ -431,6 +469,8 @@ class StepExecutor:
                     )
                     if cleanup:
                         self._cleanup()
+                    if legacy_errors and result.status == "FAILED" and result.completion_known:
+                        raise legacy_errors[0]
                     if outcome is not None:
                         return outcome
                 return self._outcome("COMPLETED", states, observations)
@@ -608,6 +648,8 @@ class StepExecutor:
             self._transition_locked(ExecutorState.TERMINAL, invalidate=True)
             self._terminal_reason = ("COMMAND_COMPLETION_UNKNOWN" if self._command_completion_unknown
                                      else "DEADLINE_EXCEEDED")
+            if self._land_attempted and self._command_completion_unknown:
+                self._terminal = self._terminal_outcome("COMMAND_COMPLETION_UNKNOWN")
             if self._cleanup_started:
                 return
             self._cleanup_started = True
@@ -616,14 +658,47 @@ class StepExecutor:
         # a cancellation mechanism. The caller remains free to supervise.
         Thread(target=self._cleanup, name="checkpoint-terminal", daemon=True).start()
 
-    def land(self) -> TerminalOutcome:
+    def land(self, *, upper_bound_s: float = 10.0, deadline: float | None = None) -> TerminalOutcome:
+        """Supervise one native descent while retaining SDK ownership until reply."""
+        if (type(upper_bound_s) not in (int, float) or not math.isfinite(upper_bound_s)
+                or upper_bound_s <= 0 or (deadline is not None and not math.isfinite(deadline))):
+            raise ValueError("landing requires finite positive bound and finite deadline")
         with self._state_lock:
             if self._terminal is not None:
                 return self._terminal
             if self._state is not ExecutorState.CLOSED:
                 self._transition_locked(ExecutorState.TERMINAL)
         with self._operation_lock:
-            result = self._land_locked()
+            with self._state_lock:
+                if self._terminal is not None:
+                    return self._terminal
+            landing_clock = self.clock
+            try:
+                landing_deadline = landing_clock() + upper_bound_s
+                if not math.isfinite(landing_deadline):
+                    raise ValueError("invalid landing clock")
+            except BaseException:
+                # A poisoned session clock cannot authorize more work. The
+                # already selected terminal cleanup still gets a real bound.
+                landing_clock = time.monotonic
+                landing_deadline = landing_clock() + upper_bound_s
+            else:
+                for limit in (deadline, self.deadline):
+                    if limit is not None:
+                        landing_deadline = min(landing_deadline, limit)
+
+            def expire():
+                with self._state_lock:
+                    self._terminal_reason = "COMMAND_COMPLETION_UNKNOWN"
+                    self._terminal = self._terminal_outcome("COMMAND_COMPLETION_UNKNOWN")
+                    self._deadline_expired(completion_unknown=True)
+
+            waited = SupervisedWait(clock=landing_clock).run(
+                lambda cancel: self._land_locked(), landing_deadline, expire)
+            if waited.status != "COMPLETED":
+                expire()
+            result = self._terminal
+            assert result is not None
             if result.state == "LANDING_FAILED":
                 try:
                     self.close()
@@ -648,9 +723,11 @@ class StepExecutor:
                     state = "EMERGENCY_ABORTED" if self._emergency() else "LANDING_FAILED"
                 finally:
                     self._context.terminal = False
-            self._may_be_airborne = False
-            self._terminal = self._terminal_outcome(state)
-            return self._terminal
+            with self._state_lock:
+                if self._terminal is None:
+                    self._may_be_airborne = False
+                    self._terminal = self._terminal_outcome(state)
+                return self._terminal
 
     def _terminal_outcome(self, state: str) -> TerminalOutcome:
         try:
@@ -658,6 +735,8 @@ class StepExecutor:
             if not math.isfinite(completed_at):
                 completed_at = None
         except BaseException:
+            completed_at = None
+        if state == "COMMAND_COMPLETION_UNKNOWN":
             completed_at = None
         return TerminalOutcome(
             state, self._terminal_reason, self.runner.envelope.position,

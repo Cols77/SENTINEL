@@ -20,7 +20,7 @@ from sentinel.cube.checkpoint import CheckpointPlan, CommandLimits, PlannedComma
 from sentinel.cube.energy import EnergyEstimate, EnergySample, ExecutionMode, ReserveDecision, ReserveGuard
 from sentinel.cube.localization import LocalizationState, LocalizationTracker, PoseForecast, PoseHealth
 from sentinel.cube.recovery import RecoveryVolume, contains_disk
-from sentinel.cube.step_executor import CheckpointOutcome, ExecutorState, TerminalOutcome
+from sentinel.cube.step_executor import CheckpointOutcome, ExecutorState, HomeState, TerminalOutcome
 from sentinel.cube.supervised_wait import SupervisedWait, WaitOutcome
 from sentinel.models import Position
 from sentinel.motion_bounds import rotate_reply_upper_bound_s
@@ -104,6 +104,7 @@ class SafetySupervisor:
         self.recovery, self.mapped_heading_tag_ids = recovery, mapped_heading_tag_ids
         self._last_clock = None
         self._terminal = False
+        self._measured_home: HomeState | None = None
         self.last_terminal_outcome = None
         self.last_persistence_error = None
         self.last_preempted_version = 0
@@ -177,18 +178,28 @@ class SafetySupervisor:
                               commands, sum(c.upper_bound_s for c in commands))
 
     def _termination(self, pose, site):
-        route = next(r for r in site.routes if r.route_id == site.home.route_id)
+        home = self._measured_home
+        route = next(r for r in site.routes if r.route_id == (home.route_id if home else site.home.route_id))
         end = route.checkpoints[-1]
         if (end.x_cm, end.y_cm) != (site.home.nominal_pose.x_cm, site.home.nominal_pose.y_cm):
             raise ValueError("home route must end over its declared pad")
         commands, position, heading = [], pose.position, pose.heading_deg
-        for point in route.checkpoints:
+        points = route.checkpoints[:-1] + (home.pose,) if home else route.checkpoints
+        for point in points:
             part = plan_checkpoint(checkpoint_id=route.route_id, start=position, target=point,
                 start_heading_deg=heading, terminal_heading_deg=self.limits.canonical_heading_deg,
                 speed_cm_s=self.limits.trim_speed_cm_s, looks_deg=(), capture_count=0,
                 limits=self.limits)
             commands.extend(part.commands)
             position, heading = point, part.terminal_heading_deg
+        if home is not None:
+            delta = (home.heading_deg - heading + 180) % 360 - 180
+            if delta:
+                commands.append(PlannedCommand.from_mapping("ROTATE",
+                    {"degrees": abs(delta), "direction": "ccw" if delta > 0 else "cw"},
+                    upper_bound_s=rotate_reply_upper_bound_s(degrees=abs(delta),
+                        base_timeout_s=self.limits.transport_limits.reply_timeout_s), interruptible=False))
+                heading = home.heading_deg
         commands.append(PlannedCommand("LAND", (), self.landing_upper_bound_s, False))
         return CheckpointPlan(route.route_id, pose.position, site.home.nominal_pose,
                               pose.heading_deg, heading, tuple(commands), sum(c.upper_bound_s for c in commands))
@@ -243,13 +254,14 @@ class SafetySupervisor:
 
     def _landing_contingency(self, site, pose, *, now, trigger, energy_available,
                              home=False, require_descent=False):
+        home_pose = self._measured_home.pose if self._measured_home is not None else site.home.nominal_pose
         for entry in site.terminal_contingencies:
             if (home or require_descent) and entry.kind == ContingencyKind.EMERGENCY:
                 # Emergency escalation is not verified landing geometry.
                 continue
             if home and (entry.z_band_cm[0] != site.home.nominal_pose.z_cm
-                         or not math.isclose(pose.position.x_cm, site.home.nominal_pose.x_cm, abs_tol=1e-6)
-                         or not math.isclose(pose.position.y_cm, site.home.nominal_pose.y_cm, abs_tol=1e-6)):
+                         or not math.isclose(pose.position.x_cm, home_pose.x_cm, abs_tol=1e-6)
+                         or not math.isclose(pose.position.y_cm, home_pose.y_cm, abs_tol=1e-6)):
                 # The policy must describe the actual pad and touchdown level.
                 continue
             try:
@@ -282,6 +294,10 @@ class SafetySupervisor:
     def _landing_plan(self, pose):
         descent = PlannedCommand("LAND", (), self.landing_upper_bound_s, False)
         return self._plan(pose, (descent,))
+
+    def _land(self, executor):
+        return executor.land(upper_bound_s=self.landing_upper_bound_s,
+                             deadline=getattr(executor, "deadline", None))
 
     def _landing_forecast(self, pose, now):
         return self._forecast(pose, self._landing_plan(pose), now)
@@ -447,7 +463,11 @@ class SafetySupervisor:
             self.reserve.ingest_sample(sample)
             if remaining_commands is not None:
                 checkpoint = self._plan(pose, remaining_commands)
-            return self.assess(SupervisorRequest(snapshot_version, checkpoint, provider_wait_s, pose, sample), self.site)
+            outcome = self.assess(SupervisorRequest(snapshot_version, checkpoint, provider_wait_s, pose, sample), self.site)
+            if outcome.transition == "CONTINUE" and getattr(self.recovery, "episode_succeeded", False):
+                resumed = self.recovery.confirm_resume(pose, route_validated=True, energy_validated=True)
+                outcome = replace(outcome, request=replace(outcome.request, pose=resumed))
+            return outcome
 
     def validate_start(self, site=None):
         active = site or self.site
@@ -456,6 +476,28 @@ class SafetySupervisor:
         outcome = self.assess(SupervisorRequest(self.store.session_version(self.session_id), None, 0, pose, sample), active)
         if outcome.transition != "CONTINUE":
             raise ValueError(f"start blocked: {outcome.reason}")
+
+    def _bind_home(self, executor):
+        home = getattr(executor, "home", None)
+        if home is not None:
+            if not isinstance(home, HomeState) or home.route_id != self.site.home.route_id:
+                raise ValueError("executor home must match the surveyed home route")
+            if self._measured_home is not None and self._measured_home != home:
+                raise ValueError("session measured home cannot change")
+            self._measured_home = home
+
+    def start(self, executor) -> HomeState:
+        """Admit takeoff, bind its measured home, and validate the real return."""
+        with self._dispatch_lock:
+            self.validate_start()
+            home = executor.start(self.site.home)
+            try:
+                self._bind_home(executor)
+                self.validate_start()
+            except Exception:
+                self.refresh_failure(executor)
+                raise
+            return home
 
     def refresh_failure(self, executor):
         """Fail closed when no sample exists; absent measurements stay null."""
@@ -603,16 +645,19 @@ class SafetySupervisor:
         return result
 
     def _record_completion(self, result, admitted, event, executor):
+        telemetry_error = None
         try:
             pose, sample = self.refresh()
-            self.reserve.ingest_sample(sample)
+            fresh = self.reserve.ingest_sample(sample)
+            if not fresh:
+                sample = self.reserve.conservative_sample
+                telemetry_error = "ENERGY_SAMPLE_REJECTED"
         except Exception:
             # Retain the last timed observation, visibly stale; never substitute
             # the commanded target or the forecast for a failed sensor read.
-            pose, sample = admitted.request.pose, admitted.energy_sample
+            pose, sample = admitted.request.pose, self.reserve.conservative_sample
             fresh = False
-        else:
-            fresh = True
+            telemetry_error = "TELEMETRY_REFRESH_FAILED"
         terminal = isinstance(result, TerminalOutcome)
         self._terminal = terminal or executor.state in {ExecutorState.TERMINAL, ExecutorState.CLOSED}
         try:
@@ -624,7 +669,8 @@ class SafetySupervisor:
         # stopped, not that the aircraft landed or that telemetry is usable.
         unavailable = self._terminal and not terminal
         fresh = fresh and pose_age is not None and not unavailable
-        state = {"battery_percent": sample.battery_pct, **asdict(pose.position),
+        state = {"battery_percent": sample.battery_pct if sample is not None else None, **asdict(pose.position),
+            "telemetry_error_category": telemetry_error,
             "heading_deg": pose.heading_deg, "pose_source": pose.source,
             "pose_quality": "MEASURED" if pose.source == "mapped_joint_tags" else "PROPAGATED",
             "pose_age_s": pose_age,
@@ -635,7 +681,7 @@ class SafetySupervisor:
             "action_progress": result.state if terminal else result.status,
             "completion_known": result.completed_at is not None if terminal else result.completion_known}
         self._persist_completion(result=result, state=state,
-            pose_measured_at=pose.measured_at, energy_measured_at=sample.measured_at_s,
+            pose_measured_at=pose.measured_at, energy_measured_at=sample.measured_at_s if sample is not None else None,
             clock_domain_id=self.clock_domain_id, sample_max_age_s=self.reserve.profile.sample_max_age_s,
             fresh=fresh, causation_id=event.event_id if event is not None else None,
             assessed_snapshot_version=admitted.request.snapshot_version)
@@ -645,16 +691,22 @@ class SafetySupervisor:
         recovery = self.recovery
         if recovery.tracker is not self.tracker:
             raise ValueError("recovery must own the active localization tracker")
-        recovery.commit_reanchor = lambda outcome: self.store.append_reanchor(outcome,
-            expected_version=self.store.session_version(self.session_id))
+        def commit_reanchor(outcome):
+            def persist():
+                try:
+                    self.store.append_reanchor(outcome,
+                        expected_version=self.store.session_version(self.session_id))
+                except Exception as exc:
+                    raise _AuditPersistenceFailure("reanchor persistence failed") from exc
+            executor.apply_reanchor(outcome.health, persist=persist)
+
+        recovery.commit_reanchor = commit_reanchor
         navigation = next(e for e in self.site.terminal_contingencies
                           if e.trigger == ContingencyTrigger.NAVIGATION_UNAVAILABLE)
         environment = adapt_recovery_environment(self.site, self._assurances(),
             session_id=self.session_id, clock_domain_id=self.clock_domain_id,
             navigation_contingency_id=navigation.contingency_id, now_monotonic_ms=self.clock() * 1000,
             mapped_heading_tag_ids=self.mapped_heading_tag_ids)
-        action = recovery.next_action(current.request.pose, environment, ())
-
         def stop(reason):
             terminal = replace(current, transition="LAND_CONTINGENCY", reason=reason,
                                invalidates_snapshot=True, contingency_id=None)
@@ -662,6 +714,11 @@ class SafetySupervisor:
             result = self.emergency(executor)
             self._record_completion(result, terminal, event, executor)
             return result
+
+        if getattr(recovery, "episode_succeeded", False) and not recovery.begin_episode(
+                current.request.pose, environment, route_validated=True, energy_validated=True):
+            return stop("RECOVERY_EPISODE_NOT_ADMITTED")
+        action = recovery.next_action(current.request.pose, environment, ())
 
         if action.kind in {"CONTINGENCY", "EMERGENCY"}:
             return stop(action.reason)
@@ -717,7 +774,13 @@ class SafetySupervisor:
         latest = self.prepare(snapshot_version=self.store.session_version(self.session_id), fallback=current)
         if latest.transition in {"RETURN_NOW", "LAND_CONTINGENCY"}:
             return self.dispatch(latest, executor)
-        accepted = recovery.assess_burst(action, waited.value)
+        try:
+            accepted = recovery.assess_burst(action, waited.value)
+        except _AuditPersistenceFailure:
+            raise
+        except Exception:
+            self.tracker.mark_lost()
+            return stop("REANCHOR_SYNC_FAILED")
         result = CheckpointOutcome("COMPLETED" if accepted.accepted else "RECOVERY_PENDING", (), (), None,
                                    self.tracker.health.position, True)
         self._record_completion(result, current, event, executor)
@@ -737,6 +800,7 @@ class SafetySupervisor:
         replacement motion is attempted; StepExecutor owns its terminal path.
         """
         with self._dispatch_lock:
+            self._bind_home(executor)
             if self._terminal:
                 raise RuntimeError("supervisor is terminal")
             if (outcome.transition == "CONTINUE"
@@ -759,7 +823,7 @@ class SafetySupervisor:
             if current.transition == "LAND_CONTINGENCY":
                 event = self._audit(current)
                 entry = next((e for e in self.site.terminal_contingencies if e.contingency_id == current.contingency_id), None)
-                result = (executor.land() if entry is not None and entry.kind != ContingencyKind.EMERGENCY
+                result = (self._land(executor) if entry is not None and entry.kind != ContingencyKind.EMERGENCY
                           else self.emergency(executor))
                 self._record_completion(result, current, event, executor)
                 return result
@@ -798,7 +862,7 @@ class SafetySupervisor:
                                       reason="LANDING_APPROACH", contingency_id=eligible.contingency_id if eligible else None)
                 event = self._audit(current)
                 if cmd.kind == "LAND":
-                    result = (executor.land() if eligible is not None and eligible.kind != ContingencyKind.EMERGENCY
+                    result = (self._land(executor) if eligible is not None and eligible.kind != ContingencyKind.EMERGENCY
                               else self.emergency(executor))
                 else:
                     part = self._plan(current.request.pose, (cmd,), plan.checkpoint_id)

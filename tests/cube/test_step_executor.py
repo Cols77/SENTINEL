@@ -85,6 +85,97 @@ def test_home_is_measured_and_validation_never_clamps_it():
     assert client.commands[-1] == "land" and client.close_count == 1
 
 
+def test_surveyed_touchdown_height_is_distinct_from_measured_airborne_home():
+    run, client, measured = executor()
+    touchdown = replace(HOME, nominal_pose=Position(0, 0, 0))
+    assert run.start(touchdown) == measured
+    assert run.runner.envelope.position == measured.pose
+    assert run.home.pose.z_cm == 200 and touchdown.nominal_pose.z_cm == 0
+    run.close()
+
+
+def test_reanchor_commits_durably_before_executor_pose_and_invalidates_old_return():
+    run, client, _ = executor()
+    run.start(HOME)
+    old = run.runner.envelope.position
+    old_plan = plan(command(), start=old)
+    revision, generation = run.pose_revision, run._generation
+    committed = []
+    corrected = Position(20, 0, 200)
+    run.apply_reanchor(corrected, persist=lambda: committed.append(run.runner.envelope.position))
+    assert committed == [old]
+    assert run.runner.envelope.position == corrected
+    assert run.pose_revision == revision + 1 and run._generation > generation
+    assert run.return_home(old_plan).status == "REPLAN_REQUIRED"
+    assert run.return_home(plan(command(), start=corrected)).status == "COMPLETED"
+    run.close()
+
+
+@pytest.mark.parametrize("position", [Position(float("nan"), 0, 200), Position(1000, 0, 200)])
+def test_invalid_reanchor_never_persists_or_updates_pose(position):
+    run, client, measured = executor()
+    run.start(HOME)
+    persisted = []
+    with pytest.raises(ValueError, match="reanchor"):
+        run.apply_reanchor(position, persist=lambda: persisted.append(True))
+    assert persisted == [] and run.runner.envelope.position == measured.pose
+    run.close()
+
+
+@pytest.mark.parametrize("field", ["heading_deg", "xy_uncertainty_cm", "estimator_failures", "pose_revision"])
+def test_reanchor_health_rejects_nonfinite_state_before_persistence(field):
+    from tests.cube.test_localization import tracker
+    value, _ = tracker()
+    run, client, measured = executor()
+    run.start(HOME)
+    pose = replace(value.health, position=Position(20, 0, 200), **{field: float("nan")})
+    persisted = []
+    with pytest.raises(ValueError, match="reanchor"):
+        run.apply_reanchor(pose, persist=lambda: persisted.append(True))
+    assert not persisted and run.runner.envelope.position == measured.pose
+    run.close()
+
+
+def test_reanchor_invalidates_optional_work_already_waiting_for_operation_lock():
+    run, client, _ = executor()
+    run.start(HOME)
+    operation_lock, waiting = run._operation_lock, Event()
+
+    class QueuedOperation:
+        def __enter__(self):
+            waiting.set()
+            operation_lock.acquire()
+
+        def __exit__(self, *args):
+            operation_lock.release()
+
+    with operation_lock:
+        run._operation_lock = QueuedOperation()
+        worker, results = threaded(lambda: run.execute(plan(command())))
+        assert waiting.wait(1)
+        run.apply_reanchor(Position(20, 0, 200), persist=lambda: None)
+    worker.join(1)
+    assert not worker.is_alive()
+    assert results[0].status == "PREEMPTED"
+    assert "forward 20" not in client.commands
+    run.close()
+
+
+def test_reanchor_persistence_failure_leaves_executor_pose_and_generation_intact():
+    run, client, measured = executor()
+    run.start(HOME)
+    revision, generation = run.pose_revision, run._generation
+
+    def fail():
+        raise OSError("database unavailable")
+
+    with pytest.raises(OSError):
+        run.apply_reanchor(Position(20, 0, 200), persist=fail)
+    assert run.runner.envelope.position == measured.pose
+    assert run.pose_revision == revision and run._generation == generation
+    run.close()
+
+
 def test_measured_home_route_and_time_are_validated():
     run, client, measured = executor()
     run.measure_home = lambda definition: replace(measured, route_id="other")
@@ -140,11 +231,13 @@ def test_terminal_action_cancels_blocked_home_measurement_without_waiting_for_ca
 
 def test_home_measurement_timeout_lands_and_discards_late_home():
     entered, release, finished = Event(), Event(), Event()
-    run, client, measured = executor(home_measurement_timeout_s=0.05)
+    now = [10.0]
+    run, client, measured = executor(home_measurement_timeout_s=0.05, clock=lambda: now[0])
     original_pose = run.runner.envelope.position
 
     def measure(definition):
         entered.set()
+        now[0] += .1
         assert release.wait(3)
         finished.set()
         return measured
@@ -329,6 +422,102 @@ def test_sdk_timeout_keeps_lock_until_reply_and_never_sends_replacement():
     run.close()
     assert client.commands.count("forward 20") == client.commands.count("land") == 1
     assert client.close_count == 1
+
+
+def test_legacy_command_crossing_deadline_never_fabricates_completion():
+    now = [0.0]
+    run, client, _ = executor(clock=lambda: now[0], deadline=1.5)
+    run.start_legacy()
+    calls = []
+
+    def sink(node):
+        calls.append(node.kind)
+        now[0] = 2.0
+        return CommandOutcome()
+
+    result = run.execute_legacy(plan(command(bound=1)), sink)
+    assert result is not None and result.status == "COMMAND_COMPLETION_UNKNOWN"
+    assert not result.completion_known
+    assert result.command_states[0].completed_at is None
+    assert run.state in {ExecutorState.TERMINAL, ExecutorState.CLOSED}
+    with pytest.raises(RuntimeError, match="AIRBORNE"):
+        run.execute_legacy(plan(command()), sink)
+    assert calls == ["MOVE"]
+    run.close()
+
+
+def test_blocked_legacy_command_returns_unknown_and_retains_command_lock():
+    entered, release = Event(), Event()
+    run, client, _ = executor()
+    run.start_legacy()
+
+    def sink(node):
+        entered.set()
+        release.wait(3)
+        return CommandOutcome()
+
+    worker, results = threaded(lambda: run.execute_legacy(plan(command(bound=.05)), sink))
+    try:
+        assert entered.wait(1)
+        worker.join(1)
+        assert not worker.is_alive()
+        assert results[0].status == "COMMAND_COMPLETION_UNKNOWN"
+        assert not run.command_lock.acquire(blocking=False)
+        assert "land" not in client.commands
+    finally:
+        release.set()
+        worker.join(1)
+        run.close()
+
+
+def test_timely_legacy_failure_preserves_exception_and_terminal_cleanup():
+    run, client, _ = executor()
+    run.start_legacy()
+
+    def sink(node):
+        raise ValueError("legacy failure")
+
+    with pytest.raises(ValueError, match="legacy failure"):
+        run.execute_legacy(plan(command()), sink)
+    assert client.commands.count("land") == client.close_count == 1
+
+
+@pytest.mark.parametrize("session_bound", [False, True])
+def test_native_landing_watchdog_returns_unknown_without_releasing_sdk_lock(session_bound):
+    entered, release = Event(), Event()
+    now = [10.0]
+
+    class BlockingLand(Client):
+        def land(self):
+            self._record("land-entered")
+            entered.set()
+            release.wait(3)
+            return super().land()
+
+    run, client, _ = executor(client=BlockingLand(), clock=lambda: now[0])
+    run.start(HOME)
+    if session_bound:
+        run.deadline = now[0] + .05
+    worker, results = threaded(lambda: run.land(upper_bound_s=1 if session_bound else .05))
+    try:
+        assert entered.wait(1)
+        now[0] += .1
+        worker.join(1)
+        assert not worker.is_alive()
+        terminal = results[0]
+        assert terminal.state == terminal.reason == "COMMAND_COMPLETION_UNKNOWN"
+        assert terminal.completed_at is None
+        assert run.land() is terminal
+        assert not run.command_lock.acquire(blocking=False)
+        assert client.commands.count("land-entered") == 1
+        with pytest.raises(RuntimeError, match="AIRBORNE"):
+            run.execute(plan(command()))
+    finally:
+        release.set()
+        worker.join(1)
+        run.close()
+    assert run.land() is terminal
+    assert client.commands.count("land") == client.close_count == 1
 
 
 @pytest.mark.parametrize("cooperative", [True, False])

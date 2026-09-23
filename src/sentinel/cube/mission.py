@@ -485,6 +485,19 @@ class CubeMissionRunner(FlightTestRunner):
                         + tuple(commands_without_recovered_axes[first_motion:]))
             plan = replace(plan, commands=commands,
                            worst_case_s=sum(command.upper_bound_s for command in commands))
+        # Legacy callbacks perform bookkeeping and injected sleeps. Reserve
+        # the declared read allowance for callback completion as well as the
+        # requested settle duration, and supervise every actual callback.
+        commands = []
+        for command in plan.commands:
+            if command.kind == "SETTLE":
+                command = PlannedCommand.from_mapping("SETTLE",
+                    {**dict(command.arguments), "duration_s": command.upper_bound_s},
+                    upper_bound_s=command.upper_bound_s + limits.telemetry_s, interruptible=True)
+            elif command.upper_bound_s == 0 and command.kind in {"WATCHDOG", "TRIM_ALLOWANCE"}:
+                command = replace(command, upper_bound_s=limits.telemetry_s)
+            commands.append(command)
+        plan = replace(plan, commands=tuple(commands), worst_case_s=sum(c.upper_bound_s for c in commands))
         self._checkpoint_plans.append(plan)
         self._active_checkpoint_plan = plan
         return plan
@@ -547,7 +560,7 @@ class CubeMissionRunner(FlightTestRunner):
             self._execute_planned_move(arguments)
         elif command.kind == "SETTLE":
             self._checkpoint_effects.append((command.kind, "settle"))
-            self.sleep_fn(command.upper_bound_s)
+            self.sleep_fn(arguments.get("duration_s", command.upper_bound_s))
             self._unsettled_speed = None
         elif command.kind == "ROTATE":
             self._checkpoint_effects.append((command.kind, "rotation"))

@@ -221,6 +221,12 @@ class ReserveGuard:
         self._motor_epoch: tuple[Decimal, Decimal, str] | None = None
         self._last_ingested_sample: EnergySample | None = None
         self._minimum_battery_pct: int | None = None
+        self._conservative_sample: EnergySample | None = None
+
+    @property
+    def conservative_sample(self) -> EnergySample | None:
+        """Lowest validated observation, retaining its original provenance."""
+        return self._conservative_sample
 
     @property
     def conservative_percent_per_second(self) -> float:
@@ -244,6 +250,8 @@ class ReserveGuard:
     def _accept_sample(self, sample: EnergySample) -> None:
         """Record a sample only after its stream transition was validated."""
 
+        if self._minimum_battery_pct is None or sample.battery_pct <= self._minimum_battery_pct:
+            self._conservative_sample = sample
         self._minimum_battery_pct = min(self._minimum_battery_pct, sample.battery_pct) \
             if self._minimum_battery_pct is not None else sample.battery_pct
         self._last_ingested_sample = sample

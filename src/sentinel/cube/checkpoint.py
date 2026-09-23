@@ -67,6 +67,8 @@ class CheckpointPlan:
 
 @dataclass(frozen=True, slots=True)
 class HomeDefinition:
+    """Surveyed pad/touchdown reference; airborne home is measured at takeoff."""
+
     pad_id: str
     nominal_pose: Position
     heading_deg: float

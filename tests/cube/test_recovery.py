@@ -169,6 +169,57 @@ def test_injected_source_and_clock_are_used_and_actions_cannot_be_replayed():
     assert not recovery.assess_burst(action, reports(clock)).accepted
 
 
+def test_new_episode_requires_successful_resume_and_fresh_route_and_energy_validation():
+    recovery, value, clock = controller()
+    env = environment()
+    first = recovery.next_action(value.health, env, ())
+    assert recovery.assess_burst(first, reports(clock)).accepted
+    assert recovery.episode_succeeded
+    with pytest.raises(ValueError, match="validation"):
+        recovery.confirm_resume(value.health, route_validated=True, energy_validated=False)
+    recovery.confirm_resume(value.health, route_validated=True, energy_validated=True)
+    value._health = replace(value.health, state=LocalizationState.RECOVERY_REQUIRED, estimator_failures=3)
+    assert not recovery.begin_episode(value.health, env, route_validated=False, energy_validated=True)
+    assert recovery.begin_episode(value.health, env, route_validated=True, energy_validated=True)
+    second = recovery.next_action(value.health, env, ())
+    assert second.kind == "STATIONARY_BURST" and second.action_id != first.action_id
+    assert recovery.assess_burst(second, reports(clock)).accepted
+    assert not recovery.assess_burst(first, reports(clock)).accepted
+
+
+@pytest.mark.parametrize("failure", ["exhausted", "unresumed", "clock_reset", "session_change"])
+def test_episode_reset_cannot_bypass_exhaustion_or_session_poisoning(failure):
+    recovery, value, clock = controller()
+    env = environment()
+    action = recovery.next_action(value.health, env, ())
+    if failure == "exhausted":
+        recovery.assess_burst(action, ())
+        recovery.max_attempts = 1
+        assert recovery.next_action(value.health, env, ()).kind == "CONTINGENCY"
+    else:
+        assert recovery.assess_burst(action, reports(clock)).accepted
+        if failure != "unresumed":
+            recovery.confirm_resume(value.health, route_validated=True, energy_validated=True)
+        if failure == "clock_reset":
+            clock.now = 9
+        elif failure == "session_change":
+            env = replace(env, session_id="other")
+    value._health = replace(value.health, state=LocalizationState.RECOVERY_REQUIRED, estimator_failures=3)
+    assert not recovery.begin_episode(value.health, env, route_validated=True, energy_validated=True)
+    assert recovery.next_action(value.health, env, ()).kind in {"CONTINGENCY", "EMERGENCY"}
+
+
+def test_terminal_recovery_selection_cannot_be_reset_after_earlier_success():
+    recovery, value, clock = controller()
+    env = environment()
+    action = recovery.next_action(value.health, env, ())
+    assert recovery.assess_burst(action, reports(clock)).accepted
+    recovery.confirm_resume(value.health, route_validated=True, energy_validated=True)
+    value._health = replace(value.health, state=LocalizationState.RECOVERY_REQUIRED)
+    assert recovery.next_action(value.health, env, ()).kind == "CONTINGENCY"
+    assert not recovery.begin_episode(value.health, env, route_validated=True, energy_validated=True)
+
+
 def test_site_roundtrip_and_schema_are_static_and_have_exact_base_contract():
     doc = room_site_document(site())
     assert parse_room_site(doc) == site()

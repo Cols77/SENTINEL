@@ -89,7 +89,27 @@ def test_checkpoint_sink_drives_telemetry_settles_rotations_and_captures(tmp_pat
     assert [effect for kind, effect in runner.checkpoint_effects if kind == "READ_TELEMETRY"] == ["telemetry", "telemetry"]
     assert all(command.kind != "LOCALISE" for command in plan.commands)
     assert _log(tmp_path)[0]["battery_pct"] == 100
-    assert sleeps == [command.upper_bound_s for command in plan.commands if command.kind == "SETTLE"]
+    assert sleeps == [dict(command.arguments)["duration_s"] for command in plan.commands if command.kind == "SETTLE"]
+
+
+def test_legacy_settle_sleep_has_a_separate_supervised_completion_allowance(tmp_path):
+    from sentinel.cube.step_executor import StepExecutor
+    now = [0.0]
+    mission = Mission(270, 250, (Waypoint("WP1", 270, 300, 100),))
+    runner, client = _runner(tmp_path, "off", [], mission=mission)
+    StepExecutor(runner, clock=lambda: now[0])
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    runner.sleep_fn = sleep
+    report = runner.run(confirm=True)
+    assert report.status == "PASS", report.error
+    settles = [c for c in runner.checkpoint_plans[0].commands if c.kind == "SETTLE"]
+    assert sleeps == [dict(c.arguments)["duration_s"] for c in settles]
+    assert all(dict(c.arguments)["duration_s"] < c.upper_bound_s for c in settles)
 
 
 def test_runner_derives_checkpoint_motion_bounds_from_the_client_transport_policy(tmp_path):

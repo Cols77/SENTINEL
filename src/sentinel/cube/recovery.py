@@ -106,6 +106,7 @@ class RecoveryOutcome:
     session_id: str
     clock_domain_id: str
     events: tuple[dict, ...] = ()
+    health: PoseHealth | None = None
 
 
 def contains_disk(volume: RecoveryVolume, position: Position, radius_cm: float) -> bool:
@@ -157,6 +158,57 @@ class RecoveryController:
         self._finished = False
         self._clock_failed = False
         self._accounted_rotations: set[str] = set()
+        self._successful_revision: int | None = None
+        self._resumed_revision: int | None = None
+        self._completed_reanchors: set[str] = set()
+
+    @property
+    def episode_succeeded(self) -> bool:
+        return self._finished and self._successful_revision is not None
+
+    def confirm_resume(self, pose: PoseHealth, *, route_validated: bool, energy_validated: bool) -> PoseHealth:
+        """Acknowledge fresh admission after success, before any later episode."""
+        current = self.tracker.health
+        self._clock()
+        if (not self.episode_succeeded or self._clock_failed
+                or route_validated is not True or energy_validated is not True
+                or pose.pose_revision != current.pose_revision
+                or current.pose_revision != self._successful_revision
+                or current.state not in {LocalizationState.ANCHORED, LocalizationState.COASTING}):
+            raise ValueError("recovery resume requires fresh route and energy validation")
+        self.tracker._health = replace(current, requires_route_validation=False, requires_energy_validation=False)
+        self._resumed_revision = current.pose_revision
+        return self.tracker.health
+
+    def begin_episode(self, pose: PoseHealth, environment: RecoveryEnvironment, *,
+                      route_validated: bool, energy_validated: bool) -> bool:
+        """Reset only a successfully resumed episode on a later recovery need.
+
+        Exhaustion, clock/session poisoning, and audit identities survive. An
+        active or exhausted episode cannot acquire a fresh deadline or attempts.
+        """
+        now = self._clock()
+        if self._environment is not None and (
+                environment.session_id != self._environment.session_id
+                or environment.clock_domain_id != self._environment.clock_domain_id):
+            self._clock_failed = True
+        current = self.tracker.health
+        if (not self.episode_succeeded or self._clock_failed
+                or route_validated is not True or energy_validated is not True
+                or current.state != LocalizationState.RECOVERY_REQUIRED
+                or pose.pose_revision != current.pose_revision
+                or current.pose_revision != self._resumed_revision
+                or current.requires_route_validation or current.requires_energy_validation
+                or now * 1000 >= environment.navigation_contingency_expires_monotonic_ms):
+            return False
+        environment = replace(environment)
+        self._started_at = self._pending_at = self._pose = self._pending = None
+        self._attempts = 0
+        self._tried.clear()
+        self._restore = self._finished = False
+        self._successful_revision = self._resumed_revision = None
+        self._environment = environment
+        return True
 
     def _clock(self) -> float:
         now = self.clock()
@@ -168,6 +220,7 @@ class RecoveryController:
     def _terminal(self, environment: RecoveryEnvironment, reason: str) -> RecoveryAction:
         self._pending = None
         self._finished = True
+        self._successful_revision = self._resumed_revision = None
         current = (not self._clock_failed and self._last_now is not None
                    and self._last_now * 1000 < environment.navigation_contingency_expires_monotonic_ms)
         return RecoveryAction(str(uuid.uuid4()), "CONTINGENCY" if current else "EMERGENCY",
@@ -398,7 +451,7 @@ class RecoveryController:
                         "idempotency_key": f"reanchor:{reanchor_id}:{event_type}"}
                        for index, event_type in enumerate(("POSE_REANCHORED", "ROUTES_INVALIDATED",
                                                            "CANDIDATES_INVALIDATED", "TARGET_LOCKS_INVALIDATED")))
-        outcome = RecoveryOutcome(True, "reanchored", session, clock_domain, events)
+        outcome = RecoveryOutcome(True, "reanchored", session, clock_domain, events, health)
         # Room integration supplies an atomic ledger append here. A failed
         # commit leaves the old pose/history intact and the same batch retryable.
         if self.commit_reanchor is not None:
@@ -410,4 +463,6 @@ class RecoveryController:
         self.tracker._health = health
         self.tracker._initialized = True
         self._finished = True
+        self._successful_revision = health.pose_revision
+        self._completed_reanchors.add(reanchor_id)
         return outcome

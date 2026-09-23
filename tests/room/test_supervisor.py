@@ -46,7 +46,10 @@ class Executor:
         self.state = ExecutorState.RETURNING
         return self.execute(plan)
 
-    def land(self):
+    def apply_reanchor(self, pose, *, persist):
+        persist()
+
+    def land(self, *, upper_bound_s=None, deadline=None):
         assert self.store.events("session")[-1].event_type == "SAFETY_ASSESSED"
         self.calls.append("LAND")
         self.state = ExecutorState.TERMINAL
@@ -101,6 +104,234 @@ def request(safety, plan=None, wait=0):
     supervisor, store, _, samples, *_ = safety
     return SupervisorRequest(store.session_version("session"), plan, wait,
                              samples["pose"], samples["energy"])
+
+
+def real_executor(safety, *, measured=None, client=None):
+    from sentinel.cube.checkpoint import CommandOutcome
+    from sentinel.cube.step_executor import HomeState, StepExecutor
+    from sentinel.dry_run import DryRunClient
+    from sentinel.envelope import FlightEnvelope
+    from sentinel.runner import FlightTestRunner
+    supervisor, store, clock, samples, *_ = safety
+    measured = measured or HomeState(Position(100, 100, 100), 90, "home-route", clock())
+    runner = FlightTestRunner(client or DryRunClient(), "dry-run", retain_video_stream=True,
+        envelope=FlightEnvelope(0, 200, 0, 200, 20, 200, position=measured.pose))
+    commands = []
+
+    def sink(node, cancel):
+        commands.append(node)
+        if node.kind == "READ_TELEMETRY":
+            return Telemetry(80, round(runner.envelope.position.z_cm))
+        return CommandOutcome()
+
+    executor = StepExecutor(runner, clock=clock, measure_home=lambda definition: measured, command_sink=sink)
+
+    def refresh():
+        supervisor.tracker._health = replace(supervisor.tracker.health, position=runner.envelope.position)
+        return supervisor.tracker.health, samples["energy"]
+
+    supervisor.refresh = refresh
+
+    def emergency(active):
+        assert store.events("session")[-1].event_type == "SAFETY_ASSESSED"
+        safety[-1].append(True)
+        active.runner.trigger_emergency()
+        return active.land()
+
+    supervisor.emergency = emergency
+    return executor, commands
+
+
+def test_site_executor_supervisor_start_returns_to_measured_airborne_home(safety):
+    from sentinel.cube.step_executor import HomeState
+    supervisor, store, clock, samples, *_ = safety
+    measured = HomeState(Position(100, 100, 120), 90, "home-route", clock())
+    executor, commands = real_executor(safety, measured=measured)
+    try:
+        assert supervisor.start(executor) == measured
+        current = supervisor.prepare(snapshot_version=store.session_version("session"))
+        assert current.transition == "CONTINUE"
+        plan = current.termination_plan
+        assert plan.target == supervisor.site.home.nominal_pose == Position(100, 100, 0)
+        assert plan.terminal_heading_deg == measured.heading_deg
+        assert not any(c.kind == "MOVE" for c in plan.commands)
+        result = supervisor.dispatch(replace(current, transition="RETURN_NOW", invalidates_snapshot=True), executor)
+        assert result.state == "LANDED"
+        assert not any(c.kind == "MOVE" for c in commands)
+        assert executor.runner.client.commands.count("takeoff") == executor.runner.client.commands.count("land") == 1
+    finally:
+        executor.close()
+
+
+def test_return_plan_restores_the_measured_home_heading(safety):
+    from sentinel.cube.step_executor import HomeState
+    supervisor, store, clock, samples, *_ = safety
+    measured = HomeState(Position(100, 100, 120), 95, "home-route", clock())
+    executor, commands = real_executor(safety, measured=measured)
+    try:
+        executor.start(supervisor.site.home)
+        supervisor._bind_home(executor)
+        pose, _ = supervisor.refresh()
+        plan = supervisor._termination(pose, supervisor.site)
+        assert plan.terminal_heading_deg == measured.heading_deg
+        assert plan.checkpoint_id == measured.route_id
+        assert not any(c.kind == "MOVE" for c in plan.commands)
+        rotation = plan.commands[-2]
+        assert rotation.kind == "ROTATE"
+        assert dict(rotation.arguments) == {"degrees": 5, "direction": "ccw"}
+        assert plan.commands[-1].kind == "LAND"
+        assert plan.target == supervisor.site.home.nominal_pose
+    finally:
+        executor.close()
+
+
+def test_recovery_reanchors_real_executor_before_a_corrected_return(safety):
+    from sentinel.cube.recovery import PoseReport, RecoveryController
+    from tests.cube.test_localization import fix
+    supervisor, store, clock, samples, *_ = safety
+    executor, commands = real_executor(safety)
+    try:
+        supervisor.start(executor)
+        supervisor.tracker._health = replace(supervisor.tracker.health,
+            state=LocalizationState.RECOVERY_REQUIRED, estimator_failures=3)
+        supervisor.recovery = RecoveryController(supervisor.tracker, clock=clock,
+            burst_source=lambda action: tuple(PoseReport(str(i), fix(clock,
+                position=Position(120, 100, 100))) for i in range(3)), energy_admits=lambda action: True)
+        supervisor.mapped_heading_tag_ids = ((90, (1, 2)),)
+        revision = executor.pose_revision
+        current = supervisor.prepare(snapshot_version=store.session_version("session"))
+        assert current.transition == "RECOVER"
+        result = supervisor.dispatch(current, executor)
+        assert result.status == "COMPLETED"
+        assert executor.runner.envelope.position == supervisor.tracker.health.position == Position(120, 100, 100)
+        assert executor.pose_revision > revision
+        current = supervisor.prepare(snapshot_version=store.session_version("session"))
+        assert current.transition == "CONTINUE"
+        result = supervisor.dispatch(replace(current, transition="RETURN_NOW", invalidates_snapshot=True), executor)
+        assert result.state == "LANDED"
+        assert any(c.kind == "MOVE" and dict(c.arguments)["direction"] == "left" for c in commands)
+        assert not any("STALE_RETURN_PLAN" in str(e.payload) for e in store.events("session"))
+    finally:
+        executor.close()
+
+
+def test_failed_executor_reanchor_sync_after_durable_append_is_terminal(safety):
+    from sentinel.cube.recovery import PoseReport, RecoveryController
+    from tests.cube.test_localization import fix
+    supervisor, store, clock, samples, _, emergencies = safety
+    executor, commands = real_executor(safety)
+    try:
+        supervisor.start(executor)
+        supervisor.tracker._health = replace(supervisor.tracker.health,
+            state=LocalizationState.RECOVERY_REQUIRED, estimator_failures=3)
+        supervisor.recovery = RecoveryController(supervisor.tracker, clock=clock,
+            burst_source=lambda action: tuple(PoseReport(str(i), fix(clock,
+                position=Position(120, 100, 100))) for i in range(3)), energy_admits=lambda action: True)
+        supervisor.mapped_heading_tag_ids = ((90, (1, 2)),)
+
+        def failed_sync(pose):
+            assert any(e.event_type == "POSE_REANCHORED" for e in store.events("session"))
+            raise RuntimeError("secret internal synchronization failure")
+
+        executor._commit_pose_locked = failed_sync
+        current = supervisor.prepare(snapshot_version=store.session_version("session"))
+        result = supervisor.dispatch(current, executor)
+        assert result.state == "EMERGENCY_ABORTED" and emergencies == [True]
+        assert supervisor.tracker.health.state == LocalizationState.LOST
+        assert executor.state == ExecutorState.TERMINAL
+        assert not commands
+        events = store.events("session")
+        assert len([e for e in events if e.event_type == "POSE_REANCHORED"]) == 1
+        assert any(e.payload.get("reason") == "REANCHOR_SYNC_FAILED" for e in events)
+        assert not any("secret" in str(e.payload) for e in events)
+    finally:
+        executor.close()
+
+
+def test_real_executor_can_recover_resume_and_recover_again(safety):
+    from sentinel.cube.recovery import PoseReport, RecoveryController
+    from tests.cube.test_localization import fix
+    supervisor, store, clock, samples, *_ = safety
+    executor, commands = real_executor(safety)
+    actions = []
+
+    def burst(action):
+        actions.append(action)
+        return tuple(PoseReport(str(i), fix(clock)) for i in range(3))
+
+    supervisor.recovery = RecoveryController(supervisor.tracker, clock=clock,
+        burst_source=burst, energy_admits=lambda action: True)
+    supervisor.mapped_heading_tag_ids = ((90, (1, 2)),)
+    try:
+        supervisor.start(executor)
+        for episode in range(2):
+            supervisor.tracker._health = replace(supervisor.tracker.health,
+                state=LocalizationState.RECOVERY_REQUIRED, estimator_failures=3)
+            current = supervisor.prepare(snapshot_version=store.session_version("session"))
+            assert current.transition == "RECOVER"
+            result = supervisor.dispatch(current, executor)
+            assert isinstance(result, CheckpointOutcome) and result.status == "COMPLETED"
+            current = supervisor.prepare(snapshot_version=store.session_version("session"))
+            assert current.transition == "CONTINUE"
+            assert not supervisor.tracker.health.requires_route_validation
+            assert not supervisor.tracker.health.requires_energy_validation
+        assert [a.kind for a in actions] == ["STATIONARY_BURST", "STATIONARY_BURST"]
+        assert len({a.action_id for a in actions}) == 2
+        assert len([e for e in store.events("session") if e.event_type == "POSE_REANCHORED"]) == 2
+    finally:
+        executor.close()
+
+
+@pytest.mark.parametrize("path", ["checkpoint", "contingency"])
+def test_supervisor_passes_landing_bound_and_session_deadline_to_real_executor(safety, path):
+    from sentinel.dry_run import DryRunClient
+    supervisor, store, clock, samples, *_ = safety
+    entered, release = Event(), Event()
+
+    class BlockedLanding(DryRunClient):
+        def land(self):
+            entered.set()
+            clock.now += .1
+            release.wait(3)
+            return super().land()
+
+    executor, commands = real_executor(safety, client=BlockedLanding())
+    supervisor.landing_upper_bound_s = .05
+    supervisor.reserve = ReserveGuard(replace(supervisor.reserve.profile, percent_per_second_upper=.1), clock)
+    supervisor.validate_bindings = lambda active: None  # Changed synthetic landing calibration.
+    captured = []
+    original_land = executor.land
+
+    def land(**kwargs):
+        captured.append(kwargs)
+        return original_land(**kwargs)
+
+    executor.land = land
+    try:
+        supervisor.start(executor)
+        executor.deadline = clock() + .5
+        if path == "contingency":
+            samples["pose"] = supervisor.tracker.health
+            supervisor.refresh = lambda: (samples["pose"], samples["energy"])
+            supervisor.recovery = None
+            # Force the measured energy reserve below the return requirement
+            # while retaining the independently affordable native descent.
+            clock.now += .01
+            samples["energy"] = EnergySample(22, clock())
+        current = supervisor.prepare(snapshot_version=store.session_version("session"),
+            checkpoint=checkpoint(supervisor.tracker.health, command("LAND", seconds=.05)) if path == "checkpoint" else None)
+        if path == "contingency":
+            assert current.transition == "LAND_CONTINGENCY" and current.contingency_id is not None
+        result = supervisor.dispatch(current, executor)
+        assert captured[0] == {"upper_bound_s": .05, "deadline": executor.deadline}
+        assert entered.is_set() and result.state == "COMMAND_COMPLETION_UNKNOWN"
+        assert result.completed_at is None
+        assert not executor.command_lock.acquire(blocking=False)
+        state = store.events("session")[-1].payload["state"]
+        assert state["airborne"] is None and state["completion_known"] is False
+    finally:
+        release.set()
+        executor.close()
 
 
 def test_assessment_is_pure_and_prices_site_route_landing_and_wait(safety):
@@ -209,6 +440,30 @@ def test_each_command_refreshes_and_completion_is_append_only_measured_evidence(
     clock.now += 4
     stale = queries.project("session")
     assert dict(next(f for f in stale.sources if f.kind == "READ_DRONE").values)["state_freshness"] == "STALE"
+
+
+def test_rejected_completion_battery_is_stale_and_retains_validated_provenance(safety):
+    supervisor, store, clock, samples, *_ = safety
+
+    class ConflictingBattery(Executor):
+        def execute(self, plan):
+            result = super().execute(plan)
+            samples["energy"] = EnergySample(99, clock())  # Same timestamp, different payload.
+            return result
+
+    executor = ConflictingBattery(store, clock)
+    plan = checkpoint(samples["pose"], command())
+    result = supervisor.dispatch(supervisor.assess(request(safety, plan), supervisor.site), executor)
+    assert result.status == "COMPLETED"
+    recorded = store.events("session")[-1].payload
+    assert recorded["refresh_succeeded"] is False
+    assert recorded["state"]["battery_percent"] == 80
+    assert recorded["state"]["telemetry_error_category"] == "ENERGY_SAMPLE_REJECTED"
+    assert recorded["energy_measured_at"] == 10
+    snapshot = ReadQueries(store, clock=clock, clock_domain_id=supervisor.clock_domain_id).project("session")
+    state = dict(next(f for f in snapshot.sources if f.kind == "READ_DRONE").values)
+    assert state["state_freshness"] == "STALE" and state["battery_percent"] == 80
+    assert supervisor.prepare(snapshot_version=store.session_version("session")).transition == "LAND_CONTINGENCY"
 
 
 def test_stale_optional_snapshot_cannot_dispatch(safety):
