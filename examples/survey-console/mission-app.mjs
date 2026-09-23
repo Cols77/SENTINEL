@@ -28,7 +28,10 @@ const spine=el('ol',{id:'evidence-spine','aria-label':'Evidence spine'});
 const center=el('section',{id:'center',class:'mission-workspace',tabindex:-1},[mapHost,localizationHost,evidenceHost,framesHost,el('h3',{},['Evidence spine']),spine]);
 const counts=el('aside',{id:'counts',class:'mission-facts','aria-label':'Survey facts'});
 const audit=el('details',{class:'mission-audit'},[el('summary',{},['Audit log']),el('ol',{id:'audit-events'})]);
-root.append(top,readinessHost,el('div',{class:'mission-layout'},[chatHost,center,counts]),audit);
+const surveyLayout=el('div',{class:'mission-layout'},[chatHost,center,counts]);
+root.append(top,readinessHost,surveyLayout,audit);
+// Task C: the room-agent architecture (its own module; additive).
+import('./room-agent.mjs').then(({mountRoomAgent,injectRoomAgentStyles})=>{injectRoomAgentStyles();mountRoomAgent({root,surveyLayout});}).catch(()=>{});
 const client=createHttpClient();
 const controller=createController(client,missionContract);
 const profiles=createSiteProfileController(client,()=>controller.refresh());
