@@ -11,7 +11,8 @@ parts -- it defines no new safety rule:
    a malformed or missing file refuses.
 2. The flight stack (executor, telemetry refresh, emergency landing, frame
    source) from the injected ``flight_stack_factory``, bound to that tracker
-   and clock. This build never constructs a real drone adapter on its own.
+   and clock. This module never constructs a drone adapter itself; the CLI's
+   default factory is ``sentinel.room.live_stack.TelloFlightStackFactory``.
 3. A REAL-mode ``SafetySupervisor``. ``validate_bindings`` requires a grant in
    the session's capability profile bound to ``calibration_hashes`` of the
    exact drift/energy/limits/site this session flies with; the CLI copies the

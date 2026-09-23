@@ -4,9 +4,11 @@
 Everything here is OFFLINE: no provider, network, drone client or hardware
 object is constructed anywhere in this file. Live mode is exercised through
 its injected drone_probe/provider_probe/client_factory/jev_factory/
-detector_factory parameters only; every default (unauthorized) factory is
-proven to refuse, and this file never overrides them with anything that
-reaches a socket.
+detector_factory parameters, or through the Task A live defaults
+(``sentinel.room.live_stack``) with their lowest transport seams replaced:
+an autouse fixture makes any real Tello client build or provider HTTP call
+raise, and the tests that exercise the defaults swap in the fake DJITelloPy
+transport from ``tests/room/test_live_stack.py``.
 """
 from __future__ import annotations
 
@@ -20,9 +22,11 @@ from pathlib import Path
 import pytest
 
 import scripts.room_session as cli
-from sentinel.room import artifacts, calibration, capabilities, connectivity
+from sentinel.room import artifacts, calibration, capabilities, connectivity, live_stack
 from sentinel.room.models import CapabilityGrant, canonical_grant_sha256
+from sentinel.room.site import room_site_document
 from tests.room import test_live_session as live_fakes
+from tests.room import test_live_stack as stack_fakes
 
 FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "room_agent" / "v1"
 SITE_PATH = FIXTURE_DIR / "semantic-site.json"
@@ -40,6 +44,38 @@ NOW = "2026-09-23T12:00:00+00:00"
 
 def _hash(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+TAG_MAP_FIXTURE = Path(__file__).resolve().parents[2] / stack_fakes.TAG_MAP_FIXTURE
+
+
+@pytest.fixture(autouse=True)
+def _forbid_real_transports(monkeypatch):
+    """The live defaults reach hardware and the provider only through these
+    seams; in this file every one of them refuses unless a test swaps in a fake."""
+
+    def no_tello(**_kwargs):
+        raise RuntimeError("test forbids building a real Tello client")
+
+    def no_http(*_args, **_kwargs):
+        raise RuntimeError("test forbids provider network calls")
+
+    monkeypatch.setattr(live_stack, "build_tello_client", no_tello)
+    monkeypatch.setattr(live_stack, "_http_get", no_http)
+    monkeypatch.setattr(live_stack, "provider_environ", lambda: {})
+
+
+def _fake_provider(monkeypatch):
+    monkeypatch.setattr(live_stack, "provider_environ", lambda: {
+        live_stack.PROVIDER_KEY_ENV: "test-key", live_stack.PROVIDER_MODEL_ENV: "google/gemini-test"})
+    monkeypatch.setattr(live_stack, "_http_get",
+                        lambda url, *, headers, timeout: stack_fakes.FakeResponse(200))
+
+
+def _fake_tello(monkeypatch, **tello_kwargs):
+    transport = stack_fakes.FakeTransport(**tello_kwargs)
+    monkeypatch.setattr(live_stack, "build_tello_client", lambda **_kwargs: transport())
+    return transport
 
 
 def _preview_argv(tmp_path, **overrides) -> list[str]:
@@ -353,7 +389,7 @@ def _fake_collaborator(identity="vendor-x"):
     return lambda: SimpleNamespace(identity=identity)
 
 
-def test_connectivity_only_refuses_with_default_unauthorized_probes(tmp_path, capsys):
+def test_connectivity_only_refuses_when_the_default_probes_reach_nothing(tmp_path, capsys):
     manifest_path, digest = _write_manifest(tmp_path)
     consent = _consent_flags(tmp_path)
     argv = _live_argv(manifest_path, digest, tmp_path,
@@ -445,14 +481,15 @@ def _full_gate_argv(tmp_path, manifest_path, digest, *, grant, profile_path, ext
     )
 
 
-def _flight_setup(tmp_path, *, flight_grant=True, calibration_flags=True):
+def _flight_setup(tmp_path, *, flight_grant=True, calibration_flags=True, site=None):
     """Every file a flight-capable live invocation binds to: the admission
     grant (manifest profile hashes), the flight-calibration grant the
     SafetySupervisor itself verifies (calibration_hashes of the drift/energy/
     limits files and the site), the calibration profile, the drift/energy/
-    limits evidence files, and a manifest bound to the fixture site."""
-    site = live_fakes.fixture_site()
-    site_path = live_fakes.write_site(tmp_path / "site.json")
+    limits evidence files, and a manifest bound to the fixture site (or *site*)."""
+    site = site or live_fakes.fixture_site()
+    site_path = tmp_path / "site.json"
+    site_path.write_text(json.dumps(room_site_document(site)), encoding="utf-8")
     aircraft_id = live_fakes.AIRCRAFT_ID
     profile = _promoted_profile(site_sha256=site.cube_site_sha256, aircraft_id=aircraft_id)
     profile_hash = calibration.canonical_profile_sha256(profile)
@@ -664,16 +701,63 @@ def test_live_full_flight_default_detector_factory_refuses(tmp_path, capsys):
     assert stack.calls == []
 
 
-def test_live_full_flight_default_client_factory_refuses_before_takeoff(tmp_path, capsys):
+def test_live_default_flight_stack_requires_a_tag_map_before_connectivity(tmp_path, capsys, monkeypatch):
+    transport = _fake_tello(monkeypatch)
     argv, manifest_path = _flight_setup(tmp_path)
-    exit_code = cli.main(argv, drone_probe=_fake_probe("tello-1"), provider_probe=_fake_probe("gemini-1"),
+
+    def forbidden():
+        raise AssertionError("the tag-map gate must refuse before connectivity")
+
+    exit_code = cli.main(argv, drone_probe=forbidden, provider_probe=forbidden,
                          jev_factory=lambda: live_fakes.PolicyJudge(),
                          detector_factory=_fake_collaborator("detector-vendor-y"))
     err = capsys.readouterr().err
     assert exit_code == 2
-    assert "requires an injected client_factory" in err
+    assert "--tag-map is required" in err
+    assert transport.builds == 0
+    assert not _run_dir(tmp_path, manifest_path).exists()
+
+
+def test_live_default_flight_stack_refuses_a_tag_map_not_bound_to_the_manifest(tmp_path, capsys, monkeypatch):
+    transport = _fake_tello(monkeypatch)
+    argv, _ = _flight_setup(tmp_path)  # the fixture site binds tag_map_sha256 "b" * 64
+    exit_code = cli.main([*argv, "--tag-map", str(TAG_MAP_FIXTURE)],
+                         jev_factory=lambda: live_fakes.PolicyJudge(),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "tag_map_sha256" in err
+    assert transport.builds == 0
+
+
+def test_live_default_flight_stack_shares_the_probe_connection_and_never_takes_off_without_tag_poses(
+        tmp_path, capsys, monkeypatch):
+    # The default drone probe and the default flight stack share one client
+    # (DJITelloPy's receivers are process-global), built only after every
+    # gate. With no tag pose the supervisor refuses takeoff: nothing flies.
+    from dataclasses import replace
+
+    tag_map_sha256 = hashlib.sha256(TAG_MAP_FIXTURE.read_bytes()).hexdigest()
+    site = replace(live_fakes.fixture_site(), tag_map_sha256=tag_map_sha256)
+    argv, manifest_path = _flight_setup(tmp_path, site=site)
+    transport = _fake_tello(monkeypatch)
+    bursts = []
+    monkeypatch.setattr(live_stack, "wp5_pose_burst", lambda *args, **kwargs: bursts.append(kwargs) or [])
+    exit_code = cli.main([*argv, "--tag-map", str(TAG_MAP_FIXTURE)], provider_probe=_fake_probe("gemini-1"),
+                         jev_factory=lambda: live_fakes.PolicyJudge(),
+                         detector_factory=_fake_collaborator("detector-vendor-y"))
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "takeoff refused" in err and "LOCALIZATION_LOST" in err
+    assert transport.builds == 1
+    assert bursts  # the default stack asked the WP5 stack for tag poses
+    assert stack_fakes.sent_motor_commands(transport.tello.sent) == []
+    assert transport.tello.ended is True  # the CLI closes the shared connection
+    events = _run_events(tmp_path, "runs", manifest_path)
+    checked = next(e for e in events if e.event_type == "CONNECTIVITY_CHECKED").payload
+    assert checked["drone_identity"].startswith("tello 192.168.10.1 ")
+    assert "LIVE_SESSION_REFUSED" in _event_types(events)
     assert not (_run_dir(tmp_path, manifest_path) / "terminal.json").exists()
-    assert "LIVE_SESSION_REFUSED" in _event_types(_run_events(tmp_path, "runs", manifest_path))
 
 
 def test_live_full_flight_refuses_without_a_matching_profile_file(tmp_path, capsys):
@@ -831,7 +915,7 @@ def test_live_connectivity_only_records_a_not_ready_preflight_too(tmp_path, caps
     consent = _consent_flags(tmp_path)
     argv = _live_argv(manifest_path, digest, tmp_path,
                       **{"__flags__": ["--execute", "--check-connectivity-only", *consent]})
-    exit_code = cli.main(argv)  # default probes refuse -> not ready
+    exit_code = cli.main(argv)  # default probes hit the forbidden transports -> not ready
     assert exit_code == 2
     capsys.readouterr()
     events = _run_events(tmp_path, "runs", manifest_path)
@@ -879,14 +963,59 @@ def test_live_full_flight_refuses_when_connectivity_has_expired_before_takeoff(t
     assert not (_run_dir(tmp_path, manifest_path) / "terminal.json").exists()
 
 
-def test_live_default_factories_refuse_real_construction(tmp_path, capsys):
+def test_live_default_factories_refuse_real_construction(tmp_path, capsys, monkeypatch):
+    transport = _fake_tello(monkeypatch)
     argv, _ = _flight_setup(tmp_path)
-    # No probe/client/jev/detector overrides at all: every one of this
-    # build's defaults must refuse before anything real is reached.
+    # No probe/client/jev/detector overrides at all: without a bound tag map
+    # the defaults refuse before any real client is built.
     exit_code = cli.main(argv)
     err = capsys.readouterr().err
     assert exit_code == 2
-    assert "never construct" in err or "requires an injected" in err
+    assert "--tag-map is required" in err
+    assert transport.builds == 0
+
+
+def test_connectivity_only_defaults_are_the_live_stack_probes(tmp_path, capsys, monkeypatch):
+    transport = _fake_tello(monkeypatch, battery=64, sdk="30")
+    _fake_provider(monkeypatch)
+    manifest_path, digest = _write_manifest(tmp_path)
+    consent = _consent_flags(tmp_path)
+    argv = _live_argv(manifest_path, digest, tmp_path,
+                      **{"__flags__": ["--execute", "--check-connectivity-only", *consent]})
+    exit_code = cli.main(argv)
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert out.strip() == "CONNECTIVITY_READY"
+    # Command mode and two reads; no takeoff, motor or RC command; closed.
+    assert transport.tello.sent == ["command", "height?", "sdk?"]
+    assert stack_fakes.sent_motor_commands(transport.tello.sent) == []
+    assert transport.tello.ended is True
+    checked = next(e for e in _run_events(tmp_path, "runs", manifest_path)
+                   if e.event_type == "CONNECTIVITY_CHECKED").payload
+    assert checked["drone_identity"] == "tello 192.168.10.1 sdk=30 battery=64% height=0cm"
+    assert checked["provider_identity"] == "openrouter:google/gemini-test"
+
+
+def test_connectivity_only_default_provider_probe_names_a_missing_key(tmp_path, capsys, monkeypatch):
+    _fake_tello(monkeypatch)
+    manifest_path, digest = _write_manifest(tmp_path)
+    consent = _consent_flags(tmp_path)
+    argv = _live_argv(manifest_path, digest, tmp_path,
+                      **{"__flags__": ["--execute", "--check-connectivity-only", *consent]})
+    exit_code = cli.main(argv)
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "provider_ready=False" in err and live_stack.PROVIDER_KEY_ENV in err
+
+
+def test_live_default_probes_are_never_built_when_a_gate_refuses(tmp_path, capsys, monkeypatch):
+    transport = _fake_tello(monkeypatch)
+    manifest_path, digest = _write_manifest(tmp_path)
+    argv = _live_argv(manifest_path, digest, tmp_path, **{"__flags__": ["--execute", "--check-connectivity-only"]})
+    exit_code = cli.main(argv)  # no consent flags: refused before any probe runs
+    capsys.readouterr()
+    assert exit_code == 2
+    assert transport.builds == 0
 
 
 # ---------------------------------------------------------------------------

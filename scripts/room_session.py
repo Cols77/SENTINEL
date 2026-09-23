@@ -7,14 +7,16 @@ credential, header, file content or environment value.
 Capability-flight-capable factories (``client_factory``/``jev_factory``/
 ``detector_factory``, plus the two connectivity probes) are injected
 through ``main()``'s keyword-only parameters, the same dependency-injection
-convention ``scripts/room_calibrate.py`` uses for its executor. Every one
-defaults to a factory that refuses outright: this build never wires a real
-Tello/provider client, judgment model or detector into a live session, so a
-real one can only be constructed if a caller deliberately overrides the
-default -- which this script never does on its own, and this file's own
-tests never do either. Every gate below (manifest authorization, capability
-admission, matching profiles, consent, site assurance, connectivity) is
-checked and enforced *before* any of those factories is ever called.
+convention ``scripts/room_calibrate.py`` uses for its executor. Task A: the
+two probes and ``client_factory`` default to the real-Tello adapters in
+``sentinel.room.live_stack`` -- a motors-off telemetry probe and a flight
+stack sharing one Tello connection, and an OpenRouter reachability probe.
+The full flight's default stack also needs ``--tag-map``, bound to the
+manifest's ``tag_map_sha256``. ``jev_factory``/``detector_factory`` still
+refuse by default. Every gate below (manifest authorization, capability
+admission, matching profiles, consent, site assurance, tag map,
+connectivity) is checked and enforced *before* any of those defaults is
+built or called.
 
 Fix round 4 (Q2): one ``live`` invocation authorizes and runs the bounded
 count-and-return session. After every gate and a ready preflight, Jev and
@@ -41,7 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from sentinel.room import artifacts, calibration, capabilities, connectivity, live_session, replay
+from sentinel.room import artifacts, calibration, capabilities, connectivity, live_session, live_stack, replay
 from sentinel.room.artifacts import ArtifactError, ManifestError, SessionManifest
 from sentinel.room.site import ContingencyTrigger, RoomSite, parse_room_site
 from sentinel.survey.live_detect import LiveDetectRefused, check_gates as check_consent_gates
@@ -66,27 +68,6 @@ SIMULATION_DEFERRED_MESSAGE = "simulation deferred (Plan 06 Task 2)"
 
 class GateError(RuntimeError):
     """A live-mode authorization gate (capability, profile, consent, site) refused."""
-
-
-def _refuse_drone_probe() -> "connectivity.ProbeResult":
-    raise RuntimeError(
-        "connectivity check requires an injected drone_probe; this build never constructs "
-        "a real Tello telemetry probe on its own"
-    )
-
-
-def _refuse_provider_probe() -> "connectivity.ProbeResult":
-    raise RuntimeError(
-        "connectivity check requires an injected provider_probe; this build never constructs "
-        "a real provider reachability probe on its own"
-    )
-
-
-def _refuse_client(**_bindings) -> "live_session.FlightStack":
-    raise RuntimeError(
-        "live flight requires an injected client_factory; this build never constructs a "
-        "real Tello flight stack on its own"
-    )
 
 
 def _refuse_jev() -> object:
@@ -225,7 +206,7 @@ def _cmd_preview(args: argparse.Namespace) -> int:
             f"--capability {args.capability} --grant-registry {args.grant_registry} "
             "--consent-db <consent-db-path> --location <location> --date <YYYY-MM-DD> "
             "--i-authorise-paid-calls --profile-file <profile-file-path> "
-            "--site <site-path> --assurance <assurance-file-path> "
+            "--site <site-path> --tag-map <tag-map-path> --assurance <assurance-file-path> "
             "--clock-domain-id <clock-domain-id> --drift-profile <drift-profile-path> "
             "--energy-profile <energy-profile-path> --command-limits <command-limits-path> "
             "--run-root <run-artifact-root>"
@@ -343,11 +324,22 @@ def _load_flight_calibration(args: argparse.Namespace):
         raise GateError(str(exc)) from exc
 
 
+def _load_bound_tag_map(args: argparse.Namespace, manifest: SessionManifest):
+    """The default flight stack's tag map, bound to the manifest's ``tag_map_sha256``
+    (``--site`` is already bound to the same hash)."""
+    if not args.tag_map:
+        raise GateError("--tag-map is required for the default real-Tello flight stack")
+    try:
+        return live_stack.load_bound_tag_map(args.tag_map, expected_sha256=manifest.tag_map_sha256)
+    except (live_stack.LiveStackError, OSError) as exc:
+        raise GateError(str(exc)) from exc
+
+
 def _cmd_live(
     args: argparse.Namespace, *,
-    drone_probe: Callable[[], connectivity.ProbeResult],
-    provider_probe: Callable[[], connectivity.ProbeResult],
-    client_factory: Callable[..., "live_session.FlightStack"],
+    drone_probe: Callable[[], connectivity.ProbeResult] | None,
+    provider_probe: Callable[[], connectivity.ProbeResult] | None,
+    client_factory: Callable[..., "live_session.FlightStack"] | None,
     jev_factory: Callable[[], object],
     detector_factory: Callable[[], object],
     clock: Callable[[], float],
@@ -415,6 +407,7 @@ def _cmd_live(
                 args.site, args.assurance, manifest=manifest, clock_domain_id=args.clock_domain_id,
                 now_monotonic_ms=int(clock() * 1000))
             drift_profile, energy_profile, limits = _load_flight_calibration(args)
+            tag_map = _load_bound_tag_map(args, manifest) if client_factory is None else None
         except GateError as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 2
@@ -431,7 +424,18 @@ def _cmd_live(
     except (ArtifactError, OSError) as exc:
         print(f"refused: run artifact could not be opened: {exc}", file=sys.stderr)
         return 2
+    link = None
     try:
+        # Past every gate: the live defaults are built only now. The default
+        # drone probe and flight stack share one Tello connection (DJITelloPy's
+        # receivers are process-global), made on the probe's first call.
+        if drone_probe is None or client_factory is None:
+            link = live_stack.TelloLink(local_ip=args.local_ip, clock=clock)
+        if drone_probe is None:
+            drone_probe = link.probe
+        if provider_probe is None:
+            def provider_probe():
+                return live_stack.openrouter_provider_probe(clock=clock)
         # Past every capability/consent/(site) gate. A motors-off connectivity
         # preflight always runs before takeoff -- proving fresh drone telemetry
         # and provider reachability concurrently -- whether this is the explicit
@@ -508,6 +512,9 @@ def _cmd_live(
                 "rechecked_at": takeoff_now, "max_age_s": args.connectivity_max_age_s,
             }, now=wall_clock())
 
+        if client_factory is None:
+            client_factory = live_stack.TelloFlightStackFactory(
+                link=link, tag_map=tag_map, run_id=manifest.run_id, run_dir=run.root)
         try:
             outcome = live_session.run_count_return(
                 store=run.store, manifest=manifest, site=site, drift_profile=drift_profile,
@@ -540,6 +547,8 @@ def _cmd_live(
         print(json.dumps({"run_id": manifest.run_id, "terminal_state": outcome.terminal_state.value}))
         return 0
     finally:
+        if link is not None:
+            link.close()  # connectivity-only ends here too: the probe's connection is closed
         run.close()
 
 
@@ -625,6 +634,12 @@ def build_parser() -> argparse.ArgumentParser:
     live_parser.add_argument("--drift-profile", default=None)
     live_parser.add_argument("--energy-profile", default=None)
     live_parser.add_argument("--command-limits", default=None)
+    # Task A: the default real-Tello flight stack localises from this tag map;
+    # its file bytes must hash to the manifest's tag_map_sha256.
+    live_parser.add_argument("--tag-map", default=None)
+    # The laptop's address on the Tello Wi-Fi; omitted, sentinel.network selects
+    # the one reachable Tello adapter itself.
+    live_parser.add_argument("--local-ip", default=None)
     live_parser.add_argument("--check-connectivity-only", action="store_true")
     live_parser.add_argument("--connectivity-max-age-s", type=float, default=5.0)
     live_parser.add_argument("--connectivity-timeout-s", type=float, default=5.0)
@@ -657,9 +672,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(
     argv: list[str] | None = None, *,
-    drone_probe: Callable[[], connectivity.ProbeResult] = _refuse_drone_probe,
-    provider_probe: Callable[[], connectivity.ProbeResult] = _refuse_provider_probe,
-    client_factory: Callable[..., "live_session.FlightStack"] = _refuse_client,
+    drone_probe: Callable[[], connectivity.ProbeResult] | None = None,
+    provider_probe: Callable[[], connectivity.ProbeResult] | None = None,
+    client_factory: Callable[..., "live_session.FlightStack"] | None = None,
     jev_factory: Callable[[], object] = _refuse_jev,
     detector_factory: Callable[[], object] = _refuse_detector,
     clock: Callable[[], float] = time.monotonic,
@@ -667,7 +682,8 @@ def main(
 ) -> int:
     """``client_factory(tracker=..., clock=..., site=...)`` returns the connected
     ``live_session.FlightStack``; it is called only after every gate, the
-    preflight, and Jev/detector identity recording."""
+    preflight, and Jev/detector identity recording. ``None`` for a probe or
+    ``client_factory`` selects the ``sentinel.room.live_stack`` default."""
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.mode == "live":
