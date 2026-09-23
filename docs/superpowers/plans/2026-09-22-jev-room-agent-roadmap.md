@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to execute every plan in this roadmap. Each task gets a fresh implementer, specification review, quality review, and fix loop before the next dependent task.
 
-**Goal:** Deliver a Jev-directed room agent incrementally, ending with grounded room queries, adaptive inspection/counting, conservative return, certified-zone landing, and bounded designated-person following.
+**Goal:** Deliver a Jev-directed room agent incrementally. Active scope (2026-09-23) is count-and-return; the full target ends with grounded room queries, adaptive inspection/counting, conservative return, certified-zone landing, and bounded designated-person following.
 
 **Architecture:** A new `sentinel.room` session kernel owns goals, evidence, candidates and replay. A connected cube executor and deterministic supervisor own flight, pose recovery, energy and terminal behavior. Capability modules add counting, closer inspection, certified landing and following only after their own evidence gates pass.
 
@@ -20,18 +20,46 @@
 - Rebase only from a clean worktree. Record the resolved upstream revision and rerun the affected serial suite after each rebase.
 - Do not push, merge into integration, or execute hardware automatically.
 
-## Required execution order
+## Scope decision — 2026-09-23: one use case first
 
-1. [Plan 01 — room kernel and grounded reads](2026-09-22-jev-room-agent-01-kernel.md)
-2. [Plan 02 — adaptive flight safety](2026-09-22-jev-room-agent-02-flight-safety.md)
-3. [Plan 03 — count, closer inspection and return](2026-09-22-jev-room-agent-03-count-closer-return.md)
-4. [Plan 06 — calibration, replay and first live rollout](2026-09-22-jev-room-agent-06-live-rollout.md), through count-and-return promotion
-5. [Plan 04 — closest certified-zone landing](2026-09-22-jev-room-agent-04-certified-landing.md)
-6. Resume Plan 06 through certified-zone landing promotion
-7. [Plan 05 — person-phone relation and bounded following](2026-09-22-jev-room-agent-05-bounded-following.md)
-8. Finish Plan 06 through yaw tracking and one-step follow promotion
+The operator narrowed delivery to a single use case, **Jev-directed count-and-return**. The goal is to reach live testing sooner without lowering the review or safety bar. The deferred work stays written and keeps its plans. Its capabilities stay disabled, parse into goals with an explicit unavailable reason, and never appear as executable candidates.
 
-Every plan is mandatory. A blocked hardware gate records blocked coverage and leaves the implementation capability-disabled; it does not delete or silently pass the plan.
+| Item | Disposition | Reason |
+|---|---|---|
+| Plan 01 — room kernel and grounded reads | Done | Tasks 1–5 committed; `tests/room tests/cube` 914 passed at `d0c4a41` |
+| Plan 02 — adaptive flight safety | Done | Tasks 1–5 committed with review fixes |
+| Plan 03 Tasks 1, 2, 4, 5 | **Active** | Semantic poses, grounded counts, controller observation loop, replay baseline |
+| Plan 03 Task 3 — closer-inspection viewpoints | Deferred | Needs swept-clearance and its own live rehearsal |
+| Plan 03 Task 4 closer-view scenarios | Deferred with Task 3 | Uncertain detections are reported as uncertain; `closer_inspection` stays disabled |
+| Plan 06 Tasks 1, 3, 4 | **Active** | Grants/manifests, calibration profiles, session CLI — required for any live run |
+| Plan 06 Task 2 — fault simulation | Deferred | Supervisor fault coverage comes from Plans 02/03 tests; CLI `--mode simulate` reports unavailable |
+| Plan 06 Task 5 | **Active, reduced** | Preview + replay stages only (no simulate stage); review loop unchanged |
+| Plan 06 Task 6 | **Active for Steps 1–2 and count-and-return only** | Closer-inspection trial skipped; count request becomes "count the computers and phones in the surveyed room, report uncertain detections as uncertain, then return home" |
+| Plan 06 Task 7 | **Active, reduced** | Report covers the count-and-return scope and lists every deferral |
+| Plan 04 — certified landing | Deferred | Separate safety surface; return-home covers session termination |
+| Plan 05 — bounded following | Deferred | Highest risk and cost; needs tracking, consent and corridor evidence |
+
+**The review bar is unchanged.** Every task still gets a fresh implementer, an independent specification review, an independent quality review and fix loops. The loops repeat until no important finding remains. Low-importance comments are recorded and dropped, not fixed.
+
+## Required execution order (active scope)
+
+Two dependency chains:
+
+- **Chain A — Plan 03:** Task 1 review → Task 2 → Task 4 (observation only) → Task 5.
+- **Chain B — Plan 06:** Task 1 → Task 3 → Task 4 (needs Chain A Task 5 for replay mode) → Task 5 (reduced).
+
+Live-testing milestones, all operator-run and never automated:
+
+| Milestone | Unblocked by | What runs |
+|---|---|---|
+| L0 motors-off connectivity | Plan 06 Tasks 1, 3, 4 | `--check-connectivity-only`; no takeoff |
+| L1 supervised calibration flights | Plan 06 Tasks 3, 4 + L0 | Fixed training/holdout routes; no Jev, no autonomy |
+| L2 safety mechanics trials | Plan 03 Task 4 + L1 candidate profile | Forced return and tag-occlusion pose recovery under `TRIAL` grants; then promote `adaptive_movement` |
+| L3 count-and-return trial | Plan 06 Task 5 + L2 promotion | The count request above under a `TRIAL` grant; then promote `count_return` |
+
+Deferred order, resumed only after L3: Plan 03 Task 3 → Plan 06 Task 2 → Plan 04 → Plan 06 landing promotion → Plan 05 → Plan 06 follow promotion.
+
+A blocked hardware gate records blocked coverage and leaves the implementation capability-disabled. It does not delete or silently pass the plan.
 
 ## Capability promotion matrix
 

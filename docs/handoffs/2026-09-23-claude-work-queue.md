@@ -1,5 +1,12 @@
 # Claude Code Work Queue
 
+> **Scope update 2026-09-23:** the roadmap is narrowed to count-and-return (see the
+> roadmap's "Scope decision" section). Plan 03 Task 3 and Plan 06 Task 2 are deferred;
+> Plans 04 and 05 are deferred entirely. Remaining active Plan 03 tasks (2, 4 observation
+> only, 5) are developed by session `sentinel-db` through the Workflow tool with
+> superpowers subagent-driven development, on stacked `claude/plan03-*` branches.
+> Merges into `feat/jev-agentic-room-loop` stay operator-approved.
+
 All Claude work uses separate worktrees and task-sized branches. Claude must
 not edit `feat/jev-agentic-room-loop`, merge, rebase, push, run live providers,
 or operate hardware.
