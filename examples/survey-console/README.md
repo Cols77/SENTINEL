@@ -20,7 +20,19 @@ Land interrupts normal sequencing and requests controlled landing. Hold Emergenc
 
 ## Live startup
 
-Live refuses startup on a missing prerequisite; it cannot select a Rehearsal fallback. The following example describes configuration, not evidence of hardware readiness:
+A bare Live host now starts its localhost UI in an explicit `NOT_READY`, unarmed state. Opening,
+refreshing, polling, asking for status, and reading evidence do not connect to a drone or provider.
+The readiness panel names missing CLI flags and environment-variable names, but never displays
+secret values. Missing or invalid Live configuration never selects a Rehearsal fallback.
+
+Start the inert UI first if configuration is not yet assembled:
+
+```sh
+uv run sentinel mission-control --mode live --data-dir artifacts/live-session
+```
+
+The panel's launch template is guidance, not evidence of hardware readiness. Restart Mission
+Control after changing CLI configuration. A fully configured launch still remains unarmed:
 
 ```sh
 export GEMINI_API_KEY='...'
@@ -37,11 +49,13 @@ uv run sentinel mission-control --mode live --confirm \
   --local-ip 192.168.10.2 --surface-z-cm 50
 ```
 
-Supply actual measured configuration. `--pose off` also requires `--start-x-cm` and `--start-y-cm`; both coordinates must lie inside the selected envelope. Reanchor retains the existing `--sr063-amended` gate. The provider profile must conform to `provider-profile.v1`, be approved, and match the selected provider/model. Moondream uses `MOONDREAM_API_KEY` and `MOONDREAM_MODEL`. Consent must already be recorded for that exact location/date in the survey database; the host does not record it on the operator's behalf.
+Supply actual measured configuration. `--pose off` also requires `--start-x-cm` and `--start-y-cm`; both coordinates must lie inside the selected envelope. Reanchor retains the existing `--sr063-amended` gate. The provider profile must conform to `provider-profile.v1`, be approved, and match the selected provider/model. Moondream uses `MOONDREAM_API_KEY` and `MOONDREAM_MODEL`. Consent must already be recorded for that exact location/date in the survey database; the host does not record it on the operator's behalf. Configuration readiness enables proposal planning only; it does not arm the aircraft.
 
 The Mission Control browser projection is schema v3: route coverage and return-leg facts, commanded/measured freshness, capture detection progression, public proposer provenance, and explicit COMPLETE/ABORTED/RECOVERY_REQUIRED terminal states are rendered from validated backend facts. Live detection starts in a separate supervised process before capture, binds cached results to run/sweep/path/hash identity, and never repeats a provider call during survey ingestion. Detector failure is an explicit analysis gap and does not take over flight control. Paid calls remain refused without `--i-authorise-paid-calls`.
 
-Startup checks the selected independent UDP interface and existing no-takeoff preflight. Actual flight still needs an explicit proposal approval. The Live adapter uses `CubeFlight`, the measured Tello camera model, real provider perception, and the existing F rules proposer. The bounded chat currently supports computer-count requests and status; it clarifies unsupported intent. Pose evidence comes from the runner's real localization bursts, so it can honestly age between bursts. Restarted Live sessions require recovery and cannot dispatch again automatically. Start a new session only after the operator has reconciled the aircraft and previous run.
+Live uses two phases. Host composition creates only the persistent session, public projection, local planning facts, and inert/deferred boundaries. After an immutable proposal is explicitly approved, dispatch separately checks `--confirm`, initializes the independent Emergency transport, creates the drone client, and runs the bounded no-takeoff preflight. Detection is admitted separately and cannot start until provider configuration, `--i-authorise-paid-calls`, and recorded consent all pass. Approval is therefore distinct from flight confirmation, preflight, provider authorization, and consent.
+
+The Live adapter uses `CubeFlight`, the measured Tello camera model, real provider perception, and the existing F rules proposer only after those gates admit the corresponding capability. Land is unavailable without an active runner; Emergency is unavailable until its independent transport is initialized. The bounded chat supports computer-count requests and status; when planning is unavailable, count requests return actionable refusal text without starting the worker. Pose evidence comes from the runner's real localization bursts, so it can honestly age between bursts. Restarted interrupted Live sessions require recovery and cannot dispatch again automatically. Start a new session only after the operator has reconciled the aircraft and previous run.
 
 All hardware operation, measured calibration and actual landing/emergency outcomes remain subject to physical verification. Automated acceptance uses injected clients only.
 
@@ -54,7 +68,7 @@ uv run python scripts/ui_assets/check_assets.py
 node scripts/ui_assets/verify_mission_control.cjs
 ```
 
-The browser verifier starts and stops three real local backends with separate temporary data directories. It requires Playwright/Chromium in the tooling environment; no frontend build is needed. Acceptance covers clean count, approved uncertain follow-up, missing analysis, approval reload/reconciliation, production survey/report/evidence, stale-to-fresh localization, deterministic browser speech, independent safety controls, 1440×900, 1920×1080 and narrow layouts, reduced motion, and local-only traffic. Artifacts go under ignored `artifacts/mission-control/`.
+The browser verifier starts and stops four real local backends with separate temporary data directories. It requires Playwright/Chromium in the tooling environment; no frontend build is needed. Acceptance covers bare-Live `NOT_READY` guidance and refusal, clean count, approved uncertain follow-up, missing analysis, approval reload/reconciliation, production survey/report/evidence, stale-to-fresh localization, deterministic browser speech, independent safety controls, 1440×900, 1920×1080 and narrow layouts, reduced motion, and local-only traffic. Artifacts go under ignored `artifacts/mission-control/`.
 
 ## Retained fixture regression surface
 

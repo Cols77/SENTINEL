@@ -25,6 +25,15 @@ flight, coverage, proposer, localization, and live detection.
   facts, return leg, commanded/measured pose, freshness and vertical consistency, capture detection
   progression/latency, proposer provenance, escalation reasons, strict cross-references, and
   explicit COMPLETE/ABORTED/RECOVERY_REQUIRED responses.
+- Backwards-compatible schema-v3 Live readiness facts with ordered planning, flight, detection, and
+  independent Emergency checks. New snapshots emit the extension; validators retain support for
+  older v3 fixtures that omit it. Public remediation names flags and environment-variable names
+  without exposing their values.
+- Two-phase Live composition: a bare `--mode live` host serves the localhost console unarmed with
+  empty options and no drone/provider/transport construction. Planning configuration is local-only;
+  confirmation, Emergency initialization, drone creation/preflight, provider authorization,
+  paid-call authorization, and recorded consent stay at their capability boundaries. No failure
+  selects Rehearsal adapters.
 - The browser renders route coverage and return-to-start, separate commanded and measured markers,
   exact pose images with AprilTag polygons/IDs, fresh/aging/stale localization, detection gaps,
   authoritative counts, evidence linkage, reports, and terminal recovery guidance.
@@ -50,6 +59,17 @@ approve it explicitly. Use a fresh data directory for every rehearsal. The uncer
 missing-analysis inputs are selected with `--scenario fixtures/mission-control/uncertain-followup.json`
 and `--scenario fixtures/mission-control/missing-analysis.json`.
 
+For Live readiness guidance without touching hardware or a provider:
+
+```sh
+uv run sentinel mission-control --mode live --data-dir artifacts/live-session
+```
+
+The browser opens as `LIVE · UNARMED · NOT_READY`. Status chat remains available; count requests
+are refused before worker start until planning configuration is valid. Restart after changing CLI
+configuration. An approved proposal still requires independent `--confirm`, no-takeoff preflight,
+Emergency transport, provider/paid-call admission, and recorded-consent checks at dispatch.
+
 See [setup and Live prerequisites](../../examples/survey-console/README.md) and the
 [schema-v3 contract](../../examples/survey-console/contract.md).
 
@@ -59,10 +79,10 @@ Final verification on 2026-09-23:
 
 | Check | Result |
 |---|---|
-| `.venv\\Scripts\\python.exe -m pytest -q --ignore=fixtures` | **1625 passed, 3 skipped, 5 warnings**, 725.99s |
-| `node --test tests/survey_console/*.test.mjs` | **79 passed**, no failures/skips |
+| `.venv\\Scripts\\python.exe -m pytest -q --ignore=fixtures` | **1631 passed, 3 skipped, 5 warnings**, 948.33s |
+| `node --test tests/survey_console/*.test.mjs` | **84 passed**, no failures/skips |
 | `uv run python scripts/ui_assets/check_assets.py` | **414 checks passed across 83 assets** |
-| `node scripts/ui_assets/verify_mission_control.cjs` | Passed clean, uncertain-follow-up, and missing-analysis real-host rehearsals |
+| `node scripts/ui_assets/verify_mission_control.cjs` | Passed clean, bare-Live readiness, uncertain-follow-up, and missing-analysis real-host scenarios |
 | `node scripts/ui_assets/verify_survey_console.cjs http://127.0.0.1:8772` | Passed all 8 retained fixture scenarios |
 | `git diff --check` | Passed |
 
