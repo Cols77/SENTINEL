@@ -167,3 +167,28 @@ def test_latch_all_does_not_propagate_a_runner_whose_latch_itself_raises():
     registry.bind('broken', _BrokenRunner())
     registry.latch_all()  # must not raise
     assert registry.emergency.is_set()
+
+
+def test_lands_own_deadline_expiry_does_not_overwrite_a_recorded_controlled_land():
+    """Carry-over (merge report): a controlled Land recorded as LANDED while
+    ``land()`` is still waiting must survive ``land()``'s own deadline
+    expiry -- its ``expire()`` closure must guard ``_terminal`` exactly as
+    ``_deadline_expired`` does."""
+    import threading
+    runner = FlightTestRunner(_FakeClient(), 'dry-run')
+    executor = runner.step_executor
+    executor.start_legacy()
+    release = threading.Event()
+
+    def slow_land_locked():
+        executor.note_controlled_land(True)
+        release.wait(2)
+        return executor._terminal
+
+    executor._land_locked = slow_land_locked
+    try:
+        outcome = executor.land(upper_bound_s=0.05)
+    finally:
+        release.set()
+    assert outcome.state == 'LANDED'
+    assert outcome.reason == 'OPERATOR_LAND'

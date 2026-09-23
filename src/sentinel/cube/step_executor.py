@@ -796,8 +796,11 @@ class StepExecutor:
 
             def expire():
                 with self._state_lock:
-                    self._terminal_reason = "COMMAND_COMPLETION_UNKNOWN"
-                    self._terminal = self._terminal_outcome("COMMAND_COMPLETION_UNKNOWN")
+                    # A controlled Land already recorded (note_controlled_land)
+                    # must never be overwritten by this landing's own deadline.
+                    if self._terminal is None:
+                        self._terminal_reason = "COMMAND_COMPLETION_UNKNOWN"
+                        self._terminal = self._terminal_outcome("COMMAND_COMPLETION_UNKNOWN")
                     self._deadline_expired(completion_unknown=True)
 
             waited = SupervisedWait(clock=landing_clock).run(
