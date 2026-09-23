@@ -51,9 +51,15 @@ class ClassCount:
     uncertain: int
     method: Literal["GROUNDED_STATIC", "MAX_SIMULTANEOUS_LOWER_BOUND", "NOT_OBSERVABLE"]
     evidence_refs: tuple[str, ...] = ()
+    #: Residual F8: the cells whose declared geometry can never resolve this
+    #: class. Whatever was counted, instances there may be missing, so the
+    #: rendered line carries that caveat instead of reading as a resolved
+    #: count.
+    not_resolvable_cells: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "evidence_refs", tuple(self.evidence_refs))
+        object.__setattr__(self, "not_resolvable_cells", tuple(self.not_resolvable_cells))
         if self.class_name not in SUPPORTED_CLASSES:
             raise ValueError("class count requires a supported class")
         if self.confirmed < 0 or self.uncertain < 0:
@@ -70,6 +76,12 @@ def _static_class_names(objects, coverage: CoverageProjection, requested_classes
 def _not_resolvable(class_name: str, coverage: CoverageProjection) -> bool:
     rows = [status for _, cell_class, status in coverage.by_cell_and_class if cell_class == class_name]
     return bool(rows) and all(CoverageStatus(status) == CoverageStatus.NOT_RESOLVABLE for status in rows)
+
+
+def _not_resolvable_cells(class_name: str, coverage: CoverageProjection) -> tuple[str, ...]:
+    return tuple(sorted(cell_id for cell_id, cell_class, status in coverage.by_cell_and_class
+                        if cell_class == class_name
+                        and CoverageStatus(status) == CoverageStatus.NOT_RESOLVABLE))
 
 
 def _static_counts(objects, coverage: CoverageProjection, requested_classes: tuple[str, ...]) -> tuple[ClassCount, ...]:
@@ -96,7 +108,8 @@ def _static_counts(objects, coverage: CoverageProjection, requested_classes: tup
         confirmed = [obj for obj in matching if len(set(obj.member_view_keys)) > 1]
         uncertain = [obj for obj in matching if len(set(obj.member_view_keys)) <= 1]
         evidence = tuple(sorted({ref for obj in matching for ref in obj.evidence_refs}))
-        counts.append(ClassCount(class_name, len(confirmed), len(uncertain), "GROUNDED_STATIC", evidence))
+        counts.append(ClassCount(class_name, len(confirmed), len(uncertain), "GROUNDED_STATIC", evidence,
+                                 _not_resolvable_cells(class_name, coverage)))
     return tuple(counts)
 
 
@@ -142,7 +155,11 @@ def _render_line(count: ClassCount) -> str:
             detail = "detection is" if count.uncertain == 1 else "detections are"
             line += f"; {count.uncertain} additional {detail} uncertain"
         return line
-    return f"{count.class_name}: {count.confirmed} confirmed; {count.uncertain} uncertain"
+    line = f"{count.class_name}: {count.confirmed} confirmed; {count.uncertain} uncertain"
+    if count.not_resolvable_cells:
+        line += (f"; not resolvable from the declared views in {', '.join(count.not_resolvable_cells)}, "
+                 f"so this class may be undercounted there")
+    return line
 
 
 def render_count_answer(counts: tuple[ClassCount, ...], coverage: CoverageProjection, *,

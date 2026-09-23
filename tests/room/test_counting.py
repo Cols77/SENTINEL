@@ -206,6 +206,37 @@ def test_not_resolvable_coverage_still_reports_associated_objects_not_discarded(
     assert phone.confirmed == 0 and phone.uncertain == 1
 
 
+def test_not_resolvable_objects_render_with_the_non_resolvable_caveat():
+    """Residual F8: objects reported despite a NOT_RESOLVABLE verdict must
+    carry that caveat in the rendered line itself -- otherwise the line
+    reads as a resolved count next to a coverage note that says "complete"."""
+    observation = CellObservation("cell-1", "phone", "p1", "NOT_RESOLVABLE", "t0", ("ev-nr",))
+    coverage = project_coverage((_PHONE_CELL,), (observation,), declared_views_by_cell={"cell-1": ("p1",)})
+    assert coverage.complete
+    objects = associate_static((), (_estimate("e1", "phone", x_cm=100.0, y_cm=100.0, captured_at="t0"),))
+    counts = project_counts(objects, (), coverage)
+    phone = next(c for c in counts if c.class_name == "phone")
+    assert phone.not_resolvable_cells == ("cell-1",)
+    line = render_count_answer(counts, coverage, scope="ROOM").splitlines()[0]
+    assert line.startswith("phone: 0 confirmed; 1 uncertain")
+    assert "not resolvable" in line and "cell-1" in line and "may be undercounted" in line
+
+
+def test_partially_not_resolvable_zero_is_never_a_confident_zero():
+    other = CoverageCell("cell-2", ((300.0, 0.0), (400.0, 0.0), (400.0, 100.0), (300.0, 100.0)),
+                         (0.0, 150.0), ("phone",))
+    coverage = project_coverage((_PHONE_CELL, other), (
+        CellObservation("cell-1", "phone", "p1", "OBSERVED", "t0", ("ev-1",)),
+        CellObservation("cell-2", "phone", "p2", "NOT_RESOLVABLE", "t1", ("ev-2",)),
+    ), declared_views_by_cell={"cell-1": ("p1",), "cell-2": ("p2",)})
+    assert coverage.complete
+    counts = project_counts((), (), coverage)
+    phone = next(c for c in counts if c.class_name == "phone")
+    assert phone.method == "GROUNDED_STATIC" and phone.not_resolvable_cells == ("cell-2",)
+    line = render_count_answer(counts, coverage, scope="ROOM").splitlines()[0]
+    assert "not resolvable" in line and "cell-2" in line
+
+
 def test_multi_view_objects_are_confirmed_single_view_objects_are_uncertain():
     objects = associate_static((), (
         _estimate("e1", x_cm=100.0, y_cm=100.0, captured_at="t0"),
