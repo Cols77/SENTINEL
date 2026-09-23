@@ -1,4 +1,129 @@
-# Room-agent Jev check (Task V)
+# Room-agent Jev check (Task V, re-run in Task V2)
+
+Does the real Jev model make sensible choices in the room controller loop?
+`scripts/room_jev_check.py` runs `RoomController` with the real `JevJudge`
+(OpenRouter, `typesafe/jev-1.13-20260917`) against a fake, offline
+supervisor and executor on the real CanningSt site fixture, with a fake
+detector. Nothing contacts drone hardware.
+
+## Task V2 re-run (2026-09-24): the room-loop acceptance policy
+
+What changed since the Task V run (the "before" column):
+
+- **Acceptance policy** (`sentinel.room.controller.AcceptancePolicy`, the
+  default in `live_session.run_count_return` and in this harness): Jev's
+  top legal choice is accepted at **0.5** for OBSERVE (one supervised
+  checkpoint), REANCHOR and the reads, and at **0.6** for a final ANSWER.
+  CLARIFY and ESCALATE, which end the session, and any other kind keep
+  the strict **0.8**. A choice below its bar is **re-asked once** with the
+  refusal as feedback (`state.previous_refusal`: refused choice,
+  confidence, required confidence, the thresholds). Then the turn counts
+  as refused. There is no loop. Physical safety does not change: the
+  SafetySupervisor still admits or refuses every movement, and mandatory
+  recovery and return still bypass Jev. The policy is recorded in every
+  `ROOM_CHOICE_ATTEMPT`, in the live session's `ROOM_ACCEPTANCE_POLICY`
+  event, and in each case's `config.json`. `--strict` reruns the old
+  single 0.8 bar.
+- **Paid-call gate:** the harness refuses without `--i-authorise-paid-calls`,
+  before reading any `.env`.
+- **Staleness case:** staleness is now injected after the **first**
+  accepted observation. Two estimator failures leave the pose COASTING,
+  and Jev is offered REANCHOR. If Jev does not re-anchor on its next turn,
+  one more failure crosses the profile limit, and the supervisor forces
+  its own recovery.
+- **Fifth case:** "count the computers in the room", with two computers,
+  one in the left region and one in the right region.
+
+Run: `python scripts/room_jev_check.py --i-authorise-paid-calls
+--artifact-root artifacts/room-agent/jev-check-v2` (one run, no re-runs).
+The logs are in `artifacts/room-agent/jev-check-v2/<case>/{events,jev_calls}.jsonl`
+and `config.json`. They are gitignored.
+
+| Case | Before (Task V, strict 0.8) | After (Task V2 policy) | Jev calls (before → after) | Verdict |
+|---|---|---|---|---|
+| 1. Search ("find the phone"; phone in center) | BLOCKED. The phone's region was refused at 0.41/0.24 and never observed; no answer | Center observe was refused at 0.34, re-asked, and the re-ask (left, 0.26) was also refused. On the next turn **center was accepted at 0.57**: phone seen. `ANSWER:SEARCH` was accepted at 0.65. The answer names the center region; safe return and landing. **COMPLETED** | 11 → **4** | **PASS** |
+| 2. Staleness / re-anchor (phone in right) | NOT EXERCISED (never reached the injection point) | Center was observed at 0.50, then staleness was injected (COASTING). REANCHOR was offered. **Jev tied it with the left observe (0.32 each) and picked the observe**, which was refused below 0.5; the re-ask (right, 0.38) was also refused. The harness then crossed the limit, and the **supervisor forced RECOVER** (`RETURN_REQUIRES_RECOVERY`), a stationary burst, and `POSE_REANCHORED`. **0 yaw ROTATE commands**: the burst at the current heading was enough. The search resumed: left 0.57, right 0.61 (phone found), `ANSWER:SEARCH` 0.77. **COMPLETED** | 9 → **8** | **PASS** (the re-anchor was reached; the supervisor forced it, not Jev) |
+| 3. Count ("count the phones"; high band center, low band left) | BLOCKED; no count answer | All three regions observed (right 0.53 after a re-ask, left 0.57 after a re-ask, center 0.67). `ANSWER:COUNTS` was refused at 0.39, then **accepted at 0.75 on the re-ask**. Answer: "phone: 0 confirmed; 2 uncertain", coverage complete; safe return and landing. **COMPLETED** | 11 → **9** | Jev: **PASS**. The harness's pinned "1 confirmed; 1 uncertain" fails: single-view fake detections never corroborate (see the known gap below; `GreedyJudge` gets the same answer) |
+| 4. Read-only ("what is your battery level?") | BLOCKED. `READ_DRONE` was refused at 0.54 | `READ_DRONE` **accepted at 0.54** (0.5 bar), `ANSWER` accepted at 0.65: "battery_percent=61 ...". Zero movement (the executor was never called). **COMPLETED** | 5 → **2** | **PASS** |
+| 5. Count computers (new; computers in left and right) | (new case) | Right 0.54 (re-ask), center 0.69, left 0.72 (after one refused turn at 0.37). `ANSWER:COUNTS` was refused at 0.36, then accepted at 0.66 on the re-ask. Answer: "computer: 0 confirmed; 2 uncertain", i.e. **two computers**, coverage complete; safe return and landing. **COMPLETED** | — → **10** | **PASS** |
+
+**33 real Jev calls in total (4 + 8 + 9 + 2 + 10).** The Task V run made 36
+calls over four cases. The budget is 40 per case, and no case came close.
+**Zero invalid, malformed or illegal choices** again: no
+`ILLEGAL_OR_MALFORMED` and no `MISSING_OR_NON_MAX_SELECTION`. No provider
+error occurred. Four of five cases pass the harness as written. Case 3
+fails only on the harness's own "1 confirmed; 1 uncertain" wording, which
+the fake detector cannot produce. Jev's choices in it were sound.
+
+### What the re-run shows about Jev
+
+- **Its confidence is low but directionally right.** Every accepted
+  OBSERVE was in the 0.5–0.72 range, and every accepted answer in the
+  0.65–0.77 range. None of them would have passed the old 0.8 bar.
+- **The re-ask helps mainly for answers.** Both count answers were first
+  offered at 0.36–0.39 and came back at 0.66–0.75 once the refusal was
+  explained. For observations, the re-ask usually picked *another* region
+  at similar low confidence (e.g. center 0.34 → left 0.26). The next turn
+  then accepted a region above 0.5.
+- **REANCHOR:** offered while COASTING, Jev rated it 0.32, level with the
+  best observation, and then 0.17 on the re-ask. It did not choose it, so
+  the supervisor floor did the re-anchor. Either way the re-anchor
+  happened before any further observation.
+
+### Jev's choices (excerpts from `jev_calls.jsonl`)
+
+JevJudge returns a choice, a probability per legal action and a
+confidence. There is no free-text rationale, so these are the "reasoning"
+excerpts. Region names are shortened (`center` = `OBSERVE:g1:center-rear-middle-toward_targets`).
+
+**Case 1 (search), turn 1 and its re-ask, then the next turn:**
+```
+call 1: value=center  confidence=0.34  {center: 0.43, READ_OBSERVATIONS: 0.16, CLARIFY: 0.11, READ_DRONE: 0.11, right: 0.09, left: 0.07}   -> refused (< 0.5), re-asked
+call 2: value=left    confidence=0.26  {left: 0.36, right: 0.19, center: 0.17, READ_OBSERVATIONS: 0.15, ...}                                -> refused, turn refused
+call 3: value=center  confidence=0.57  {center: 0.63, right: 0.18, READ_OBSERVATIONS: 0.08, ...}                                           -> ACCEPTED, phone seen
+call 4: value=ANSWER:SEARCH confidence=0.65 {ANSWER:SEARCH: 0.71, READ_DRONE: 0.15, READ_OBSERVATIONS: 0.08, CLARIFY: 0.05}           -> ACCEPTED (0.6)
+```
+
+**Case 2 (staleness), the turn after staleness was injected (REANCHOR offered):**
+```
+call 4: value=left   confidence=0.22  {left: 0.32, REANCHOR: 0.32, READ_DRONE: 0.13, right: 0.11, READ_OBSERVATIONS: 0.07, ...}  -> refused, re-asked
+call 5: value=right  confidence=0.38  {right: 0.46, READ_OBSERVATIONS: 0.22, REANCHOR: 0.17, ...}                                 -> refused
+(harness: third estimator failure -> RECOVERY_REQUIRED; supervisor RECOVER, stationary burst, POSE_REANCHORED, no ROTATE)
+```
+
+**Case 3 (count phones), the answer and its re-ask:**
+```
+call 8: value=ANSWER:COUNTS confidence=0.39 {ANSWER:COUNTS: 0.49, READ_DRONE: 0.25, READ_OBSERVATIONS: 0.16, ...}  -> refused (< 0.6), re-asked
+call 9: value=ANSWER:COUNTS confidence=0.75 {ANSWER:COUNTS: 0.79, ESCALATE: 0.06, READ_OBSERVATIONS: 0.06, ...}     -> ACCEPTED
+```
+
+**Case 4 (read-only), the choice refused in Task V and accepted now:**
+```
+call 1: value=READ_DRONE confidence=0.54 {READ_DRONE: 0.64, CLARIFY: 0.24, ESCALATE: 0.09, READ_OBSERVATIONS: 0.03, READ_COUNTS: 0.00}  -> ACCEPTED (0.5)
+```
+
+**Case 5 (count computers), the answer and its re-ask:**
+```
+call 9:  value=ANSWER:COUNTS confidence=0.36 {ANSWER:COUNTS: 0.47, READ_DRONE: 0.26, READ_OBSERVATIONS: 0.15, ...}  -> refused, re-asked
+call 10: value=ANSWER:COUNTS confidence=0.66 {ANSWER:COUNTS: 0.71, READ_OBSERVATIONS: 0.12, ESCALATE: 0.08, ...}     -> ACCEPTED
+```
+
+### Known gaps (Task V2)
+
+- **Counting corroboration in the harness.** The fake detector gives every
+  detection the same generic box, so each object is a single view and is
+  reported "uncertain". "1 confirmed / 1 uncertain" (case 3) is therefore
+  unreachable in this harness. Case 5 checks the total (2) instead.
+- **Staleness was resolved by the supervisor, not Jev.** One run is too
+  small to say how often Jev would pick REANCHOR. Its 0.32 tie suggests
+  the option is taken seriously but not preferred over observing.
+- **Thresholds come from one run's calibration.** 0.5/0.6 fit what this
+  model reports. The re-ask costs one more call per refused turn
+  (11 of the 33 calls here were re-asks).
+
+---
+
+# Task V (before): the original run at the strict 0.8 bar
 
 Does the real Jev model make sensible choices in the room controller loop?
 `scripts/room_jev_check.py` runs `RoomController` with the real `JevJudge`
