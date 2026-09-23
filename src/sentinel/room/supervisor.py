@@ -807,11 +807,12 @@ class SafetySupervisor:
                 now = self.clock()
                 landing = self._landing_forecast(current.request.pose, now)
                 descent_energy = self._landing_energy(copy(self.reserve), current.request)
+                components = dict(current.energy.components)
+                components.update(contingency_landing_s=self.landing_upper_bound_s,
+                    contingency_landing_cost_pct=descent_energy.action_cost_pct,
+                    contingency_available_pct=descent_energy.current_pct)
                 current = replace(current, pose_forecast=landing,
-                    energy=replace(current.energy, components=current.energy.components + (
-                        ("contingency_landing_s", self.landing_upper_bound_s),
-                        ("contingency_landing_cost_pct", descent_energy.action_cost_pct),
-                        ("contingency_available_pct", descent_energy.current_pct))))
+                    energy=replace(current.energy, components=tuple(components.items())))
                 eligible = admit_terminal_contingency(self.site, self._assurances(),
                     contingency_id=action.contingency_id, trigger=ContingencyTrigger.NAVIGATION_UNAVAILABLE,
                     session_id=self.session_id, clock_domain_id=self.clock_domain_id,

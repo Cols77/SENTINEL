@@ -479,7 +479,7 @@ def test_supervisor_passes_landing_bound_and_session_deadline_to_real_executor(s
         executor.close()
 
 
-@pytest.mark.parametrize("change", ["valid", "expired", "revoked", "stale_telemetry", "descent_geometry",
+@pytest.mark.parametrize("change", ["valid", "fresh_landing_decision", "expired", "revoked", "stale_telemetry", "descent_geometry",
                                     "wrong_trigger", "low_energy", "emergency"])
 def test_exhausted_recovery_uses_its_contingency_only_after_fresh_descent_admission(safety, change):
     from sentinel.cube.recovery import RecoveryController
@@ -487,19 +487,33 @@ def test_exhausted_recovery_uses_its_contingency_only_after_fresh_descent_admiss
     supervisor.tracker.profile = replace(supervisor.tracker.profile,
         max_camera_age_s=80, max_recovery_attempts=1)
     supervisor.validate_bindings = lambda active: None  # Changed synthetic recovery calibration.
+    if change == "fresh_landing_decision":
+        supervisor.site = replace(supervisor.site, terminal_contingencies=tuple(
+            replace(entry, max_assurance_age_ms=100000) for entry in supervisor.site.terminal_contingencies))
     executor, commands = real_executor(safety)
     recovery = RecoveryController(supervisor.tracker, clock=clock,
         burst_source=lambda action: (), energy_admits=lambda action: True)
     supervisor.recovery = recovery
     supervisor.mapped_heading_tag_ids = ((90, (1, 2)),)
-    decisions, landings = [], []
+    decisions, landings, preparations = [], [], []
     next_action, land = recovery.next_action, executor.land
+    prepare = supervisor.prepare
+
+    def observed_prepare(**kwargs):
+        outcome = prepare(**kwargs)
+        preparations.append(outcome)
+        return outcome
+
+    supervisor.prepare = observed_prepare
 
     def decide(*args):
         action = next_action(*args)
         if action.kind == "CONTINGENCY":
             decisions.append(action)
-            if change == "expired":
+            if change == "fresh_landing_decision":
+                clock.now = 30
+                samples["energy"] = EnergySample(41, clock())
+            elif change == "expired":
                 clock.now = 15.1
                 samples["energy"] = EnergySample(80, clock())
             elif change == "revoked":
@@ -539,13 +553,25 @@ def test_exhausted_recovery_uses_its_contingency_only_after_fresh_descent_admiss
         assert decisions[0].contingency_id == "NAVIGATION_UNAVAILABLE"
         terminal_audit = [e for e in store.events("session") if e.event_type == "SAFETY_ASSESSED"][-1]
         assert terminal_audit.payload["reason"] == "recovery_exhausted"
-        if change == "valid":
+        if change in {"valid", "fresh_landing_decision"}:
             assert result.state == "LANDED"
             assert not emergencies and executor.client.commands.count("land") == 1
             assert landings == [{"upper_bound_s": supervisor.landing_upper_bound_s, "deadline": executor.deadline}]
             assert terminal_audit.payload["contingency_id"] == "NAVIGATION_UNAVAILABLE"
             assert terminal_audit.payload["pose_forecast"]["projected"]["propagated_at"] == clock() + 10
             assert dict(terminal_audit.payload["energy"]["components"])["contingency_landing_s"] == 10
+            if change == "fresh_landing_decision":
+                admission = preparations[-1]
+                assert admission.transition == "LAND_CONTINGENCY"
+                assert admission.reason == "RETURN_ENERGY_UNAVAILABLE"
+                components = dict(admission.energy.components)
+                assert components["contingency_landing_cost_pct"] == 21
+                assert components["contingency_available_pct"] - components["contingency_landing_cost_pct"] == 20
+                audited = terminal_audit.payload["energy"]
+                assert {k: v for k, v in audited.items() if k != "components"} == {
+                    k: v for k, v in asdict(admission.energy).items() if k != "components"}
+                assert dict(audited["components"]) == components
+                assert len(audited["components"]) == len(components)
         else:
             assert result.state == "EMERGENCY_ABORTED" and emergencies == [True]
             assert "land" not in executor.client.commands
