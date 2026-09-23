@@ -86,6 +86,12 @@ class SupervisorOutcome:
 #: forecast, energy, the current pose, the site) is judged exactly as before,
 #: so a fix that never comes still leaves a clear way home (and the absurd
 #: 0.45 cm/cm drift, whose corridor home is not clear, is still refused).
+#: A never-fixed aircraft is assumed placed on the pad mark to this accuracy;
+#: StepExecutor's measured-home tolerance (20 cm, 15 deg) verifies it right
+#: after takeoff. 20 cm here pushed the CanningSt home route (pad 30 cm from
+#: the cube edge) outside the cube with the drift profile.
+PAD_XY_UNCERTAINTY_CM = 5.0
+PAD_HEADING_UNCERTAINTY_DEG = 5.0
 _REANCHOR_RELIEVES = frozenset({"PROJECTED_TERMINATION_LANDING_INVALID", "LOCALIZATION_RECOVERY_REQUIRED"})
 
 
@@ -694,12 +700,26 @@ class SafetySupervisor:
             return pose
         return replace(pose, position=replace(pose.position, z_cm=route.checkpoints[-1].z_cm))
 
+    def _declared_pad_pose(self, pose, site):
+        """Takeoff is not gated on a tag fix from the pad: the camera may not
+        see the tags from the floor. A tracker that has never had a fix is
+        assessed at the declared pad; the airborne home measurement is the
+        first real fix, and StepExecutor refuses a home more than its
+        tolerance away from the pad (the run then lands)."""
+        if pose.state != LocalizationState.LOST or self.tracker.initialized:
+            return pose
+        now = self.clock()
+        return replace(pose, state=LocalizationState.ANCHORED, position=site.home.nominal_pose,
+                       heading_deg=site.home.heading_deg, measured_at=now, camera_at=now, propagated_at=now,
+                       camera_age_s=0, fix_age_s=0, estimator_failures=0, source="declared_pad",
+                       xy_uncertainty_cm=PAD_XY_UNCERTAINTY_CM, heading_uncertainty_deg=PAD_HEADING_UNCERTAINTY_DEG)
+
     def validate_start(self, site=None):
         active = site or self.site
         self._site_current(active, self.clock())
         pose, sample = self.refresh()
         if self._measured_home is None:
-            pose = self._pre_takeoff_pose(pose, active)
+            pose = self._pre_takeoff_pose(self._declared_pad_pose(pose, active), active)
         outcome = self.assess(SupervisorRequest(self.store.session_version(self.session_id), None, 0, pose, sample), active)
         if outcome.transition != "CONTINUE":
             raise ValueError(f"start blocked: {outcome.reason}")

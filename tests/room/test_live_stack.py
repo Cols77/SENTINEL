@@ -765,3 +765,14 @@ def test_default_detector_is_the_pinned_gemini_openrouter_detector_with_an_ident
                                                     live_stack.PROVIDER_MODEL_ENV: "google/gemini-test"})
     assert detector.provider == "gemini-openrouter" and detector.model == "google/gemini-test"
     assert detector.identity == "gemini-openrouter:google/gemini-test"
+
+
+def test_start_without_a_pad_fix_anchors_the_tracker_on_the_airborne_home(tmp_path):
+    # Takeoff is not gated on a pad fix: with no refresh before start, the
+    # airborne home burst is the tracker's first anchor.
+    stack, _, tracker, site, _ = build_stack(tmp_path)
+    assert not tracker.initialized
+    home = stack.executor.start(site.home)
+    assert tracker.initialized
+    assert tracker.health.state is LocalizationState.ANCHORED
+    assert (tracker.health.position.x_cm, tracker.health.position.y_cm) == (home.pose.x_cm, home.pose.y_cm)

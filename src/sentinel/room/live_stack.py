@@ -78,6 +78,10 @@ HEIGHT_READ_SLACK_S = 1.0
 #: (BURST_MAX_S) that measure_home and LOCALISE use, where thoroughness matters
 #: more than latency.
 REFRESH_BURST_S = 1.5
+#: The airborne home is wherever the tags place the aircraft after takeoff,
+#: not the declared pad mark: the flight envelope (validated on the home)
+#: bounds it. The first live run measured home 43 cm from the mark.
+HOME_TOLERANCE_CM = 150.0
 #: A drone that never answers ``sdk?`` (DJITelloPy's own timeout text) is not
 #: proof of a live SDK link; SENTINEL prefers to say so plainly.
 SDK_ABORT_PREFIX = "aborting command"
@@ -584,6 +588,11 @@ class _TelloStack:
         if fix is None:
             raise LiveStackError("home: no reliable tag fix after takeoff; the home is never assumed")
         z_cm = self._passive_height_cm()
+        if not self.tracker.initialized:
+            # Takeoff is not gated on a pad fix; this airborne fix is the
+            # tracker's first anchor (there is no pad anchor to climb from).
+            self._climb_applied = True
+            self.tracker.accept_fix(fix.pose_fix(z_cm))
         return HomeState(Position(fix.x_cm, fix.y_cm, z_cm), fix.heading_deg, definition.route_id, fix.measured_at)
 
     def emergency(self, executor) -> object:
@@ -699,7 +708,7 @@ class TelloFlightStackFactory:
                             recorder=FrameRecorder(self.run_dir / "captures"), home_settle_s=self.home_settle_s)
         deadline = None if self.max_duration_s is None else clock() + self.max_duration_s
         executor = StepExecutor(runner, clock=clock, deadline=deadline, measure_home=stack.measure_home,
-                                command_sink=stack.command_sink,
+                                command_sink=stack.command_sink, home_tolerance_cm=HOME_TOLERANCE_CM,
                                 home_measurement_timeout_s=self.home_settle_s + BURST_MAX_S + 2 * HEIGHT_READ_SLACK_S)
         stack.executor = executor
         headings = mapped_heading_tag_ids(self.tag_map)

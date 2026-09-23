@@ -1491,3 +1491,20 @@ def test_terminal_completion_storage_failure_does_not_repeat_landing(safety, mon
     result = supervisor.dispatch(supervisor.assess(request(safety, plan), supervisor.site), executor)
     assert result.state == "LANDED" and executor.calls == ["LAND"] and emergencies == []
     assert supervisor.last_terminal_outcome == result and supervisor.last_persistence_error
+
+
+def test_takeoff_is_admitted_from_the_declared_pad_when_the_tracker_never_had_a_fix(safety):
+    from sentinel.cube.localization import LocalizationTracker
+    supervisor, _, clock, samples, *_ = safety
+    fresh = LocalizationTracker(supervisor.tracker.profile, clock=clock)
+    supervisor.tracker = fresh
+    samples["pose"] = fresh.health
+    assert samples["pose"].state == LocalizationState.LOST
+    supervisor.validate_start()  # no tag fix on the pad: still admitted
+
+
+def test_a_tracker_lost_after_a_fix_still_blocks_takeoff(safety):
+    supervisor, _, _, samples, *_ = safety
+    samples["pose"] = supervisor.tracker.mark_lost()
+    with pytest.raises(ValueError, match="LOCALIZATION_LOST"):
+        supervisor.validate_start()

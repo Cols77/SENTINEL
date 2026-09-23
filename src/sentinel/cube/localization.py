@@ -154,6 +154,11 @@ class LocalizationTracker:
         self._initialized = False
 
     @property
+    def initialized(self) -> bool:
+        """True once any fix has anchored the tracker (a later LOST stays latched)."""
+        return self._initialized
+
+    @property
     def health(self) -> PoseHealth:
         self._health = self._advance(self._health, self.clock())
         return self._health
