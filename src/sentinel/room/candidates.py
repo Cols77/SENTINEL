@@ -17,7 +17,7 @@ from .coverage import CoverageProjection
 from .goals import GoalObjective
 from .models import CandidateKind, GoalKind, GoalStatus, PhysicalCost, RoomCandidate
 from .queries import READ_KINDS, ReadSnapshot, ToolOutcome, relevant_hash
-from .semantic import SemanticPose, resolve_semantic_pose
+from .semantic import SemanticPose, resolve_pose_id
 from .site import RoomSite
 
 _DESCRIPTIONS = {
@@ -103,14 +103,7 @@ def _region_pose_id(scope: str) -> str | None:
 
 
 def _resolved_position(site: RoomSite, pose_id: str):
-    parts = pose_id.split("-")
-    if len(parts) != 4:
-        return None
-    horizontal, depth, height, look = parts
-    try:
-        return resolve_semantic_pose(site, SemanticPose(horizontal, depth, height, look))
-    except ValueError:
-        return None
+    return resolve_pose_id(site, pose_id)
 
 
 def _uncovered_cell_ids(coverage: CoverageProjection) -> set[str]:

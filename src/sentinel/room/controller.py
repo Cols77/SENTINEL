@@ -14,12 +14,14 @@ from sentinel.judgment import ChoiceJudge
 from sentinel.cube.energy import ExecutionMode
 from sentinel.cube.supervised_wait import SupervisedWait
 from sentinel.cube.step_executor import TerminalOutcome
+from sentinel.models import Position
 
 from .candidates import build_candidates, build_observation_candidates
 from .coverage import CellObservation, CoverageProjection, project_coverage, render_coverage_note
 from .ingest import ingest_result
 from .models import CandidateKind, GoalKind, GoalStatus, RoomCandidate, TerminalState
 from .queries import READ_KINDS, ReadFact, ReadQueries, ReadSnapshot, ToolOutcome, relevant_hash, render_answer
+from .semantic import resolve_pose_id
 from .store import RoomStore, VersionConflict
 
 if TYPE_CHECKING:
@@ -120,7 +122,19 @@ class RoomController:
         ``observed_at`` uses the perception result's own measured capture
         time (fix round 1, Q12) when the outcome carries one; only the
         durable ROOM_TOOL_OUTCOME event ID is used as a fallback for outcomes
-        recorded before this fix.
+        recorded before this fix. Fix round 2 (Q5): this method still trusts
+        the ``pose_id`` parsed out of a replayed ``OBSERVE_SUCCEEDED``
+        outcome's ``candidate_id`` -- but ``_execute_observation`` now only
+        ever records ``OBSERVE_SUCCEEDED`` once it has verified, before
+        dispatch, that the resolved checkpoint plan's own endpoint/heading
+        match that exact declared pose (``_checkpoint_targets_declared_pose``)
+        and, after dispatch, that the outcome's own per-command record shows
+        that plan's CAPTURE actually completed (``_capture_completed``) --
+        never a mid-plan recovery/re-dispatch outcome that only looks
+        successful at the top level. So the pose_id this method parses back
+        out of a persisted outcome is no longer merely asserted by the
+        candidate that was chosen; it is the pose that dispatch itself
+        confirmed the checkpoint reached.
         """
         site = self.supervisor.site
         cells_by_id = {cell.cell_id: cell for cell in site.coverage_cells}
@@ -549,6 +563,40 @@ class RoomController:
             payload = self._outcome(snapshot, candidate_id, kind, digest, "STALE_DECISION", refusal="STALE_DECISION")
             return self._record(snapshot, correlation, payload, prior=prior)
 
+    def _checkpoint_targets_declared_pose(self, candidate, plan) -> bool:
+        """Fix round 2 (Q5): ``_coverage`` credits every declared cell/class a
+        pose declares visibility of purely off the ``pose_id`` embedded in an
+        OBSERVE candidate's ID -- it never checks that the checkpoint which
+        actually ran was the one that pose declares. Verify, before this
+        checkpoint is ever admitted or dispatched, that the plan
+        ``resolve_checkpoint`` built truly targets that exact declared pose's
+        resolved endpoint and heading, not merely some other (e.g. current,
+        unmoved) position happening to be reported under this pose's ID."""
+        pose_id = candidate.candidate_id.rsplit(":", 1)[-1]
+        resolved = resolve_pose_id(self.supervisor.site, pose_id)
+        if resolved is None:
+            return False
+        target = Position(resolved.x_cm, resolved.y_cm, resolved.z_cm)
+        return plan.target == target and plan.terminal_heading_deg == resolved.yaw_deg
+
+    def _capture_completed(self, plan, result) -> bool:
+        """Fix round 2 (Q5): a dispatched ``CheckpointOutcome`` can report
+        ``COMPLETED``, ``completion_known`` and even non-empty
+        ``observation_ids`` without this plan's own CAPTURE command ever
+        having run -- ``SafetySupervisor._dispatch``'s mid-plan re-dispatch
+        (supervisor.py's remaining-commands loop, ``if refreshed.transition
+        != current.transition: return self.dispatch(...)``) discards any
+        commands already accumulated and can return a fresh outcome (e.g.
+        ``_recover``'s own vacuous ``CheckpointOutcome("COMPLETED", (), (),
+        ..., True)``) that never touched this checkpoint's capture. Require
+        instead that the outcome's own per-command record
+        (``command_states``) shows a completed CAPTURE that is actually one
+        of this plan's declared commands -- never inferred merely from the
+        outcome's top-level status/observation_ids, which a recovery or
+        partial re-dispatch outcome can satisfy vacuously."""
+        return any(state.status == "COMPLETED" and state.command.kind == "CAPTURE"
+                   and state.command in plan.commands for state in result.command_states)
+
     def _execute_observation(self, session_id, candidate, snapshot, expected_version):
         """Resolve, admit and dispatch exactly one checkpoint for ``candidate``,
         then wait for and ingest its correlated perception result.
@@ -562,7 +610,7 @@ class RoomController:
             plan = self.resolve_checkpoint(candidate, snapshot)
         except Exception:
             plan = None
-        if plan is None:
+        if plan is None or not self._checkpoint_targets_declared_pose(candidate, plan):
             return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
         # Fix round 1 (Q6): admit the checkpoint AND the airborne perception
         # wait that follows it as one action -- a checkpoint that is only
@@ -587,13 +635,17 @@ class RoomController:
             # attempted; a fresh Jev choice must wait for the next turn.
             terminal_outcome = result if isinstance(result, TerminalOutcome) else None
             return self._preempted(session_id, admission, terminal_outcome=terminal_outcome)
-        if result.status != "COMPLETED" or not result.completion_known or not result.observation_ids:
+        if (result.status != "COMPLETED" or not result.completion_known or not result.observation_ids
+                or not self._capture_completed(plan, result)):
             # SDK/command completion uncertainty -- or a mid-plan safety
             # re-dispatch that resolved through recovery instead of actually
             # running this checkpoint's commands (fix round 1, Q5: recovery's
             # own vacuous CheckpointOutcome always carries empty
-            # observation_ids, never a real capture) -- is never treated as a
-            # success, and never releases a second optional checkpoint this turn.
+            # observation_ids, never a real capture; fix round 2, Q5: never
+            # trust status/observation_ids alone -- require the per-command
+            # record to show this plan's own CAPTURE actually completed) --
+            # is never treated as a success, and never releases a second
+            # optional checkpoint this turn.
             return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
         try:
             request = self.perception_capture(candidate, result, snapshot)

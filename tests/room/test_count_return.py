@@ -18,9 +18,10 @@ from dataclasses import asdict, replace
 
 import pytest
 
+from sentinel.cube.checkpoint import CheckpointPlan
 from sentinel.cube.localization import LocalizationState
 from sentinel.cube.recovery import PoseReport, RecoveryController
-from sentinel.cube.step_executor import ExecutorState, TerminalOutcome
+from sentinel.cube.step_executor import CheckpointOutcome, CommandState, ExecutorState, TerminalOutcome
 from sentinel.cube.energy import EnergySample
 from sentinel.models import Position
 from sentinel.room.controller import RoomController, TurnOutcome
@@ -28,6 +29,7 @@ from sentinel.room.coverage import CoverageCell
 from sentinel.room.goals import GoalLedger, GoalObjective
 from sentinel.room.ingest import DetectionEvidence, PerceptionRequest, PerceptionResult, detection_digest
 from sentinel.room.models import CandidateKind, GoalKind, GoalStatus, TerminalState
+from sentinel.room.semantic import resolve_pose_id
 from sentinel.room.site import SemanticFrame
 from tests.cube.test_localization import fix
 from tests.cube.test_recovery import site as cube_site
@@ -84,6 +86,35 @@ def drone(store, session_id, battery=73):
 
 
 def make_resolve_checkpoint(supervisor, *, seconds=1):
+    """Build a checkpoint that actually targets the resolved endpoint/heading
+    of the pose the candidate's ID declares -- not merely the tracker's
+    current (unmoved) pose -- matching the controller's pose-verification
+    guard added in fix round 2 (Q5). The plan still only carries a single
+    stationary CAPTURE command (real waypoint navigation stays out of this
+    task's "injected collaborators, not real geometry" scope; see the task
+    report), so the tracker's actual position is unaffected -- only the
+    plan's declared ``target``/``terminal_heading_deg`` metadata, which is
+    exactly what the new guard checks, reflects the requested pose."""
+    def resolve(candidate, snapshot):
+        pose = supervisor.tracker.health
+        pose_id = candidate.candidate_id.rsplit(":", 1)[-1]
+        resolved = resolve_pose_id(supervisor.site, pose_id)
+        target = Position(resolved.x_cm, resolved.y_cm, resolved.z_cm) if resolved else pose.position
+        heading = resolved.yaw_deg if resolved else pose.heading_deg
+        commands = (command(seconds=seconds),)
+        return CheckpointPlan("optional", pose.position, target, pose.heading_deg, heading,
+                              commands, sum(c.upper_bound_s for c in commands))
+    return resolve
+
+
+def make_hovering_resolve_checkpoint(supervisor, *, seconds=1):
+    """Fix round 2 (Q5) negative fixture: deliberately ignores which pose the
+    candidate declares and always hovers in place at the tracker's current
+    pose -- this is the exact gap the round-2 review found ("the test
+    resolver hovers in place for every pose and still reaches 'coverage
+    complete'"). Used only by the test that proves the controller now
+    refuses to dispatch (and credit) a checkpoint whose declared endpoint
+    doesn't match its candidate's pose."""
     def resolve(candidate, snapshot):
         return checkpoint(supervisor.tracker.health, command(seconds=seconds))
     return resolve
@@ -691,3 +722,82 @@ def test_real_mode_never_offers_observation_candidate(safety, tmp_path):
     legal_ids = {c.candidate_id for c in controller._legal_candidates(snapshot)}
     assert not any(candidate_id.startswith("OBSERVE:") for candidate_id in legal_ids)
     assert not controller._observation_enabled
+
+
+# ============================================================================
+# Fix round 2 (2026-09-23): Q5.
+# ============================================================================
+
+# --- 19. a resolver that ignores the declared pose is refused, uncredited --
+
+def test_observation_resolver_ignoring_the_declared_pose_is_refused_and_uncredited(safety, tmp_path):
+    """Q5 (fix round 2): coverage must never be credited off the pose_id
+    embedded in the candidate ID alone. ``make_hovering_resolve_checkpoint``
+    reproduces exactly the round-2 review's own reproduction ("the test
+    resolver hovers in place for every pose and still reaches 'coverage
+    complete'") -- its plan's endpoint/heading never actually match the
+    declared pose (``resolve_semantic_pose(site, pose)``). The controller
+    must refuse to dispatch it (never call the executor or capture a frame)
+    and must never credit that pose's coverage cells."""
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
+    judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets")
+    controller, executor = make_controller(safety, judge, rig,
+                                           resolve_checkpoint=make_hovering_resolve_checkpoint(supervisor))
+
+    outcome = controller.step(SESSION)
+    assert not outcome.accepted
+    payload = store.events(SESSION)[-1].payload
+    assert payload["code"] == "TOOL_FAILURE" and payload["refusal_code"] == "TOOL_FAILURE"
+    assert executor.calls == []
+    assert rig.captures == []
+
+    from sentinel.room.queries import ReadQueries
+    snapshot = ReadQueries(store).project(SESSION)
+    assert "cell1:computer" in controller._coverage(snapshot).uncovered
+
+
+# --- 20. a recovery/re-dispatch outcome without a completed capture is -----
+# --- refused and uncredited, even when it otherwise looks successful -------
+
+def test_observation_outcome_without_a_completed_capture_is_refused_and_uncredited(safety, tmp_path):
+    """Q5 (fix round 2): SafetySupervisor._dispatch's mid-plan re-dispatch
+    (its remaining-commands loop: ``if refreshed.transition !=
+    current.transition: return self.dispatch(refreshed, executor)``) can
+    return a fresh CheckpointOutcome -- e.g. a successful RECOVER's own
+    vacuous ``CheckpointOutcome("COMPLETED", (), (), ..., True)`` -- that
+    reports COMPLETED/completion_known and, in principle, could carry a
+    non-empty observation_ids without this plan's own CAPTURE command ever
+    having run (the original checkpoint's commands, and any observation IDs
+    they already produced, are discarded by that recursive re-dispatch).
+    Simulate exactly that shape directly on ``supervisor.dispatch`` -- status
+    COMPLETED, completion_known True, non-empty observation_ids, but a
+    command_states record showing only a MOVE, never a completed CAPTURE --
+    and assert the controller refuses to credit it as an observation."""
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
+    judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets")
+    controller, executor = make_controller(safety, judge, rig)
+
+    move_only = CheckpointOutcome("COMPLETED",
+        (CommandState(command(kind="MOVE"), "COMPLETED", 0.0, 1.0),), ("observation",),
+        None, supervisor.tracker.health.position, True)
+    supervisor.dispatch = lambda outcome, flight_executor: move_only
+
+    outcome = controller.step(SESSION)
+    assert not outcome.accepted
+    payload = store.events(SESSION)[-1].payload
+    assert payload["code"] == "TOOL_FAILURE" and payload["refusal_code"] == "TOOL_FAILURE"
+    assert rig.captures == []
+
+    from sentinel.room.queries import ReadQueries
+    snapshot = ReadQueries(store).project(SESSION)
+    assert "cell1:computer" in controller._coverage(snapshot).uncovered

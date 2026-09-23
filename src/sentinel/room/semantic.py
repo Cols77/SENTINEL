@@ -152,6 +152,25 @@ def resolve_semantic_sequence(site: RoomSite, poses: Sequence[SemanticPose]) -> 
     return tuple(resolve_semantic_pose(site, pose) for pose in poses)
 
 
+def resolve_pose_id(site: RoomSite, pose_id: str) -> ResolvedPose | None:
+    """Parse a declared ``pose_id`` (``"horizontal-depth-height-look"``, as
+    embedded in an OBSERVE candidate ID or ``RoomSite.pose_visibility``) and
+    resolve it, or ``None`` for a malformed ID or one that fails to resolve
+    (no semantic frame, unknown region/look value). Shared by
+    ``candidates.py`` (candidate cost/suppression) and ``controller.py``
+    (fix round 2, Q5: verifying a resolved checkpoint plan's endpoint/heading
+    actually match the pose its candidate ID declares, rather than trusting
+    that ID alone to credit coverage)."""
+    parts = pose_id.split("-")
+    if len(parts) != 4:
+        return None
+    horizontal, depth, height, look = parts
+    try:
+        return resolve_semantic_pose(site, SemanticPose(horizontal, depth, height, look))
+    except ValueError:
+        return None
+
+
 def resolve_landmark(site: RoomSite, landmark_id: str) -> Position:
     """Executor-facing: the concrete Position behind a declared landmark ID.
 
