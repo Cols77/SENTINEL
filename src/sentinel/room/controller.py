@@ -954,8 +954,16 @@ class RoomController:
         pose = result.pose
         if pose is None:
             return False
+        # Task B2: the checkpoint planner deliberately leaves an offset within
+        # its dead band uncorrected (e.g. the CanningSt pad at y 190 and the
+        # rear poses at y 183: no 7 cm move is ever commanded), so a correct
+        # arrival is within the dead band of the declared pose, plus the
+        # measurement tolerance -- never within the tolerance alone, which
+        # refused every such observation as TOOL_FAILURE.
+        limits = getattr(self.supervisor, "limits", None)
+        tolerance_cm = _POSE_POSITION_TOLERANCE_CM + float(getattr(limits, "dead_band_cm", 0) or 0)
         distance_cm = math.hypot(pose.x_cm - resolved.x_cm, pose.y_cm - resolved.y_cm)
-        if distance_cm > _POSE_POSITION_TOLERANCE_CM or abs(pose.z_cm - resolved.z_cm) > _POSE_POSITION_TOLERANCE_CM:
+        if distance_cm > tolerance_cm or abs(pose.z_cm - resolved.z_cm) > tolerance_cm:
             return False
         return _heading_within_tolerance(health.heading_deg, resolved.yaw_deg)
 

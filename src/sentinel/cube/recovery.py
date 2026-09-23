@@ -419,6 +419,12 @@ class RecoveryController:
         if action.kind == "STATIONARY_BURST" or action.action_id in self._accounted_rotations:
             return
         current = self.tracker.health
+        # Task B2: reading ``health`` propagates the tracker to the clock's
+        # *current* reading, which on a real monotonic clock is already later
+        # than ``now`` (taken when the burst assessment began). Propagating
+        # back to ``now`` is time running backwards, which the tracker latches
+        # as LOST -- every real yaw recovery then failed as REANCHOR_SYNC_FAILED.
+        now = max(now, current.propagated_at)
         # The executor may already have propagated some or all of this rotation.
         # Account only the remaining angular displacement; completed action IDs
         # also make a failed reanchor persistence retry unable to add yaw twice.

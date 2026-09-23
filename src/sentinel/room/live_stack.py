@@ -35,7 +35,7 @@ from typing import Callable, Mapping
 
 from sentinel.cube.checkpoint import CommandOutcome, HomeDefinition, PlannedCommand
 from sentinel.cube.energy import EnergySample
-from sentinel.cube.localization import PoseFix
+from sentinel.cube.localization import LocalizationState, PoseFix
 from sentinel.cube.recovery import PoseReport
 from sentinel.cube.mission import BURST_MAX_S, BURST_TARGET_REPORTS, CM_PER_UNIT, SETTLE_S, _StreamHeld
 from sentinel.cube.site import MAX_LEG_CM
@@ -416,6 +416,9 @@ class _TelloStack:
         self._climb_applied = False
         self._looking_away = False
         self.executor: StepExecutor | None = None
+        #: Set when the session's supervisor gets a recovery adapter (mapped
+        #: tag headings exist): refresh then leaves RECOVERY_REQUIRED to it.
+        self.defer_recovery_fixes = False
 
     # -- measurements -------------------------------------------------------
     def _height_cm(self) -> int:
@@ -516,6 +519,15 @@ class _TelloStack:
         # burst as an estimator failure; the tracker keeps propagating.
         fix = self._tag_fix(REFRESH_BURST_S, blocking=False)
         if fix is _BUSY:
+            pass
+        elif (fix is not None and self.defer_recovery_fixes
+              and self.tracker.health.state == LocalizationState.RECOVERY_REQUIRED):
+            # Task B2: a pose that needs recovery is re-anchored by the
+            # supervisor's recovery policy (its audited POSE_REANCHORED batch
+            # and invalidations), never silently by the watchdog's refresh.
+            # A refresh fix here superseded the policy's own burst and left
+            # its episode unfinished-but-closed, so the *next* recovery of
+            # the flight was refused as exhausted and landed in place.
             pass
         elif fix is None:
             self.tracker.note_camera(self.clock(), estimator_failed=True,
@@ -687,7 +699,12 @@ class TelloFlightStackFactory:
                                 command_sink=stack.command_sink,
                                 home_measurement_timeout_s=self.home_settle_s + BURST_MAX_S + 2 * HEIGHT_READ_SLACK_S)
         stack.executor = executor
+        headings = mapped_heading_tag_ids(self.tag_map)
+        # live_session gives the supervisor a recovery adapter exactly when
+        # both the burst and mapped headings exist; only then does refresh
+        # defer a RECOVERY_REQUIRED re-anchor to it.
+        stack.defer_recovery_fixes = bool(headings)
         runner._call(client.stream_on)
         return FlightStack(executor=executor, refresh=stack.refresh, emergency=stack.emergency, frame_source=client,
                            trigger_emergency=runner.trigger_emergency, recovery_burst=stack.recovery_burst,
-                           mapped_heading_tag_ids=mapped_heading_tag_ids(self.tag_map))
+                           mapped_heading_tag_ids=headings)
