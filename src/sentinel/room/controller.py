@@ -680,6 +680,18 @@ class RoomController:
         return any(state.status == "COMPLETED" and state.command.kind == "CAPTURE"
                    and state.command in plan.commands for state in result.command_states)
 
+    def _checkpoint_completed_since(self, session_id, version) -> bool:
+        """Whether any command was executed and recorded after ``version``
+        (this turn's ROOM_CHOICE_ATTEMPT). ``CHECKPOINT_COMPLETED`` is written
+        by ``SafetySupervisor._record_completion`` after every executed
+        command, so its absence proves the conflict happened before motion.
+        If the ledger cannot be read, motion cannot be ruled out."""
+        try:
+            return any(e.event_type == "CHECKPOINT_COMPLETED" and e.state_version > version
+                       for e in self.store.events(session_id))
+        except Exception:
+            return True
+
     def _record_perception_preempted(self, session_id, candidate, snapshot, correlation, request):
         """Fix round 3 (F4): a perception wait preempted by a mandatory
         safety transition after the checkpoint's own CAPTURE already
@@ -738,9 +750,17 @@ class RoomController:
         # admission -- not only one that preempts the Jev choice itself
         # (see ``_decide``'s ``VersionConflict`` handling before dispatch) --
         # is a typed STALE_DECISION, never a physical CHECKPOINT_FAILED.
+        # Residual NB1: ``SafetySupervisor._dispatch`` can also raise a plain
+        # VersionConflict *after* earlier commands of this same checkpoint
+        # already executed (the per-command CAS audit of a later command).
+        # STALE_DECISION ("nothing was dispatched") is only true when no
+        # command of this turn completed; otherwise motion happened and the
+        # outcome is a physical CHECKPOINT_FAILED.
         try:
             result = self.supervisor.dispatch(admission, self.flight_executor)
         except VersionConflict:
+            if self._checkpoint_completed_since(session_id, expected_version):
+                return {"code": "CHECKPOINT_FAILED", "refusal": "CHECKPOINT_FAILED"}
             return {"code": "STALE_DECISION", "refusal": "STALE_DECISION"}
         except Exception:
             return {"code": "CHECKPOINT_FAILED", "refusal": "CHECKPOINT_FAILED"}

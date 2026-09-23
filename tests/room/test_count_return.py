@@ -1045,3 +1045,51 @@ def test_stale_decision_caught_after_room_choice_attempt_is_typed_correctly(safe
     assert payload["code"] == "STALE_DECISION" and payload["refusal_code"] == "STALE_DECISION"
     assert executor.calls == []
     assert rig.captures == []
+
+
+# ============================================================================
+# Plan 03 residual task R (2026-09-23): NB1.
+# ============================================================================
+
+# --- 25. a version conflict after partial motion is never a stale decision -
+
+def test_version_conflict_after_partial_motion_is_checkpoint_failed_not_stale(safety, tmp_path):
+    """NB1: ``SafetySupervisor._dispatch`` re-prepares each command after the
+    first against the live version and then audits it with a CAS append; a
+    concurrent write between those two points surfaces as a plain
+    ``VersionConflict`` *after* an earlier command of the same checkpoint
+    already moved the aircraft. That must be recorded as CHECKPOINT_FAILED
+    (motion happened), never STALE_DECISION ("nothing was dispatched")."""
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set("left-rear-bottom-toward_targets", make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets"))
+    judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets")
+    controller, executor = make_controller(safety, judge, rig)
+    single = controller.resolve_checkpoint
+
+    def two_command_resolve(candidate, snapshot):
+        plan = single(candidate, snapshot)
+        commands = (command("MOVE", direction="right", distance_cm=20), command())
+        return replace(plan, commands=commands, worst_case_s=sum(c.upper_bound_s for c in commands))
+
+    controller.resolve_checkpoint = two_command_resolve
+    original_prepare = supervisor.prepare
+
+    def racing_prepare(**kwargs):
+        decision = original_prepare(**kwargs)
+        if "remaining_commands" in kwargs:
+            # The first command has already executed and been recorded; a
+            # concurrent writer now races the second command's CAS audit.
+            append(store, SESSION, "CONCURRENT_CHANGE", {})
+        return decision
+
+    supervisor.prepare = racing_prepare
+    outcome = controller.step(SESSION)
+    assert not outcome.accepted
+    assert executor.calls == ["MOVE"]
+    payload = store.events(SESSION)[-1].payload
+    assert payload["code"] == "CHECKPOINT_FAILED" and payload["refusal_code"] == "CHECKPOINT_FAILED"
+    assert rig.captures == []
