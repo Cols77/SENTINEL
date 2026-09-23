@@ -364,6 +364,61 @@ def test_cli_config_and_root_dispatch(monkeypatch):
     assert calls==[['--mode','rehearsal']]
 
 
+@pytest.mark.parametrize('flag,value,field,expected', [
+    ('--site', 'operator-site.json', 'site_path', Path('operator-site.json')),
+    ('--tag-map', 'operator-map.json', 'tag_map_path', Path('operator-map.json')),
+    ('--pose-db', 'operator-pose.sqlite', 'pose_db', Path('operator-pose.sqlite')),
+    ('--pose', 'passive', 'pose_mode', 'passive'),
+    ('--surface-z-cm', '40', 'surface_z_cm', 40.0),
+    ('--start-x-cm', '123', 'start_x_cm', 123),
+    ('--start-y-cm', '234', 'start_y_cm', 234),
+])
+def test_any_legacy_physical_cli_flag_preserves_compatibility_path(
+        flag, value, field, expected):
+    from sentinel.ui.__main__ import parse_config
+
+    config = parse_config(['--mode', 'live', flag, value])
+    assert config.site_profiles_path is None
+    assert getattr(config, field) == expected
+
+
+def test_complete_legacy_cli_physical_fields_reach_service(tmp_path):
+    from sentinel.ui.__main__ import parse_config
+
+    site = Path('docs/wp5-flight1-site.json')
+    tag_map = Path('docs/wp5-flight3-map.json')
+    pose_db = tmp_path / 'operator-pose.sqlite'
+    config = parse_config([
+        '--mode', 'live', '--data-dir', str(tmp_path / 'data'),
+        '--site', str(site), '--tag-map', str(tag_map),
+        '--pose-db', str(pose_db), '--pose', 'off',
+        '--surface-z-cm', '50', '--start-x-cm', '250',
+        '--start-y-cm', '190'])
+    assert config.site_profiles_path is None
+    service = bootstrap.build_service(config)
+    try:
+        assert service.config.site_path == site
+        assert service.config.tag_map_path == tag_map
+        assert service.config.pose_db == pose_db
+        assert service.config.surface_z_cm == 50
+        assert (service.config.start_x_cm, service.config.start_y_cm) == (250, 190)
+    finally:
+        service.close()
+
+
+def test_incomplete_legacy_cli_physical_fields_fail_without_registry_fallback(
+        tmp_path):
+    from sentinel.ui.__main__ import parse_config
+
+    config = parse_config(['--mode', 'live', '--data-dir', str(tmp_path / 'data'),
+                           '--site', 'operator-site.json'])
+    assert config.site_profiles_path is None
+    with pytest.raises(bootstrap.StartupError,
+                       match='^SITE_PROFILE_INCOMPLETE$'):
+        bootstrap.build_service(config)
+    assert not (tmp_path / 'data').exists()
+
+
 @pytest.mark.parametrize('change', ['consent', 'profile'])
 def test_invalid_profile_and_consent_refuse_at_dispatch_before_client(
         live_config, monkeypatch, change):

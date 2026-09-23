@@ -127,6 +127,26 @@ def test_collection_pose_mode_uses_allowlisted_error(tmp_path, pose_mode):
         load_site_profiles(path).require('Lab')
 
 
+def test_integer_local_ip_uses_allowlisted_error(tmp_path):
+    from sentinel.ui.site_profiles import load_site_profiles
+
+    path = _registry(tmp_path, [dict(_enabled(), local_ip=3232238082)])
+    with pytest.raises(StartupError, match='^SITE_PROFILE_INCOMPLETE$'):
+        load_site_profiles(path).require('Lab')
+
+
+@pytest.mark.parametrize('version', [True, 1.0])
+def test_registry_rejects_noninteger_version(tmp_path, version):
+    from sentinel.ui.site_profiles import load_site_profiles
+
+    path = _registry(tmp_path, [_enabled()])
+    doc = json.loads(path.read_text())
+    doc['version'] = version
+    path.write_text(json.dumps(doc))
+    with pytest.raises(StartupError, match='^SITE_PROFILE_INCOMPLETE$'):
+        load_site_profiles(path)
+
+
 def test_registry_loading_and_startup_gate_do_not_construct_operational_boundaries(
         tmp_path, monkeypatch):
     from sentinel.ui import live

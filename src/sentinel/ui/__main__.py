@@ -1,10 +1,12 @@
 from argparse import ArgumentParser
 from pathlib import Path
+import sys
 from .bootstrap import SessionConfig, StartupError, build_service
 from .app import build_app
 
 
 def parse_config(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
     parser=ArgumentParser(description='SENTINEL Mission Control')
     parser.add_argument('--mode',choices=['rehearsal','live'],default='rehearsal')
     parser.add_argument('--host',default='127.0.0.1')
@@ -31,7 +33,13 @@ def parse_config(argv=None):
     parser.add_argument('--start-y-cm',type=int)
     parser.add_argument('--sr063-amended',action='store_true')
     args=vars(parser.parse_args(argv));args['mode']=args['mode'].upper()
-    if args['mode'] == 'LIVE' and args['site_profiles_path'] is None:
+    legacy_physical_flags = ('--site', '--tag-map', '--pose-db', '--pose',
+                             '--surface-z-cm', '--start-x-cm', '--start-y-cm')
+    explicit_legacy = any(
+        token == flag or token.startswith(flag + '=')
+        for token in argv for flag in legacy_physical_flags)
+    if (args['mode'] == 'LIVE' and args['site_profiles_path'] is None and
+            not explicit_legacy):
         args['site_profiles_path'] = (Path(__file__).resolve().parents[3] /
                                      'config/mission-control-sites.v1.json')
     if args['detector_name'] is None:

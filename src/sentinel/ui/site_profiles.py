@@ -72,7 +72,8 @@ def load_site_profiles(path: Path) -> SiteProfileRegistry:
     path = Path(path).resolve()
     try:
         doc = json.loads(path.read_text(encoding='utf-8'))
-        if (not isinstance(doc, dict) or doc.get('version') != 1 or
+        if (not isinstance(doc, dict) or type(doc.get('version')) is not int or
+                doc['version'] != 1 or
                 not isinstance(doc.get('profiles'), list)):
             raise ValueError('unsupported registry')
         profiles = []
@@ -120,6 +121,8 @@ def validate_site_profile(profile: SiteProfile) -> None:
                 for value in (profile.start_x_cm, profile.start_y_cm))):
         raise StartupError('SITE_PROFILE_INCOMPLETE')
     if profile.local_ip is not None:
+        if not isinstance(profile.local_ip, str) or not profile.local_ip.strip():
+            raise StartupError('SITE_PROFILE_INCOMPLETE')
         try:
             address = ipaddress.ip_address(profile.local_ip)
             if address.version != 4 or address.is_unspecified or address.is_loopback:
