@@ -98,6 +98,11 @@
     ["left-rear-middle-toward_targets", ["left-strip"]],
     ["right-rear-middle-toward_targets", ["right-strip"]]
   ],
+  "pose_tag_visibility": [
+    ["center-rear-middle-toward_targets", [0, 2]],
+    ["left-rear-middle-toward_targets", [0, 2]],
+    ["right-rear-middle-toward_targets", [0, 2]]
+  ],
   "support_planes": [
     {"plane_id": "FLOOR", "z_cm": 0, "classes": []},
     {"plane_id": "demo-surface", "z_cm": 50, "classes": ["computer", "phone", "pen"]}

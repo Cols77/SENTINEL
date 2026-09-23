@@ -201,11 +201,16 @@ def test_canningst_takeoff_is_admitted_under_one_trial_grant_with_the_history_pr
         link.close()
 
 
-def _airborne_supervisor(tmp_path, drift_override=None, battery=90):
+def _airborne_supervisor(tmp_path, drift_override=None, battery=90, *, recovery=False, drift_changes=None,
+                         site_changes=None):
     """The CanningSt supervisor with the committed history profiles (drift
     optionally overridden), airborne over the pad after the real stack's
-    takeoff; bindings are item 5's concern and are stubbed here."""
+    takeoff; bindings are item 5's concern and are stubbed here.
+
+    ``recovery`` gives it the live session's recovery adapter (the mapped
+    tag headings of the bound tag map), which the expected re-anchor needs."""
     from dataclasses import replace
+    from sentinel.cube.recovery import RecoveryController
     from sentinel.room import live_session
     profiles = ROOT / "fixtures" / "room_agent" / "v1" / "profiles"
     binding = live_session.load_flight_binding(
@@ -213,8 +218,12 @@ def _airborne_supervisor(tmp_path, drift_override=None, battery=90):
         energy_profile_path=profiles / "canningst-energy.json",
         command_limits_path=profiles / "canningst-command-limits.json",
         profile_paths=(profiles / "canningst-flight-profile.json",))
+    if site_changes:
+        binding = replace(binding, site=replace(binding.site, **site_changes))
     drift = binding.drift_profile if drift_override is None else replace(binding.drift_profile,
                                                                           xy_drift_per_cm=drift_override)
+    if drift_changes:
+        drift = replace(drift, **drift_changes)
     clock = time.monotonic
     tracker = LocalizationTracker(drift, clock=clock, real_mode=True)
     link = live_stack.TelloLink(build_client=FakeTransport(battery=battery), clock=clock)
@@ -223,11 +232,18 @@ def _airborne_supervisor(tmp_path, drift_override=None, battery=90):
         pose_burst=Bursts(reports(250, 190, 90.0)), home_settle_s=0.0)(tracker=tracker, clock=clock, site=binding.site)
     store = RoomStore.open(tmp_path / "room.sqlite3")
     store.create_session("run-0001", "request", CapabilityProfile(()))
+    adapter, headings = None, ()
+    if recovery:
+        tag_map = live_stack.load_bound_tag_map(TAG_MAP_PATH, expected_sha256=binding.site.tag_map_sha256)
+        headings = live_stack.mapped_heading_tag_ids(tag_map)
+        adapter = RecoveryController(tracker, clock=clock, burst_source=lambda action: (),
+                                     energy_admits=lambda action: True)
     supervisor = SafetySupervisor(
         store=store, session_id="run-0001", site=binding.site, tracker=tracker,
         reserve=ReserveGuard(binding.energy_profile, clock), limits=binding.limits,
         aircraft_id=binding.energy_profile.aircraft_id, mode=ExecutionMode.REAL, refresh=stack.refresh,
-        emergency=stack.emergency, clock=clock, capability="count_return")
+        emergency=stack.emergency, clock=clock, capability="count_return", recovery=adapter,
+        mapped_heading_tag_ids=headings)
     supervisor.validate_bindings = lambda active_site: None
     for assurance in live_fakes.operator_assurances("run-0001", binding.site,
                                                     clock_domain_id=supervisor.clock_domain_id):
@@ -334,3 +350,62 @@ def test_the_wp5_corner_regions_are_refused_at_the_history_drift_even_without_ho
     assert decisions[CENTER].transition == "CONTINUE", decisions[CENTER].reason
     for pose_id in (LEFT, RIGHT):
         assert decisions[pose_id].transition == "RETURN_NOW", (pose_id, decisions[pose_id].reason)
+
+
+# ---------------------------------------------------------------------------
+# Task V2: an expected re-anchor at a tag-visible observation checkpoint
+# ---------------------------------------------------------------------------
+
+#: The pre-fix-1 declared hover drift: at it no lateral region is admissible
+#: from a fixless out-and-back (Task B2's report), so it isolates the credit.
+DOUBLED_HOVER = {"xy_drift_cm_s": 0.1}
+
+
+def test_the_site_declares_both_mapped_wall_tags_visible_from_every_region():
+    site = canningst_site()
+    assert dict(site.pose_tag_visibility) == {CENTER: (0, 2), LEFT: (0, 2), RIGHT: (0, 2)}
+
+
+def test_a_tag_visibility_declaration_must_name_a_declared_pose_and_valid_tags():
+    from dataclasses import replace
+    site = canningst_site()
+    for bad in ((("front-rear-middle-toward_targets", (0, 2)),), ((CENTER, ()),), ((CENTER, (0, 0)),),
+                ((CENTER, (-1, 2)),), ((CENTER, (0, 2)), (CENTER, (0, 2)))):
+        with pytest.raises(ValueError):
+            replace(site, pose_tag_visibility=bad).validate()
+
+
+def test_without_the_expected_reanchor_the_lateral_regions_are_refused_at_the_doubled_hover_drift(tmp_path):
+    """The control: no recovery adapter (so no yaw-scan recovery can be
+    reserved), or no declared tag visibility, and the fixless out-and-back
+    is refused exactly as before."""
+    for label, kwargs in (("no-recovery", {}), ("no-tags", {"recovery": True,
+                                                            "site_changes": {"pose_tag_visibility": ()}})):
+        decisions = _decisions(tmp_path / label, drift_changes=DOUBLED_HOVER, **kwargs)
+        assert decisions[CENTER].transition == "CONTINUE", decisions[CENTER].reason
+        for pose_id in (LEFT, RIGHT):
+            assert decisions[pose_id].transition == "RETURN_NOW", (label, pose_id, decisions[pose_id].reason)
+            assert decisions[pose_id].expected_reanchor is None
+
+
+def test_an_expected_reanchor_at_the_tag_visible_checkpoint_admits_the_lateral_regions(tmp_path):
+    """Task V2 item 0: the return may start from the tag fix the checkpoint
+    is expected to get (both wall tags declared and mapped at the pose's yaw,
+    one stationary yaw-scan recovery reserved there). The drift per cm is
+    the unchanged history value; the outcome names the credited pose."""
+    decisions = _decisions(tmp_path, drift_changes=DOUBLED_HOVER, recovery=True)
+    assert all(d.transition == "CONTINUE" for d in decisions.values()), {k: d.reason for k, d in decisions.items()}
+    assert decisions[LEFT].expected_reanchor == LEFT and decisions[RIGHT].expected_reanchor == RIGHT
+    assert decisions[CENTER].expected_reanchor is None  # admitted without it, as before
+
+
+def test_the_expected_reanchor_does_not_relieve_an_absurd_drift(tmp_path):
+    """The corridor home is always judged from the fixless forecast (a fix
+    that never comes must still leave a clear way home): the 0.45 cm/cm
+    outlier is still refused wherever the aircraft must move, even with the
+    recovery adapter and the declared tags."""
+    decisions = _decisions(tmp_path, drift_override=0.45, recovery=True)
+    for pose_id in (LEFT, RIGHT):
+        assert decisions[pose_id].transition == "RETURN_NOW", (pose_id, decisions[pose_id].reason)
+        assert decisions[pose_id].reason == "PROJECTED_TERMINATION_PATH_INVALID"
+        assert decisions[pose_id].expected_reanchor is None

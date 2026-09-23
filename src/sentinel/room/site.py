@@ -253,6 +253,13 @@ class RoomSite:
     #: static detections on (see ``SupportPlane``). Optional; none declared
     #: leaves every static class unplaced.
     support_planes: tuple[SupportPlane, ...] = ()
+    #: Task V2: declared tag visibility, which mapped tag IDs are in view
+    #: from a declared semantic pose_id (at that pose's own yaw). The
+    #: supervisor credits an *expected* re-anchor at an observation
+    #: checkpoint only when at least two of the declared tags are mapped at
+    #: that heading (see ``SafetySupervisor._reanchor_destination``). An
+    #: operator declaration, like ``pose_visibility``; optional.
+    pose_tag_visibility: tuple[tuple[str, tuple[int, ...]], ...] = ()
 
     def validate(self, *, real_mode: bool = True) -> None:
         if not self.site_id or not self.clearance_provenance.strip() or not self.free_space_volumes:
@@ -343,6 +350,15 @@ class RoomSite:
                 raise ValueError(f"pose {pose_id!r} declares visibility of an unknown coverage cell")
             if not _declared_pose_resolves(self, pose_id):
                 raise ValueError(f"pose {pose_id!r} does not resolve to a declared, in-envelope semantic pose")
+        tag_pose_ids = [pose_id for pose_id, _ in self.pose_tag_visibility]
+        if len(set(tag_pose_ids)) != len(tag_pose_ids):
+            raise ValueError("duplicate declared pose tag visibility identity")
+        for pose_id, tag_ids in self.pose_tag_visibility:
+            if pose_id not in pose_ids:
+                raise ValueError(f"pose {pose_id!r} declares tag visibility but no coverage visibility")
+            if (not tag_ids or len(set(tag_ids)) != len(tag_ids)
+                    or any(type(tag) is not int or tag < 0 for tag in tag_ids)):
+                raise ValueError(f"invalid declared tag visibility for pose {pose_id!r}")
         plane_ids = [plane.plane_id for plane in self.support_planes]
         if len(set(plane_ids)) != len(plane_ids):
             raise ValueError("duplicate support plane identity")
@@ -446,6 +462,8 @@ def room_site_document(site: RoomSite) -> dict:
         fields_dict.pop("pose_visibility", None)
     if not fields_dict.get("support_planes"):
         fields_dict.pop("support_planes", None)
+    if not fields_dict.get("pose_tag_visibility"):
+        fields_dict.pop("pose_tag_visibility", None)
     return json.loads(json.dumps({"schema_version": "room-site-base-v1", **fields_dict}, allow_nan=False))
 
 
@@ -464,7 +482,8 @@ def parse_room_site(doc: dict, *, real_mode: bool = True) -> RoomSite:
         if doc.get("schema_version") != "room-site-base-v1":
             raise ValueError("unsupported room site version")
         raw = _keys({key: value for key, value in doc.items() if key != "schema_version"}, RoomSite,
-                    optional=("semantic_frame", "coverage_cells", "pose_visibility", "support_planes"))
+                    optional=("semantic_frame", "coverage_cells", "pose_visibility", "support_planes",
+                              "pose_tag_visibility"))
 
         def volume(item):
             item = _keys(item, Volume3D)
@@ -510,7 +529,9 @@ def parse_room_site(doc: dict, *, real_mode: bool = True) -> RoomSite:
                if "pose_visibility" in raw else {}),
             **({"support_planes": tuple(SupportPlane(**_keys(item, SupportPlane))
                                         for item in raw["support_planes"])}
-               if "support_planes" in raw else {})})
+               if "support_planes" in raw else {}),
+            **({"pose_tag_visibility": tuple((pose_id, tuple(tags)) for pose_id, tags in raw["pose_tag_visibility"])}
+               if "pose_tag_visibility" in raw else {})})
         result.validate(real_mode=real_mode)
         return result
     except (KeyError, TypeError, AttributeError, OverflowError) as exc:
