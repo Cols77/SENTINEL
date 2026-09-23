@@ -697,12 +697,25 @@ def test_person_qualifiers_cannot_attach_to_another_supported_class(tmp_path, ta
 
 def test_person_qualifier_cannot_apply_to_a_mixed_class_group(tmp_path):
     request = "Find a man and a phone"
+    # "man" and "phone" are named outright, so the group resolves without class_group calls.
     script = [("next_objective", "NEXT_OBJECTIVE:c1"), ("goal_family", "FIND_OBSERVE"),
-              ("target_classes", "CLASS_GROUP"), ("class_group", "INCLUDE:person"),
-              ("class_group", "INCLUDE:phone"), ("class_group", "GROUP_DONE"), ("qualifier", "MAN")]
+              ("target_classes", "CLASS_GROUP"), ("qualifier", "MAN")]
     compiler, judge, store = setup(tmp_path, request, script)
     ledger = compiler.compile("session-1", request, snapshot())
-    assert_rejected_prefix(store, judge, ledger, script, 7, "QUALIFIER_CLASS_MISMATCH")
+    assert_rejected_prefix(store, judge, ledger, script, 4, "QUALIFIER_CLASS_MISMATCH")
+
+
+def test_explicitly_named_classes_resolve_without_per_class_jev_calls(tmp_path):
+    request = "count the phones and computers in the room"
+    script = [("next_objective", "NEXT_OBJECTIVE:c1"), ("goal_family", "COUNT"),
+              ("target_classes", "CLASS_GROUP"),
+              ("qualifier", "NONE"), ("relation", "NONE"), ("spatial_scope", "ROOM"),
+              ("entity_reference", "NEW_ENTITY"), ("terminal_condition", "REPORTED")] + FINISH
+    compiler, judge, store = setup(tmp_path, request, script)
+    ledger = compiler.compile("session-1", request, snapshot())
+    assert ledger.objectives[0].target_classes == ("phone", "computer")
+    assert not [call for call in judge.calls if call[0] == "class_group"]
+    assert_audit(store, judge, ledger)
 
 
 @pytest.mark.parametrize("noun,qualifier,pronoun,verb", [

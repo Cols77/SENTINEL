@@ -126,6 +126,24 @@ class _Rejected(Exception):
         self.status = status
 
 
+_CLASS_NOUNS = {
+    "computer": r"computers?|laptops?|pcs?|desktops?",
+    "phone": r"phones?|smartphones?|mobiles?|cellphones?",
+    "pen": r"pens?",
+    "person": r"persons?|people|men|man|women|woman|humans?",
+}
+
+
+def _named_classes(text: str) -> tuple[str, ...]:
+    """Supported classes named outright in ``text``, in order of first mention."""
+    hits = []
+    for name, pattern in _CLASS_NOUNS.items():
+        match = re.search(rf"\b(?:{pattern})\b", text, re.IGNORECASE)
+        if match:
+            hits.append((match.start(), name))
+    return tuple(name for _, name in sorted(hits))
+
+
 #: Goal compilation only interprets the request; it moves nothing (the room
 #: loop's read/observe gate is also 0.5). Driving Mission Control's Jev
 #: rehearsal, the real model scored single steps of "count the phones and
@@ -396,6 +414,17 @@ class _Compilation:
         })
         if selected != "CLASS_GROUP":
             return (selected.removeprefix("CLASS:"),)
+        named = _named_classes(self.clause.text if self.clause else "")
+        if len(named) >= 2:
+            # The clause names two or more supported classes outright ("phones and
+            # computers"): resolve them deterministically instead of one Jev call per
+            # class, which the real model answered inconsistently (UNSUPPORTED at 0.41
+            # for GROUP_DONE after including both, Mission Control Jev rehearsal).
+            self.accepted_choices.append({
+                "clause_id": self.clause.clause_id if self.clause else None,
+                "name": "class_group", "label": "LEXICAL:" + ",".join(named),
+            })
+            return named
         remaining = list(SUPPORTED_CLASSES)
         included = []
         while True:
