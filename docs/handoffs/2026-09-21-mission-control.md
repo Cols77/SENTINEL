@@ -8,12 +8,13 @@ flight, coverage, proposer, localization, and live detection.
 
 ## Live site-profile workflow delivery
 
-The implementation was delivered across commits `cef6fd5` through `763ab64`, from the required
+The implementation was delivered across commits `cef6fd5` through `6eeb8d2`, from the required
 physical-profile startup gate through registry/switch hardening, readiness refresh, approval-time
-dispatch admission, and browser selector recovery fixes. It adds a versioned data registry with
-CanningSt enabled and Demo disabled, idle-only atomic Live switching, route-aware current readiness,
-and explicit proposal approval as real-flight dispatch authorization. Mission Control alone admits
-the paid detector call after approved dispatch; standalone authorization gates remain in place.
+dispatch admission, browser selector recovery fixes, and final HTTP-boundary hardening. It adds a
+versioned data registry with CanningSt enabled and Demo disabled, idle-only atomic Live switching,
+route-aware current readiness, and explicit proposal approval as real-flight dispatch authorization.
+Mission Control alone admits the paid detector call after approved dispatch; standalone authorization
+gates remain in place.
 
 ## Delivered
 
@@ -105,8 +106,18 @@ See [setup and Live prerequisites](../../examples/survey-console/README.md) and 
 
 ## Verification
 
+Final live site-profile verification on 2026-09-23:
+
+| Check | Result |
+|---|---|
+| `.venv\\Scripts\\python.exe -m pytest -q` | **1735 passed, 3 skipped, 5 warnings**, 813.35s |
+| `node --test tests/survey_console/*.test.mjs` | **107 passed**, no failures/skips |
+| `.venv\\Scripts\\python.exe scripts/ui_assets/check_assets.py` | **414 checks passed across 83 assets** |
+| Live browser acceptance | CanningSt selected; no stale restart command; no horizontal overflow at 390x844, 1440x900, or 1920x1080 |
+| `git diff --check` | Passed |
+
 The figures below are the earlier integration verification and predate the live site-profile
-workflow. Final verification for the profile changes is recorded by the final coordinator at handoff.
+workflow.
 
 Earlier integration verification on 2026-09-23:
 
