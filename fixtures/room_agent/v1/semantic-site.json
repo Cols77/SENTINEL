@@ -177,5 +177,23 @@
         }
       ]
     ]
-  }
+  },
+  "coverage_cells": [
+    {
+      "cell_id": "room-floor",
+      "polygon_xy_cm": [
+        [150, 120],
+        [350, 120],
+        [350, 260],
+        [150, 260]
+      ],
+      "z_band_cm": [60, 140],
+      "required_classes": ["phone", "computer"]
+    }
+  ],
+  "pose_visibility": [
+    ["center-middle-middle-toward_targets", ["room-floor"]],
+    ["left-front-bottom-toward_targets", ["room-floor"]],
+    ["right-rear-top-toward_targets", ["room-floor"]]
+  ]
 }

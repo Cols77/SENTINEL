@@ -23,7 +23,9 @@
       ]
     },
     "clearance_provenance": {"$ref": "#/$defs/id"},
-    "semantic_frame": {"$ref": "#/$defs/semantic_frame"}
+    "semantic_frame": {"$ref": "#/$defs/semantic_frame"},
+    "coverage_cells": {"type": "array", "items": {"$ref": "#/$defs/coverage_cell"}},
+    "pose_visibility": {"type": "array", "items": {"$ref": "#/$defs/pose_visibility_entry"}}
   },
   "$defs": {
     "id": {"type": "string", "minLength": 1, "pattern": "\\S"},
@@ -103,6 +105,27 @@
           }
         }
       }
+    },
+    "coverage_cell": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cell_id", "polygon_xy_cm", "z_band_cm", "required_classes"],
+      "properties": {
+        "cell_id": {"$ref": "#/$defs/id"},
+        "polygon_xy_cm": {"$ref": "#/$defs/polygon"},
+        "z_band_cm": {"$ref": "#/$defs/band"},
+        "required_classes": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"enum": ["computer", "person", "phone", "pen"]}
+        }
+      }
+    },
+    "pose_visibility_entry": {
+      "type": "array",
+      "prefixItems": [
+        {"$ref": "#/$defs/id"},
+        {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}}
+      ],
+      "items": false, "minItems": 2, "maxItems": 2
     }
   }
 }

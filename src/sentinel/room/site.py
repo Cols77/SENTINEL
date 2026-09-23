@@ -20,6 +20,7 @@ from sentinel.cube.recovery import (
     RecoveryEnvironment, RecoveryVolume, contains_disk, normalize_mapped_heading_tag_ids,
 )
 from sentinel.models import Position
+from sentinel.room.coverage import CoverageCell
 
 
 def _polygon(points):
@@ -213,6 +214,14 @@ class RoomSite:
     terminal_contingencies: tuple[TerminalContingency, ...]
     clearance_provenance: str
     semantic_frame: SemanticFrame | None = None
+    #: Bounded regions a room-wide count must resolve to be complete (Plan 03
+    #: Task 2). Never required for a site with no declared semantic frame.
+    coverage_cells: tuple[CoverageCell, ...] = ()
+    #: Declared visibility: which coverage cell IDs are legally observable
+    #: from a given semantic pose_id. A fixture-declared matrix rather than a
+    #: calibrated frustum/occlusion model -- see the task report. Sorted by
+    #: pose_id; each pose's cell IDs are sorted and unique.
+    pose_visibility: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     def validate(self, *, real_mode: bool = True) -> None:
         if not self.site_id or not self.clearance_provenance.strip() or not self.free_space_volumes:
@@ -261,6 +270,23 @@ class RoomSite:
                     raise ValueError(f"landmark {landmark_id!r} outside surveyed free space")
                 if any(_contains(volume, position) for volume in self.forbidden_volumes):
                     raise ValueError(f"landmark {landmark_id!r} inside a forbidden volume")
+        cell_ids = [cell.cell_id for cell in self.coverage_cells]
+        if len(set(cell_ids)) != len(cell_ids):
+            raise ValueError("duplicate coverage cell identity")
+        for cell in self.coverage_cells:
+            corners = [Position(x, y, z) for x, y in cell.polygon_xy_cm for z in cell.z_band_cm]
+            if not all(any(_contains(volume, corner) for volume in self.free_space_volumes) for corner in corners):
+                raise ValueError(f"coverage cell {cell.cell_id!r} escapes surveyed free space")
+            if any(_contains(volume, corner) for volume in self.forbidden_volumes for corner in corners):
+                raise ValueError(f"coverage cell {cell.cell_id!r} enters a forbidden volume")
+        pose_ids = [pose_id for pose_id, _ in self.pose_visibility]
+        if len(set(pose_ids)) != len(pose_ids):
+            raise ValueError("duplicate declared pose visibility identity")
+        for pose_id, visible_cell_ids in self.pose_visibility:
+            if not pose_id or not visible_cell_ids or len(set(visible_cell_ids)) != len(visible_cell_ids):
+                raise ValueError(f"invalid declared visibility for pose {pose_id!r}")
+            if not set(visible_cell_ids) <= set(cell_ids):
+                raise ValueError(f"pose {pose_id!r} declares visibility of an unknown coverage cell")
 
 
 def _contains(volume, position):
@@ -337,11 +363,16 @@ def parse_room_site(doc: dict, *, real_mode: bool = True) -> RoomSite:
         if doc.get("schema_version") != "room-site-base-v1":
             raise ValueError("unsupported room site version")
         raw = _keys({key: value for key, value in doc.items() if key != "schema_version"}, RoomSite,
-                    optional=("semantic_frame",))
+                    optional=("semantic_frame", "coverage_cells", "pose_visibility"))
 
         def volume(item):
             item = _keys(item, Volume3D)
             return Volume3D(item["volume_id"], tuple(tuple(p) for p in item["polygon_xy_cm"]), tuple(item["z_interval_cm"]))
+
+        def coverage_cell(item):
+            item = _keys(item, CoverageCell)
+            return CoverageCell(item["cell_id"], tuple(tuple(p) for p in item["polygon_xy_cm"]),
+                                tuple(item["z_band_cm"]), tuple(item["required_classes"]))
 
         def position(item):
             return Position(**_keys(item, Position))
@@ -371,7 +402,11 @@ def parse_room_site(doc: dict, *, real_mode: bool = True) -> RoomSite:
             "routes": tuple(route(item) for item in raw["routes"]),
             "home": HomeDefinition(**{**home, "nominal_pose": position(home["nominal_pose"])}),
             "terminal_contingencies": tuple(contingency(item) for item in raw["terminal_contingencies"]),
-            **({"semantic_frame": semantic_frame(raw["semantic_frame"])} if "semantic_frame" in raw else {})})
+            **({"semantic_frame": semantic_frame(raw["semantic_frame"])} if "semantic_frame" in raw else {}),
+            **({"coverage_cells": tuple(coverage_cell(item) for item in raw["coverage_cells"])}
+               if "coverage_cells" in raw else {}),
+            **({"pose_visibility": tuple((pose_id, tuple(cells)) for pose_id, cells in raw["pose_visibility"])}
+               if "pose_visibility" in raw else {})})
         result.validate(real_mode=real_mode)
         return result
     except (KeyError, TypeError, AttributeError, OverflowError) as exc:
