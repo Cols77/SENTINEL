@@ -75,6 +75,11 @@ test('a pending proposal and a running run gate the controls',()=>{
  assert.equal(roomViewModel({run:null}).localization,'UNAVAILABLE');
 });
 
+test('a search answer headlines its first finding, not the objective header',()=>{
+ const text='Objective g1:c1 (search for phone):\nphone: seen from the center-rear-middle region; high confidence. [observation=x; event=y]';
+ assert.equal(answerText({status:'COMPLETED',answer:{text,summary:null}}),'phone: seen from the center-rear-middle region; high confidence.');
+});
+
 test('terminal texts without an answer or a return are explicit',()=>{
  assert.equal(answerText({status:'ABORTED',answer:null}),'No answer recorded.');
  assert.equal(returnedHomeText({status:'ABORTED',returned_home:false,returning:false}),'Not returned home');

@@ -55,7 +55,11 @@ export function poseText(run){
 export function answerText(run){
  const answer=run?.answer;
  if(!answer)return TERMINAL_STATUSES.has(run?.status)?'No answer recorded.':'Awaiting answer…';
- return answer.summary??answer.text.split('\n')[0];
+ if(answer.summary)return answer.summary;
+ // Search answers have no count summary: headline the first finding, not the "Objective …:" header.
+ const lines=answer.text.split('\n').map(l=>l.trim()).filter(Boolean);
+ const finding=lines.find(l=>!/^Objective\b/.test(l))??lines[0]??'';
+ return finding.replace(/\s*\[observation=.*$/,'');
 }
 
 export function returnedHomeText(run){
