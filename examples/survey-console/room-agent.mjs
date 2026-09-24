@@ -1,6 +1,6 @@
 // Room-agent mode (Task C): architecture selector and the room-agent panel.
 // Additive to Mission Control: its own API (/api/v1/room-agent) plus the
-// existing Land and Emergency endpoints, which act on the room run's
+// existing Land endpoint, which acts on the room run's
 // registered flight runner. Every control carries a stable data-testid.
 import {el,button,replace} from './dom.mjs';
 import {ROOM_AGENT,SURVEY,architectureOptions,selectArchitecture,modeOptions,proposalCommand,roomViewModel,safetyIdentity} from './room-agent-model.mjs';
@@ -19,7 +19,6 @@ function createRoomClient(base='/api/v1',fetchImpl=fetch){
   propose:command=>post(`${base}/room-agent/proposals`,command),
   decide:(proposal_id,decision)=>post(`${base}/room-agent/decisions`,{proposal_id,decision}),
   land:(runId,identity)=>post(`${base}/runs/${encodeURIComponent(runId)}/land`,identity),
-  emergency:(session,identity)=>post(`${base}/safety/emergency`,{session_id:session.id,identity,active_run_id:session.active_run_id}),
  };
 }
 
@@ -67,13 +66,13 @@ function reanchorList(steps){
 }
 
 export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
- let catalogue=null,state=null,session=null,architecture=SURVEY,message='',timer=null,landAttempt=null,emergencyAttempt=null,prepBusy=false;
+ let catalogue=null,state=null,session=null,architecture=SURVEY,message='',timer=null,landAttempt=null,prepBusy=false;
  const form={mode:'REHEARSAL',scenario:'a',requestText:'',localIp:''};
  const archSelect=el('select',{id:'architecture-select','data-testid':'architecture-select','aria-label':'Mission architecture'});
  const archHelp=el('p',{class:'meta',id:'architecture-help'});
  const bar=el('section',{id:'architecture-bar',class:'architecture-bar','aria-label':'Mission architecture'},[
   el('label',{for:'architecture-select',class:'section-label'},['ARCHITECTURE']),archSelect,archHelp]);
- const panel=el('section',{id:'room-agent',class:'room-agent','data-testid':'room-agent-panel',hidden:true,'aria-label':'Room agent'});
+ const panel=el('section',{id:'room-agent',class:'room-agent','data-testid':'room-agent-panel',hidden:true,tabindex:'-1','aria-label':'Room agent'});
  root.insertBefore(bar,surveyLayout);
  root.insertBefore(panel,surveyLayout);
  archSelect.addEventListener('change',()=>{architecture=archSelect.value;store.set(architecture);apply();});
@@ -85,6 +84,9 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
   archSelect.value=architecture;
   archHelp.textContent=options.find(row=>row.value===architecture)?.description??'';
   const room=architecture===ROOM_AGENT;
+  root.classList.toggle('is-room-agent',room);
+  const skip=document.querySelector('.skip');
+  if(skip){skip.href=room?'#room-agent':'#center';skip.textContent=room?'Skip to room agent':'Skip to sweep';}
   panel.hidden=!room;
   if(surveyLayout)surveyLayout.hidden=room;
   if(room)render();
@@ -103,7 +105,7 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
   message='Preparing proposal…';render();
   const r=await client.propose(command);
   message=r.ok?'Proposal ready: review and approve to dispatch.':`Refused: ${r.body.reason_code??r.status}`;
-  landAttempt=null;emergencyAttempt=null;
+  landAttempt=null;
   await refresh();
  }
 
@@ -135,19 +137,13 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
   await refresh();
  }
 
- async function emergency(){
-  session??=(await client.session()).body;
-  emergencyAttempt??=safetyIdentity();
-  message='EMERGENCY requested…';render();
-  const r=await client.emergency(session,emergencyAttempt);
-  message=`Emergency: ${r.body.status??r.status}${r.body.reason_code?` (${r.body.reason_code})`:''}`;
-  await refresh();
- }
-
  // The setup form is built once (typing is never interrupted by polling);
  // only its options/disabled state and the dynamic facts are re-rendered.
  const modeSelect=el('select',{id:'room-mode','data-testid':'room-mode-select','aria-describedby':'room-mode-help'});
- const modeHelp=el('p',{id:'room-mode-help',class:'room-mode-help',role:'status'});
+ const modeHelpList=el('div',{class:'room-mode-help-list'});
+ const modeHelp=el('details',{id:'room-mode-help',class:'room-mode-help'},[
+  el('summary',{},['Other modes unavailable']),modeHelpList,
+ ]);
  modeSelect.addEventListener('change',()=>{form.mode=modeSelect.value;render();});
  const request=el('textarea',{id:'room-request','data-testid':'room-request',rows:2,placeholder:'count the phones and computers in the room'});
  request.addEventListener('input',()=>{form.requestText=request.value;});
@@ -169,8 +165,7 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
   el('label',{for:'room-local-ip'},['Tello local IP (Live)']),ip,
   el('label',{for:'room-request'},['Request']),request,submit,
  ]);
- const landButton=button('Land',()=>void land(),{id:'room-land','data-testid':'room-land'});
- const emergencyButton=button('EMERGENCY STOP',()=>void emergency(),{id:'room-emergency','data-testid':'room-emergency',class:'emergency-control'});
+  const landButton=button('Emergency land',()=>void land(),{id:'room-land','data-testid':'room-land',class:'emergency-control',title:'Request a controlled landing'});
  const messageLine=el('p',{'data-testid':'room-message',role:'status',class:'meta'});
  const approvalHost=el('div',{});
  const cameraHost=el('section',{class:'room-col room-camera','aria-label':'Drone camera'});
@@ -179,7 +174,7 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
  const logs=el('div',{class:'room-col room-logs'});
  const lists=el('div',{class:'room-col room-results'});
  panel.append(
-  el('header',{class:'room-header'},[el('p',{class:'section-label'},['ROOM AGENT · JEV ADAPTIVE']),el('div',{class:'room-safety'},[landButton,emergencyButton])]),
+   el('header',{class:'room-header'},[el('p',{class:'section-label'},['SENTINEL / ROOM AGENT · JEV ADAPTIVE']),el('div',{class:'room-safety'},[landButton])]),
   messageLine,
   el('div',{class:'room-grid'},[el('div',{class:'room-col room-setup-col'},[setup,prepPanel,approvalHost]),cameraHost,dynamic,logs,lists]),
  );
@@ -194,7 +189,9 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
    lastModes=modesKey;
    replace(modeSelect,modes.map(row=>option(row,form.mode)));
    modeSelect.value=form.mode;
-   replace(modeHelp,modes.filter(row=>row.disabled).map(row=>el('span',{class:'room-mode-unavailable'},[
+    const unavailableModes=modes.filter(row=>row.disabled);
+    modeHelp.hidden=unavailableModes.length===0;
+    replace(modeHelpList,unavailableModes.map(row=>el('span',{class:'room-mode-unavailable'},[
     el('strong',{},[row.value==='LIVE'?'Live Tello':row.label]),
     ` unavailable: ${row.title||'this server is not configured for it.'}`,
    ])));
@@ -230,7 +227,6 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
    ROOM_LIVE_CONFIG_REQUIRED:'Start Mission Control with a room Live pack.',
   }[prep?.reason_code]??'';
   landButton.disabled=!view.running;
-  emergencyButton.disabled=!view.running;
   messageLine.textContent=message;
   camera.render(state?.run);
   const proposalId=view.proposal?.id??'';

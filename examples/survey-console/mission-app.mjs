@@ -49,8 +49,12 @@ const decision=createDecisionController(client,()=>crypto.randomUUID(),id=>({ses
 function persistDecision(ds){if(snapshot&&ds.attempt)localStorage.setItem(`sentinel:${snapshot.session.id}:${snapshot.run.id}:decision`,JSON.stringify(ds.attempt));}
 function drawDecision(){if(snapshot)renderApproval(proposalHost,toSurveyView(snapshot),decision.getState(),{onApprove:()=>decision.submit('APPROVE'),onReject:()=>decision.submit('REJECT'),onRetry:()=>decision.retry()},controller.getState().needs_refresh);}
 const capabilityLabels={planning:'Planning',flight:'Flight',detection:'Detection',emergency:'Emergency transport'};
+const readinessCopy={
+ APPROVED_PROVIDER_PROFILE_REQUIRED:'An approved detector profile is required for Live detection. Configure it before launch.',
+};
 function renderReadiness(view){
- const model=liveReadinessModel(view);
+  const model=liveReadinessModel(view);
+  const detailsOpen=readinessHost.querySelector('.readiness-details')?.open??false;
  readinessHost.hidden=!model.visible;
  if(!model.visible){replace(readinessHost,[]);return model;}
  const nodes=[
@@ -70,12 +74,14 @@ function renderReadiness(view){
    (profileState.switch_allowed?'Select the calibrated site before the mission begins.':'Site selection locked for this mission.')]),
   ...(profileState.catalogue_unavailable?[button('Retry site catalogue',()=>void profiles.retry(),{id:'retry-site-profiles','aria-describedby':'site-profile-status'})]:[]),
  ]));
- if(model.failed.length)nodes.push(el('ul',{class:'readiness-checks'},model.failed.map(check=>
-  el('li',{id:`readiness-${check.capability}`},[
-   el('strong',{},[capabilityLabels[check.capability]??check.capability]),
-   el('span',{class:'readiness-code'},[check.reason_code]),
-   el('p',{},[check.remediation]),
-  ]))));
+  if(model.failed.length)nodes.push(el('details',{class:'readiness-details',open:detailsOpen},[
+   el('summary',{id:'readiness-toggle'},[`${model.failed.length} readiness ${model.failed.length===1?'check needs':'checks need'} attention`]),
+   el('ul',{class:'readiness-checks'},model.failed.map(check=>
+   el('li',{id:`readiness-${check.capability}`},[
+    el('strong',{},[capabilityLabels[check.capability]??check.capability]),
+    el('span',{class:'readiness-code'},[check.reason_code]),
+    el('p',{},[readinessCopy[check.reason_code]??check.remediation]),
+   ])))]));
  else nodes.push(el('p',{class:'meta'},['Configuration checks passed. Dispatch still requires proposal approval and bounded preflight.']));
  replace(readinessHost,nodes);
  return model;
@@ -91,7 +97,6 @@ function describeReadiness(model){
  describe('reject',['planning'],'decision-heading');
  describe('land',['flight'],'safety-status');
  describe('land-now',['flight'],'safety-status');
- describe('emergency-stop',['emergency'],'safety-status');
 }
 decision.subscribe(ds=>{persistDecision(ds);drawDecision();if(ds.result)controller.refresh();});
 function select(kind,id){selection={kind,id};evidence.select(toSurveyView(snapshot),selection);}

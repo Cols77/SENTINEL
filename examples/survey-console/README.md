@@ -27,7 +27,7 @@ In the room-agent Live setup, **Prepare next flight** runs the same offline prep
 
 The clean scenario yields one confirmed synthetic computer. Pass `--scenario fixtures/mission-control/uncertain-followup.json` for a separately approved follow-up, or `--scenario fixtures/mission-control/missing-analysis.json` for a provider gap. Missing analysis is visibly incomplete, never interpreted as a zero count. Rehearsal localization runs the real AprilTag estimator over scripted image inputs, including no-tag intervals that age and recover the last measured fix.
 
-Land interrupts normal sequencing and requests controlled landing. Hold Emergency for 1.2 seconds to latch the session and all active runners, then use the independent transport. Both are simulated in Rehearsal. Acknowledgement is not proof of physical landing or motor stop.
+The visible **Emergency land** control interrupts normal sequencing and requests a controlled landing. It does not stop motors in flight. The independent motor-stop transport remains available through the safety API for the operator's separate emergency procedure. Rehearsal simulates the landing request. Acknowledgement is not proof of physical landing.
 
 ## Live startup and site profiles
 

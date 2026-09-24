@@ -1,9 +1,10 @@
 /* A compact flight instrument panel within Mission Control. */
 .architecture-bar {
   display:flex; flex-wrap:wrap; align-items:center; gap:8px 16px;
-  padding:12px 16px; border-bottom:1px solid var(--border-default);
+  padding:6px 16px; border-bottom:1px solid var(--border-default);
 }
 .architecture-bar .meta { margin:0; }
+.mission-console.is-room-agent .architecture-bar .meta { display:none; }
 .architecture-bar select { min-width:16rem; }
 .mission-console:has(.room-agent:not([hidden])) { overflow-x:clip; }
 .room-agent { padding:0 0 24px; }
@@ -12,7 +13,7 @@
 .room-header {
   position:sticky; top:0; z-index:12;
   display:flex; justify-content:space-between; align-items:center; gap:16px;
-  min-height:76px; padding:12px 16px;
+  min-height:62px; padding:7px 16px;
   border-bottom:1px solid var(--border-default);
   background:var(--surface-canvas);
 }
@@ -22,21 +23,17 @@
   display:inline-flex; align-items:center; justify-content:center; gap:8px;
   min-width:8.5rem; min-height:48px; font-weight:700;
 }
-.room-safety #room-land { border-color:var(--status-warning); color:var(--status-warning); }
-.room-safety #room-land:not(:disabled):hover {
-  background:color-mix(in srgb,var(--surface-raised) 85%,var(--status-warning));
-}
-.room-safety #room-emergency {
+.room-safety #room-land {
   min-width:12.5rem; border:2px solid var(--status-emergency);
   background:color-mix(in srgb,var(--surface-panel) 86%,var(--status-emergency));
   color:var(--text-primary);
 }
-.room-safety #room-emergency::before {
+.room-safety #room-land::before {
   content:''; width:20px; height:20px; flex:none; background:var(--status-emergency);
-  -webkit-mask:url('/assets/sentinel-ui/icons/emergency-stop.svg') center / contain no-repeat;
-  mask:url('/assets/sentinel-ui/icons/emergency-stop.svg') center / contain no-repeat;
+  -webkit-mask:url('/assets/sentinel-ui/icons/warning.svg') center / contain no-repeat;
+  mask:url('/assets/sentinel-ui/icons/warning.svg') center / contain no-repeat;
 }
-.room-safety #room-emergency:not(:disabled):hover {
+.room-safety #room-land:not(:disabled):hover {
   background:color-mix(in srgb,var(--surface-panel) 72%,var(--status-emergency));
 }
 .room-safety button:disabled { opacity:.7; }
@@ -48,9 +45,9 @@
 
 .room-grid {
   display:grid;
-  grid-template-columns:minmax(0,1.12fr) minmax(0,1.45fr) minmax(0,.86fr);
-  grid-template-areas:'setup camera camera' 'setup state results' 'setup logs results';
-  gap:16px; align-items:start; padding-top:16px;
+  grid-template-columns:minmax(280px,1fr) minmax(440px,1.45fr) minmax(310px,1.15fr);
+  grid-template-areas:'setup camera state' 'logs logs results';
+  gap:12px; align-items:start; padding-top:12px;
 }
 .room-col {
   min-width:0; padding:16px;
@@ -75,8 +72,11 @@
   background:var(--surface-canvas); color:var(--text-primary); font:14px Mission Plex,var(--font-body);
 }
 .room-setup :is(select,input,textarea):disabled { opacity:.68; }
-.room-mode-help { display:grid; gap:6px; margin:2px 0 4px; color:var(--text-secondary); font:12px/1.45 Mission Plex,var(--font-body); }
-.room-mode-help:empty { display:none; }
+.room-mode-help { margin:5px 0 2px; color:var(--text-secondary); font:12px/1.45 Mission Plex,var(--font-body); }
+.room-mode-help[hidden] { display:none; }
+.room-mode-help summary { width:max-content; max-width:100%; cursor:pointer; color:var(--status-warning); }
+.room-mode-help summary:focus-visible { outline:2px solid var(--focus-color); outline-offset:3px; }
+.room-mode-help-list { display:grid; gap:6px; margin-top:7px; }
 .room-mode-unavailable { padding:7px 9px; border-left:2px solid var(--status-warning); background:var(--surface-raised); }
 .room-mode-unavailable strong { color:var(--status-warning); }
 .room-setup textarea { grid-column:1 / -1; min-height:66px; resize:vertical; }
@@ -116,7 +116,7 @@
 .room-prep-hint:empty { display:none; }
 
 .room-camera {
-  display:grid; grid-template-columns:minmax(0,1.9fr) minmax(180px,1fr);
+  display:grid; grid-template-columns:minmax(0,1fr);
   gap:10px 18px; background:linear-gradient(140deg,var(--surface-panel),var(--surface-canvas));
 }
 .room-camera-heading,.room-camera-tabs { grid-column:1 / -1; }
@@ -138,7 +138,7 @@
   border-color:var(--accent-primary); color:var(--text-on-accent); background:var(--accent-primary);
 }
 .room-camera-stage {
-  position:relative; grid-column:1; width:100%; aspect-ratio:4 / 3;
+  position:relative; grid-column:1; width:100%; height:clamp(260px,23vw,390px);
   overflow:hidden; display:grid; place-items:center; background:#0b1117;
   border:1px solid var(--border-default);
 }
@@ -153,7 +153,7 @@
 }
 .room-camera-empty[hidden] { display:none; }
 .room-camera-note {
-  grid-column:2; align-self:start; margin:0; padding:12px 0 0 14px;
+  grid-column:1; align-self:start; margin:0; padding:3px 0 0 10px;
   border-left:2px solid var(--accent-primary); color:var(--text-secondary);
   font:14px/1.5 Mission Plex,var(--font-body); overflow-wrap:anywhere;
 }
@@ -347,8 +347,8 @@
 
 @media (max-width:1100px) {
   .room-grid {
-    grid-template-columns:minmax(0,1fr);
-    grid-template-areas:'camera' 'state' 'setup' 'logs' 'results';
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    grid-template-areas:'state state' 'camera camera' 'setup results' 'logs logs';
   }
 }
 @media (max-width:680px) {
@@ -357,10 +357,11 @@
   .room-header { flex-wrap:wrap; padding-inline:0; }
   .room-safety { width:100%; justify-content:stretch; }
   .room-safety button { flex:1 1 8rem; min-width:0; }
-  .room-safety #room-emergency { min-width:0; }
-  .room-grid { gap:12px; }
+  .room-safety #room-land { min-width:0; }
+  .room-grid { grid-template-columns:minmax(0,1fr); grid-template-areas:'state' 'camera' 'setup' 'results' 'logs'; gap:12px; }
   .room-col { padding:14px; }
   .room-camera { grid-template-columns:minmax(0,1fr); }
+  .room-camera-stage { height:clamp(220px,60vw,340px); }
   .room-camera-heading,.room-camera-tabs,.room-camera-stage,.room-camera-note { grid-column:1; }
   .room-camera-note { padding:0 0 0 10px; }
   .room-camera-heading h3 { font-size:20px; }

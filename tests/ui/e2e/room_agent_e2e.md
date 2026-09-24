@@ -64,12 +64,12 @@ Rehearsal is paced for watching: one run takes about 30 s (scenario a) to 45 s
 | # | Action | Selector | Expected |
 |---|--------|----------|----------|
 | 1 | Select `a`, propose, approve (as above) | | `RUNNING` |
-| 2 | After ~8 s, click | `[data-testid=room-land]` | `[data-testid=room-message]` becomes `Land: ACKNOWLEDGED` |
+| 2 | After ~8 s, click **Emergency land** | `[data-testid=room-land]` | `[data-testid=room-message]` becomes `Land: ACKNOWLEDGED` |
 | 3 | Wait for text `LANDED` | `[data-testid=room-status]` | `... · SAFE_LANDED · LANDED` |
 | 4 | Assert | `[data-testid=room-landing]` | `Landing: LANDED (REQUESTED)` (never `LANDING_FAILED`) |
 | 5 | Assert | `[data-testid=room-reanchor-log]` | contains `Operator Land: LANDED` |
 
-`[data-testid=room-emergency]` (EMERGENCY STOP) latches the whole session; test it
+The independent motor-stop transport is available through the safety API; test it
 last, then restart Mission Control.
 
 ## MCP call sketch
