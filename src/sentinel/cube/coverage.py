@@ -12,7 +12,7 @@ with the heading off by the measured bias and more, the airframe tilted, and the
 - OK: two tags or more from every pose, and a predicted fix inside the tolerance.
 
 Calibrated against the 2026-09-21/22 flights (tests/cube/test_coverage.py). Once the site's
-drone's height was corrected (``Site.altitude_bias_cm``: it hovers ~18 cm above its `height?`),
+drone's height was corrected (``Site.altitude_bias_cm`` with ``HOVER_PITCH_DOWN_DEG``),
 the stop that saw no tag in 287 frames is BLIND, the stop that needed three trims is refused too,
 and every stop that localised at the first fix is OK or MARGINAL.
 
@@ -40,6 +40,15 @@ PITCH_ERRORS_DEG = (-3.0, 0.0, 3.0)
 ALTITUDE_ERRORS_CM = (-10, 0, 10)
 #: A predicted fix error above the tolerance circle makes a stop MARGINAL.
 MAX_P95_CM = 15.0
+#: Nose-down tilt the airframe holds in a hover, on top of the camera's mounted pitch
+#: (``camera.TELLO_MEASURED.pitch_down_deg`` describes the mount, not the flight attitude).
+#: Fitted jointly with ``Site.altitude_bias_cm`` against every 2026-09-21/22/23 stop: the pair
+#: (45 cm, 7 deg) keeps every stop that localised in view -- under the whole perturbation set, not
+#: just nominally -- and still leaves blind the stop that saw no tag in 287 frames. Neither is
+#: identifiable alone: a higher drone and a more downward camera trade off almost exactly, so they
+#: are calibrated together. Below 7 deg the 09-22 stops at 1.5 m standoff come out blind, which the
+#: flights contradict; above it nothing changes until R_NEAR stops being blind.
+HOVER_PITCH_DOWN_DEG = 7.0
 
 
 def _one_error_at_a_time():
@@ -68,18 +77,29 @@ class Coverage:
 
 
 class CoverageModel:
-    def __init__(self, site, calibration: dict) -> None:
+    def __init__(self, site, calibration: dict, height_offset_cm: float | None = None) -> None:
         self.site = site
+        self.calibration = calibration
+        #: room height minus commanded altitude: the site's planning figure until a flight measures
+        #: its own (``measured``)
+        self.height_offset_cm = (site.height_offset_cm if height_offset_cm is None
+                                 else float(height_offset_cm))
         self.tag_map = TagMap(site.tag_map_doc(calibration))
 
+    def measured(self, height_offset_cm: float) -> "CoverageModel":
+        """The same site from the height this flight really flies. ``cube.mission`` calibrates it
+        at the first fix: what the tags say the drone's height is, minus what was commanded."""
+        return CoverageModel(self.site, self.calibration, height_offset_cm)
+
     @classmethod
-    def from_files(cls, site, calibration_path) -> "CoverageModel":
+    def from_files(cls, site, calibration_path, height_offset_cm: float | None = None
+                   ) -> "CoverageModel":
         """``calibration_path``: any JSON file with a ``camera_calibration`` block (a tag map)."""
         doc = json.loads(Path(calibration_path).read_text(encoding="utf-8"))
-        return cls(site, doc["camera_calibration"])
+        return cls(site, doc["camera_calibration"], height_offset_cm)
 
     def _room_point(self, x_cm: float, y_cm: float, z_cm: float) -> np.ndarray:
-        return np.array([x_cm, y_cm, z_cm + self.site.height_offset_cm], dtype=float) / 100.0
+        return np.array([x_cm, y_cm, z_cm + self.height_offset_cm], dtype=float) / 100.0
 
     def tags_in_view(self, x_cm: float, y_cm: float, z_cm: float, *,
                      commanded_yaw_deg: float = 90.0,
@@ -88,7 +108,8 @@ class CoverageModel:
         pos = self._room_point(x_cm, y_cm, z_cm)
         if not all(math.isfinite(value) for value in (commanded_yaw_deg, yaw_err_deg, pitch_err_deg)):
             raise ValueError("camera headings must be finite")
-        R, t = _camera(pos, commanded_yaw_deg - 90 + yaw_err_deg, pitch_err_deg)
+        R, t = _camera(pos, commanded_yaw_deg - 90 + yaw_err_deg,
+                       HOVER_PITCH_DOWN_DEG + pitch_err_deg)
         return len(_visible(self.tag_map, pos, R, t))
 
     def verdict(self, x_cm: float, y_cm: float, z_cm: float, *,
@@ -116,7 +137,8 @@ class CoverageModel:
         pos = self._room_point(x_cm, y_cm, z_cm)
         # The existing Monte Carlo calibration is canonical-heading only.
         # Do not label a different heading with that error estimate.
-        p95 = (predict_cell(self.tag_map, *pos, rng=np.random.default_rng(0), trials=40)["p95_cm"]
+        p95 = (predict_cell(self.tag_map, *pos, rng=np.random.default_rng(0), trials=40,
+                            pitch_extra_deg=HOVER_PITCH_DOWN_DEG)["p95_cm"]
                if commanded_yaw_deg % 360 == 90 else None)
         good = worst >= 2 and p95 is not None and p95 <= MAX_P95_CM
         return Coverage(OK if good else MARGINAL, nominal, worst, p95)

@@ -54,9 +54,12 @@ def _visible(tag_map: TagMap, pos, R, t):
 
 
 def predict_cell(tag_map: TagMap, x_m: float, y_m: float, alt_m: float, *, rng,
-                 trials: int = 60, sigma_px: float = 0.35, reality: float = 2.5) -> dict:
+                 trials: int = 60, sigma_px: float = 0.35, reality: float = 2.5,
+                 pitch_extra_deg: float = 0.0) -> dict:
+    """``pitch_extra_deg``: attitude on top of the camera's mounted pitch, so a caller that
+    models the hover tilt (``cube.coverage``) predicts from the same camera it checks with."""
     pos = np.array([x_m, y_m, alt_m], dtype=float)
-    R, t = _camera(pos)
+    R, t = _camera(pos, 0.0, pitch_extra_deg)
     seen = _visible(tag_map, pos, R, t)
     cell = {"x_m": x_m, "y_m": y_m, "alt_m": alt_m, "tags_in_frame": len(seen), "p95_cm": None}
     if not seen:
@@ -66,7 +69,7 @@ def predict_cell(tag_map: TagMap, x_m: float, y_m: float, alt_m: float, *, rng,
     errors = []
     for _ in range(trials):
         image = clean + rng.normal(0.0, sigma_px, clean.shape)
-        R0, t0 = _camera(pos + rng.normal(0.0, 0.10, 3), rng.normal(0.0, 4.0))
+        R0, t0 = _camera(pos + rng.normal(0.0, 0.10, 3), rng.normal(0.0, 4.0), pitch_extra_deg)
         ok, rvec, tvec = cv2.solvePnP(
             obj, image, tag_map.K, tag_map.dist, rvec=cv2.Rodrigues(R0)[0],
             tvec=t0.reshape(3, 1), useExtrinsicGuess=True, flags=cv2.SOLVEPNP_ITERATIVE)

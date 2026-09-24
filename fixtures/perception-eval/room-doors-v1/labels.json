@@ -1,0 +1,101 @@
+{
+  "DOORS_0922_FAR_L_HI": {
+    "counts": {
+      "computer": 0,
+      "pen": 0,
+      "person": 1,
+      "phone": 1
+    },
+    "source_run": "20260922-163134-reanchor"
+  },
+  "DOORS_0922_FAR_MID_HI": {
+    "counts": {
+      "computer": 0,
+      "pen": 0,
+      "person": 0,
+      "phone": 1
+    },
+    "source_run": "20260922-163134-reanchor"
+  },
+  "DOORS_0922_FAR_R_HI": {
+    "counts": {
+      "computer": 0,
+      "pen": 0,
+      "person": 0,
+      "phone": 1
+    },
+    "source_run": "20260922-163134-reanchor"
+  },
+  "DOORS_0922_NEAR_L_LO": {
+    "counts": {
+      "computer": 0,
+      "pen": 0,
+      "person": 0,
+      "phone": 1
+    },
+    "source_run": "20260922-163134-reanchor"
+  },
+  "DOORS_0922_NEAR_R_LO": {
+    "counts": {
+      "computer": 0,
+      "pen": 0,
+      "person": 0,
+      "phone": 1
+    },
+    "source_run": "20260922-163134-reanchor"
+  },
+  "DOORS_0922_RETURN": {
+    "counts": {
+      "computer": 0,
+      "pen": 0,
+      "person": 0,
+      "phone": 0
+    },
+    "source_run": "20260922-163134-reanchor"
+  },
+  "DOORS_0923_FAR_L_HI": {
+    "counts": {
+      "computer": 0,
+      "pen": 0,
+      "person": 1,
+      "phone": 0
+    },
+    "source_run": "20260923-122157-reanchor"
+  },
+  "DOORS_0923_FAR_MID_HI": {
+    "counts": {
+      "computer": 0,
+      "pen": 0,
+      "person": 1,
+      "phone": 0
+    },
+    "source_run": "20260923-122157-reanchor"
+  },
+  "DOORS_0923_FAR_R_HI": {
+    "counts": {
+      "computer": 0,
+      "pen": 0,
+      "person": 0,
+      "phone": 0
+    },
+    "source_run": "20260923-122157-reanchor"
+  },
+  "DOORS_0923_NEAR_L_LO": {
+    "counts": {
+      "computer": 0,
+      "pen": 0,
+      "person": 1,
+      "phone": 0
+    },
+    "source_run": "20260923-122157-reanchor"
+  },
+  "DOORS_0923_NEAR_R_LO": {
+    "counts": {
+      "computer": 0,
+      "pen": 0,
+      "person": 0,
+      "phone": 0
+    },
+    "source_run": "20260923-122157-reanchor"
+  }
+}

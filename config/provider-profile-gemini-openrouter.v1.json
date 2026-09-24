@@ -1,0 +1,16 @@
+{
+  "profile_version": "provider-profile.v1",
+  "profile_id": "7f3c1e28-5a44-4b19-9c07-2d6e8a41b350",
+  "approval_status": "APPROVED",
+  "selection_decision_id": "COLIN-2026-09-23-SOLE-OPERATOR-APPROVAL",
+  "provider": "gemini-openrouter",
+  "model": "google/gemini-2.5-flash",
+  "model_revision": "google/gemini-2.5-flash@2026-09-23-openrouter-resolved",
+  "prompt_revision": "survey-detect-prompt+2304b0e8a567f453",
+  "transform_revision": "fullframe+2x2-overlap0.15-cubic-960x720",
+  "evaluation_pack_sha256": "daf6b387c8fc40ce87ffee023a8ad8a92c30d5316e94f160db797cdc9669f59b",
+  "score_semantics": "VLM_CONFIDENCE_BAND: this provider returns high/medium/low, never a number. A sighting counts as confirmed at band high. The numeric threshold below is the recorded equivalent of DETECTOR_RAW_HIGH_PROVISIONAL and is measured for no provider.",
+  "decision_threshold": 0.35,
+  "replay_allowed_in_judged_path": false,
+  "box_required": true
+}

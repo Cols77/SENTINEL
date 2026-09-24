@@ -69,7 +69,7 @@ BIASED = parse_site({
                {"x_m": 2.844, "first_tag_id": 0, "heights_m": [0.55], "size_m": 0.192}],
     "cube": {"min_x_m": 1.6, "max_x_m": 3.4, "min_y_m": 1.6, "max_y_m": 3.0, "max_z_m": 2.0},
     "commanded": {"inset_m": 0.3, "min_z_cm": 60, "max_z_cm": 180},
-    "altitude_bias_cm": 20,     # the flights' bias with the tags at 55 cm (= 18 at the measured 53)
+    "altitude_bias_cm": 45,     # calibrated with coverage.HOVER_PITCH_DOWN_DEG, see test_coverage
 })
 
 

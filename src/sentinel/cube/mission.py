@@ -67,8 +67,9 @@ LEG_SPEED_LIMIT_CM_S = 50
 INSET_FREE_SPEED_CM_S = 40
 #: Margin on top of the measured travel after `land`.
 LAND_TRAVEL_MARGIN_CM = 5
-#: Tag-implied height against `height?` + the site's height offset: beyond this, the site's
-#: vertical model (takeoff height, altitude bias or tag heights) is wrong for this room.
+#: The flight's own height offset, measured at the first fix, against the site file's planning
+#: figure: beyond this the site's vertical model does not describe this flight, and the stops the
+#: coverage guard passed are re-checked against what was measured.
 VERTICAL_MISMATCH_CM = 25.0
 #: Pause before a move that directly follows another. The Tello answers "ok" on reaching the
 #: target but still brakes after a fast leg; a move sent at once was refused with "error Not
@@ -272,6 +273,8 @@ class CubeMissionRunner(FlightTestRunner):
         #: cube.coverage.CoverageModel: refuses stops the camera cannot localise from (None: unchecked)
         self.coverage = coverage
         self._start_fix_cm: tuple[float, float] | None = None
+        #: room height minus commanded altitude, measured at this flight's first fix
+        self._measured_offset_cm: float | None = None
         #: speed of the last translation if nothing has let the drone settle since, else None
         self._unsettled_speed: int | None = None
         self._implausible_streak = 0
@@ -947,20 +950,50 @@ class CubeMissionRunner(FlightTestRunner):
             self._append_log(entry)
 
     def _check_vertical(self, name: str, reports, fix, entry: dict) -> None:
-        """Log the tag-implied height beside `height?` + takeoff height; alert when they disagree.
-        At a new venue a wrong takeoff height or tag height shows here on the first fix, before a
-        stop the coverage guard passed turns out blind."""
+        """Calibrate this flight's height offset from the tags, then keep checking it.
+
+        The runner tracks the altitude it commanded; the drone flies somewhere else (2026-09-23:
+        30-50 cm higher, by the tags, by a range-free pixel reading and by the operator's tape).
+        The tags measure where the camera really is, so the first fix of a flight gives that
+        flight its own offset. Every later stop is checked against it, and the coverage guard is
+        re-run from the measured height: a stop that was fine on paper can be blind in the air,
+        and this is where that shows -- at the first stop, not at the one that loses the tags."""
         implied = tag_implied_height_cm(reports, self.tag_map, fix)
         entry["tag_height_cm"] = implied
         if implied is None or entry.get("height_cm") is None:
             return
-        expected = entry["height_cm"] + self.site.height_offset_cm
+        if self._measured_offset_cm is None:
+            self._calibrate_height(name, implied - entry["height_cm"], entry)
+        expected = entry["height_cm"] + self._offset_cm()
         entry["vertical_mismatch_cm"] = round(implied - expected, 1)
         if abs(implied - expected) > VERTICAL_MISMATCH_CM:
-            self._emit("alert", f"{name}: the tags put the drone at {implied:.0f} cm, `height?` plus the "
-                                f"site's {self.site.height_offset_cm:.0f} cm offset says {expected:.0f} cm: the "
-                                "site's takeoff height, altitude bias or tag heights are wrong, and so "
-                                "is its tag coverage")
+            self._emit("alert", f"{name}: the tags put the drone at {implied:.0f} cm, {expected:.0f} cm "
+                                f"expected from the commanded altitude and this flight's "
+                                f"{self._offset_cm():.0f} cm offset: the drone is not holding the height "
+                                "the runner tracks")
+
+    def _offset_cm(self) -> float:
+        """This flight's measured height offset, or the site file's planning figure until then."""
+        return (self.site.height_offset_cm if self._measured_offset_cm is None
+                else self._measured_offset_cm)
+
+    def _calibrate_height(self, name: str, offset_cm: float, entry: dict) -> None:
+        """Adopt the first fix's offset for this flight and re-check the stops still to come."""
+        self._measured_offset_cm = round(offset_cm, 1)
+        entry["measured_height_offset_cm"] = self._measured_offset_cm
+        planned = self.site.height_offset_cm
+        self._emit("pose", f"{name}: this flight flies {self._measured_offset_cm:.0f} cm above the "
+                           f"altitude it commands (the site file plans for {planned:.0f})")
+        if abs(self._measured_offset_cm - planned) <= VERTICAL_MISMATCH_CM or self.coverage is None:
+            return
+        measured = self.coverage.measured(self._measured_offset_cm)
+        blind = [wp.name for wp in self.mission.waypoints
+                 if wp.localise and measured.verdict(wp.x_cm, wp.y_cm, wp.z_cm).level == "BLIND"]
+        entry["blind_at_measured_height"] = blind
+        if blind:
+            self._emit("alert", f"{name}: at the measured height the tags can be lost at "
+                                f"{', '.join(blind)}; those stops were planned from the site's "
+                                f"{planned:.0f} cm offset and may not localise")
 
     def _return_waypoint(self) -> Waypoint:
         """RETURN: where the drone took off, at the last waypoint's altitude. A takeoff point outside
