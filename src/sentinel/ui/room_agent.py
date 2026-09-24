@@ -678,12 +678,19 @@ class RoomAgentService:
             terminal = json.loads((run_dir / "terminal.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             pass
-        refusals = [line[len("refused: "):] for line in buffer.getvalue().splitlines() if line.startswith("refused: ")]
+        stderr_lines = buffer.getvalue().splitlines()
+        refusals = [line[len("refused: "):] for line in stderr_lines if line.startswith("refused: ")]
         if code != 0:
             run.status = "REFUSED" if refusals else "FAILED"
             run.error = refusals[-1] if refusals else f"room_session live exited {code}"
             run.projection.note("REFUSED", f"Live session refused: {run.error}")
         state = terminal.get("state") or ("REFUSED" if code else "COMPLETED")
+        if state == "ABORTED" and terminal.get("reason") == "START_FAILED":
+            start_failures = [line[len("Live start failed: "):] for line in stderr_lines
+                              if line.startswith("Live start failed: ")]
+            if start_failures:
+                run.error = start_failures[-1][:300]
+                run.projection.note("START_FAILED", f"Flight start failed; landed: {run.error}")
         landing_pose = None
         outcome = run.safety.land_outcome
         if run.world is None and run.tracker is not None:
