@@ -66,6 +66,7 @@ export function createRoomCamera(host,fetchImpl=fetch){
 
  function clear(){
   epoch++;clearTimeout(liveTimer);clearTimeout(captureTimer);
+  liveTimer=null;captureTimer=null;
   if(liveUrl)URL.revokeObjectURL(liveUrl);
   if(captureUrl)URL.revokeObjectURL(captureUrl);
   liveUrl=null;captureUrl=null;liveAt=null;liveTags=[];captureId=null;captureData=null;
