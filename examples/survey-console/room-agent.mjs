@@ -134,7 +134,8 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
 
  // The setup form is built once (typing is never interrupted by polling);
  // only its options/disabled state and the dynamic facts are re-rendered.
- const modeSelect=el('select',{id:'room-mode','data-testid':'room-mode-select'});
+ const modeSelect=el('select',{id:'room-mode','data-testid':'room-mode-select','aria-describedby':'room-mode-help'});
+ const modeHelp=el('p',{id:'room-mode-help',class:'room-mode-help',role:'status'});
  modeSelect.addEventListener('change',()=>{form.mode=modeSelect.value;render();});
  const request=el('textarea',{id:'room-request','data-testid':'room-request',rows:2,placeholder:'count the phones and computers in the room'});
  request.addEventListener('input',()=>{form.requestText=request.value;});
@@ -142,7 +143,7 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
  ip.addEventListener('input',()=>{form.localIp=ip.value;});
  const submit=button('Propose run',()=>void propose(),{id:'room-propose','data-testid':'room-propose'});
  const setup=el('div',{class:'room-setup'},[
-  el('label',{for:'room-mode'},['Run mode']),modeSelect,
+  el('label',{for:'room-mode'},['Run mode']),modeSelect,modeHelp,
   el('label',{for:'room-local-ip'},['Tello local IP (Live)']),ip,
   el('label',{for:'room-request'},['Request']),request,submit,
  ]);
@@ -167,7 +168,15 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
   const view=roomViewModel(state);
   const modes=modeOptions(catalogue);
   const modesKey=JSON.stringify(modes)+form.mode;
-  if(modesKey!==lastModes){lastModes=modesKey;replace(modeSelect,modes.map(row=>option(row,form.mode)));modeSelect.value=form.mode;}
+  if(modesKey!==lastModes){
+   lastModes=modesKey;
+   replace(modeSelect,modes.map(row=>option(row,form.mode)));
+   modeSelect.value=form.mode;
+   replace(modeHelp,modes.filter(row=>row.disabled).map(row=>el('span',{class:'room-mode-unavailable'},[
+    el('strong',{},[row.value==='LIVE'?'Live Tello':row.label]),
+    ` unavailable: ${row.title||'this server is not configured for it.'}`,
+   ])));
+  }
   if(document.activeElement!==ip&&ip.value!==form.localIp)ip.value=form.localIp;
   if(catalogue?.default_request)request.placeholder=catalogue.default_request;
   modeSelect.disabled=!view.canPropose;

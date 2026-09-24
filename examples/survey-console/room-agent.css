@@ -75,6 +75,10 @@
   background:var(--surface-canvas); color:var(--text-primary); font:14px Mission Plex,var(--font-body);
 }
 .room-setup :is(select,input,textarea):disabled { opacity:.68; }
+.room-mode-help { display:grid; gap:6px; margin:2px 0 4px; color:var(--text-secondary); font:12px/1.45 Mission Plex,var(--font-body); }
+.room-mode-help:empty { display:none; }
+.room-mode-unavailable { padding:7px 9px; border-left:2px solid var(--status-warning); background:var(--surface-raised); }
+.room-mode-unavailable strong { color:var(--status-warning); }
 .room-setup textarea { grid-column:1 / -1; min-height:66px; resize:vertical; }
 .room-setup label[for='room-request'] { grid-column:1 / -1; margin-top:2px; }
 .room-setup button {

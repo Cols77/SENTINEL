@@ -207,18 +207,25 @@ class RoomAgentService:
         return available
 
     def catalogue(self):
+        paid_calls_authorised = bool(getattr(self.mission.config, "authorise_paid_calls", False))
+        def mode_entry(mode):
+            if mode == "LIVE" and self.live_config_path is None:
+                reason = "Live Tello needs a room Live flight pack (--room-live-config)."
+            elif mode in ("JEV_REHEARSAL", "LIVE") and not paid_calls_authorised:
+                reason = "Jev needs paid calls authorised (--i-authorise-paid-calls)."
+            else:
+                reason = None
+            return dict(id=mode, label=MODES[mode], available=reason is None, reason=reason)
+
         return dict(
             architectures=list(ARCHITECTURES),
-            modes=[dict(id=m, label=MODES[m], available=m in self.modes(),
-                        reason=None if m in self.modes() else "Start Mission Control with "
-                                                                "--room-live-config <pack.json>")
-                   for m in MODES],
+            modes=[mode_entry(m) for m in MODES],
             scenarios=[dict(id=s.scenario_id, label=s.label, description=s.description)
                        for s in room_rehearsal.SCENARIOS.values()],
             default_request=DEFAULT_REQUEST,
             site="CanningSt",
             local_ip=self._default_local_ip(),
-            paid_calls_authorised=bool(getattr(self.mission.config, "authorise_paid_calls", False)),
+            paid_calls_authorised=paid_calls_authorised,
         )
 
     def state(self):
