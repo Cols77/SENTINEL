@@ -87,7 +87,7 @@ Priorities for a live, shared-screen demo, in order:
 ## Verification before you hand back
 
 ```powershell
-node --test tests/survey_console/
+node --test "tests/survey_console/*.test.mjs"   # Node 22 rejects the bare directory form
 $env:PYTHONPATH = "src;."
 & "C:\Users\33630\AppData\Local\Temp\claude\C--coding-sentinel\2541e4bd-1eaa-4102-a60d-558629bb5271\scratchpad\ui\venv-c0\Scripts\python.exe" -m pytest -q -p no:warnings tests/ui
 ```
