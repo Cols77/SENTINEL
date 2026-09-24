@@ -8,6 +8,7 @@ artifacts/*
 !artifacts/jev
 !artifacts/decisions
 !artifacts/wp1
+runs/
 docs/.obsidian/
 .env
 .env.local
