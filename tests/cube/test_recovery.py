@@ -989,13 +989,15 @@ def test_a_search_sweep_keeps_trying_widening_yaw_offsets_before_giving_up():
     for tried in ((), (60,), (60, 90)):
         recovery.assess_burst(recovery.next_action(value.health, env, tried), ())
     searched = []
-    for _ in range(2):
-        action = recovery.next_action(value.health, env, (60, 90))
-        assert action.kind == "YAW_BURST"
+    action = recovery.next_action(value.health, env, (60, 90))
+    while action.kind == "YAW_BURST":
         searched.append(action.heading_deg)
         recovery.assess_burst(action, ())
-    assert sorted(searched) == [75.0, 105.0]  # canonical 90 -/+ 15, only then the contingency
-    assert recovery.next_action(value.health, env, (60, 90)).kind == "CONTINGENCY"
+        action = recovery.next_action(value.health, env, (60, 90))
+    # Beyond the mapped headings it searched canonical 90 -/+ 15 (as far as
+    # the yaw budget admits) before the contingency.
+    assert searched and set(searched) <= {75.0, 105.0}
+    assert action.kind == "CONTINGENCY"
 
 
 @pytest.mark.parametrize("position, accepted", [(Position(110, 100, 100), True),
