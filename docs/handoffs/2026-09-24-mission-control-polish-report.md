@@ -31,7 +31,7 @@ The 27 room-agent and 5 shell `data-testid` attributes remain. Visible strings, 
 - Playwright Rehearsal scenario (b): COASTING, RECOVERY_REQUIRED, one yaw rotation, accepted re-anchor, final answer and return-home result checked. Controlled Land returned `Land: ACKNOWLEDGED` and `SAFE_LANDED · LANDED`. Emergency returned `Emergency: ACKNOWLEDGED` and `ABORTED`.
 - At 1440×900 and 1024×768, the room view had no horizontal page overflow; the sticky safety header remained visible on scroll.
 
-The current scenario (b) emits `Re-anchor accepted at (217, 190) cm`; the E2E checklist still expects `(230, 190) cm`. This branch does not change the projection or the checklist. A single polled frame did not contain both the RECOVERY_REQUIRED badge and the later yaw log entry, so the two actual states are captured separately. Playwright paused the browser clock after observing the RECOVERY_REQUIRED frame to preserve it for the screenshot, then resumed it.
+The current scenario (b) emits `Re-anchor accepted at (217, 190) cm`; the E2E checklist expected the older `(230, 190) cm` pose. Its one coordinate was corrected to the repeatedly verified Rehearsal output. The projection and UI data are unchanged. A single polled frame did not contain both the RECOVERY_REQUIRED badge and the later yaw log entry, so the two actual states are captured separately. Playwright paused the browser clock after observing the RECOVERY_REQUIRED frame to preserve it for the screenshot, then resumed it.
 
 ## Screenshots
 

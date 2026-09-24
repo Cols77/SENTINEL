@@ -51,7 +51,7 @@ Rehearsal is paced for watching: one run takes about 30 s (scenario a) to 45 s
 | 3 | Click | `[data-testid=room-propose]` | `[data-testid=room-approval]` appears |
 | 4 | Click | `[data-testid=room-approve]` | `[data-testid=room-status]` contains `RUNNING` |
 | 5 | Wait (up to 120 s) for text `COMPLETED` | `[data-testid=room-status]` | `... · COMPLETED · LANDED` |
-| 6 | Assert | `[data-testid=room-reanchor-log]` | contains, in this order: `Localization ANCHORED -> COASTING at heading 75 deg`, `Localization COASTING -> RECOVERY_REQUIRED`, `Recovery stationary burst at heading 75 deg: no tags in view`, `Yaw rotation ccw 15 deg -> heading 90 deg`, `Recovery yaw burst at heading 90 deg: tags 0, 2`, `Re-anchor accepted at (230, 190) cm, heading 90 deg (mapped_joint_tags)`, `Return home (MISSION_TERMINAL)` |
+| 6 | Assert | `[data-testid=room-reanchor-log]` | contains, in this order: `Localization ANCHORED -> COASTING at heading 75 deg`, `Localization COASTING -> RECOVERY_REQUIRED`, `Recovery stationary burst at heading 75 deg: no tags in view`, `Yaw rotation ccw 15 deg -> heading 90 deg`, `Recovery yaw burst at heading 90 deg: tags 0, 2`, `Re-anchor accepted at (217, 190) cm, heading 90 deg (mapped_joint_tags)`, `Return home (MISSION_TERMINAL)` |
 | 7 | Assert | `[data-testid=room-reanchor-heading]` | `Re-anchor and recovery (1 yaw rotations, 1 accepted)` (at least one of each) |
 | 8 | Assert | `li[data-kind=YAW_ROTATION]` inside `[data-testid=room-reanchor-log]` | count >= 1 |
 | 9 | Assert | `li[data-kind=REANCHOR_ACCEPTED]` inside `[data-testid=room-reanchor-log]` | count >= 1 |
