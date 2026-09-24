@@ -82,8 +82,11 @@ REFRESH_BURST_S = 1.5
 #: not the declared pad mark: the flight envelope (validated on the home)
 #: bounds it. The first live run measured home 43 cm from the mark.
 HOME_TOLERANCE_CM = 150.0
-#: A height reading further than this from the dead-reckoned height is
-#: ignored (the Tello altimeter drifts); it bounds any climb chasing a drift.
+#: Airborne home bursts: one retry when the first saw no two-tag view.
+HOME_BURST_ATTEMPTS = 2
+#: A height reading further than this (or than the drift profile's
+#: max_height_error_cm, if smaller) from the dead-reckoned height is ignored
+#: (the Tello altimeter drifts); it bounds any climb chasing a drift.
 HEIGHT_TRUST_CM = 40
 #: A drone that never answers ``sdk?`` (DJITelloPy's own timeout text) is not
 #: proof of a live SDK link; SENTINEL prefers to say so plainly.
@@ -461,7 +464,11 @@ class _TelloStack:
         # on the pad (or before the takeoff climb is applied) it is not.
         expected = (round(self.tracker.health.position.z_cm)
                     if self._climb_applied and getattr(self.tracker, "initialized", False) else None)
-        if type(raw) is int and (expected is None or abs(raw - expected) <= HEIGHT_TRUST_CM):
+        # Never beyond the tracker's own height gate: a fix whose height jumps
+        # more than max_height_error_cm latches LOCALIZATION LOST (and lands).
+        profile = getattr(self.tracker, "profile", None)
+        trust_cm = min(HEIGHT_TRUST_CM, getattr(profile, "max_height_error_cm", HEIGHT_TRUST_CM))
+        if type(raw) is int and (expected is None or abs(raw - expected) <= trust_cm):
             height = raw
         elif expected is not None:
             height = expected
@@ -642,7 +649,13 @@ class _TelloStack:
         begins.
         """
         time.sleep(self._home_settle_s)
-        fix = self._tag_fix(BURST_MAX_S)
+        fix = None
+        for _ in range(HOME_BURST_ATTEMPTS):
+            # A burst that saw no joint (two-tag) view is retried once: a
+            # hovering Tello often frames both tags a moment later.
+            fix = self._tag_fix(BURST_MAX_S)
+            if fix is not None and len(fix.tag_ids) >= 2:
+                break
         if fix is None:
             raise LiveStackError("home: no reliable tag fix after takeoff; the home is never assumed")
         z_cm = self._passive_height_cm()
@@ -767,7 +780,8 @@ class TelloFlightStackFactory:
         deadline = None if self.max_duration_s is None else clock() + self.max_duration_s
         executor = StepExecutor(runner, clock=clock, deadline=deadline, measure_home=stack.measure_home,
                                 command_sink=stack.command_sink, home_tolerance_cm=HOME_TOLERANCE_CM,
-                                home_measurement_timeout_s=self.home_settle_s + BURST_MAX_S + 2 * HEIGHT_READ_SLACK_S)
+                                home_measurement_timeout_s=(self.home_settle_s + HOME_BURST_ATTEMPTS * BURST_MAX_S
+                                                            + 2 * HEIGHT_READ_SLACK_S))
         stack.executor = executor
         headings = mapped_heading_tag_ids(self.tag_map)
         # live_session gives the supervisor a recovery adapter exactly when
