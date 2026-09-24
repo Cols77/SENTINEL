@@ -20,6 +20,24 @@ export function reviewOptions(catalogue){
  return (catalogue?.perception_reviews??[]).map(row=>({value:row.id,label:row.label}));
 }
 
+export function flightControlMessages(preparation,canPropose,liveReason=''){
+ const blocker=preparation?.reason_code;
+ const prepare={
+  ROOM_LIVE_CONFIG_REQUIRED:'No room Live pack is configured. Prepare one on the operator machine, then restart Mission Control with --room-live-config <pack> and --i-authorise-paid-calls.',
+  ROOM_RUN_ACTIVE:'Available after the current run or proposal ends.',
+  MISSION_ACTIVE:'Available when the other Mission Control run ends.',
+  SESSION_EMERGENCY_LATCHED:'Restart Mission Control after Emergency Stop.',
+  PREPARATION_ACTIVE:'A new flight pack is being prepared.',
+  CLOSED:'The room-agent service is closed.',
+ }[blocker]??'';
+ const propose=!canPropose?'Available after the current run ends.':
+  blocker==='ROOM_LIVE_CONFIG_REQUIRED'?'A room Live pack is required before proposing a flight.':
+  liveReason||
+  (preparation?.command_port?.status==='BUSY'?'Tello command port 8889 is in use. Close the other session before proposing.':
+   !preparation?.pack_run_id||preparation.pack_expired||preparation.pack_used?'Prepare next flight to stage a fresh pack before proposing.':'');
+ return {prepare,propose};
+}
+
 export function scenarioOptions(catalogue){
  return (catalogue?.scenarios??[]).map(row=>({value:row.id,label:row.label,description:row.description}));
 }

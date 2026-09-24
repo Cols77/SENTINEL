@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {ROOM_AGENT,SURVEY,architectureOptions,selectArchitecture,modeOptions,scenarioOptions,proposalCommand,roomViewModel,safetyIdentity,answerText,returnedHomeText,landingText,reviewOptions} from '../../examples/survey-console/room-agent-model.mjs';
+import {ROOM_AGENT,SURVEY,architectureOptions,selectArchitecture,modeOptions,scenarioOptions,proposalCommand,roomViewModel,safetyIdentity,answerText,returnedHomeText,landingText,reviewOptions,flightControlMessages} from '../../examples/survey-console/room-agent-model.mjs';
 
 const catalogue={
  architectures:[{id:'survey',label:'Survey (rules proposer)',description:'s'},{id:'room_agent',label:'Room agent (Jev adaptive)',description:'r'}],
@@ -38,6 +38,17 @@ test('recorded review is a separate Live-only choice in the proposal',()=>{
  assert.deepEqual(choices.map(row=>row.value),['STANDARD','RECORDED_REVIEW']);
  assert.equal(proposalCommand({mode:'LIVE',scenario:'a',requestText:'count',perceptionReview:'RECORDED_REVIEW'}).command.perception_review,'RECORDED_REVIEW');
  assert.equal(proposalCommand({mode:'REHEARSAL',scenario:'a',requestText:'count',perceptionReview:'RECORDED_REVIEW'}).command.perception_review,undefined);
+});
+
+test('disabled Live flight controls explain the missing pack and the next step',()=>{
+ const missing=flightControlMessages({reason_code:'ROOM_LIVE_CONFIG_REQUIRED'},true);
+ assert.match(missing.prepare,/--room-live-config/);
+ assert.match(missing.propose,/Live pack/);
+ const unstaged=flightControlMessages({can_prepare:true},true);
+ assert.equal(unstaged.prepare,'');
+ assert.match(unstaged.propose,/Prepare next flight/);
+ const staged=flightControlMessages({can_prepare:true,pack_run_id:'flight-1',pack_expired:false,pack_used:false},true);
+ assert.equal(staged.propose,'');
 });
 
 const run={
