@@ -187,8 +187,8 @@ def test_observation_description_names_unresolved_classes_and_known_distance():
 
     (candidate,) = build_observation_candidates((objective,), site, coverage, (), 1)
 
-    assert "table-left:computer" in candidate.description
-    assert "table-left:phone" in candidate.description
+    assert "table-left: computer" in candidate.description
+    assert "table-left: phone" in candidate.description
     assert "Approximate direct distance from nominal home:" in candidate.description
     assert "battery cost is assessed by the supervisor" in candidate.description
     assert "%" not in candidate.description

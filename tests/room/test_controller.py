@@ -561,3 +561,39 @@ def test_stale_illegal_choices_with_only_unrelated_events_terminate_on_repeated_
     assert all(o["candidate_id"] == "JEV" and o["refusal_code"] == "STALE_DECISION" for o in refusals)
     assert controller.run_until_terminal("s1") == TerminalState.ESCALATED
     assert len(judge.calls) == 2
+
+
+def _gate_candidates():
+    from sentinel.room.models import RoomCandidate
+    make = lambda cid, kind: RoomCandidate(cid, kind, 1, "h", cid, "b")
+    return {c.candidate_id: c for c in (
+        make("OBSERVE:g1:c1:center", CandidateKind.OBSERVE), make("OBSERVE:g1:c1:left", CandidateKind.OBSERVE),
+        make("OBSERVE:g1:c1:right", CandidateKind.OBSERVE), make("ESCALATE", CandidateKind.ESCALATE),
+        make("READ_OBSERVATIONS", CandidateKind.READ_OBSERVATIONS))}
+
+
+def test_equivalent_regions_splitting_the_probability_still_accept_the_top_observe():
+    # Live 2026-09-24, turn 1: center 0.44, right 0.21, left 0.20 (0.85 on observing), scalar 0.36.
+    from sentinel.jev_choice import assess_choice
+    from sentinel.room.controller import observe_kind_gate
+    candidates = _gate_candidates()
+    answer = {"value": "OBSERVE:g1:c1:center", "confidence": 0.36, "probabilities": {
+        "OBSERVE:g1:c1:center": 0.44, "OBSERVE:g1:c1:left": 0.20, "OBSERVE:g1:c1:right": 0.21,
+        "ESCALATE": 0.04, "READ_OBSERVATIONS": 0.11}}
+    assessment = assess_choice(answer, candidates, escalation_label="ESCALATE", act_at=0.5, min_margin=0.15)
+    assert assessment.outcome == "LOW_CONFIDENCE"
+    gated = observe_kind_gate(assessment, candidates, 0.5, 0.15)
+    assert (gated.outcome, gated.final_label, gated.confidence_source) == (
+        "ACCEPTED", "OBSERVE:g1:c1:center", "KIND_MASS")
+    assert gated.confidence == pytest.approx(0.85)
+
+
+def test_the_kind_gate_never_accepts_when_observing_itself_is_uncertain():
+    from sentinel.jev_choice import assess_choice
+    from sentinel.room.controller import observe_kind_gate
+    candidates = _gate_candidates()
+    answer = {"value": "OBSERVE:g1:c1:center", "probabilities": {
+        "OBSERVE:g1:c1:center": 0.30, "OBSERVE:g1:c1:left": 0.10, "OBSERVE:g1:c1:right": 0.05,
+        "ESCALATE": 0.29, "READ_OBSERVATIONS": 0.26}}
+    assessment = assess_choice(answer, candidates, escalation_label="ESCALATE", act_at=0.5, min_margin=0.15)
+    assert observe_kind_gate(assessment, candidates, 0.5, 0.15) == assessment  # 0.45 on observing: refused

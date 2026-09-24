@@ -80,8 +80,23 @@ export function statusText(run){
  return `${run.mode_label??run.mode} · ${run.status}${phase}${run.error?` · ${run.error}`:''}`;
 }
 
+const known=value=>value!==null&&value!==undefined;
+
+// Task 4b item 5: a refused turn shows Jev's real choice, its probability and
+// the refusal code; a turn accepted on the observe kind's summed probability
+// (KIND_MASS) shows the label's probability next to that mass.
 export function decisionLines(run){
- return (run?.decisions??[]).map(d=>`${d.turn}. ${d.label} — ${d.reason}${d.confidence!==null&&d.confidence!==undefined?` (p ${fmt(d.confidence,2)})`:''}${d.result?` → ${d.result}`:''}`);
+ return (run?.decisions??[]).map(d=>{
+  if(d.refused){
+   const p=known(d.probability)?`, p ${fmt(d.probability,2)}`:'';
+   const result=d.result&&d.result!==d.refused?` → ${d.result}`:'';
+   return `${d.turn}. ${d.label} (refused: ${d.refused}${p})${result}`;
+  }
+  const odds=known(d.kind_mass)
+   ?` (p ${fmt(d.probability,2)}, observe ${fmt(d.kind_mass,2)})`
+   :known(d.confidence)?` (p ${fmt(d.confidence,2)})`:'';
+  return `${d.turn}. ${d.label} — ${d.reason}${odds}${d.result?` → ${d.result}`:''}`;
+ });
 }
 
 export function reanchorLines(run){

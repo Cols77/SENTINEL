@@ -86,6 +86,18 @@ test('terminal texts without an answer or a return are explicit',()=>{
  assert.equal(landingText({landing:null,land_status:'REQUESTED'}),'Landing requested…');
 });
 
+test('a refused turn shows the real choice, its probability and the refusal code',()=>{
+ const decisions=[
+  {turn:1,label:'Observe center region',reason:'resolves 2 cells',confidence:0.36,probability:0.44,refused:'LOW_CONFIDENCE',kind_mass:null,result:'LOW_CONFIDENCE'},
+  {turn:2,label:'Observe right region',reason:'resolves 1 cell',confidence:0.85,probability:0.44,refused:null,kind_mass:0.85,result:'OBSERVE_SUCCEEDED'},
+  {turn:3,label:'No usable choice',reason:'provider error: TimeoutError',confidence:null,probability:null,refused:'PROVIDER_ERROR',kind_mass:null},
+ ];
+ const view=roomViewModel({run:{...run,decisions}});
+ assert.equal(view.decisions[0],'1. Observe center region (refused: LOW_CONFIDENCE, p 0.44)');
+ assert.equal(view.decisions[1],'2. Observe right region — resolves 1 cell (p 0.44, observe 0.85) → OBSERVE_SUCCEEDED');
+ assert.equal(view.decisions[2],'3. No usable choice (refused: PROVIDER_ERROR)');
+});
+
 test('safety identities are one id used three ways',()=>{
  assert.deepEqual(safetyIdentity(()=>'x'),{command_id:'x',correlation_id:'x',idempotency_key:'x'});
 });

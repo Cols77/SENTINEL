@@ -69,15 +69,28 @@ def can_answer_objectives(snapshot: ReadSnapshot, objectives: tuple[GoalObjectiv
     return True
 
 
-def build_candidates(snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
+#: A count is answered in flight either way; the capability returns home
+#: after the answer, so an explicit "and return home" count is answerable too.
+_COUNT_TERMINALS = ("REPORTED", "OBSERVED", "RETURN_HOME")
+
+
+def build_candidates(snapshot: ReadSnapshot, *, observation_legal: bool = False) -> tuple[RoomCandidate, ...]:
     if snapshot.terminal_state:
         return ()
     kinds = (*READ_KINDS, CandidateKind.ANSWER, CandidateKind.CLARIFY, CandidateKind.ESCALATE)
     candidates = []
+    physical_mission_reads = (CandidateKind.READ_OBSERVATIONS, CandidateKind.READ_COUNTS)
     for kind in kinds:
         if kind == CandidateKind.ANSWER and not can_answer(snapshot):
             continue
         digest = relevant_hash(kind, snapshot)
+        prior_reads = tuple(o for o in snapshot.outcomes if o.candidate_id == kind.value
+                            and kind in physical_mission_reads and o.code in ("READ_SUCCEEDED", "NO_EVIDENCE"))
+        if observation_legal and kind in physical_mission_reads:
+            seen = {fact.fact_id for outcome in prior_reads for fact in outcome.facts}
+            available = {fact.fact_id for fact in snapshot.sources if fact.kind == kind}
+            if not (prior_reads and available - seen):
+                continue
         if any(o.candidate_id == kind.value and o.relevant_state_sha256 == digest
                and (o.refusal_code is not None or (kind in READ_KINDS and o.code in ("READ_SUCCEEDED", "NO_EVIDENCE")))
                for o in snapshot.outcomes):
@@ -194,7 +207,7 @@ def count_answer_candidate(snapshot: ReadSnapshot, coverage: CoverageProjection)
     if snapshot.terminal_state or ledger is None or ledger.status != GoalStatus.PENDING:
         return None
     counts = tuple(o for o in ledger.objectives if o.kind == GoalKind.COUNT)
-    if not counts or any(o.relation or o.qualifier or o.terminal_condition not in ("REPORTED", "OBSERVED")
+    if not counts or any(o.relation or o.qualifier or o.terminal_condition not in _COUNT_TERMINALS
                          for o in counts):
         return None
     if not all(count_objective_ready(o, coverage, snapshot.outcomes) for o in counts):
@@ -246,17 +259,55 @@ def _coverage_gain_description(pose_id: str, site: RoomSite, coverage: CoverageP
         sample += f", +{len(cells) - 3} more"
     return (f"adds a view of {len(cells)} unexplored {cell_word} ({sample}); "
             f"could resolve {len(pairs)} unresolved cell/class {pair_word}")
+#: Refusals decided by the choice gate itself (``assess_choice`` and the
+#: provider call), not by the world: Jev was unsure, malformed or
+#: unreachable, while the action stays physically possible. Task 4b item 1:
+#: they must not burn an OBSERVE or grounded ANSWER candidate for the rest of
+#: the session (live 2026-09-24: center refused at 0.44 was never offered
+#: again). A repeat of the same refusal on an unchanged digest still ends
+#: the session through the controller's persisted NO_PROGRESS rule.
+CONFIDENCE_GATE_REFUSALS = frozenset({
+    "LOW_CONFIDENCE", "THIN_MARGIN", "MALFORMED_ANSWER", "ILLEGAL_OR_MALFORMED",
+    "MISSING_OR_NON_MAX_SELECTION", "PROVIDER_ERROR",
+})
+
+_NON_BURNING_REFUSALS = CONFIDENCE_GATE_REFUSALS | {"STALE_DECISION"}
+
+
+def _burns(outcome: ToolOutcome) -> bool:
+    """Whether a refused outcome suppresses its candidate: physical, tool
+    and supervisor refusals do; confidence-gate refusals do not."""
+    return outcome.refusal_code is not None and outcome.refusal_code not in _NON_BURNING_REFUSALS
 
 
 def _observe_suppressed(outcomes: tuple[ToolOutcome, ...], candidate_id: str, digest: str) -> bool:
     return any(o.candidate_id == candidate_id and o.relevant_state_sha256 == digest
-               and (o.refusal_code is not None or o.code == "OBSERVE_SUCCEEDED")
+               and (_burns(o) or o.code == "OBSERVE_SUCCEEDED")
                for o in outcomes)
 
 
 def _answer_suppressed(outcomes: tuple[ToolOutcome, ...], candidate_id: str, digest: str) -> bool:
-    return any(o.candidate_id == candidate_id and o.relevant_state_sha256 == digest and o.refusal_code is not None
+    return any(o.candidate_id == candidate_id and o.relevant_state_sha256 == digest and _burns(o)
                for o in outcomes)
+
+
+def _resolves_text(pose_id: str, site: RoomSite, coverage: CoverageProjection) -> str:
+    """``resolves 2 unexplored cell/class pairs (left-strip: computer, phone)``
+    for the cells ``site.pose_visibility`` declares this pose can see."""
+    cells = {cell for declared, cell_ids in site.pose_visibility if declared == pose_id for cell in cell_ids}
+    by_cell: dict[str, list[str]] = {}
+    for entry in sorted(coverage.uncovered):
+        cell_id, _, class_name = entry.partition(":")
+        if cell_id in cells:
+            by_cell.setdefault(cell_id, []).append(class_name)
+    count = sum(len(classes) for classes in by_cell.values())
+    if not count:
+        return "resolves no unexplored cell/class pair"
+    entries = [(cell_id, class_name) for cell_id, classes in by_cell.items() for class_name in classes]
+    detail = "; ".join(f"{cell_id}: {class_name}" for cell_id, class_name in entries[:3])
+    if len(entries) > 3:
+        detail += f"; +{len(entries) - 3} more"
+    return f"resolves {count} unexplored cell/class pair{'' if count == 1 else 's'} ({detail})"
 
 
 def _observe_digest(objective_id: str, pose_id: str, coverage: CoverageProjection) -> str:
@@ -279,6 +330,11 @@ def _observe_candidate(objective: GoalObjective, pose_id: str, description: str,
         return None
     home = site.home.nominal_pose
     distance_cm = math.hypot(resolved.x_cm - home.x_cm, resolved.y_cm - home.y_cm)
+    # Task 4b item 2: what this view resolves and roughly how far it is, so
+    # Jev has a reason to prefer one region over an otherwise identical one.
+    description = (f"{description.rstrip('.')}: {_resolves_text(pose_id, site, coverage)}; "
+                   f"Approximate direct distance from nominal home: {distance_cm:.0f} cm; "
+                   "battery cost is assessed by the supervisor.")
     return RoomCandidate(candidate_id, CandidateKind.OBSERVE, snapshot_version, digest, description, description,
                          coverage.evidence_refs, (), PhysicalCost(distance_cm=distance_cm, requires_airborne=True))
 
@@ -398,7 +454,7 @@ def search_answer_candidate(snapshot: ReadSnapshot, site: RoomSite,
     if not searches or not all(search_objective_ready(o, site, coverage, snapshot.outcomes) for o in searches):
         return None
     counts = tuple(o for o in ledger.objectives if o.kind == GoalKind.COUNT)
-    if any(o.relation or o.qualifier or o.terminal_condition not in ("REPORTED", "OBSERVED")
+    if any(o.relation or o.qualifier or o.terminal_condition not in _COUNT_TERMINALS
            or not count_objective_ready(o, coverage, snapshot.outcomes) for o in counts):
         return None
     others = tuple(o for o in ledger.objectives if o.kind != GoalKind.COUNT and not is_search_objective(o))

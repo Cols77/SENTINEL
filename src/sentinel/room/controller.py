@@ -55,6 +55,9 @@ _MAX_RETURN_ATTEMPTS = 5
 _POSE_POSITION_TOLERANCE_CM = 5.0
 _POSE_HEADING_TOLERANCE_DEG = 5.0
 
+#: Task 4b item 4: reply-shape refusals re-asked once, like a provider error.
+_MALFORMED_OUTCOMES = ("MALFORMED_ANSWER", "ILLEGAL_OR_MALFORMED", "MISSING_OR_NON_MAX_SELECTION")
+
 
 def _heading_within_tolerance(a_deg: float, b_deg: float, tolerance_deg: float = _POSE_HEADING_TOLERANCE_DEG) -> bool:
     """Fix round 3 (F6): compare headings modularly, never by exact equality
@@ -141,6 +144,32 @@ class AcceptancePolicy:
 
     def as_config(self) -> dict:
         return asdict(self)
+
+
+def observe_kind_gate(assessment, candidates, act_at: float, min_margin: float):
+    """Accept Jev's top OBSERVE when observing, as a kind, is the confident choice.
+
+    Equivalent regions split Jev's probability (live 2026-09-24: center 0.44,
+    right 0.21, left 0.20 -- 0.85 on observing), so the per-label gate refused
+    a decision Jev was confident in. The kind's summed probability must clear
+    the observe bar and lead every other kind's sum by the margin; Jev's own
+    top label (always the argmax, see ``assess_choice``) is the one flown.
+    """
+    if assessment.outcome not in ("LOW_CONFIDENCE", "THIN_MARGIN"):
+        return assessment
+    chosen = candidates.get(assessment.selected_label)
+    if chosen is None or chosen.kind != CandidateKind.OBSERVE:
+        return assessment
+    mass: dict = {}
+    for label, probability in assessment.probabilities:
+        candidate = candidates.get(label)
+        kind = candidate.kind if candidate is not None else label
+        mass[kind] = mass.get(kind, 0.0) + probability
+    observe = mass.pop(CandidateKind.OBSERVE, 0.0)
+    if observe < act_at or observe - max(mass.values(), default=0.0) < min_margin:
+        return assessment
+    return replace(assessment, final_label=assessment.selected_label, outcome="ACCEPTED",
+                   confidence=observe, confidence_source="KIND_MASS")
 
 
 @dataclass(frozen=True)
@@ -540,10 +569,17 @@ class RoomController:
         return {"code": code, "refusal": code}
 
     def _legal_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
-        base = build_candidates(snapshot)
+        observations = self._observation_candidates(snapshot)
+        observation_legal = any(c.kind == CandidateKind.OBSERVE for c in observations)
+        base = build_candidates(snapshot, observation_legal=observation_legal)
+        if observation_legal:
+            # The live call logs showed READ options diluted the physical
+            # mission decision even after their facts were already current.
+            # Re-offer them as soon as there is no admissible OBSERVE.
+            base = tuple(c for c in base if c.kind not in READ_KINDS)
         if self._legacy_count_answer_blocked(snapshot):
             base = tuple(c for c in base if c.kind != CandidateKind.ANSWER)
-        return (*base, *self._observation_candidates(snapshot), *self._count_answer_candidates(snapshot),
+        return (*base, *observations, *self._count_answer_candidates(snapshot),
                *self._closer_unavailable_candidates(snapshot), *self._reanchor_candidates(snapshot))
 
     def _local_terminal(self, terminal, candidate_id):
@@ -844,7 +880,7 @@ class RoomController:
             act_at = policy.act_at_for(chosen.kind if chosen is not None else None)
             assessment = assess_choice(answer, criteria, escalation_label="ESCALATE",
                                        act_at=act_at, min_margin=policy.min_margin)
-            return assessment, error, act_at
+            return observe_kind_gate(assessment, candidates, act_at, policy.min_margin), error, act_at
 
         def audit(assessment):
             audited = asdict(assessment)
@@ -857,16 +893,22 @@ class RoomController:
             return self._preempted(session_id, self.supervisor.last_preemption)
         assessment, provider_error, act_at = asked
         reask = None
-        if (policy.reask_once and not provider_error
-                and assessment.outcome in ("LOW_CONFIDENCE", "THIN_MARGIN")):
+        malformed = provider_error is not None or assessment.outcome in _MALFORMED_OUTCOMES
+        if policy.reask_once and (malformed or assessment.outcome in ("LOW_CONFIDENCE", "THIN_MARGIN")):
             # Task V2: one re-ask with the refusal as feedback, never a loop.
-            feedback = {"refused_choice": assessment.selected_label, "refusal": assessment.outcome,
+            # Task 4b item 4: a malformed/illegal reply or a provider error is
+            # re-asked once too, with feedback on the reply's shape.
+            refusal = "PROVIDER_ERROR" if provider_error else assessment.outcome
+            note = ("Your previous reply could not be used (" + refusal + "). Reply with one legal action "
+                    "label as value, a probability for every legal label (the chosen one the highest) and a "
+                    "confidence; this is the last ask this turn.") if malformed else (
+                    "Your previous choice was refused: below the acceptance threshold for its "
+                    "kind. Choose once more from the same legal actions. Repeat it only if you "
+                    "are confident it is the right next action; this is the last ask this turn.")
+            feedback = {"refused_choice": assessment.selected_label, "refusal": refusal,
                         "confidence": assessment.confidence, "required_confidence": act_at,
                         "margin": assessment.margin, "required_margin": policy.min_margin,
-                        "acceptance_thresholds": policy.as_config(),
-                        "note": ("Your previous choice was refused: below the acceptance threshold for its "
-                                 "kind. Choose once more from the same legal actions. Repeat it only if you "
-                                 "are confident it is the right next action; this is the last ask this turn.")}
+                        "acceptance_thresholds": policy.as_config(), "note": note}
             reask = {"first_assessment": audit(assessment), "first_act_at": act_at, "feedback": feedback}
             asked = ask({**state, "previous_refusal": feedback})
             if asked is None:

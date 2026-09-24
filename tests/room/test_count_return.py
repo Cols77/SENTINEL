@@ -430,14 +430,16 @@ def test_uncertain_detection_stays_uncertain_after_observation(safety, tmp_path)
     rig = PerceptionRig(store, SESSION)
     rig.set("left-rear-bottom-toward_targets",
            make_result(tmp_path, SESSION, "left-rear-bottom-toward_targets", confidence_band="low"))
-    judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets", "READ_OBSERVATIONS")
+    judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets")
     controller, executor = make_controller(safety, judge, rig)
 
     first = controller.step(SESSION)
     assert first.accepted and store.events(SESSION)[-1].payload["code"] == "OBSERVE_SUCCEEDED"
-    second = controller.step(SESSION)
-    assert second.accepted
-    facts = store.events(SESSION)[-1].payload["facts"]
+    # Task 4b item 3: reads are hidden while another OBSERVE is legal, so the
+    # persisted observation evidence is read directly here.
+    projected = controller.queries.project(SESSION)
+    assert CandidateKind.READ_OBSERVATIONS not in {c.kind for c in controller._legal_candidates(projected)}
+    facts = [asdict(f) for f in controller.queries.read(CandidateKind.READ_OBSERVATIONS, projected)]
     assert facts and dict(tuple(map(tuple, facts[0]["values"])))["confidence_band"] == "low"
     assert "confirmed" not in str(facts)
 
@@ -725,11 +727,16 @@ def test_typed_tool_error_then_a_different_legal_action_succeeds(safety, tmp_pat
     drone(store, SESSION)
     rig = PerceptionRig(store, SESSION)
 
-    def failing_resolve(candidate, snapshot):
-        return None
+    resolve = {}
 
-    judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets", "READ_DRONE")
+    def failing_resolve(candidate, snapshot):
+        # Only the left pose fails to resolve; the right one flies normally.
+        return None if "left" in candidate.candidate_id else resolve["real"](candidate, snapshot)
+
+    rig.set("right-front-top-toward_targets", make_result(tmp_path, SESSION, "right-front-top-toward_targets"))
+    judge = Judge("OBSERVE:g1:left-rear-bottom-toward_targets", "OBSERVE:g1:right-front-top-toward_targets")
     controller, executor = make_controller(safety, judge, rig, resolve_checkpoint=failing_resolve)
+    resolve["real"] = make_resolve_checkpoint(supervisor, executor=executor)
 
     first = controller.step(SESSION)
     assert not first.accepted
@@ -738,7 +745,9 @@ def test_typed_tool_error_then_a_different_legal_action_succeeds(safety, tmp_pat
 
     second = controller.step(SESSION)
     assert second.accepted
-    assert store.events(SESSION)[-1].payload["code"] == "READ_SUCCEEDED"
+    assert store.events(SESSION)[-1].payload["code"] == "OBSERVE_SUCCEEDED"
+    # The tool failure still suppresses the failed view (Task 4b item 1).
+    assert "OBSERVE:g1:left-rear-bottom-toward_targets" not in judge.calls[1][1]
 
 
 # ============================================================================
@@ -791,15 +800,23 @@ def test_plain_answer_is_gated_while_declared_coverage_is_incomplete(safety, tmp
     legacy, _, _ = survey(tmp_path)
     try:
         rig = PerceptionRig(store, SESSION)
-        judge = Judge("READ_COUNTS")
+        judge = Judge()
         executor = Executor(store, clock)
         controller = RoomController(store, judge, supervisor=supervisor, flight_executor=executor,
                                     survey_store=legacy, survey_run_id="run1",
                                     resolve_checkpoint=make_resolve_checkpoint(supervisor),
                                     perception_capture=rig.capture, perception_provider=rig.provide)
-        first = controller.step(SESSION)
-        assert first.accepted and first.candidate_id == "READ_COUNTS"
+        # Task 4b item 3: reads are hidden while an OBSERVE is legal, so the
+        # legacy READ_COUNTS read is recorded directly (as a completed read).
+        before = controller.queries.project(SESSION)
+        from sentinel.room.queries import relevant_hash
+        append(store, SESSION, "ROOM_TOOL_OUTCOME", {
+            "candidate_id": "READ_COUNTS", "kind": CandidateKind.READ_COUNTS,
+            "relevant_state_sha256": relevant_hash(CandidateKind.READ_COUNTS, before),
+            "code": "READ_SUCCEEDED", "refusal_code": None, "terminal_state": None,
+            "facts": [asdict(f) for f in controller.queries.read(CandidateKind.READ_COUNTS, before)]})
         snapshot = controller.queries.project(SESSION)
+        assert snapshot.facts
         assert not controller._coverage(snapshot).complete
         legal_ids = {c.candidate_id for c in controller._legal_candidates(snapshot)}
         assert "ANSWER" not in legal_ids

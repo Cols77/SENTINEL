@@ -55,7 +55,13 @@ def objective(clause, family, classes=None, *, qualifier="NONE", relation="NONE"
         steps.extend((("qualifier", qualifier), ("relation", relation)))
     steps.append(("spatial_scope", scope))
     steps.extend((f"scope_{axis}", value) for axis, value in zip(("x", "y", "z"), axes))
-    steps.extend((("entity_reference", binding), ("terminal_condition", terminal)))
+    # Decided in code, not asked (goals.py decide_in_code): the single-option
+    # NEW_ENTITY/CURRENT_DRONE/DESIGNATED_PERSON confirmations, a COUNT's
+    # terminal, and a plain FIND_OBSERVE's OBSERVED.
+    if binding not in ("NEW_ENTITY", "CURRENT_DRONE", "DESIGNATED_PERSON"):
+        steps.append(("entity_reference", binding))
+    if not (family == "COUNT" or (family == "FIND_OBSERVE" and relation == "NONE" and terminal == "OBSERVED")):
+        steps.append(("terminal_condition", terminal))
     return steps
 
 
@@ -202,7 +208,7 @@ def test_man_holding_phone_then_follow_uses_verified_designated_person_exactly(t
         ("NEXT_OBJECTIVE:c1", "NEXT_OBJECTIVE:c2", "DONE", *SAFE), (*FAMILIES, *SAFE),
         (*CLASSES, *SAFE), ("NONE", "MAN", "DESIGNATED", *SAFE),
         ("NONE", "HOLDS_PHONE", "NEXT_TO_DRONE", *SAFE), ("ROOM", "CURRENT_VIEW", "REGION", *SAFE),
-        ("DESIGNATED_PERSON", *SAFE), ("OBSERVED", "VALIDATED", "RELATION_VERIFIED", "RETURN_HOME", *SAFE),
+        ("OBSERVED", "VALIDATED", "RELATION_VERIFIED", "RETURN_HOME", *SAFE),
         ("NEXT_OBJECTIVE:c2", "DONE", *SAFE), (*FAMILIES, *SAFE), (*CLASSES, *SAFE),
         ("NONE", "MAN", "DESIGNATED", *SAFE), ("NONE", "HOLDS_PHONE", "NEXT_TO_DRONE", *SAFE),
         ("ROOM", "CURRENT_VIEW", "REGION", *SAFE), ("REF:g1:c1:subject", *SAFE),
@@ -232,7 +238,7 @@ def test_phone_next_to_you_then_land_binds_same_hypothesis_and_snapshot(tmp_path
         ("NEXT_OBJECTIVE:c1", "NEXT_OBJECTIVE:c2", "DONE", *SAFE), (*FAMILIES, *SAFE),
         (*CLASSES, *SAFE), ("NONE", "MAN", "DESIGNATED", *SAFE),
         ("NONE", "HOLDS_PHONE", "NEXT_TO_DRONE", *SAFE), ("ROOM", "CURRENT_VIEW", "REGION", *SAFE),
-        ("CURRENT_DRONE", *SAFE), ("OBSERVED", "VALIDATED", "RELATION_VERIFIED", "RETURN_HOME", *SAFE),
+        ("OBSERVED", "VALIDATED", "RELATION_VERIFIED", "RETURN_HOME", *SAFE),
         ("NEXT_OBJECTIVE:c2", "DONE", *SAFE), (*FAMILIES, *SAFE), (*CLASSES, *SAFE),
         ("NONE", "MAN", "DESIGNATED", *SAFE), ("NONE", "HOLDS_PHONE", "NEXT_TO_DRONE", *SAFE),
         ("ROOM", "CURRENT_VIEW", "REGION", *SAFE), ("REF:g1:c1:subject", *SAFE),
@@ -273,8 +279,7 @@ def test_devices_require_explicit_jev_selected_supported_subset(tmp_path):
     script = [("next_objective", "NEXT_OBJECTIVE:c1"), ("goal_family", "COUNT"),
               ("target_classes", "CLASS_GROUP"), ("class_group", "INCLUDE:computer"),
               ("class_group", "INCLUDE:phone"), ("class_group", "GROUP_DONE"),
-              ("qualifier", "NONE"), ("relation", "NONE"), ("spatial_scope", "ROOM"),
-              ("entity_reference", "NEW_ENTITY"), ("terminal_condition", "REPORTED")] + FINISH
+              ("qualifier", "NONE"), ("relation", "NONE"), ("spatial_scope", "ROOM")] + FINISH
     compiler, judge, store = setup(tmp_path, request, script)
     ledger = compiler.compile("session-1", request, snapshot())
     assert ledger.objectives[0].target_classes == ("computer", "phone")
@@ -302,13 +307,17 @@ def test_ambiguous_pronoun_rolls_back_prior_goals_before_reference_choice(tmp_pa
     request = "Find a person on the left; find a person on the right; follow him"
     script = objective("c1", "FIND_OBSERVE", "person", terminal="OBSERVED")
     script += objective("c2", "FIND_OBSERVE", "person", terminal="OBSERVED")
-    script += objective("c3", "FOLLOW", "person", terminal="FOLLOW_BOUNDED_RETURN")[:-2]
+    # c3's bind_target raises AMBIGUOUS_ENTITY_REFERENCE before any entity_reference
+    # ask; only next_objective..spatial_scope are reached (drop terminal_condition).
+    script += objective("c3", "FOLLOW", "person", terminal="FOLLOW_BOUNDED_RETURN")[:-1]
     compiler, judge, store = setup(tmp_path, request, script)
     ledger = compiler.compile("session-1", request, snapshot())
     assert ledger.status == GoalStatus.CLARIFICATION_REQUIRED
     assert ledger.objectives == ()
     assert ledger.physical_objectives == ()
-    assert len([call for call in judge.calls if call[0] == "entity_reference"]) == 2
+    # c1 and c2's NEW_ENTITY confirmations are decided in code; no entity_reference
+    # is ever asked, since c3's ambiguity is caught before it could be either.
+    assert len([call for call in judge.calls if call[0] == "entity_reference"]) == 0
     assert_audit(store, judge, ledger, accepted=False)
 
 
@@ -329,7 +338,9 @@ def test_final_inconsistency_discards_tentative_ledger(tmp_path):
     (RuntimeError("provider unavailable"), 2),
     ({"value": "NEXT_OBJECTIVE:c1", "confidence": 0.1, "probabilities": {"NEXT_OBJECTIVE:c1": 0.99}}, 2),
     ({"value": "NEXT_OBJECTIVE:c1", "probabilities": {"NEXT_OBJECTIVE:c1": 0.51, "DONE": 0.49}}, 1),
-    ({"value": "arbitrary command", "probabilities": {"arbitrary command": 0.99}}, 1),
+    # Task 4b item 4: a malformed or illegal reply is re-asked once too.
+    ({"value": "arbitrary command", "probabilities": {"arbitrary command": 0.99}}, 2),
+    ({"value": "NEXT_OBJECTIVE:c1"}, 2),
 ])
 def test_provider_failure_and_gate_rejection_are_audited_without_defaults(tmp_path, response, asked):
     request = "Follow him"
@@ -338,6 +349,22 @@ def test_provider_failure_and_gate_rejection_are_audited_without_defaults(tmp_pa
     assert ledger.status == GoalStatus.CLARIFICATION_REQUIRED
     assert ledger.physical_objectives == ()
     assert_audit(store, judge, ledger, accepted=False)
+
+
+def test_a_reply_missing_probabilities_is_reasked_once_and_can_recover(tmp_path):
+    """Task 4b item 4: live target_classes came back MALFORMED once; the
+    compiler re-asks it once with feedback on the reply's shape."""
+    request = "Count phones"
+    script = objective("c1", "COUNT", "phone") + FINISH
+    malformed_at = script.index(("target_classes", "CLASS:phone"))
+    script.insert(malformed_at, ("target_classes", {"value": "CLASS:phone"}))
+    compiler, judge, store = setup(tmp_path, request, script)
+    ledger = compiler.compile("session-1", request, snapshot())
+    assert ledger.status == GoalStatus.PENDING
+    assert ledger.objectives[0].target_classes == ("phone",)
+    first, second = [call for call in judge.calls if call[0] == "target_classes"]
+    assert "unusable (ILLEGAL_OR_MALFORMED)" in second[3] and "unusable" not in first[3]
+    assert_audit(store, judge, ledger)
 
 
 @pytest.mark.parametrize("selection", ["DONE", "NEXT_OBJECTIVE:c2"])
@@ -379,7 +406,9 @@ def test_pronoun_ambiguity_cannot_be_hidden_by_judge_class_selection(tmp_path):
     request = "Find the phone; find the pen; land near it"
     script = objective("c1", "FIND_OBSERVE", "phone", terminal="OBSERVED")
     script += objective("c2", "FIND_OBSERVE", "pen", terminal="OBSERVED")
-    script += objective("c3", "LAND_NEAR", "phone", terminal="LANDED_AT_CERTIFIED_ZONE")[:-2]
+    # c3's bind_target raises AMBIGUOUS_ENTITY_REFERENCE before any entity_reference
+    # ask; only next_objective..spatial_scope are reached (drop terminal_condition).
+    script += objective("c3", "LAND_NEAR", "phone", terminal="LANDED_AT_CERTIFIED_ZONE")[:-1]
     compiler, judge, store = setup(tmp_path, request, script)
     ledger = compiler.compile("session-1", request, snapshot())
     assert ledger.status == GoalStatus.CLARIFICATION_REQUIRED
@@ -439,7 +468,10 @@ def test_following_one_target_cannot_bind_a_multiple_class_group(tmp_path):
 
 def test_unresolved_pronoun_in_observation_does_not_create_a_new_entity(tmp_path):
     request = "Find it"
-    script = objective("c1", "FIND_OBSERVE", "phone", terminal="OBSERVED")[:-2]
+    # bind_target raises AMBIGUOUS_ENTITY_REFERENCE (no antecedent) before any
+    # entity_reference ask; entity_reference/terminal_condition are already
+    # excluded from this plain FIND_OBSERVE script (both decided in code).
+    script = objective("c1", "FIND_OBSERVE", "phone", terminal="OBSERVED")
     compiler, judge, store = setup(tmp_path, request, script)
     ledger = compiler.compile("session-1", request, snapshot())
     assert ledger.status == GoalStatus.CLARIFICATION_REQUIRED
@@ -450,6 +482,8 @@ def test_unresolved_pronoun_in_observation_does_not_create_a_new_entity(tmp_path
 
 def test_closer_pronoun_binds_existing_phone_observation_dependency(tmp_path):
     request = "Find the phone and look closer at it"
+    # "closer" wording keeps the terminal a Jev question (VALIDATED); only the
+    # plain find (c1) is decided in code as OBSERVED.
     script = objective("c1", "FIND_OBSERVE", "phone", terminal="OBSERVED")
     script += objective("c2", "FIND_OBSERVE", "phone", binding="REF:g1:c1:subject", terminal="VALIDATED")
     compiler, judge, store = setup(tmp_path, request, script + FINISH)
@@ -515,9 +549,11 @@ def test_pronoun_holding_relation_preserves_actor_and_creates_verified_follow_re
     common = [(*FAMILIES, *SAFE), (*CLASSES, *SAFE), ("NONE", "MAN", "DESIGNATED", *SAFE),
               ("NONE", "HOLDS_PHONE", "NEXT_TO_DRONE", *SAFE), ("ROOM", "CURRENT_VIEW", "REGION", *SAFE)]
     observe_terminals = ("OBSERVED", "VALIDATED", "RELATION_VERIFIED", "RETURN_HOME", *SAFE)
+    # c1's entity_reference (NEW_ENTITY) and terminal_condition (OBSERVED, plain
+    # FIND_OBSERVE with no relation) are both decided in code: no judge call.
     assert [tuple(call[2]) for call in judge.calls] == [
         ("NEXT_OBJECTIVE:c1", "NEXT_OBJECTIVE:c2", "NEXT_OBJECTIVE:c3", "DONE", *SAFE),
-        *common, ("NEW_ENTITY", *SAFE), observe_terminals,
+        *common,
         ("NEXT_OBJECTIVE:c2", "NEXT_OBJECTIVE:c3", "DONE", *SAFE),
         *common, ("REF:g1:c1:subject", *SAFE), observe_terminals,
         ("NEXT_OBJECTIVE:c3", "DONE", *SAFE),
@@ -529,9 +565,10 @@ def test_pronoun_holding_relation_preserves_actor_and_creates_verified_follow_re
 
 def test_direct_landing_separates_phone_target_from_current_drone_attachment(tmp_path):
     request = "Land near the phone next to you"
+    # relative_reference CURRENT_DRONE is decided in code (goals.py decide_in_code):
+    # no judge call precedes the bind_target entity_reference ask.
     script = objective("c1", "LAND_NEAR", "phone", relation="NEXT_TO_DRONE",
                        binding="NEW_TARGET", terminal="LANDED_AT_CERTIFIED_ZONE")
-    script.insert(-2, ("relative_reference", "CURRENT_DRONE"))
     compiler, judge, store = setup(tmp_path, request, script + FINISH)
     ledger = compiler.compile("session-1", request, snapshot())
     observe, land = ledger.objectives
@@ -541,17 +578,18 @@ def test_direct_landing_separates_phone_target_from_current_drone_attachment(tmp
     assert land.target_ref == observe.subject_ref
     assert land.depends_on_objective_ids == (observe.objective_id,)
     assert [tuple(call[2]) for call in judge.calls if call[0] in ("relative_reference", "entity_reference")] == [
-        ("CURRENT_DRONE", *SAFE), ("NEW_TARGET", *SAFE),
+        ("NEW_TARGET", *SAFE),
     ]
     assert_audit(store, judge, ledger)
 
 
 def test_landing_it_next_to_you_preserves_phone_identity_and_pose_dependency(tmp_path):
     request = "Find the phone; land near it next to you"
+    # entity_reference NEW_ENTITY (c1) and relative_reference CURRENT_DRONE (c2)
+    # are both decided in code; only the bind_target REF ask remains.
     first = objective("c1", "FIND_OBSERVE", "phone", terminal="OBSERVED")
     landing = objective("c2", "LAND_NEAR", "phone", relation="NEXT_TO_DRONE",
                         binding="REF:g1:c1:subject", terminal="LANDED_AT_CERTIFIED_ZONE")
-    landing.insert(-2, ("relative_reference", "CURRENT_DRONE"))
     compiler, judge, store = setup(tmp_path, request, first + landing + FINISH)
     ledger = compiler.compile("session-1", request, snapshot())
     found, relative, land = ledger.objectives
@@ -563,7 +601,7 @@ def test_landing_it_next_to_you_preserves_phone_identity_and_pose_dependency(tmp
     assert land.target_ref == found.subject_ref
     assert land.depends_on_objective_ids == (found.objective_id, relative.objective_id)
     assert [tuple(call[2]) for call in judge.calls if call[0] in ("relative_reference", "entity_reference")] == [
-        ("NEW_ENTITY", *SAFE), ("CURRENT_DRONE", *SAFE), ("REF:g1:c1:subject", *SAFE),
+        ("REF:g1:c1:subject", *SAFE),
     ]
     assert_audit(store, judge, ledger)
 
@@ -605,10 +643,10 @@ def test_current_state_version_cannot_hide_stale_or_invented_goal_revision(tmp_p
 
 def test_observation_it_next_to_you_keeps_phone_subject_and_drone_relation_object(tmp_path):
     request = "Find the phone; verify it next to you"
+    # relative_reference CURRENT_DRONE is decided in code; no judge call for it.
     first = objective("c1", "FIND_OBSERVE", "phone", terminal="OBSERVED")
     verification = objective("c2", "FIND_OBSERVE", "phone", relation="NEXT_TO_DRONE",
                              binding="REF:g1:c1:subject", terminal="OBSERVED")
-    verification.insert(-2, ("relative_reference", "CURRENT_DRONE"))
     compiler, judge, store = setup(tmp_path, request, first + verification + FINISH)
     ledger = compiler.compile("session-1", request, snapshot())
     found, relative = ledger.objectives
@@ -647,9 +685,11 @@ def test_follow_attached_holding_relation_verifies_existing_actor_before_followi
     assert follow.depends_on_objective_ids == (found.objective_id, verified.objective_id)
     common = [(*FAMILIES, *SAFE), (*CLASSES, *SAFE), ("NONE", "MAN", "DESIGNATED", *SAFE),
               ("NONE", "HOLDS_PHONE", "NEXT_TO_DRONE", *SAFE), ("ROOM", "CURRENT_VIEW", "REGION", *SAFE)]
+    # c1's entity_reference (NEW_ENTITY) and terminal_condition (OBSERVED) are
+    # both decided in code: no judge call for either.
     assert [tuple(call[2]) for call in judge.calls] == [
         ("NEXT_OBJECTIVE:c1", "NEXT_OBJECTIVE:c2", "DONE", *SAFE),
-        *common, ("NEW_ENTITY", *SAFE), ("OBSERVED", "VALIDATED", "RELATION_VERIFIED", "RETURN_HOME", *SAFE),
+        *common,
         ("NEXT_OBJECTIVE:c2", "DONE", *SAFE),
         *common, ("REF:g1:c1:subject", *SAFE), ("FOLLOW_BOUNDED_RETURN", *SAFE),
         ("DONE", *SAFE), ("CONSISTENT", *SAFE),
@@ -709,8 +749,7 @@ def test_explicitly_named_classes_resolve_without_per_class_jev_calls(tmp_path):
     request = "count the phones and computers in the room"
     script = [("next_objective", "NEXT_OBJECTIVE:c1"), ("goal_family", "COUNT"),
               ("target_classes", "CLASS_GROUP"),
-              ("qualifier", "NONE"), ("relation", "NONE"), ("spatial_scope", "ROOM"),
-              ("entity_reference", "NEW_ENTITY"), ("terminal_condition", "REPORTED")] + FINISH
+              ("qualifier", "NONE"), ("relation", "NONE"), ("spatial_scope", "ROOM")] + FINISH
     compiler, judge, store = setup(tmp_path, request, script)
     ledger = compiler.compile("session-1", request, snapshot())
     assert ledger.objectives[0].target_classes == ("phone", "computer")
@@ -737,8 +776,10 @@ def test_subject_pronoun_relation_refines_the_unique_prior_actor(tmp_path, noun,
     assert verified.depends_on_objective_ids == (found.objective_id,)
     assert verified.qualifier == qualifier.lower()
     assert verified.target_ref == EntityRef("g1:c2:phone", verified.objective_id, "RELATED_PHONE", None)
+    # c1's entity_reference (NEW_ENTITY) is decided in code; only the bind_target
+    # REF ask for c2 reaches the judge.
     bindings = [tuple(call[2]) for call in judge.calls if call[0] == "entity_reference"]
-    assert bindings == [("NEW_ENTITY", *SAFE), ("REF:g1:c1:subject", *SAFE)]
+    assert bindings == [("REF:g1:c1:subject", *SAFE)]
     assert_audit(store, judge, ledger)
 
 
@@ -747,7 +788,9 @@ def test_ambiguous_subject_pronoun_requires_clarification_before_new_identity(tm
     request = f"Find a person; find another person; verify {pronoun} {verb} a phone"
     script = objective("c1", "FIND_OBSERVE", "person", terminal="OBSERVED")
     script += objective("c2", "FIND_OBSERVE", "person", terminal="OBSERVED")
-    script += objective("c3", "FIND_OBSERVE", "person", relation="HOLDS_PHONE", terminal="RELATION_VERIFIED")[:-2]
+    # c3's bind_target raises AMBIGUOUS_ENTITY_REFERENCE before any entity_reference
+    # ask; only next_objective..spatial_scope are reached (drop terminal_condition).
+    script += objective("c3", "FIND_OBSERVE", "person", relation="HOLDS_PHONE", terminal="RELATION_VERIFIED")[:-1]
     compiler, judge, store = setup(tmp_path, request, script)
     ledger = compiler.compile("session-1", request, snapshot())
     assert_rejected_prefix(store, judge, ledger, script, len(script), "AMBIGUOUS_ENTITY_REFERENCE")
@@ -756,7 +799,9 @@ def test_ambiguous_subject_pronoun_requires_clarification_before_new_identity(tm
 @pytest.mark.parametrize("pronoun,verb", [("he", "holds"), ("she", "holds"), ("they", "hold")])
 def test_subject_pronoun_without_antecedent_cannot_invent_an_actor(tmp_path, pronoun, verb):
     request = f"Verify {pronoun} {verb} a phone"
-    script = objective("c1", "FIND_OBSERVE", "person", relation="HOLDS_PHONE", terminal="RELATION_VERIFIED")[:-2]
+    # bind_target raises AMBIGUOUS_ENTITY_REFERENCE (no antecedent) before any
+    # entity_reference ask; only next_objective..spatial_scope are reached.
+    script = objective("c1", "FIND_OBSERVE", "person", relation="HOLDS_PHONE", terminal="RELATION_VERIFIED")[:-1]
     compiler, judge, store = setup(tmp_path, request, script)
     ledger = compiler.compile("session-1", request, snapshot())
     assert_rejected_prefix(store, judge, ledger, script, len(script), "AMBIGUOUS_ENTITY_REFERENCE")
@@ -770,19 +815,19 @@ def test_goal_compiler_default_gate_is_the_calibrated_jev_gate():
 
 
 def test_single_option_confirmation_accepts_gate_level_probability_despite_low_scalar(tmp_path):
-    # Real model: entity_reference NEW_ENTITY at probability 0.61 with a scalar
-    # confidence below the gate. A one-label confirmation accepts on probability.
-    request = "count the phones and computers in the room"
-    confirm = {"value": "NEW_ENTITY", "confidence": 0.3,
-               "probabilities": {"NEW_ENTITY": 0.61, "CLARIFICATION_REQUIRED": 0.25, "UNSUPPORTED": 0.14}}
-    script = [("next_objective", "NEXT_OBJECTIVE:c1"), ("goal_family", "COUNT"),
-              ("target_classes", "CLASS_GROUP"),
-              ("qualifier", "NONE"), ("relation", "NONE"), ("spatial_scope", "ROOM"),
-              ("entity_reference", confirm), ("terminal_condition", "REPORTED")] + FINISH
+    # Real model: a single-option confirmation at probability 0.61 with a scalar
+    # confidence below the gate is still accepted on probability. entity_reference
+    # NEW_ENTITY no longer reaches the judge (decided in code), so this exercises
+    # the same rule through ANSWER_STATE's one-option terminal_condition (REPORTED),
+    # which is still genuinely asked.
+    request = "What is your battery?"
+    confirm = {"value": "REPORTED", "confidence": 0.3,
+               "probabilities": {"REPORTED": 0.61, "CLARIFICATION_REQUIRED": 0.25, "UNSUPPORTED": 0.14}}
+    script = objective("c1", "ANSWER_STATE", terminal=confirm) + FINISH
     compiler, judge, store = setup(tmp_path, request, script)
     ledger = compiler.compile("session-1", request, snapshot())
     assert ledger.status == GoalStatus.PENDING
-    assert ledger.objectives[0].target_classes == ("phone", "computer")
+    assert ledger.objectives[0].terminal_condition == "REPORTED"
 
 
 def test_multi_option_choice_still_needs_scalar_confidence(tmp_path):
