@@ -14,14 +14,14 @@ uv run sentinel mission-control --mode rehearsal --data-dir artifacts/my-rehears
 
 Open http://127.0.0.1:8771/console/, ask **count the computers**, inspect the proposal and explicitly approve or reject it. Text cannot authorize flight. Status questions remain available while approval waits. One host owns one session/run; use a fresh data directory for a new rehearsal. Do not run two hosts against the same session database.
 
-For a room-agent UI preview with **Jev rehearsal and Live Tello selectable**, prepare a room Live pack in this checkout and start the host with both room flags:
+The Room agent browser panel is **Live only**. Prepare a room Live pack in this checkout and start the host with both room flags:
 
 ```sh
 uv run python scripts/room_live_prepare.py --run-root runs --local-ip 192.168.10.2
 uv run python -m sentinel.ui --mode rehearsal --data-dir artifacts/room-ui-preview --port 8771 --room-live-config runs/live.pack.json --i-authorise-paid-calls
 ```
 
-Preparation reuses today's recorded CanningSt filming consent and refuses if it is absent. The pack and its run artifacts stay in this checkout. Selecting and approving Live Tello can dispatch a real flight, even though the host's survey mode is rehearsal; follow the room Live flight checklist before approval. Re-run preparation when its site assurances expire.
+Preparation reuses today's recorded CanningSt filming consent and refuses if it is absent. The pack and its run artifacts stay in this checkout. Approving a Room agent proposal can dispatch a real flight, even though the host's survey mode is rehearsal; follow the room Live flight checklist before approval. Re-run preparation when its site assurances expire. Rehearsal remains available through the service and automated tests, but is not selectable in this browser panel.
 
 In the room-agent Live setup, **Prepare next flight** runs the same offline preparation from the browser. It creates a fresh run, grant, manifest and assurances using the configured pack's run root and existing consent; it sends no drone command. The panel also shows whether local Tello UDP port 8889 is occupied. If this server retains that port after a landed flight, restart Mission Control before proposing the next Live run. Pack preparation alone does not release DJITelloPy's process-wide receiver socket.
 

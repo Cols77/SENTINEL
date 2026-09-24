@@ -3,7 +3,7 @@
 // existing Land endpoint, which acts on the room run's
 // registered flight runner. Every control carries a stable data-testid.
 import {el,button,replace} from './dom.mjs';
-import {ROOM_AGENT,SURVEY,architectureOptions,selectArchitecture,modeOptions,reviewOptions,proposalCommand,roomViewModel,safetyIdentity} from './room-agent-model.mjs';
+import {ROOM_AGENT,SURVEY,architectureOptions,selectArchitecture,reviewOptions,proposalCommand,roomViewModel,safetyIdentity} from './room-agent-model.mjs';
 import {createRoomCamera} from './room-camera.mjs';
 
 const STORAGE_KEY='sentinel:architecture';
@@ -151,12 +151,6 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
 
  // The setup form is built once (typing is never interrupted by polling);
  // only its options/disabled state and the dynamic facts are re-rendered.
- const modeSelect=el('select',{id:'room-mode','data-testid':'room-mode-select','aria-describedby':'room-mode-help'});
- const modeHelpList=el('div',{class:'room-mode-help-list'});
- const modeHelp=el('details',{id:'room-mode-help',class:'room-mode-help'},[
-  el('summary',{},['Other modes unavailable']),modeHelpList,
- ]);
- modeSelect.addEventListener('change',()=>{form.mode=modeSelect.value;render();});
  const reviewSelect=el('select',{id:'room-perception-review','data-testid':'room-perception-review'});
  reviewSelect.addEventListener('change',()=>{form.perceptionReview=reviewSelect.value;});
  const request=el('textarea',{id:'room-request','data-testid':'room-request',rows:2,placeholder:'count the phones and computers in the room'});
@@ -170,14 +164,13 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
  const prepHint=el('p',{class:'room-prep-hint'});
  const prepPanel=el('section',{class:'room-preparation','aria-label':'Next flight preparation'},[
   el('p',{class:'room-prep-eyebrow'},['NEXT FLIGHT']),
-  el('h3',{},['Prepare a fresh pack']),
-  el('p',{class:'room-prep-copy'},['Creates a new run, grant and site assurances. No drone commands are sent.']),
-  prepPack,prepPort,prepButton,prepHint,
+  el('h3',{},['Flight pack']),
+  prepPack,prepButton,prepPort,prepHint,
  ]);
  const setup=el('div',{class:'room-setup'},[
-  el('label',{for:'room-mode'},['Run mode']),modeSelect,modeHelp,
-  el('label',{for:'room-perception-review'},['Perception review (Live)']),reviewSelect,
-  el('label',{for:'room-local-ip'},['Tello local IP (Live)']),ip,
+  el('p',{class:'room-live-marker'},['LIVE · REAL TELLO']),
+  el('label',{for:'room-perception-review'},['Post-flight review']),reviewSelect,
+  el('label',{for:'room-local-ip'},['Tello local IP']),ip,
   el('label',{for:'room-request'},['Request']),request,submit,
  ]);
   const landButton=button('Emergency land',()=>void land(),{id:'room-land','data-testid':'room-land',class:'emergency-control',title:'Request a controlled landing'});
@@ -201,29 +194,16 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
  ]);
  panel.append(
    el('header',{class:'room-header'},[el('p',{class:'section-label'},['SENTINEL / ROOM AGENT · JEV ADAPTIVE']),el('div',{class:'room-safety'},[landButton])]),
-  messageLine,
-  el('div',{class:'room-grid'},[el('div',{class:'room-col room-setup-col'},[setup,prepPanel,approvalHost]),cameraHost,dynamic,logs,lists]),
-  reviewPanel,
+   messageLine,
+   prepPanel,
+   el('div',{class:'room-grid'},[el('div',{class:'room-col room-setup-col'},[setup,approvalHost]),cameraHost,dynamic,logs,lists]),
  );
- let lastModes='';
+ camera.attachReview(reviewPanel);
  let lastReviewOptions='',loadedReviewId='',reviewData=null;
 
  function render(){
   const scrollPositions=new Map([...panel.querySelectorAll('.room-log, .room-answer pre')].map(node=>[node.dataset.testid,node.scrollTop]));
   const view=roomViewModel(state);
-  const modes=modeOptions(catalogue);
-  const modesKey=JSON.stringify(modes)+form.mode;
-  if(modesKey!==lastModes){
-   lastModes=modesKey;
-   replace(modeSelect,modes.map(row=>option(row,form.mode)));
-   modeSelect.value=form.mode;
-    const unavailableModes=modes.filter(row=>row.disabled);
-    modeHelp.hidden=unavailableModes.length===0;
-    replace(modeHelpList,unavailableModes.map(row=>el('span',{class:'room-mode-unavailable'},[
-    el('strong',{},[row.value==='LIVE'?'Live Tello':row.label]),
-    ` unavailable: ${row.title||'this server is not configured for it.'}`,
-   ])));
-  }
   const choices=reviewOptions(catalogue);
   const choicesKey=JSON.stringify(choices)+form.perceptionReview;
   if(choicesKey!==lastReviewOptions){
@@ -233,15 +213,12 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
   }
   if(document.activeElement!==ip&&ip.value!==form.localIp)ip.value=form.localIp;
   if(catalogue?.default_request)request.placeholder=catalogue.default_request;
-  modeSelect.disabled=!view.canPropose;
-  reviewSelect.disabled=!view.canPropose||form.mode!=='LIVE';
+  reviewSelect.disabled=!view.canPropose;
   request.disabled=!view.canPropose;
-  ip.disabled=!view.canPropose||form.mode!=='LIVE';
+  ip.disabled=!view.canPropose;
   const prep=state?.preparation;
   const port=prep?.command_port;
-  submit.disabled=!view.canPropose||(form.mode==='LIVE'&&(
-   port?.status==='BUSY'||!prep?.pack_run_id||prep.pack_expired||prep.pack_used));
-  prepPanel.hidden=form.mode!=='LIVE'&&state?.run?.mode!=='LIVE';
+  submit.disabled=!view.canPropose||port?.status==='BUSY'||!prep?.pack_run_id||prep.pack_expired||prep.pack_used;
   prepButton.disabled=prepBusy||!prep?.can_prepare;
   prepButton.textContent=prepBusy?'Preparing…':'Prepare next flight';
   prepButton.title=prep?.reason_code??'';
@@ -251,11 +228,12 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
   const packLabel=prep?.pack_run_id?`${prep.pack_used?'Pack used':!Number.isFinite(expiry)?'Pack status unknown':expired?'Pack expired':'Pack staged'} · ${prep.pack_run_id} · assurances until ${expiryLabel}`:'No flight pack staged.';
   if(prepPack.textContent!==packLabel)prepPack.textContent=packLabel;
   prepPack.classList.toggle('is-expired',expired||Boolean(prep?.pack_used));
-  prepPort.textContent=view.running?'Tello command port is in use by the active flight. Land before preparing another run.':
-   port?.owner_is_this_server?'This server still owns Tello port 8889. Prepare will restart its receiver for the next Live run.':
-   port?.status==='BUSY'?`Another process${port.owner_pid?` (${port.owner_pid})`:''} owns Tello port 8889. Close that session before a Live run.`:
-   port?.status==='FREE'?'Tello command port 8889 is free.':'Tello command port status unavailable.';
+  prepPort.textContent=view.running?'Tello port in use by this flight. Land before preparing again.':
+   port?.owner_is_this_server?'This server owns Tello port 8889. Prepare will restart its receiver.':
+   port?.status==='BUSY'?`Tello port 8889 busy${port.owner_pid?` · process ${port.owner_pid}`:''}. Close that session before flying.`:
+   port?.status==='FREE'?'Tello port 8889 free.':'Tello port status unavailable.';
   prepPort.classList.toggle('is-busy',port?.status==='BUSY');
+  prepPort.classList.toggle('is-attention',view.running||Boolean(port?.owner_is_this_server)||port?.status==='BUSY');
   prepHint.textContent=prepBusy?'Creating a new grant, manifest and assurances…':{
    ROOM_RUN_ACTIVE:'Available after the current run or proposal ends.',
    MISSION_ACTIVE:'Available when the other Mission Control run ends.',
@@ -266,8 +244,7 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
   messageLine.textContent=message;
   camera.render(state?.run);
   const run=state?.run, review=run?.review;
-  reviewPanel.hidden=run?.perception_review!=='RECORDED_REVIEW';
-  if(!reviewPanel.hidden){
+  if(run?.perception_review==='RECORDED_REVIEW'){
    const recording=review?.recording, analysis=review?.analysis;
    const recStatus=recording?.status??'PENDING', analysisStatus=analysis?.status??'UNAVAILABLE';
    reviewStatus.textContent=`Recording: ${recStatus}${recording?.bytes?` · ${(recording.bytes/1048576).toFixed(1)} MiB`:''}. Analysis: ${analysisStatus}${analysis?.reason_code?` (${analysis.reason_code})`:''}${analysis?.detail?` · ${analysis.detail}`:''}${recording?.error?` · ${recording.error}`:''}`;
@@ -294,6 +271,10 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
    replace(reviewRows,(reviewData?.detections??[]).slice(0,100).map(row=>el('li',{},[
      `${reviewData?.timestamp_basis==='estimated_30fps'?'~':''}${Number(row.time_s).toFixed(1)} s · ${row.label} · score ${Number(row.score).toFixed(2)} · frame ${row.frame}`,
    ])));
+  }else{
+   reviewStatus.textContent=run?'Recorded review was not enabled for this flight.':'Choose recorded review before proposing a Live flight.';
+   recordingLink.hidden=true;analyzeButton.hidden=true;reviewVideo.hidden=true;reviewJson.hidden=true;
+   replace(reviewRows,[]);
   }
   const proposalId=view.proposal?.id??'';
   if(approvalHost.dataset.proposal!==proposalId){

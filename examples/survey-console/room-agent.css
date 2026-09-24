@@ -45,7 +45,7 @@
 
 .room-grid {
   display:grid;
-  grid-template-columns:minmax(280px,1fr) minmax(440px,1.45fr) minmax(310px,1.15fr);
+  grid-template-columns:minmax(245px,.9fr) minmax(360px,1.4fr) minmax(270px,1fr);
   grid-template-areas:'setup camera state' 'logs logs results';
   gap:12px; align-items:start; padding-top:12px;
 }
@@ -64,6 +64,10 @@
 .room-setup {
   display:grid; grid-template-columns:minmax(0,1fr);
   gap:5px; align-items:center;
+}
+.room-live-marker {
+  margin:0 0 4px; color:var(--status-warning);
+  font:700 12px/1.3 Mission Mono,var(--font-mono); letter-spacing:.08em;
 }
 .room-setup label { margin-top:7px; font-size:14px; color:var(--text-secondary); }
 .room-setup :is(select,input,textarea) {
@@ -91,28 +95,30 @@
 
 .room-preparation[hidden] { display:none; }
 .room-preparation {
-  margin:20px 0 0; padding:16px; border:1px solid var(--border-control);
+  display:grid; grid-template-columns:160px minmax(0,1fr) auto;
+  align-items:center; gap:3px 12px; margin:12px 0 0; padding:9px 12px;
+  border:1px solid var(--border-control);
   border-left:3px solid var(--accent-primary); border-radius:var(--radius-panel);
   background:linear-gradient(145deg,var(--surface-raised),var(--surface-panel));
 }
 .room-prep-eyebrow {
-  margin:0 0 4px; color:var(--accent-primary);
+  grid-column:1;grid-row:1;margin:0;color:var(--accent-primary);
   font:700 11px/1.2 Mission Mono,var(--font-mono); letter-spacing:.12em;
 }
-.room-col .room-preparation h3 { margin:0 0 7px; font-size:17px; }
-.room-prep-copy { margin:0 0 12px; color:var(--text-secondary); font-size:13px; line-height:1.5; }
+.room-preparation h3 { grid-column:1;grid-row:2;margin:0;font-size:17px; }
 .room-prep-pack,.room-prep-port {
-  margin:0 0 7px; padding:7px 9px; border-left:2px solid var(--accent-primary);
+  grid-column:2;min-width:0;margin:0;padding:3px 8px;border-left:2px solid var(--accent-primary);
   background:var(--surface-canvas); color:var(--text-primary);
   font:12px/1.45 Mission Mono,var(--font-mono); overflow-wrap:anywhere;
 }
+.room-prep-pack { grid-row:1; }.room-prep-port { grid-row:2; }
 .room-prep-pack.is-expired,.room-prep-port.is-busy { border-left-color:var(--status-warning); color:var(--status-warning); }
 .room-preparation button {
-  min-height:42px; margin-top:7px; padding:8px 12px;
+  grid-column:3;grid-row:1 / span 2;min-height:42px;margin:0;padding:8px 12px;
   border:1px solid var(--accent-primary); color:var(--accent-primary); font-weight:700;
 }
 .room-preparation button:disabled { opacity:.55; }
-.room-prep-hint { margin:8px 0 0; color:var(--text-secondary); font-size:12px; line-height:1.4; }
+.room-prep-hint { grid-column:1/-1;margin:2px 0 0;color:var(--text-secondary);font-size:12px;line-height:1.4; }
 .room-prep-hint:empty { display:none; }
 
 .room-camera {
@@ -129,16 +135,16 @@
   letter-spacing:.04em; text-align:center;
 }
 .room-camera-source.is-stale { border-color:var(--status-warning); color:var(--status-warning); }
-.room-camera-tabs { display:flex; flex-wrap:wrap; gap:6px; margin:2px 0 0; }
+.room-camera-tabs { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; margin:2px 0 0; }
 .room-camera-tab {
-  min-height:38px; padding:7px 12px; border:1px solid var(--border-default);
+  min-width:0; min-height:42px; padding:6px 8px; border:1px solid var(--border-default);
   color:var(--text-secondary); background:transparent; font:700 14px Mission Plex,var(--font-body);
 }
 .room-camera-tab[aria-pressed='true'] {
   border-color:var(--accent-primary); color:var(--text-on-accent); background:var(--accent-primary);
 }
 .room-camera-stage {
-  position:relative; grid-column:1; width:100%; height:clamp(260px,23vw,390px);
+  position:relative; grid-column:1; width:100%; height:clamp(220px,23vw,390px);
   overflow:hidden; display:grid; place-items:center; background:#0b1117;
   border:1px solid var(--border-default);
 }
@@ -345,10 +351,10 @@
   border-color:var(--status-warning); color:var(--status-warning);
 }
 
-@media (max-width:1100px) {
+@media (max-width:940px) {
   .room-grid {
     grid-template-columns:repeat(2,minmax(0,1fr));
-    grid-template-areas:'state state' 'camera camera' 'setup results' 'logs logs';
+    grid-template-areas:'camera state' 'setup results' 'logs logs';
   }
 }
 @media (max-width:680px) {
@@ -358,7 +364,7 @@
   .room-safety { width:100%; justify-content:stretch; }
   .room-safety button { flex:1 1 8rem; min-width:0; }
   .room-safety #room-land { min-width:0; }
-  .room-grid { grid-template-columns:minmax(0,1fr); grid-template-areas:'state' 'camera' 'setup' 'results' 'logs'; gap:12px; }
+  .room-grid { grid-template-columns:minmax(0,1fr); grid-template-areas:'camera' 'state' 'setup' 'results' 'logs'; gap:12px; }
   .room-col { padding:14px; }
   .room-camera { grid-template-columns:minmax(0,1fr); }
   .room-camera-stage { height:clamp(220px,60vw,340px); }
@@ -366,16 +372,23 @@
   .room-camera-note { padding:0 0 0 10px; }
   .room-camera-heading h3 { font-size:20px; }
   .room-camera-source { max-width:45%; }
+  .room-preparation { grid-template-columns:minmax(0,1fr);gap:6px; }
+  .room-preparation > * { grid-column:1 !important;grid-row:auto !important; }
+  .room-preparation button { width:100%; }
+  .room-prep-port:not(.is-attention) { display:none; }
+  .room-facts { gap:4px 8px; }
+  .room-answer { margin-top:10px;padding:12px; }
 }
 
 .room-recorded-review {
-  margin-top:16px; padding:18px;
+  grid-column:1; min-width:0; margin:0; padding:12px;
   border:1px solid var(--border-control); border-radius:var(--radius-panel);
-  background:var(--surface-panel);
+  background:var(--surface-canvas);
 }
 .room-recorded-review[hidden] { display:none; }
 .room-recorded-review h3 { margin:0 0 8px; }
 .room-recorded-review a, .room-recorded-review button { margin-right:14px; }
-.room-recorded-review video { display:block; width:min(100%,960px); margin:14px 0; }
+.room-recorded-review video { display:block; width:100%; max-height:390px; margin:12px 0; background:#0b1117; }
 .room-recorded-review video[hidden] { display:none; }
 .room-recorded-review .room-log { max-height:220px; overflow:auto; }
+@media(max-width:680px){.room-camera-tab{font-size:12px;padding:6px 4px;line-height:1.2}}

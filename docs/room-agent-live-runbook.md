@@ -771,9 +771,9 @@ run.
 
 ## Optional recorded perception review
 
-In Mission Control, choose **Live** and then **Standard + recorded post flight review** in the separate Perception review dropdown before proposing the run. The live OpenRouter detector and saved PNG captures continue to drive the room mission. The Tello receiver also saves its raw stream as `flight.h264` in that run's directory, with `recording.json` containing its byte count, SHA-256 and recording status. The current run panel offers a raw recording download after the receiver closes.
+In Mission Control's Live-only Room agent panel, choose **Standard + recorded post flight review** before proposing the run. The live OpenRouter detector and saved PNG captures continue to drive the room mission. The Tello receiver also saves its raw stream as `flight.h264` in that run's directory, with `recording.json` containing its byte count, SHA-256 and recording status. The **Recorded review** camera tab offers a raw recording download after the receiver closes.
 
-After landing, click **Analyze recording** to run Dzivha's local Grounding DINO over sampled frames. The resulting `review/annotated.mp4`, `review/review.json` and `review/analysis.log` stay in the run directory. The panel shows annotated playback and a timestamped detection list; this visual review does not change the flight's decisions or counts and makes no yaw-scan bearing or unique-object claim.
+After landing, open **Recorded review** and click **Analyze recording** to run Dzivha's local Grounding DINO over sampled frames. The resulting `review/annotated.mp4`, `review/review.json` and `review/analysis.log` stay in the run directory. That tab shows annotated playback and a timestamped detection list; this visual review does not change the flight's decisions or counts and makes no yaw-scan bearing or unique-object claim.
 
 Stage the optional model before the flight from `fixtures/perception`:
 
