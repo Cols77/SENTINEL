@@ -377,6 +377,17 @@ def test_a_drifting_or_failed_height_reading_keeps_the_dead_reckoned_height(tmp_
     assert stack.refresh()[0].position.z_cm == first
 
 
+def test_a_consistent_single_tag_burst_reanchors_instead_of_demanding_recovery(tmp_path):
+    bursts = Bursts(reports(101, 99, 91.0), reports(108, 99, 92.0, tags=(1,)), reports(300, 99, 92.0, tags=(1,)))
+    stack, *_ = build_stack(tmp_path, bursts=bursts)
+    assert stack.refresh()[0].state is LocalizationState.ANCHORED
+    pose = stack.refresh()[0]
+    assert pose.state is LocalizationState.ANCHORED and pose.position.x_cm == 108
+    assert pose.source == "mapped_single_tag"
+    pose = stack.refresh()[0]  # a far single-tag view is ignored: the tracker coasts
+    assert pose.state is LocalizationState.COASTING and pose.position.x_cm == 108
+
+
 def test_refresh_without_a_reliable_burst_never_invents_a_pose(tmp_path):
     stack, _, tracker, *_ = build_stack(tmp_path, bursts=Bursts(reports(n=3)))
     pose, _ = stack.refresh()

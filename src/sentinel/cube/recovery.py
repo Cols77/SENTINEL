@@ -500,14 +500,13 @@ class RecoveryController:
                               for axis in ("x_cm", "y_cm", "z_cm")))
         heading = math.degrees(math.atan2(sum(math.sin(math.radians(fix.heading_deg)) for fix in fixes),
                                          sum(math.cos(math.radians(fix.heading_deg)) for fix in fixes))) % 360
-        # Only fresh, mapped, distinct and internally coherent evidence can
-        # contradict the motion history. An isolated noisy report cannot latch LOST.
-        if (math.dist((pose.position.x_cm, pose.position.y_cm), (position.x_cm, position.y_cm)) > profile.max_fix_jump_cm
-                or heading_distance(heading, action.heading_deg) > profile.max_fix_heading_jump_deg
-                or abs(position.z_cm - pose.position.z_cm) > profile.max_height_error_cm):
-            self.tracker.mark_lost()
-            self._finished = True
-            return reject("contradictory_burst")
+        # Fresh, mapped, distinct and internally coherent two-tag evidence is
+        # the best pose there is: when it contradicts the motion history's
+        # position, the history was wrong, so the burst re-anchors. A heading
+        # far from the one this action rotated to rejects only this action
+        # (the scan tries its next heading); it never latches LOST.
+        if heading_distance(heading, action.heading_deg) > profile.max_fix_heading_jump_deg:
+            return reject("contradictory_heading")
         if any(not any(contains_disk(volume, fix.position, fix.xy_uncertainty_cm)
                        for volume in environment.rotation_clearance_volumes) for fix in fixes):
             return reject("uncontained_report")

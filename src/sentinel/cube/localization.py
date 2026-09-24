@@ -222,11 +222,40 @@ class LocalizationTracker:
                           (fix.position.x_cm, fix.position.y_cm)) > profile.max_fix_jump_cm
                 or abs(fix.position.z_cm - health.position.z_cm) > profile.max_height_error_cm
                 or heading_distance(health.heading_deg, fix.heading_deg) > profile.max_fix_heading_jump_deg):
-            self._health = replace(health, state=LocalizationState.LOST)
+            # A fix that contradicts the estimate asks for a stationary
+            # recovery (a fresh, coherent two-tag burst), not a landing: the
+            # recovery decides which pose is true.
+            self._health = replace(health, state=LocalizationState.RECOVERY_REQUIRED)
             return self._health
         self._health = self._anchored(fix, now, invalidate=self._initialized)
         self._initialized = True
         return self._health
+
+    def accept_consistent_fix(self, fix: PoseFix, *, max_xy_cm: float, max_heading_deg: float,
+                              min_xy_uncertainty_cm: float, min_heading_uncertainty_deg: float) -> bool:
+        """Re-anchor on a single-tag fix only when it agrees with the estimate.
+
+        A single tag cannot rule out a pose flip, so it never anchors from
+        scratch, never moves the estimate far, and never changes a recovery
+        or LOST state. A fix that disagrees is ignored (no state change).
+        Returns whether the fix was accepted.
+        """
+        now = self.clock()
+        health = self._advance(self._health, now)
+        profile = self.profile
+        if (profile is None or not self._initialized or not valid_fix(fix) or not fix.tag_ids
+                or health.state not in {LocalizationState.ANCHORED, LocalizationState.COASTING}
+                or fix.measured_at > now or now - fix.measured_at > profile.max_fix_age_on_arrival_s
+                or fix.measured_at < health.measured_at
+                or math.dist((health.position.x_cm, health.position.y_cm),
+                             (fix.position.x_cm, fix.position.y_cm)) > max_xy_cm
+                or abs(fix.position.z_cm - health.position.z_cm) > profile.max_height_error_cm
+                or heading_distance(health.heading_deg, fix.heading_deg) > max_heading_deg):
+            return False
+        widened = replace(fix, xy_uncertainty_cm=max(fix.xy_uncertainty_cm, min_xy_uncertainty_cm),
+                          heading_uncertainty_deg=max(fix.heading_uncertainty_deg, min_heading_uncertainty_deg))
+        self._health = self._anchored(widened, now, invalidate=True)
+        return True
 
     def _anchored(self, fix: PoseFix, now: float, *, invalidate: bool) -> PoseHealth:
         health = PoseHealth(LocalizationState.ANCHORED, fix.position, fix.heading_deg % 360,

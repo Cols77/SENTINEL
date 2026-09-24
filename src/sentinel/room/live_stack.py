@@ -82,6 +82,12 @@ REFRESH_BURST_S = 1.5
 #: not the declared pad mark: the flight envelope (validated on the home)
 #: bounds it. The first live run measured home 43 cm from the mark.
 HOME_TOLERANCE_CM = 150.0
+#: A single-tag fix re-anchors only within these of the current estimate,
+#: and carries at least these uncertainties (one tag cannot rule out a flip).
+SINGLE_TAG_MAX_XY_CM = 30.0
+SINGLE_TAG_MAX_HEADING_DEG = 10.0
+SINGLE_TAG_XY_UNCERTAINTY_CM = 15.0
+SINGLE_TAG_HEADING_UNCERTAINTY_DEG = 5.0
 #: Airborne home bursts: one retry when the first saw no two-tag view.
 HOME_BURST_ATTEMPTS = 2
 #: A height reading further than this (or than the drift profile's
@@ -406,10 +412,17 @@ class _TagFix:
     xy_uncertainty_cm: float
     heading_uncertainty_deg: float
     tag_ids: tuple[int, ...]
+    #: Every mapped tag seen in the burst, including single-tag reports.
+    seen_tag_ids: tuple[int, ...] = ()
 
     def pose_fix(self, z_cm: int) -> PoseFix:
         return PoseFix(Position(self.x_cm, self.y_cm, z_cm), self.heading_deg, self.measured_at,
                        self.xy_uncertainty_cm, self.heading_uncertainty_deg, self.tag_ids)
+
+    def single_tag_fix(self, z_cm: int) -> PoseFix:
+        return PoseFix(Position(self.x_cm, self.y_cm, z_cm), self.heading_deg, self.measured_at,
+                       self.xy_uncertainty_cm, self.heading_uncertainty_deg, self.seen_tag_ids,
+                       source="mapped_single_tag")
 
 
 # ---------------------------------------------------------------------------
@@ -521,9 +534,10 @@ class _TelloStack:
         # joint-tag evidence; tag_ids is the union over those reports alone.
         joint_reports = [report for report in burst if len({obs.tag_id for obs in report.tag_observations}) >= 2]
         tag_ids = tuple(sorted({obs.tag_id for report in joint_reports for obs in report.tag_observations}))
+        seen = tuple(sorted({obs.tag_id for report in burst for obs in report.tag_observations}))
         return _TagFix(round(result.x_units * CM_PER_UNIT), round(result.y_units * CM_PER_UNIT),
                        result.heading_deg, measured_at, result.spread_p95_cm, deltas[int(0.95 * (len(deltas) - 1))],
-                       tag_ids)
+                       tag_ids, seen)
 
     @staticmethod
     def _within(upper_bound_s: float) -> float:
@@ -593,7 +607,17 @@ class _TelloStack:
             # Climb first, so the height check compares against the airborne home.
             self._propagate_takeoff_climb()
             z_cm = self._height_cm()
-            self.tracker.accept_fix(fix.pose_fix(z_cm))
+            if len(fix.tag_ids) >= 2 or not self.tracker.initialized:
+                self.tracker.accept_fix(fix.pose_fix(z_cm))
+            elif not self.tracker.accept_consistent_fix(
+                    fix.single_tag_fix(z_cm), max_xy_cm=SINGLE_TAG_MAX_XY_CM,
+                    max_heading_deg=SINGLE_TAG_MAX_HEADING_DEG,
+                    min_xy_uncertainty_cm=SINGLE_TAG_XY_UNCERTAINTY_CM,
+                    min_heading_uncertainty_deg=SINGLE_TAG_HEADING_UNCERTAINTY_DEG):
+                # A single-tag view that disagrees is not evidence either way:
+                # the tracker coasts (it does not demand recovery).
+                self.tracker.note_camera(self.clock(), estimator_failed=True,
+                                         intentional_look_away=self._looking_away)
         return self.tracker.health, EnergySample(self._battery(), self.clock())
 
     def _battery(self) -> int:

@@ -105,15 +105,26 @@ def test_repeated_estimator_failures_require_recovery_but_lookaway_is_not_failur
 
 
 @pytest.mark.parametrize("changes", [{"position": Position(500, 100, 100)}, {"heading_deg": 170}])
-def test_contradictory_fix_loses_integrity_and_cannot_be_cleared_by_ordinary_fix(changes):
+def test_contradictory_fix_requires_recovery_and_keeps_the_estimate(changes):
     value, clock = tracker()
-    assert value.accept_fix(fix(clock, **changes)).state == LocalizationState.LOST
-    assert value.accept_fix(fix(clock)).state == LocalizationState.LOST
-    for cmd in (command(direction="right", distance_cm=20), command("ROTATE", degrees=30, direction="cw")):
-        assert not value.forecast(plan(cmd), clock.now).admitted
-        with pytest.raises(ValueError, match="LOST"):
-            value.note_command(cmd, clock.now)
+    before = value.health
+    health = value.accept_fix(fix(clock, **changes))
+    assert health.state == LocalizationState.RECOVERY_REQUIRED
+    assert (health.position, health.heading_deg) == (before.position, before.heading_deg)
+    assert not value.forecast(plan(command(direction="right", distance_cm=20)), clock.now).admitted
 
+
+def test_a_single_tag_fix_reanchors_only_when_it_agrees_with_the_estimate():
+    value, clock = tracker()
+    near = replace(fix(clock, position=Position(110, 100, 100)), tag_ids=(1,), source="mapped_single_tag")
+    assert value.accept_consistent_fix(near, max_xy_cm=30, max_heading_deg=10,
+                                       min_xy_uncertainty_cm=15, min_heading_uncertainty_deg=5)
+    assert value.health.state == LocalizationState.ANCHORED and value.health.position.x_cm == 110
+    assert value.health.xy_uncertainty_cm >= 15
+    far = replace(fix(clock, position=Position(200, 100, 100)), tag_ids=(1,), source="mapped_single_tag")
+    assert not value.accept_consistent_fix(far, max_xy_cm=30, max_heading_deg=10,
+                                           min_xy_uncertainty_cm=15, min_heading_uncertainty_deg=5)
+    assert value.health.position.x_cm == 110 and value.health.state != LocalizationState.LOST
 
 @pytest.mark.parametrize("drift", [None, profile(validated=False), profile(evidence_refs=())])
 def test_missing_validated_profile_disables_real_tag_free_execution(drift):
