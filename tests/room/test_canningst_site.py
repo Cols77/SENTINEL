@@ -43,16 +43,16 @@ def canningst_site():
     return parse_room_site(json.loads(SITE_PATH.read_text(encoding="utf-8")))
 
 
-def test_canningst_commanded_flight_starts_at_50_cm():
+def test_canningst_commanded_flight_starts_at_floor():
     site = canningst_site()
     volumes = {volume.volume_id: volume for volume in site.free_space_volumes}
-    assert volumes["flight"].z_interval_cm == (50, 180)
-    assert volumes["observation"].z_interval_cm == (50, 140)
+    assert volumes["flight"].z_interval_cm == (0, 180)
+    assert volumes["observation"].z_interval_cm == (0, 140)
 
     envelope = live_stack.site_envelope(site)
-    assert envelope.contains(Position(250, 190, 50))
+    assert envelope.contains(Position(250, 190, 0))
     with pytest.raises(EnvelopeViolation):
-        envelope.validate_position(Position(250, 190, 49))
+        envelope.validate_position(Position(250, 190, -1))
 
 
 def lf_sha256(path: Path) -> str:
