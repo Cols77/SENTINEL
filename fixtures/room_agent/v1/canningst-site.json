@@ -12,12 +12,12 @@
     {
       "volume_id": "flight",
       "polygon_xy_cm": [[160, 120], [340, 120], [340, 300], [160, 300]],
-      "z_interval_cm": [30, 180]
+      "z_interval_cm": [50, 180]
     },
     {
       "volume_id": "observation",
       "polygon_xy_cm": [[200, 160], [300, 160], [300, 300], [200, 300]],
-      "z_interval_cm": [30, 140]
+      "z_interval_cm": [50, 140]
     }
   ],
   "forbidden_volumes": [],

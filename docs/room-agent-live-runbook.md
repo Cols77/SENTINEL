@@ -337,7 +337,7 @@ stack):
 - the three regions stand **20 cm apart at the takeoff height**: left
   (230, 183), center (250, 183), right (270, 183), z 100 cm. The site's
   semantic envelope is the `observation` volume (x 220-280, y 160-300,
-  z 60-140) inside the cube; the runner also refuses any commanded position
+  z 50-140) inside the cube; the runner also refuses any commanded position
   outside it;
 - at 90 % the count mission observes **all three** (frame captured,
   detector run, detections grounded on the demo surface), answers the count,

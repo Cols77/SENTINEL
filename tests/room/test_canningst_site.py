@@ -22,6 +22,8 @@ from sentinel.cube.checkpoint import CommandLimits
 from sentinel.cube.energy import ExecutionMode, ReserveGuard
 from sentinel.cube.localization import LocalizationState, LocalizationTracker
 from sentinel.cube.step_executor import ExecutorState
+from sentinel.envelope import EnvelopeViolation
+from sentinel.models import Position
 from sentinel.room import live_stack
 from sentinel.room.models import CapabilityProfile
 from sentinel.room.semantic import resolve_pose_id
@@ -39,6 +41,18 @@ TAG_MAP_PATH = ROOT / "docs" / "wp5-flight3-map.json"
 
 def canningst_site():
     return parse_room_site(json.loads(SITE_PATH.read_text(encoding="utf-8")))
+
+
+def test_canningst_commanded_flight_starts_at_50_cm():
+    site = canningst_site()
+    volumes = {volume.volume_id: volume for volume in site.free_space_volumes}
+    assert volumes["flight"].z_interval_cm == (50, 180)
+    assert volumes["observation"].z_interval_cm == (50, 140)
+
+    envelope = live_stack.site_envelope(site)
+    assert envelope.contains(Position(250, 190, 50))
+    with pytest.raises(EnvelopeViolation):
+        envelope.validate_position(Position(250, 190, 49))
 
 
 def lf_sha256(path: Path) -> str:
