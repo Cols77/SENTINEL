@@ -358,7 +358,7 @@ class ReserveGuard:
 
     def _cost(self, seconds: Decimal) -> int:
         if self.disable_predictive_guard:
-            return self.profile.telemetry_allowance_pct
+            return 0
         value = self._observed_upper * seconds + Decimal(self.profile.telemetry_allowance_pct)
         return int(value.to_integral_value(rounding=ROUND_CEILING))
 
@@ -410,7 +410,12 @@ class ReserveGuard:
         termination_cost = self._cost(termination_seconds)
         valid_sample = bound_sample and self._sample_is_current(current, self._now())
         can_terminate = usable_battery - termination_cost >= self.profile.landing_floor_pct
-        if not valid_sample:
+        if self.disable_predictive_guard:
+            # Live demo: the Tello's battery reading is too unstable to gate
+            # on. No floor, no projected cost, no telemetry-validity landing;
+            # the aircraft's own firmware low-battery landing still applies.
+            decision = ReserveDecision.RETURN_NOW if self._return_latched else ReserveDecision.CONTINUE
+        elif not valid_sample:
             decision = ReserveDecision.LAND_CONTINGENCY
         elif self._return_latched:
             decision = ReserveDecision.RETURN_NOW if can_terminate else ReserveDecision.LAND_CONTINGENCY

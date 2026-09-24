@@ -422,6 +422,7 @@ class _TelloStack:
         self._burst_lock = threading.Lock()
         self._climb_applied = False
         self._looking_away = False
+        self._last_battery: int | None = None
         self.executor: StepExecutor | None = None
         #: Set when the session's supervisor gets a recovery adapter (mapped
         #: tag headings exist): refresh then leaves RECOVERY_REQUIRED to it.
@@ -543,8 +544,22 @@ class _TelloStack:
             z_cm = self._height_cm()
             self._propagate_takeoff_climb()
             self.tracker.accept_fix(fix.pose_fix(z_cm))
-        battery = self.runner._call(self.client.battery)
-        return self.tracker.health, EnergySample(battery, self.clock())
+        return self.tracker.health, EnergySample(self._battery(), self.clock())
+
+    def _battery(self) -> int:
+        """The Tello's battery reading, never a reason to abort a flight.
+
+        The reading is unstable (it drops, jumps back and sometimes fails);
+        a failed or out-of-range read reuses the last good value (0 before
+        any). Battery is displayed and recorded, not gated on.
+        """
+        try:
+            value = self.runner._call(self.client.battery)
+        except Exception:
+            value = None
+        if type(value) is int and 0 <= value <= 100:
+            self._last_battery = value
+        return self._last_battery if self._last_battery is not None else 0
 
     def recovery_burst(self, action) -> tuple[PoseReport, ...]:
         """One stationary tag burst as ``PoseReport``s for the recovery policy.
@@ -633,7 +648,7 @@ class _TelloStack:
         if kind == "READ_TELEMETRY":
             if args.get("phase") == "vertical":
                 return HeightTelemetry(self._height_cm())
-            return Telemetry(runner._call(client.battery), round(runner.envelope.position.z_cm))
+            return Telemetry(self._battery(), round(runner.envelope.position.z_cm))
         if kind == "SETTLE":
             cancellation.wait(self._within(command.upper_bound_s))
             return CommandOutcome()

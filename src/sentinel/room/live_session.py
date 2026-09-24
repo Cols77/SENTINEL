@@ -367,7 +367,7 @@ def run_count_return(
 
 def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, calibration_profiles,
              flight_stack_factory, judge, detector, assurances, request_text, frames_dir, clock, wall_clock,
-             landing_upper_bound_s, disable_battery_guard):
+             landing_upper_bound_s, disable_battery_guard=False):
     """Everything up to (not including) takeoff; returns an outcome only when
     the session ends on the ground (a goal ledger that is not PENDING)."""
     session_id = manifest.run_id

@@ -43,8 +43,8 @@ def test_it_connects_takes_off_hovers_about_three_seconds_and_lands():
 
 def test_a_low_battery_refuses_before_takeoff():
     tello, client = fake_client(battery=20)
-    code = room_takeoff_check.main(["--execute"], build_client=lambda: client, sleep=lambda s: None,
-                                   arm_emergency=lambda stop: None)
+    code = room_takeoff_check.main(["--execute", "--minimum-battery", "40"], build_client=lambda: client,
+                                   sleep=lambda s: None, arm_emergency=lambda stop: None)
     assert code == 2 and sdk_sequence(tello.sent) == ["command"]
 
 

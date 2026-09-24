@@ -360,6 +360,13 @@ def test_refresh_anchors_the_tracker_from_a_tag_burst_and_reads_the_battery(tmp_
     assert sent_motor_commands(tello.sent) == []
 
 
+def test_an_unusable_battery_read_keeps_the_last_reading_instead_of_aborting(tmp_path):
+    stack, tello, *_ = build_stack(tmp_path, bursts=Bursts(reports(101, 99, 91.0)))
+    assert stack.refresh()[1].battery_pct == 87
+    tello.battery = 150
+    assert stack.refresh()[1].battery_pct == 87
+
+
 def test_refresh_without_a_reliable_burst_never_invents_a_pose(tmp_path):
     stack, _, tracker, *_ = build_stack(tmp_path, bursts=Bursts(reports(n=3)))
     pose, _ = stack.refresh()

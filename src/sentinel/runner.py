@@ -316,13 +316,16 @@ class FlightTestRunner:
 
         self._emit("preflight", "validating battery telemetry")
         battery = self._call(self.client.battery)
-        if (
+        if self.minimum_battery <= 0:
+            # Battery gating disabled (Live demo): report the reading, never refuse on it.
+            self._emit("preflight", f"battery reads {battery!r} (not gated)")
+        elif (
             isinstance(battery, bool)
             or not isinstance(battery, int)
             or not 0 <= battery <= 100
         ):
             raise RuntimeError(f"invalid battery telemetry: {battery!r}")
-        if battery < self.minimum_battery:
+        elif battery < self.minimum_battery:
             if self.video_only:
                 self._emit(
                     "preflight",

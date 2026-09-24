@@ -509,7 +509,8 @@ class SafetySupervisor:
             return result("LAND_CONTINGENCY", "SITE_OR_CAPABILITY_INVALID")
         guard = copy(self.reserve)
         guard.clock = lambda: now
-        if not guard.ingest_sample(request.energy_sample) or not guard._sample_is_current(request.energy_sample, now):
+        sample_ok = guard.ingest_sample(request.energy_sample) and guard._sample_is_current(request.energy_sample, now)
+        if not sample_ok and not guard.disable_predictive_guard:
             return result("LAND_CONTINGENCY", "TELEMETRY_INVALID", ContingencyTrigger.RETURN_ENERGY_UNAVAILABLE)
         prerequisites_valid = True
         commands = request.checkpoint.commands if request.checkpoint else ()

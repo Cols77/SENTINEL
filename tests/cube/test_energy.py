@@ -426,3 +426,17 @@ def test_dry_run_can_replay_scripted_battery_and_motor_time_sequences() -> None:
     assert [(reading.battery_percent, reading.flight_time_s) for reading in readings] == [
         (25, 10), (24, 15), (21, 20),
     ]
+
+
+def test_a_disabled_battery_guard_continues_below_the_floor_and_on_stale_telemetry() -> None:
+    guard = ReserveGuard(_profile(landing_floor_pct=20), clock=lambda: 100.0, disable_predictive_guard=True)
+    common = dict(next_plan=_plan("next", 60), recovery_plan=None, provider_wait_s=10.0,
+                  termination_plan=_plan("home-and-land", 30))
+
+    low = guard.assess(current=_sample(5, 99.0), **common)
+    stale = guard.assess(current=_sample(5, 1.0), **common)
+
+    assert low.decision is ReserveDecision.CONTINUE and low.action_cost_pct == 0
+    assert stale.decision is ReserveDecision.CONTINUE
+    guard.latch_return(low)
+    assert guard.assess(current=_sample(4, 100.0), **common).decision is ReserveDecision.RETURN_NOW

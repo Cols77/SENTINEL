@@ -621,7 +621,8 @@ def _cmd_live(
         if client_factory is None:
             client_factory = live_stack.TelloFlightStackFactory(
                 link=link, tag_map=tag_map, run_id=manifest.run_id, run_dir=run.root,
-                max_duration_s=manifest.max_duration_s)
+                max_duration_s=manifest.max_duration_s,
+                minimum_battery=0 if args.disable_battery_guard else 40)
         # Q1: arm the operator's motor-stop hotkey for the whole flight, from
         # stack construction until landing/close (stopped in the finally
         # below). See _ArmedFlightStackFactory.

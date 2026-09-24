@@ -31,12 +31,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-ip", default=None,
                         help="the laptop's address on the Tello Wi-Fi (default: automatic selection)")
     parser.add_argument("--hover-s", type=float, default=3.0, help=f"hover time, at most {MAX_HOVER_S:.0f} s")
-    parser.add_argument("--minimum-battery", type=int, default=40)
+    parser.add_argument("--minimum-battery", type=int, default=0)
     return parser
 
 
 def run_check(*, build_client: Callable[[], object] | None = None, local_ip: str | None = None,
-              hover_s: float = 3.0, minimum_battery: int = 40, sleep: Callable[[float], None] = time.sleep,
+              hover_s: float = 3.0, minimum_battery: int = 0, sleep: Callable[[float], None] = time.sleep,
               arm_emergency: Callable[[Callable[[], object]], object] | None = None,
               out=sys.stdout) -> int:
     from sentinel.room.live_stack import TelloLink
