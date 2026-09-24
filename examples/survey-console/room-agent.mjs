@@ -44,16 +44,21 @@ function decisionList(decisions){
     el('strong',{},[d.label||'No usable choice']),
     el('span',{class:'room-decision-result'},[result.replaceAll('_',' ')]),
    ]),
-   el('p',{class:'room-decision-reason'},[d.reason||'No reason recorded.']),
    el('p',{class:'room-decision-meta'},[d.refused?`Refused · ${d.refused}`:'Jev selected this action',odds?` · ${odds}${mass}`:'']),
+   el('details',{class:'room-decision-detail'},[
+    el('summary',{},['Why this step']),
+    el('p',{class:'room-decision-reason'},[d.reason||'No reason recorded.']),
+   ]),
   ]);
  }):[el('li',{class:'meta'},['No Jev turn yet.'])];
  return el('ol',{'data-testid':'room-decision-log',class:'room-log room-decision-list','aria-label':'Jev decisions'},rows);
 }
 
 function reanchorList(steps){
- return el('ol',{'data-testid':'room-reanchor-log',class:'room-log room-reanchor-list'},steps.length
-  ?steps.map(row=>el('li',{'data-kind':row.kind,class:row.kind==='TAG_BURST'&&row.text.includes('no tags in view')?'is-tagless':''},[
+ const recoveryKinds=new Set(['LOCALIZATION','RECOVERY','YAW_ROTATION','TAG_BURST','REANCHOR_ACCEPTED','EXPECTED_REANCHOR','CONTINGENCY','RETURN']);
+ const recovery=steps.filter(row=>recoveryKinds.has(row.kind));
+ return el('ol',{'data-testid':'room-reanchor-log',class:'room-log room-reanchor-list'},recovery.length
+  ?recovery.map(row=>el('li',{'data-kind':row.kind,class:row.kind==='TAG_BURST'&&row.text.includes('no tags in view')?'is-tagless':''},[
     el('span',{class:'room-reanchor-kind'},[row.kind.replaceAll('_',' ')]),
     el('span',{class:'room-reanchor-text'},[row.text]),
    ]))

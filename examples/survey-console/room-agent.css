@@ -252,6 +252,10 @@
 .room-decision-reason { margin:8px 0 0; color:var(--text-primary); font-size:14px; line-height:1.45; }
 .room-decision-meta { margin:6px 0 0; color:var(--text-secondary); font:12px/1.4 Mission Mono,var(--font-mono); }
 .is-refused .room-decision-meta { color:var(--status-emergency); }
+.room-decision-detail { margin-top:7px; color:var(--text-secondary); font-size:13px; }
+.room-decision-detail summary { cursor:pointer; width:max-content; max-width:100%; text-decoration:underline; text-underline-offset:3px; }
+.room-decision-detail summary:focus-visible { outline:2px solid var(--focus-color); outline-offset:3px; }
+.room-decision-detail[open] { padding-top:4px; border-top:1px solid var(--border-default); }
 .room-reanchor-list { max-height:20rem; padding-left:12px; border-left:1px solid var(--border-control); }
 .room-reanchor-list li {
   position:relative; display:grid; gap:3px; margin:0 0 7px 8px; padding:7px 10px;
