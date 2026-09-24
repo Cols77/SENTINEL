@@ -37,7 +37,7 @@ from typing import Callable, Mapping
 from sentinel.cube.checkpoint import CommandOutcome, HomeDefinition, PlannedCommand
 from sentinel.cube.energy import EnergySample
 from sentinel.cube.localization import LocalizationState, PoseFix
-from sentinel.cube.recovery import PoseReport
+from sentinel.cube.recovery import SINGLE_TAG_MAX_HEADING_DEG, SINGLE_TAG_MAX_XY_CM, SINGLE_TAG_SOURCE, PoseReport
 from sentinel.cube.mission import BURST_MAX_S, BURST_TARGET_REPORTS, CM_PER_UNIT, SETTLE_S, _StreamHeld
 from sentinel.cube.site import MAX_LEG_CM
 from sentinel.cube.step_executor import HeightTelemetry, HomeState, StepExecutor
@@ -86,8 +86,6 @@ REFRESH_BURST_S = 1.5
 HOME_TOLERANCE_CM = 150.0
 #: A single-tag fix re-anchors only within these of the current estimate,
 #: and carries at least these uncertainties (one tag cannot rule out a flip).
-SINGLE_TAG_MAX_XY_CM = 30.0
-SINGLE_TAG_MAX_HEADING_DEG = 10.0
 SINGLE_TAG_XY_UNCERTAINTY_CM = 15.0
 SINGLE_TAG_HEADING_UNCERTAINTY_DEG = 5.0
 #: Airborne home bursts: one retry when the first saw no two-tag view.
@@ -612,7 +610,12 @@ class _TelloStack:
             # the flight was refused as exhausted and landed in place.
             pass
         elif fix is None:
-            self.tracker.note_camera(self.clock(), estimator_failed=True,
+            # A tagless burst is not a failure: the tracker coasts and its
+            # uncertainty keeps growing with time and motion. Positioning is
+            # demanded where it matters -- the supervisor admits a translation
+            # (a new zone) only within the forecast uncertainty limit, and
+            # recovers first otherwise; camera/fix age limits still apply.
+            self.tracker.note_camera(self.clock(), estimator_failed=False,
                                      intentional_look_away=self._looking_away)
         else:
             # Climb first, so the height check compares against the airborne home.
@@ -627,7 +630,7 @@ class _TelloStack:
                     min_heading_uncertainty_deg=SINGLE_TAG_HEADING_UNCERTAINTY_DEG):
                 # A single-tag view that disagrees is not evidence either way:
                 # the tracker coasts (it does not demand recovery).
-                self.tracker.note_camera(self.clock(), estimator_failed=True,
+                self.tracker.note_camera(self.clock(), estimator_failed=False,
                                          intentional_look_away=self._looking_away)
         return self.tracker.health, EnergySample(self._battery(), self.clock())
 
@@ -664,16 +667,26 @@ class _TelloStack:
             return ()
         joint = [report for report in burst if report.heading_deg is not None
                  and len({obs.tag_id for obs in report.tag_observations}) >= 2]
-        if not joint:
+        # No joint view: single-tag reports, marked as such, which the recovery
+        # policy accepts only when they agree with the current estimate.
+        single = not joint
+        reports = joint or [report for report in burst if report.heading_deg is not None
+                            and len({obs.tag_id for obs in report.tag_observations}) == 1]
+        if not reports:
             return ()
-        deltas = sorted(abs(heading_delta_deg(report.heading_deg, result.heading_deg)) for report in joint)
+        deltas = sorted(abs(heading_delta_deg(report.heading_deg, result.heading_deg)) for report in reports)
         heading_uncertainty = deltas[int(0.95 * (len(deltas) - 1))]
+        xy_uncertainty = result.spread_p95_cm
+        if single:
+            heading_uncertainty = max(heading_uncertainty, SINGLE_TAG_HEADING_UNCERTAINTY_DEG)
+            xy_uncertainty = max(xy_uncertainty, SINGLE_TAG_XY_UNCERTAINTY_CM)
         z_cm = self._passive_height_cm()
         measured_at = self.clock()
         return tuple(PoseReport(str(report.report_id), PoseFix(
             Position(round(report.point[0] * CM_PER_UNIT), round(report.point[1] * CM_PER_UNIT), z_cm),
-            report.heading_deg % 360, measured_at, result.spread_p95_cm, heading_uncertainty,
-            tuple(sorted({obs.tag_id for obs in report.tag_observations})))) for report in joint)
+            report.heading_deg % 360, measured_at, xy_uncertainty, heading_uncertainty,
+            tuple(sorted({obs.tag_id for obs in report.tag_observations})),
+            source=SINGLE_TAG_SOURCE if single else "mapped_joint_tags")) for report in reports)
 
     def measure_home(self, definition: HomeDefinition) -> HomeState:
         """The airborne home: position and heading from tags, height from the state stream.

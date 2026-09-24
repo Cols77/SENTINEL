@@ -49,6 +49,13 @@ def normalize_mapped_heading_tag_ids(values: object) -> tuple[tuple[float, tuple
     return tuple(sorted(normalized))
 
 
+#: A single-tag fix (``PoseFix.source``) re-anchors only an estimate it agrees
+#: with, within these; anchoring from nothing still needs two tags.
+SINGLE_TAG_SOURCE = "mapped_single_tag"
+SINGLE_TAG_MAX_XY_CM = 40.0
+SINGLE_TAG_MAX_HEADING_DEG = 15.0
+
+
 @dataclass(frozen=True)
 class RecoveryVolume:
     volume_id: str
@@ -172,6 +179,13 @@ class RecoveryController:
         self.commit_reanchor = commit_reanchor
         self.forecast_authorized = forecast_authorized
         self.max_attempts = tracker.profile.max_recovery_attempts if tracker.profile else 0
+        #: Opt-in search sweep (live): after the mapped headings, yaw bursts at
+        #: these offsets from the canonical heading, each re-anchoring on any
+        #: mapped tag; its own attempt count and extra deadline (stationary
+        #: rotations only -- a failed search still ends in the contingency).
+        self.search_offsets_deg: tuple[float, ...] = ()
+        self.search_extra_s: float = 0.0
+        self._search_headings: set[float] = set()
         self._started_at: float | None = None
         self._last_now: float | None = None
         self._environment: RecoveryEnvironment | None = None
@@ -370,9 +384,12 @@ class RecoveryController:
         if profile is None or (self.tracker.real_mode and not (profile.validated and profile.evidence_refs)):
             return self._terminal(environment, "validated_drift_profile_required")
         horizon = now + profile.recovery_action_upper_bound_s
-        if (self._finished or horizon - self._started_at >= profile.recovery_deadline_s
+        searching = bool(self.search_offsets_deg)
+        deadline_s = profile.recovery_deadline_s + (self.search_extra_s if searching else 0.0)
+        attempts = self.max_attempts + (len(self.search_offsets_deg) if searching else 0)
+        if (self._finished or horizon - self._started_at >= deadline_s
                 or horizon * 1000 >= environment.navigation_contingency_expires_monotonic_ms
-                or self._attempts >= self.max_attempts):
+                or self._attempts >= attempts):
             return self._terminal(environment, "recovery_exhausted")
         if self._pending is not None:
             return self._pending
@@ -400,6 +417,15 @@ class RecoveryController:
                 candidate = make_action("YAW_BURST", heading)
                 if self._can_recover(pose, environment, candidate):
                     action = candidate
+                    break
+            for offset in self.search_offsets_deg if action is None else ():
+                heading = (self.tracker.canonical_heading_deg + offset) % 360
+                if heading in tried:
+                    continue
+                candidate = make_action("YAW_BURST", heading)
+                if self._can_recover(pose, environment, candidate):
+                    action = candidate
+                    self._search_headings.add(heading)
                     break
             if action is None:
                 return self._terminal(environment, "no_admissible_heading")
@@ -478,19 +504,26 @@ class RecoveryController:
         # Duplicate identities may not weight the aggregate or hide spread.
         if len(set(report_ids)) != len(reports):
             return reject("duplicate_reports")
+        search = action.heading_deg in self._search_headings
+        # A search burst looks off the mapped headings: any mapped tag it sees counts.
         mapped = set().union(*(set(tags) for heading, tags in environment.mapped_heading_tag_ids
-                                  if heading_distance(heading, action.heading_deg) <= profile.max_fix_heading_jump_deg))
+                                  if search or heading_distance(heading, action.heading_deg)
+                                  <= profile.max_fix_heading_jump_deg))
         for report in reports:
             fix = report.fix
             if (not valid_fix(fix) or not 0 <= now - fix.measured_at <= profile.max_fix_age_on_arrival_s
                     or fix.measured_at < max(self._pending_at, action.measured_at)
-                    or fix.source != "mapped_joint_tags" or len(set(fix.tag_ids)) < 2
+                    or not (fix.source == "mapped_joint_tags" and len(set(fix.tag_ids)) >= 2
+                            or fix.source == SINGLE_TAG_SOURCE and len(set(fix.tag_ids)) >= 1)
                     or not set(fix.tag_ids) <= mapped
                     or fix.xy_uncertainty_cm >= profile.max_xy_uncertainty_cm
                     or fix.heading_uncertainty_deg >= profile.max_heading_uncertainty_deg):
                 return reject("untrusted_report")
         fixes = [report.fix for report in reports]
-        if any(math.dist((a.position.x_cm, a.position.y_cm), (b.position.x_cm, b.position.y_cm)) > profile.max_burst_spread_cm
+        single = any(fix.source == SINGLE_TAG_SOURCE for fix in fixes)
+        # One tag is noisier than a joint view: its burst may spread twice as far.
+        spread_cm = profile.max_burst_spread_cm * (2 if single else 1)
+        if any(math.dist((a.position.x_cm, a.position.y_cm), (b.position.x_cm, b.position.y_cm)) > spread_cm
                or abs(a.position.z_cm - b.position.z_cm) > profile.max_height_error_cm
                or heading_distance(a.heading_deg, b.heading_deg) > profile.max_burst_heading_spread_deg
                for a in fixes for b in fixes):
@@ -507,17 +540,27 @@ class RecoveryController:
         # (the scan tries its next heading); it never latches LOST.
         if heading_distance(heading, action.heading_deg) > profile.max_fix_heading_jump_deg:
             return reject("contradictory_heading")
+        # A single tag cannot rule out a flipped pose: it re-anchors only a
+        # position it agrees with (never a jump), and never latches LOST.
+        if single and (math.dist((pose.position.x_cm, pose.position.y_cm), (position.x_cm, position.y_cm))
+                       > SINGLE_TAG_MAX_XY_CM
+                       or heading_distance(heading, pose.heading_deg) > SINGLE_TAG_MAX_HEADING_DEG):
+            return reject("single_tag_disagrees")
         if any(not any(contains_disk(volume, fix.position, fix.xy_uncertainty_cm)
                        for volume in environment.rotation_clearance_volumes) for fix in fixes):
             return reject("uncontained_report")
         self._account_verified_rotation(action, fixes, position, heading, now)
-        if heading_distance(heading, self.tracker.canonical_heading_deg) > profile.canonical_heading_tolerance_deg:
+        # A search re-anchor may hold its off-canonical heading: the next
+        # checkpoint's admission rotation restores canonical before any move.
+        if (not search and heading_distance(heading, self.tracker.canonical_heading_deg)
+                > profile.canonical_heading_tolerance_deg):
             self._restore = True
             return reject("restore_canonical_heading")
         accepted_fix = PoseFix(position, heading, min(fix.measured_at for fix in fixes),
                               max(fix.xy_uncertainty_cm for fix in fixes),
                               max(fix.heading_uncertainty_deg for fix in fixes),
-                              tuple(sorted(set().union(*(set(fix.tag_ids) for fix in fixes)))))
+                              tuple(sorted(set().union(*(set(fix.tag_ids) for fix in fixes)))),
+                              source=SINGLE_TAG_SOURCE if single else "mapped_joint_tags")
         health = self.tracker._anchored(accepted_fix, now, invalidate=True)
         if health.state != LocalizationState.ANCHORED:
             return reject("reanchor_exceeds_profile")

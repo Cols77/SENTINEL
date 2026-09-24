@@ -62,6 +62,12 @@ _FLIGHT_GRANT_STATES = ("PROMOTED", "TRIAL")
 _AIRBORNE_STATES = (ExecutorState.AIRBORNE, ExecutorState.RETURNING)
 
 
+#: Live recovery search sweep: yaw offsets (deg) from the tag-facing heading,
+#: tried after the mapped headings, and the extra time it may take.
+RECOVERY_SEARCH_OFFSETS_DEG = (15.0, -15.0, 30.0, -30.0, 45.0, -45.0)
+RECOVERY_SEARCH_EXTRA_S = 90.0
+
+
 class LiveSessionError(RuntimeError):
     """The session was refused before takeoff; nothing flew."""
 
@@ -399,6 +405,10 @@ def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, ca
         # policy's own energy hook defers to it.
         recovery = RecoveryController(tracker, clock=clock, burst_source=stack.recovery_burst,
                                       energy_admits=lambda action: True)
+        # Lost tags: search harder before any landing -- yaw bursts in
+        # widening steps around the tag-facing heading (stationary rotations).
+        recovery.search_offsets_deg = RECOVERY_SEARCH_OFFSETS_DEG
+        recovery.search_extra_s = RECOVERY_SEARCH_EXTRA_S
     supervisor = SafetySupervisor(
         store=store, session_id=session_id, site=site, tracker=tracker, reserve=reserve, limits=limits,
         aircraft_id=manifest.aircraft_id, mode=ExecutionMode.REAL, refresh=stack.refresh,

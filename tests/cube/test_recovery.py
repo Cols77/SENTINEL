@@ -980,3 +980,35 @@ def test_same_report_and_whitespace_aliases_never_count_as_distinct(identities):
     result = recovery.assess_burst(action, samples)
     assert not result.accepted and not result.events and not persisted
     assert value.health.pose_revision == revision
+
+
+def test_a_search_sweep_keeps_trying_widening_yaw_offsets_before_giving_up():
+    recovery, value, _ = controller()
+    recovery.search_offsets_deg, recovery.search_extra_s = (15.0, -15.0), 60.0
+    env = environment()
+    for tried in ((), (60,), (60, 90)):
+        recovery.assess_burst(recovery.next_action(value.health, env, tried), ())
+    searched = []
+    for _ in range(2):
+        action = recovery.next_action(value.health, env, (60, 90))
+        assert action.kind == "YAW_BURST"
+        searched.append(action.heading_deg)
+        recovery.assess_burst(action, ())
+    assert sorted(searched) == [75.0, 105.0]  # canonical 90 -/+ 15, only then the contingency
+    assert recovery.next_action(value.health, env, (60, 90)).kind == "CONTINGENCY"
+
+
+@pytest.mark.parametrize("position, accepted", [(Position(110, 100, 100), True),
+                                                (Position(160, 100, 100), False)])
+def test_a_single_tag_recovery_burst_reanchors_only_where_it_agrees(position, accepted):
+    from sentinel.cube.recovery import SINGLE_TAG_SOURCE
+    recovery, value, clock = controller()
+    action = recovery.next_action(value.health, environment(), ())
+    sample = tuple(replace(report, fix=replace(report.fix, position=position, tag_ids=(1,),
+                                               source=SINGLE_TAG_SOURCE, xy_uncertainty_cm=15))
+                   for report in reports(clock))
+    outcome = recovery.assess_burst(action, sample)
+    assert outcome.accepted is accepted, outcome.reason
+    assert value.health.state != LocalizationState.LOST
+    if not accepted:
+        assert outcome.reason == "single_tag_disagrees"

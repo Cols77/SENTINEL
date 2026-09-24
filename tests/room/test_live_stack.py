@@ -394,11 +394,13 @@ def test_refresh_without_a_reliable_burst_never_invents_a_pose(tmp_path):
     assert pose.state is LocalizationState.LOST  # never anchored: no fix is ever assumed
 
 
-def test_refresh_without_a_look_counts_a_tagless_burst_as_an_estimator_failure(tmp_path):
+def test_a_tagless_burst_coasts_and_never_counts_as_an_estimator_failure(tmp_path):
+    # Permissive positioning: losing the tags while hovering or looking is
+    # not a failure; the supervisor demands a fix only before a translation.
     stack, _, tracker, *_ = build_stack(tmp_path, bursts=Bursts(reports(n=3)))
     before = tracker.health.estimator_failures
     stack.refresh()
-    assert tracker.health.estimator_failures == before + 1
+    assert tracker.health.estimator_failures == before
 
 
 def test_refresh_never_anchors_from_single_tag_per_frame_bursts_even_with_two_tags_overall(tmp_path):
@@ -728,11 +730,14 @@ def test_recovery_burst_returns_one_joint_tag_pose_report_per_frame(tmp_path):
     assert tello.sent == []  # a supervised wait operation: data only, no SDK command
 
 
-def test_recovery_burst_never_turns_single_tag_or_unreliable_bursts_into_reports(tmp_path):
-    from sentinel.cube.recovery import RecoveryAction
+def test_recovery_burst_marks_single_tag_reports_and_never_turns_unreliable_bursts_into_reports(tmp_path):
+    from sentinel.cube.recovery import SINGLE_TAG_SOURCE, RecoveryAction
     action = RecoveryAction("a1", "STATIONARY_BURST", 90.0, upper_bound_s=5.0)
     single, *_ = build_stack(tmp_path, bursts=Bursts(reports(tags=(1,))))
-    assert single.recovery_burst(action) == ()
+    fixes = [report.fix for report in single.recovery_burst(action)]
+    # Single-tag evidence is marked so the recovery policy accepts it only
+    # when it agrees with the current estimate, with widened uncertainty.
+    assert fixes and all(f.source == SINGLE_TAG_SOURCE and f.xy_uncertainty_cm >= 15 for f in fixes)
     short, *_ = build_stack(tmp_path, bursts=Bursts(reports(n=3)))
     assert short.recovery_burst(action) == ()
 

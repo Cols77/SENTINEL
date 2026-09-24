@@ -118,27 +118,18 @@ def test_rehearsal_sweep_battery_admission(tmp_path, fast, monkeypatch, battery,
     assert run["returned_home"] and run["landing"]["state"] == "LANDED"
 
 
-def test_scenario_b_recovers_by_a_yaw_rotation_and_an_accepted_reanchor(tmp_path, fast):
+def test_scenario_b_a_tag_loss_during_the_sweep_coasts_and_the_count_still_completes(tmp_path, fast):
+    """Permissive positioning: the scenario's tag loss no longer forces a
+    recovery (and a possible landing); the tracker coasts through it and the
+    mission answers, returns and lands."""
     service, room, client = _client(tmp_path)
     with client:
         run = _run(client, room, scenario="b")
     assert run["status"] == "COMPLETED", run["error"]
-    kinds = [row["kind"] for row in run["reanchor_log"]]
-    assert "RECOVERY" in kinds
-    rotation = kinds.index("YAW_ROTATION")
-    accepted = kinds.index("REANCHOR_ACCEPTED")
-    assert rotation < accepted
-    rotation_row = run["reanchor_log"][rotation]
-    assert rotation_row["direction"] == "ccw" and rotation_row["degrees"] == 15
-    assert abs(rotation_row["heading_deg"] - 90) < 1
     states = [row["state"] for row in run["reanchor_log"] if row["kind"] == "LOCALIZATION"]
-    assert "COASTING" in states and "RECOVERY_REQUIRED" in states
-    bursts = [row for row in run["reanchor_log"] if row["kind"] == "TAG_BURST"]
-    assert any(row["tags"] == [0, 2] and abs(row["heading_deg"] - 90) < 1 for row in bursts)
-    assert run["yaw_rotations"] >= 1 and run["reanchors_accepted"] >= 1
+    assert "COASTING" in states and "LOST" not in states[1:]
     assert run["answer"]["summary"].startswith("phones:")
     assert run["returned_home"] is True and run["landing"]["state"] == "LANDED"
-    assert room.run.world.world.sent.count("ccw 15") == 1
 
 
 def _wait_airborne(room, timeout=30):
