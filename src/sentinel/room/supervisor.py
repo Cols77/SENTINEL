@@ -98,6 +98,9 @@ class SupervisorOutcome:
 PAD_XY_UNCERTAINTY_CM = 5.0
 PAD_HEADING_UNCERTAINTY_DEG = 5.0
 _REANCHOR_RELIEVES = frozenset({"PROJECTED_TERMINATION_LANDING_INVALID", "LOCALIZATION_RECOVERY_REQUIRED"})
+#: Commands that change where the aircraft is or faces; only these are
+#: re-admitted mid-plan (see ``_dispatch``).
+_CHECKED_KINDS = frozenset({"MOVE", "ROTATE", "LAND"})
 #: Refusals of an optional zone that say nothing about the aircraft's
 #: current safety: its own return from here is checked separately (and
 #: first), so it can stay and let Jev choose another zone.
@@ -1408,6 +1411,16 @@ class SafetySupervisor:
                     return replace(result, command_states=tuple(states), observation_ids=tuple(observations))
                 if awaiting and cmd.kind == "MOVE":
                     arrival = self.tracker.health.pose_revision
+                if remaining[0].kind not in _CHECKED_KINDS:
+                    # Stationary steps (settle, capture, telemetry, speed,
+                    # watchdog) run without a fresh admission: a full check
+                    # costs ~0.8 s of telemetry and tag reads, and 36 of them
+                    # made one live sweep take 72 s. The next move, turn or
+                    # landing is re-admitted as before.
+                    current = replace(current, request=replace(
+                        current.request, pose=self.tracker.health,
+                        snapshot_version=self.store.session_version(self.session_id)))
+                    continue
                 refreshed = self.prepare(snapshot_version=self.store.session_version(self.session_id),
                     remaining_commands=remaining, remaining_of=plan, fallback=current,
                     expected_fix=arrival if awaiting else None)

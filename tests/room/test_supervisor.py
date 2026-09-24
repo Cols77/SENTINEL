@@ -685,7 +685,9 @@ def test_each_command_refreshes_and_completion_is_append_only_measured_evidence(
     plan = checkpoint(samples["pose"], command(), command())
     result = supervisor.dispatch(supervisor.assess(request(safety, plan), supervisor.site), Executor(store, clock))
     assert result.status == "COMPLETED"
-    assert len(refreshes) >= 4  # admission + completion for each command
+    # Admission plus each command's completion; a stationary step (here the
+    # second capture) is not re-admitted mid-plan, only moves/turns/landing.
+    assert len(refreshes) >= 3
     events = store.events("session")
     assert len([e for e in events if e.event_type == "CHECKPOINT_COMPLETED"]) == 2
     states = [e for e in events if e.event_type == "DRONE_STATE_RECORDED"]

@@ -1344,7 +1344,9 @@ def test_version_conflict_after_partial_motion_is_checkpoint_failed_not_stale(sa
 
     def two_command_resolve(candidate, snapshot):
         plan = single(candidate, snapshot)
-        commands = (command("MOVE", direction="right", distance_cm=20), command())
+        # The second step must move: only motion is re-admitted mid-plan.
+        commands = (command("MOVE", direction="right", distance_cm=20),
+                    command("MOVE", direction="left", distance_cm=20))
         return replace(plan, commands=commands, worst_case_s=sum(c.upper_bound_s for c in commands))
 
     controller.resolve_checkpoint = two_command_resolve
