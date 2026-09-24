@@ -37,6 +37,7 @@ from dataclasses import dataclass, fields, replace
 from datetime import datetime
 import json
 from pathlib import Path
+import sys
 from typing import Callable, Iterable
 
 from sentinel.cube.checkpoint import CommandLimits, TransportLimits
@@ -334,6 +335,7 @@ def run_count_return(
     try:
         supervisor.start(stack.executor)
     except Exception as exc:
+        print(f"Live start failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         landing = supervisor.last_terminal_outcome
         attempted_takeoff = bool(getattr(stack.executor, "takeoff_attempted", False))
         if landing is None and attempted_takeoff:
