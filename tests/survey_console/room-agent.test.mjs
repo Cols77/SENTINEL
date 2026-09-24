@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {ROOM_AGENT,SURVEY,architectureOptions,selectArchitecture,modeOptions,scenarioOptions,proposalCommand,roomViewModel,safetyIdentity,answerText,returnedHomeText,landingText} from '../../examples/survey-console/room-agent-model.mjs';
+import {ROOM_AGENT,SURVEY,architectureOptions,selectArchitecture,modeOptions,scenarioOptions,proposalCommand,roomViewModel,safetyIdentity,answerText,returnedHomeText,landingText,reviewOptions} from '../../examples/survey-console/room-agent-model.mjs';
 
 const catalogue={
  architectures:[{id:'survey',label:'Survey (rules proposer)',description:'s'},{id:'room_agent',label:'Room agent (Jev adaptive)',description:'r'}],
@@ -29,8 +29,15 @@ test('a proposal needs request text; the local IP is sent only for Live and must
  assert.deepEqual(proposalCommand({mode:'REHEARSAL',scenario:'b',requestText:' count the phones ',localIp:'192.168.10.2'}).command,
   {mode:'REHEARSAL',scenario:'b',request_text:'count the phones'});
  assert.deepEqual(proposalCommand({mode:'LIVE',scenario:'a',requestText:'count',localIp:'192.168.10.2'}).command,
-  {mode:'LIVE',scenario:'a',request_text:'count',local_ip:'192.168.10.2'});
+   {mode:'LIVE',scenario:'a',request_text:'count',perception_review:'STANDARD',local_ip:'192.168.10.2'});
  assert.match(proposalCommand({mode:'LIVE',scenario:'a',requestText:'count',localIp:'192.168.10.300'}).error,/IPv4/);
+});
+
+test('recorded review is a separate Live-only choice in the proposal',()=>{
+ const choices=reviewOptions({perception_reviews:[{id:'STANDARD',label:'Standard'},{id:'RECORDED_REVIEW',label:'Recorded review'}]});
+ assert.deepEqual(choices.map(row=>row.value),['STANDARD','RECORDED_REVIEW']);
+ assert.equal(proposalCommand({mode:'LIVE',scenario:'a',requestText:'count',perceptionReview:'RECORDED_REVIEW'}).command.perception_review,'RECORDED_REVIEW');
+ assert.equal(proposalCommand({mode:'REHEARSAL',scenario:'a',requestText:'count',perceptionReview:'RECORDED_REVIEW'}).command.perception_review,undefined);
 });
 
 const run={

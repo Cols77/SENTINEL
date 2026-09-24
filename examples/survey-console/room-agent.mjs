@@ -3,7 +3,7 @@
 // existing Land endpoint, which acts on the room run's
 // registered flight runner. Every control carries a stable data-testid.
 import {el,button,replace} from './dom.mjs';
-import {ROOM_AGENT,SURVEY,architectureOptions,selectArchitecture,modeOptions,proposalCommand,roomViewModel,safetyIdentity} from './room-agent-model.mjs';
+import {ROOM_AGENT,SURVEY,architectureOptions,selectArchitecture,modeOptions,reviewOptions,proposalCommand,roomViewModel,safetyIdentity} from './room-agent-model.mjs';
 import {createRoomCamera} from './room-camera.mjs';
 
 const STORAGE_KEY='sentinel:architecture';
@@ -17,7 +17,9 @@ function createRoomClient(base='/api/v1',fetchImpl=fetch){
   state:()=>json(`${base}/room-agent`),
   prepare:command=>post(`${base}/room-agent/preparations`,command),
   propose:command=>post(`${base}/room-agent/proposals`,command),
-  decide:(proposal_id,decision)=>post(`${base}/room-agent/decisions`,{proposal_id,decision}),
+   decide:(proposal_id,decision)=>post(`${base}/room-agent/decisions`,{proposal_id,decision}),
+   analyze:runId=>post(`${base}/room-agent/runs/${encodeURIComponent(runId)}/analysis`,{}),
+   reviewResult:runId=>json(`${base}/room-agent/runs/${encodeURIComponent(runId)}/analysis/result`),
   land:(runId,identity)=>post(`${base}/runs/${encodeURIComponent(runId)}/land`,identity),
  };
 }
@@ -67,7 +69,7 @@ function reanchorList(steps){
 
 export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
  let catalogue=null,state=null,session=null,architecture=SURVEY,message='',timer=null,landAttempt=null,prepBusy=false;
- const form={mode:'REHEARSAL',scenario:'a',requestText:'',localIp:''};
+ const form={mode:'LIVE',perceptionReview:'STANDARD',scenario:'a',requestText:'',localIp:''};
  const archSelect=el('select',{id:'architecture-select','data-testid':'architecture-select','aria-label':'Mission architecture'});
  const archHelp=el('p',{class:'meta',id:'architecture-help'});
  const bar=el('section',{id:'architecture-bar',class:'architecture-bar','aria-label':'Mission architecture'},[
@@ -109,6 +111,16 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
   await refresh();
  }
 
+ async function analyze(){
+  const runId=state?.run?.id;if(!runId)return;
+  message='Starting local recorded review…';render();
+  try{
+   const r=await client.analyze(runId);
+   message=r.ok?'Recorded review running.':`Review unavailable: ${r.body.detail??r.body.reason_code??r.status}`;
+  }catch{message='Recorded review could not start.';}
+  await refresh();
+ }
+
  async function prepare(){
   if(prepBusy)return;
   prepBusy=true;message='Creating the next flight pack…';render();
@@ -145,6 +157,8 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
   el('summary',{},['Other modes unavailable']),modeHelpList,
  ]);
  modeSelect.addEventListener('change',()=>{form.mode=modeSelect.value;render();});
+ const reviewSelect=el('select',{id:'room-perception-review','data-testid':'room-perception-review'});
+ reviewSelect.addEventListener('change',()=>{form.perceptionReview=reviewSelect.value;});
  const request=el('textarea',{id:'room-request','data-testid':'room-request',rows:2,placeholder:'count the phones and computers in the room'});
  request.addEventListener('input',()=>{form.requestText=request.value;});
  const ip=el('input',{id:'room-local-ip','data-testid':'room-local-ip',type:'text',inputmode:'decimal',placeholder:'auto (192.168.10.x)'});
@@ -162,6 +176,7 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
  ]);
  const setup=el('div',{class:'room-setup'},[
   el('label',{for:'room-mode'},['Run mode']),modeSelect,modeHelp,
+  el('label',{for:'room-perception-review'},['Perception review (Live)']),reviewSelect,
   el('label',{for:'room-local-ip'},['Tello local IP (Live)']),ip,
   el('label',{for:'room-request'},['Request']),request,submit,
  ]);
@@ -173,12 +188,25 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
  const dynamic=el('div',{class:'room-dynamic room-col'});
  const logs=el('div',{class:'room-col room-logs'});
  const lists=el('div',{class:'room-col room-results'});
+ const reviewStatus=el('p',{'data-testid':'room-review-status',role:'status'});
+ const recordingLink=el('a',{'data-testid':'room-recording-download',download:'flight.h264'},['Download raw recording']);
+ const analyzeButton=button('Analyze recording',()=>void analyze(),{'data-testid':'room-analyze'});
+ const reviewVideo=el('video',{'data-testid':'room-review-video',controls:true,preload:'metadata'});
+ const reviewRows=el('ol',{'data-testid':'room-review-detections',class:'room-log'});
+ const reviewJson=el('a',{'data-testid':'room-review-json'},['Full detection timeline (JSON)']);
+ const reviewPanel=el('section',{class:'room-recorded-review','data-testid':'room-recorded-review',hidden:true},[
+  el('h3',{},['Recorded perception review']),
+  el('p',{class:'meta'},['After landing, Grounding DINO marks sampled frames for visual inspection. Live decisions and counts are unchanged.']),
+  reviewStatus,recordingLink,analyzeButton,reviewVideo,reviewRows,reviewJson,
+ ]);
  panel.append(
    el('header',{class:'room-header'},[el('p',{class:'section-label'},['SENTINEL / ROOM AGENT · JEV ADAPTIVE']),el('div',{class:'room-safety'},[landButton])]),
   messageLine,
   el('div',{class:'room-grid'},[el('div',{class:'room-col room-setup-col'},[setup,prepPanel,approvalHost]),cameraHost,dynamic,logs,lists]),
+  reviewPanel,
  );
  let lastModes='';
+ let lastReviewOptions='',loadedReviewId='',reviewData=null;
 
  function render(){
   const scrollPositions=new Map([...panel.querySelectorAll('.room-log, .room-answer pre')].map(node=>[node.dataset.testid,node.scrollTop]));
@@ -196,9 +224,17 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
     ` unavailable: ${row.title||'this server is not configured for it.'}`,
    ])));
   }
+  const choices=reviewOptions(catalogue);
+  const choicesKey=JSON.stringify(choices)+form.perceptionReview;
+  if(choicesKey!==lastReviewOptions){
+   lastReviewOptions=choicesKey;
+   replace(reviewSelect,choices.map(row=>option(row,form.perceptionReview)));
+   reviewSelect.value=form.perceptionReview;
+  }
   if(document.activeElement!==ip&&ip.value!==form.localIp)ip.value=form.localIp;
   if(catalogue?.default_request)request.placeholder=catalogue.default_request;
   modeSelect.disabled=!view.canPropose;
+  reviewSelect.disabled=!view.canPropose||form.mode!=='LIVE';
   request.disabled=!view.canPropose;
   ip.disabled=!view.canPropose||form.mode!=='LIVE';
   const prep=state?.preparation;
@@ -229,6 +265,36 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
   landButton.disabled=!view.running;
   messageLine.textContent=message;
   camera.render(state?.run);
+  const run=state?.run, review=run?.review;
+  reviewPanel.hidden=run?.perception_review!=='RECORDED_REVIEW';
+  if(!reviewPanel.hidden){
+   const recording=review?.recording, analysis=review?.analysis;
+   const recStatus=recording?.status??'PENDING', analysisStatus=analysis?.status??'UNAVAILABLE';
+   reviewStatus.textContent=`Recording: ${recStatus}${recording?.bytes?` · ${(recording.bytes/1048576).toFixed(1)} MiB`:''}. Analysis: ${analysisStatus}${analysis?.reason_code?` (${analysis.reason_code})`:''}${analysis?.detail?` · ${analysis.detail}`:''}${recording?.error?` · ${recording.error}`:''}`;
+   recordingLink.hidden=!['READY','FAILED'].includes(recStatus);
+   recordingLink.href=`/api/v1/room-agent/runs/${encodeURIComponent(run.id)}/recording`;
+   analyzeButton.hidden=analysisStatus==='COMPLETE';
+   analyzeButton.disabled=analysisStatus!=='READY';
+   reviewVideo.hidden=analysisStatus!=='COMPLETE';
+   reviewJson.hidden=analysisStatus!=='COMPLETE';
+   if(analysisStatus==='COMPLETE'){
+    const base=`/api/v1/room-agent/runs/${encodeURIComponent(run.id)}/analysis`;
+    if(reviewVideo.dataset.run!==run.id){reviewVideo.dataset.run=run.id;reviewVideo.src=`${base}/video`;}
+    reviewJson.href=`${base}/result`;
+    if(loadedReviewId!==run.id){
+     reviewData=null;
+     loadedReviewId=run.id;
+     void client.reviewResult(run.id).then(r=>{
+      if(loadedReviewId!==run.id)return;
+      if(r.ok){reviewData=r.body;render();}
+      else loadedReviewId='';
+     }).catch(()=>{if(loadedReviewId===run.id)loadedReviewId='';});
+    }
+   }else if(loadedReviewId!==run.id){reviewData=null;loadedReviewId='';}
+   replace(reviewRows,(reviewData?.detections??[]).slice(0,100).map(row=>el('li',{},[
+     `${reviewData?.timestamp_basis==='estimated_30fps'?'~':''}${Number(row.time_s).toFixed(1)} s · ${row.label} · score ${Number(row.score).toFixed(2)} · frame ${row.frame}`,
+   ])));
+  }
   const proposalId=view.proposal?.id??'';
   if(approvalHost.dataset.proposal!==proposalId){
    approvalHost.dataset.proposal=proposalId;

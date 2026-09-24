@@ -16,15 +16,20 @@ export function modeOptions(catalogue){
  return (catalogue?.modes??[]).map(row=>({value:row.id,label:row.label,disabled:!row.available,title:row.reason??''}));
 }
 
+export function reviewOptions(catalogue){
+ return (catalogue?.perception_reviews??[]).map(row=>({value:row.id,label:row.label}));
+}
+
 export function scenarioOptions(catalogue){
  return (catalogue?.scenarios??[]).map(row=>({value:row.id,label:row.label,description:row.description}));
 }
 
-export function proposalCommand({mode,scenario,requestText,localIp}){
+export function proposalCommand({mode,scenario,requestText,localIp,perceptionReview}){
  const text=(requestText??'').trim();
  if(!text)return {error:'Type a request first.'};
  if(new TextEncoder().encode(text).length>4096)return {error:'The request is too long (4096 bytes at most).'};
  const command={mode,scenario,request_text:text};
+ if(mode==='LIVE')command.perception_review=perceptionReview??'STANDARD';
  const ip=(localIp??'').trim();
  if(mode==='LIVE'&&ip){
   if(!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)||ip.split('.').some(part=>Number(part)>255))return {error:'Local IP must be an IPv4 address such as 192.168.10.2.'};

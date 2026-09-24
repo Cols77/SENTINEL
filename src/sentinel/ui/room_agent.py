@@ -43,6 +43,7 @@ from uuid import uuid4
 
 from .room_agent_projection import RoomAgentProjection
 from . import room_rehearsal
+from .room_review import RoomReview
 
 ARCHITECTURES = (
     dict(id="survey", label="Survey (rules proposer)",
@@ -57,6 +58,10 @@ MODES = {
     "LIVE": "Live: real Tello, real detector, real Jev",
 }
 DEFAULT_REQUEST = "count the phones and computers in the room"
+PERCEPTION_REVIEWS = (
+    dict(id="STANDARD", label="Standard: live perception only"),
+    dict(id="RECORDED_REVIEW", label="Standard + recorded post flight review"),
+)
 SITE_LINE = "Site: CanningSt (fixtures/room_agent/v1/canningst-site.json)"
 def _now():
     return datetime.now(timezone.utc).isoformat()
@@ -114,11 +119,12 @@ class RoomRunnerSafety:
 
 
 class RoomAgentRun:
-    def __init__(self, *, mode, scenario, request_text, local_ip):
+    def __init__(self, *, mode, scenario, request_text, local_ip, perception_review="STANDARD"):
         self.id = f"room-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:6]}"
         self.initial_id = self.id
         self.proposal_id = uuid4().hex
         self.mode, self.scenario, self.request_text, self.local_ip = mode, scenario, request_text, local_ip
+        self.perception_review = perception_review
         self.status = "AWAITING_APPROVAL"
         self.created_at = _now()
         self.started_at = None
@@ -133,6 +139,7 @@ class RoomAgentRun:
         self.frame_root = None
         self.camera_source = None
         self.capture_records = {}
+        self.review = None
         self.world = None
         self.thread = None
         self.done = threading.Event()
@@ -174,19 +181,39 @@ class RoomAgentRun:
                          (" and paid detector calls" if flies else ""))
         if flies:
             lines.append("Approving is dispatch: the real Tello takes off after the live gates and preflight pass")
+            if self.perception_review == "RECORDED_REVIEW":
+                lines.append("Record the Tello video for optional local review after landing")
             if self.local_ip:
                 lines.append(f"Tello link local IP: {self.local_ip}")
         return dict(id=self.proposal_id, mode=self.mode, scenario=self.scenario, request_text=self.request_text,
+                     perception_review=self.perception_review,
                     flies=flies, paid_calls=self.mode != "REHEARSAL", lines=lines)
 
     def public(self):
         self.sync()
         view = self.projection.public()
+        review = None
+        if self.perception_review == "RECORDED_REVIEW":
+            active = self.review_session()
+            review = active.status() if active is not None else {
+                "recording": {"status": "PENDING" if not self.done.is_set() else "MISSING"},
+                "analysis": {"status": "UNAVAILABLE", "reason_code": "RUN_NOT_FINISHED"},
+            }
         return dict(id=self.id, mode=self.mode, mode_label=MODES[self.mode], scenario=self.scenario,
+                     perception_review=self.perception_review,
+                     review=review,
                     request_text=self.request_text, status=self.status, created_at=self.created_at,
                     started_at=self.started_at, finished_at=self.finished_at, error=self.error,
                     proposal=self.proposal() if self.status == "AWAITING_APPROVAL" else None,
-                    land_status=self.safety.land_status, emergency_sent=self.safety.emergency_sent, **view)
+                     land_status=self.safety.land_status, emergency_sent=self.safety.emergency_sent, **view)
+
+    def review_session(self):
+        if self.perception_review != "RECORDED_REVIEW" or not self.done.is_set() or self.frame_root is None:
+            return None
+        with self.lock:
+            if self.review is None:
+                self.review = RoomReview(self.frame_root, room_rehearsal.REPO_ROOT / "fixtures" / "perception")
+            return self.review
 
 
 class RoomAgentService:
@@ -227,6 +254,7 @@ class RoomAgentService:
         return dict(
             architectures=list(ARCHITECTURES),
             modes=[mode_entry(m) for m in MODES],
+            perception_reviews=list(PERCEPTION_REVIEWS),
             scenarios=[dict(id=s.scenario_id, label=s.label, description=s.description)
                        for s in room_rehearsal.SCENARIOS.values()],
             default_request=DEFAULT_REQUEST,
@@ -354,6 +382,10 @@ class RoomAgentService:
         if not isinstance(command, dict):
             return dict(status="INVALID", reason_code="INVALID_REQUEST")
         mode = command.get("mode", "REHEARSAL")
+        perception_review = command.get("perception_review", "STANDARD")
+        if perception_review not in {row["id"] for row in PERCEPTION_REVIEWS} or (
+                perception_review == "RECORDED_REVIEW" and mode != "LIVE"):
+            return dict(status="INVALID", reason_code="INVALID_PERCEPTION_REVIEW")
         scenario = command.get("scenario", "a")
         text = command.get("request_text")
         local_ip = command.get("local_ip") or None
@@ -395,7 +427,8 @@ class RoomAgentService:
             if busy:
                 return dict(status="CONFLICT", reason_code=busy)
             self.run = RoomAgentRun(mode=mode, scenario=scenario, request_text=text.strip(),
-                                    local_ip=local_ip or (self._default_local_ip() if mode == "LIVE" else None))
+                                    local_ip=local_ip or (self._default_local_ip() if mode == "LIVE" else None),
+                                    perception_review=perception_review)
             if mode == "LIVE":
                 pack = self._live_pack(optional=True) or {}
                 if pack.get("site"):
@@ -650,6 +683,8 @@ class RoomAgentService:
             argv.append("--i-authorise-paid-calls")
         if run.local_ip:
             argv += ["--local-ip", run.local_ip]
+        if run.perception_review == "RECORDED_REVIEW":
+            argv.append("--record-video")
         if pack.get("jev_acceptance_json"):
             argv += ["--jev-acceptance-json", json.dumps(pack["jev_acceptance_json"])]
         manifest_run_id = json.loads(Path(path("manifest")).read_text(encoding="utf-8"))["run_id"]
@@ -754,7 +789,7 @@ def attach_room_agent(mission, **kwargs) -> RoomAgentService:
 
 def build_room_agent_router(room: RoomAgentService):
     from fastapi import APIRouter, Request
-    from fastapi.responses import JSONResponse, Response
+    from fastapi.responses import FileResponse, JSONResponse, Response
     from starlette.concurrency import run_in_threadpool
 
     router = APIRouter(prefix="/api/v1/room-agent")
@@ -828,6 +863,36 @@ def build_room_agent_router(room: RoomAgentService):
             return Response(status_code=503, headers={"cache-control": "no-store"})
         return (Response(payload, media_type="image/png", headers={"cache-control": "no-store"})
                 if payload is not None else Response(status_code=404))
+
+    @router.get("/runs/{run_id}/recording")
+    def recording(run_id: str):
+        run = current_run(run_id)
+        review = run.review_session() if run is not None else None
+        if review is None or not review.source.is_file():
+            return Response(status_code=404)
+        return FileResponse(review.source, filename="flight.h264", media_type="application/octet-stream")
+
+    @router.post("/runs/{run_id}/analysis")
+    def start_analysis(run_id: str):
+        run = current_run(run_id)
+        review = run.review_session() if run is not None else None
+        if review is None:
+            return Response(status_code=404)
+        return result(review.start())
+
+    @router.get("/runs/{run_id}/analysis/result")
+    def analysis_result(run_id: str):
+        run = current_run(run_id)
+        review = run.review_session() if run is not None else None
+        document = review.result() if review is not None else None
+        return JSONResponse(document, headers={"cache-control": "no-store"}) if document else Response(status_code=404)
+
+    @router.get("/runs/{run_id}/analysis/video")
+    def analysis_video(run_id: str):
+        run = current_run(run_id)
+        review = run.review_session() if run is not None else None
+        path = review.video_path() if review is not None else None
+        return FileResponse(path, media_type="video/mp4") if path else Response(status_code=404)
 
     @router.post("/proposals")
     async def propose(request: Request):

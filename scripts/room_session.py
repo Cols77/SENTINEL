@@ -622,7 +622,8 @@ def _cmd_live(
             client_factory = live_stack.TelloFlightStackFactory(
                 link=link, tag_map=tag_map, run_id=manifest.run_id, run_dir=run.root,
                 max_duration_s=manifest.max_duration_s,
-                minimum_battery=0 if args.disable_battery_guard else 40)
+                minimum_battery=0 if args.disable_battery_guard else 40,
+                record_video=args.record_video)
         # Q1: arm the operator's motor-stop hotkey for the whole flight, from
         # stack construction until landing/close (stopped in the finally
         # below). See _ArmedFlightStackFactory.
@@ -665,6 +666,12 @@ def _cmd_live(
     finally:
         if link is not None:
             link.close()  # connectivity-only ends here too: the probe's connection is closed
+        if getattr(args, "record_video", False):
+            try:
+                live_stack.write_recording_status(run.root,
+                    error=link.recording_error() if link is not None else None)
+            except OSError as exc:
+                print(f"recording status unavailable: {exc}", file=sys.stderr)
         run.close()
 
 
@@ -785,6 +792,8 @@ def build_parser() -> argparse.ArgumentParser:
     # stderr, so an operator (or room_verify_artifact.py) can later confirm
     # what a session actually observed before refusing or flying.
     live_parser.add_argument("--run-root", required=True)
+    live_parser.add_argument("--record-video", action="store_true",
+                             help="save the existing Tello H.264 stream beside this run")
     # Fix round 1 (Q7): live never takes an operator-supplied --now. A
     # flight-capable invocation's wall time (grant expiry) comes only from
     # main()'s injected `wall_clock`, which tests can override but which a

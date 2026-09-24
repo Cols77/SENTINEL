@@ -134,6 +134,22 @@ def build_tello_client(*, local_ip: str | None = None):
                                              tello_ip=TELLO_IP, timeout=7.0, video_path=None))
 
 
+def write_recording_status(run_dir: str | Path, *, error: str | None = None) -> dict:
+    """Describe the closed raw stream without granting it decision authority."""
+    path = Path(run_dir) / "flight.h264"
+    digest = hashlib.sha256()
+    size = 0
+    if path.is_file():
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                size += len(chunk)
+                digest.update(chunk)
+    status = {"status": "FAILED" if error else "READY" if size else "MISSING",
+              "bytes": size, "sha256": digest.hexdigest() if size else None, "error": error}
+    (Path(run_dir) / "recording.json").write_text(json.dumps(status, indent=2), encoding="utf-8")
+    return status
+
+
 class _SessionClient:
     """One connected ``DroneClient`` for the whole session: ``connect`` is idempotent.
 
@@ -222,6 +238,10 @@ class TelloLink:
         client = self._client
         if client is not None:
             _close_quietly(client)
+
+    def recording_error(self) -> str | None:
+        return (getattr(self._client, "video_recording_error", None)
+                if self._client is not None else None)
 
 
 def tello_drone_probe(*, build_client: Callable[[], object] | None = None, local_ip: str | None = None,
@@ -840,10 +860,12 @@ class TelloFlightStackFactory:
 
     def __init__(self, *, link: TelloLink, tag_map: TagMap | None, run_id: str, run_dir: str | Path,
                  pose_burst: Callable[..., list] | None = None, minimum_battery: int = 40,
-                 home_settle_s: float = SETTLE_S, max_duration_s: float | None = None) -> None:
+                 home_settle_s: float = SETTLE_S, max_duration_s: float | None = None,
+                 record_video: bool = False) -> None:
         self.link, self.tag_map, self.run_id, self.run_dir = link, tag_map, run_id, Path(run_dir)
         self._pose_burst = pose_burst
         self.minimum_battery, self.home_settle_s = minimum_battery, home_settle_s
+        self.record_video = record_video
         # The manifest's own declared flight-duration bound: StepExecutor's
         # deadline enforces it (DEADLINE_EXCEEDED before each command, and it
         # caps SafetySupervisor._land's landing upper bound). Without it, the
@@ -864,6 +886,8 @@ class TelloFlightStackFactory:
         envelope = site_envelope(site)
         burst = self._pose_burst or self._default_burst()
         client = self.link.client()
+        if self.record_video:
+            client.set_video_record_path(self.run_dir / "flight.h264")
         runner = FlightTestRunner(
             client, "real", self.minimum_battery, retain_video_stream=True, envelope=envelope,
             adapter=getattr(client, "_sentinel_adapter", None),

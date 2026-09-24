@@ -5,6 +5,7 @@ description = "Yaw-scan perception for the SENTINEL demonstrator"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "av==14.2.0",
     "accelerate>=1.15.0",
     "numpy>=2.4.6",
     "opencv-python-headless>=5.0.0.93",

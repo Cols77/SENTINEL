@@ -349,6 +349,32 @@ def test_flight_stack_is_a_live_session_flight_stack_connected_motors_off(tmp_pa
     assert tello.sent == ["command", "streamon"]
 
 
+def test_recorded_review_sets_the_existing_video_receivers_path_before_streaming(tmp_path):
+    transport = FakeTransport()
+    link = live_stack.TelloLink(build_client=transport)
+    tracker = LocalizationTracker(live_fakes.drift_profile(), clock=time.monotonic, real_mode=True)
+    factory = live_stack.TelloFlightStackFactory(
+        link=link, tag_map=None, run_id="run-0001", run_dir=tmp_path,
+        pose_burst=Bursts(), record_video=True, home_settle_s=0.0)
+
+    factory(tracker=tracker, clock=time.monotonic, site=live_fakes.fixture_site())
+
+    assert link.client().video_record_path == tmp_path / "flight.h264"
+    assert transport.tello.sent == ["command", "streamon"]
+
+
+def test_recording_status_marks_partial_stream_failed_and_hashes_saved_bytes(tmp_path):
+    import json
+
+    (tmp_path / "flight.h264").write_bytes(b"partial-h264")
+    status = live_stack.write_recording_status(tmp_path, error="OSError: disk full")
+
+    assert status["status"] == "FAILED"
+    assert status["bytes"] == len(b"partial-h264")
+    assert status["sha256"] == hashlib.sha256(b"partial-h264").hexdigest()
+    assert json.loads((tmp_path / "recording.json").read_text()) == status
+
+
 def test_refresh_anchors_the_tracker_from_a_tag_burst_and_reads_the_battery(tmp_path):
     stack, tello, tracker, site, _ = build_stack(tmp_path, bursts=Bursts(reports(101, 99, 91.0)))
     pose, sample = stack.refresh()

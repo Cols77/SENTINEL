@@ -768,3 +768,19 @@ run.
 - `--cost-assumptions-json`/`--home-policy-json`/`--termination-policy-json`
   accept arbitrary JSON objects; this CLI does not itself validate their
   contents beyond what the manifest schema requires.
+
+## Optional recorded perception review
+
+In Mission Control, choose **Live** and then **Standard + recorded post flight review** in the separate Perception review dropdown before proposing the run. The live OpenRouter detector and saved PNG captures continue to drive the room mission. The Tello receiver also saves its raw stream as `flight.h264` in that run's directory, with `recording.json` containing its byte count, SHA-256 and recording status. The current run panel offers a raw recording download after the receiver closes.
+
+After landing, click **Analyze recording** to run Dzivha's local Grounding DINO over sampled frames. The resulting `review/annotated.mp4`, `review/review.json` and `review/analysis.log` stay in the run directory. The panel shows annotated playback and a timestamped detection list; this visual review does not change the flight's decisions or counts and makes no yaw-scan bearing or unique-object claim.
+
+Stage the optional model before the flight from `fixtures/perception`:
+
+```powershell
+uv sync --frozen
+uv run python scripts/probe_models.py
+uv run python scripts/stage_room_review.py
+```
+
+The Analyze button requires that virtual environment and its `models/manifest.json`. If either is missing, the raw recording remains downloadable and the panel names the missing setup. Analysis uses the manifest-pinned checkpoint from the local cache without network access. Raw H.264 has no frame timestamps, so timeline times are marked as estimates based on 30 frames per second.
