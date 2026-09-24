@@ -47,11 +47,14 @@ def live_frame(run):
 
 
 def capture_record(run, observation_id=None):
-    """Return the newest verified VLM capture and its own pixel boxes."""
+    """Return a saved capture; include boxes only from its verified VLM result."""
     root = run.frame_root
     database = run.store_path
-    if root is None or database is None or not Path(database).is_file():
+    if root is None:
         return None
+    if database is None or not Path(database).is_file():
+        return _saved_capture(run, observation_id)
+    newest_saved = _saved_capture(run) if observation_id is None else None
     with closing(sqlite3.connect(str(database), timeout=1.0)) as connection:
         connection.row_factory = sqlite3.Row
         predicate = "AND o.observation_id = ?" if observation_id is not None else ""
@@ -66,7 +69,9 @@ def capture_record(run, observation_id=None):
             f"{predicate} ORDER BY o.captured_at DESC, o.observation_id DESC LIMIT 1", arguments,
         ).fetchone()
         if row is None:
-            return None
+            return _saved_capture(run, observation_id)
+        if newest_saved is not None and newest_saved["captured_at"] > row["captured_at"]:
+            return newest_saved
         path = Path(row["frame_path"]).resolve()
         if not path.is_relative_to(Path(root).resolve()) or not path.is_file() or path.stat().st_size > 10 * 1024 * 1024:
             return None
@@ -83,7 +88,30 @@ def capture_record(run, observation_id=None):
                   bbox=json.loads(d["full_frame_bbox_json"])) for d in detections]
     return dict(observation_id=row["observation_id"], path=path, sha256=row["frame_sha256"],
                 captured_at=row["captured_at"], provider=row["provider"], model=row["resolved_model"],
-                width=width, height=height, detections=boxes)
+                width=width, height=height, detections=boxes, verified=True)
+
+
+def _saved_capture(run, observation_id=None):
+    """Show the flight's saved frame when analysis never produced verified boxes."""
+    records = dict(getattr(run, "capture_records", {}) or {})
+    if observation_id is None:
+        if not records:
+            return None
+        observation_id = max(records, key=lambda key: records[key][1])
+    record = records.get(observation_id)
+    if record is None:
+        return None
+    path = Path(record[0]).resolve()
+    root = Path(run.frame_root).resolve()
+    if not path.is_relative_to(root) or not path.is_file() or path.stat().st_size > 10 * 1024 * 1024:
+        return None
+    from PIL import Image
+    with Image.open(path) as image:
+        width, height = image.size
+    return dict(observation_id=observation_id, path=path,
+                sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                captured_at=record[1], provider=None, model=None,
+                width=width, height=height, detections=[], verified=False)
 
 
 def capture_bytes(record):

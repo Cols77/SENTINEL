@@ -116,6 +116,7 @@ class RoomRunnerSafety:
 class RoomAgentRun:
     def __init__(self, *, mode, scenario, request_text, local_ip):
         self.id = f"room-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:6]}"
+        self.initial_id = self.id
         self.proposal_id = uuid4().hex
         self.mode, self.scenario, self.request_text, self.local_ip = mode, scenario, request_text, local_ip
         self.status = "AWAITING_APPROVAL"
@@ -131,6 +132,7 @@ class RoomAgentRun:
         self.store_path = None
         self.frame_root = None
         self.camera_source = None
+        self.capture_records = {}
         self.world = None
         self.thread = None
         self.done = threading.Event()
@@ -490,6 +492,7 @@ class RoomAgentService:
         tracker for live localization, and each recovery burst for display."""
         run.tracker = tracker
         run.camera_source = stack.frame_source
+        run.capture_records = stack.capture_records
         if clock is not None:
             run.clock = clock
         run.safety.attach(stack)
@@ -772,7 +775,7 @@ def build_room_agent_router(room: RoomAgentService):
     def current_run(run_id):
         with room._lock:
             run = room.run
-        return run if run is not None and run.id == run_id else None
+        return run if run is not None and run_id in (run.id, run.initial_id) else None
 
     @router.get("/camera/live/{run_id}")
     def camera_live(run_id: str):

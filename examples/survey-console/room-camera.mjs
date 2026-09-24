@@ -40,7 +40,7 @@ export function createRoomCamera(host,fetchImpl=fetch){
  const liveNote=el('p',{class:'room-camera-note'},['AprilTag outlines follow the current decoded frame.']);
  const captureImage=el('img',{alt:'Latest analyzed drone capture',hidden:true});
  const captureOverlay=svgNode('svg',{'aria-hidden':'true',class:'room-camera-overlay'});
- const captureEmpty=el('p',{class:'room-camera-empty'},['No analyzed capture yet.']);
+ const captureEmpty=el('p',{class:'room-camera-empty'},['No saved capture yet.']);
  const captureStage=el('div',{class:'room-camera-stage','data-testid':'room-camera-capture',hidden:true},[captureImage,captureOverlay,captureEmpty]);
  const captureNote=el('p',{class:'room-camera-note',hidden:true},['Detection boxes belong to this captured frame.']);
  host.append(
@@ -51,7 +51,7 @@ export function createRoomCamera(host,fetchImpl=fetch){
 
  let runId=null,mode=null,running=false,view='live',liveUrl=null,captureUrl=null;
  let liveAt=null,liveTags=[],captureId=null,captureData=null,liveTimer=null,captureTimer=null;
- let liveBusy=false,captureBusy=false,epoch=0,disposed=false,terminalCaptureRead=false;
+ let liveBusy=false,captureBusy=false,epoch=0,disposed=false,terminalCaptureAttempts=0;
 
  function select(next){
   view=next;
@@ -73,13 +73,13 @@ export function createRoomCamera(host,fetchImpl=fetch){
   liveImage.removeAttribute('src');captureImage.removeAttribute('src');
   replace(liveOverlay,[]);replace(captureOverlay,[]);
   liveEmpty.hidden=false;captureEmpty.hidden=false;
-  terminalCaptureRead=false;
+  terminalCaptureAttempts=0;
  }
 
  function updateSource(){
   if(!runId){source.textContent='AWAITING CAMERA';return;}
   if(view==='capture'){
-   source.textContent=captureData?`ANALYZED · ${new Date(captureData.captured_at).toLocaleTimeString()}`:'AWAITING ANALYSIS';
+   source.textContent=captureData?`${captureData.verified?'ANALYZED':'RECORDED'} · ${new Date(captureData.captured_at).toLocaleTimeString()}`:'AWAITING CAPTURE';
    source.classList.remove('is-stale');
    return;
   }
@@ -91,7 +91,7 @@ export function createRoomCamera(host,fetchImpl=fetch){
  }
 
  async function loadLive(token){
-  if(liveBusy||disposed||!running||!runId||document.hidden||view!=='live')return;
+  if(liveBusy||disposed||!running||!runId||view!=='live')return;
   liveBusy=true;
   try{
    const response=await fetchImpl(`/api/v1/room-agent/camera/live/${encodeURIComponent(runId)}`,{cache:'no-store'});
@@ -114,7 +114,7 @@ export function createRoomCamera(host,fetchImpl=fetch){
    if(token===epoch){liveEmpty.textContent='Camera frame unavailable.';source.textContent='CAMERA UNAVAILABLE';}
   }finally{
    liveBusy=false;
-   if(token===epoch&&running&&!disposed)liveTimer=setTimeout(()=>{liveTimer=null;void loadLive(token);},400);
+   if(token===epoch&&running&&!disposed)liveTimer=setTimeout(()=>{liveTimer=null;void loadLive(token);},document.hidden?1500:400);
   }
  }
 
@@ -138,10 +138,15 @@ export function createRoomCamera(host,fetchImpl=fetch){
    captureImage.src=nextUrl;captureImage.hidden=false;captureEmpty.hidden=true;
    if(data.width>0&&data.height>0)captureStage.style.aspectRatio=`${data.width} / ${data.height}`;
    const detector=mode==='LIVE'?'VLM':'simulated detector';
-   captureImage.alt=`Drone capture from ${new Date(data.captured_at).toLocaleTimeString()} with ${data.detections.length} ${detector} detections`;
+   captureImage.alt=data.verified
+    ?`Drone capture from ${new Date(data.captured_at).toLocaleTimeString()} with ${data.detections.length} ${detector} detections`
+    :`Saved drone capture from ${new Date(data.captured_at).toLocaleTimeString()} without verified analysis`;
    drawObjects(captureOverlay,data.detections,data.width,data.height);
-   captureNote.textContent=`${data.detections.length} ${detector} ${data.detections.length===1?'object':'objects'} · ${data.provider} · ${new Date(data.captured_at).toLocaleTimeString()}. ${data.detections.map(d=>`${d.label} (${d.confidence})`).join(', ')}`;
-   captureButton.textContent=`${mode==='LIVE'?'Latest VLM capture':'Latest analysis'} · ${data.detections.length}`;
+   captureNote.textContent=data.verified
+    ?`${data.detections.length} ${detector} ${data.detections.length===1?'object':'objects'} · ${data.provider} · ${new Date(data.captured_at).toLocaleTimeString()}. ${data.detections.map(d=>`${d.label} (${d.confidence})`).join(', ')}`
+    :'Saved camera frame. No verified VLM result is available for this frame.';
+   captureButton.textContent=data.verified?`Latest analysis · ${data.detections.length}`:'Latest capture';
+   if(!running&&view==='live'&&!liveAt)select('capture');
    updateSource();
   }catch{
    if(token===epoch)captureEmpty.textContent='Analyzed capture unavailable.';
@@ -154,13 +159,15 @@ export function createRoomCamera(host,fetchImpl=fetch){
  return {
   render(run){
    const nextId=run?.id??null;
-   if(nextId!==runId){clear();runId=nextId;mode=run?.mode??null;captureButton.textContent=mode==='LIVE'?'Latest VLM capture':'Latest analysis';}
+   if(nextId!==runId){clear();runId=nextId;mode=run?.mode??null;captureButton.textContent='Latest capture';}
    running=run?.status==='RUNNING';
    if(!runId)liveEmpty.textContent='Camera starts after dispatch.';
    else if(!running&&!liveAt)liveEmpty.textContent='No camera frame was received for this run.';
    if(running&&!liveTimer&&!liveBusy)void loadLive(epoch);
    if(running&&!captureTimer&&!captureBusy)void loadCapture(epoch);
-   if(!running&&runId&&!terminalCaptureRead){terminalCaptureRead=true;void loadCapture(epoch);}
+   if(!running&&runId&&!captureBusy&&terminalCaptureAttempts<6&&(!captureData||terminalCaptureAttempts===0)){
+    terminalCaptureAttempts++;void loadCapture(epoch);
+   }
    updateSource();
   },
   dispose(){disposed=true;clear();},
