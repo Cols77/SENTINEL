@@ -207,13 +207,15 @@ class EnergyEstimate:
 class ReserveGuard:
     """Monotonic, fail-closed admission guard for a declared flight action."""
 
-    def __init__(self, profile: EnergyProfile, clock: Clock) -> None:
+    def __init__(self, profile: EnergyProfile, clock: Clock,
+                 *, disable_predictive_guard: bool = False) -> None:
         if not isinstance(profile, EnergyProfile):
             raise TypeError("profile must be an EnergyProfile")
         if not callable(clock):
             raise TypeError("clock must be callable")
         self.profile = profile
         self.clock = clock
+        self.disable_predictive_guard = disable_predictive_guard
         self._observed_upper = _exact_decimal(profile.percent_per_second_upper, "percent_per_second_upper")
         self._return_latched = False
         self._clock_failed = False
@@ -355,6 +357,8 @@ class ReserveGuard:
             raise TypeError(f"{field} must declare worst_case_s") from exc
 
     def _cost(self, seconds: Decimal) -> int:
+        if self.disable_predictive_guard:
+            return self.profile.telemetry_allowance_pct
         value = self._observed_upper * seconds + Decimal(self.profile.telemetry_allowance_pct)
         return int(value.to_integral_value(rounding=ROUND_CEILING))
 
@@ -364,6 +368,7 @@ class ReserveGuard:
         components = {
             "next_checkpoint_s": float(next_seconds),
             "percent_per_second_upper": float(self._observed_upper),
+            "predictive_guard_disabled": float(self.disable_predictive_guard),
             "provider_wait_s": float(provider_wait_s),
             "recovery_s": float(recovery_seconds),
             "telemetry_allowance_pct": float(self.profile.telemetry_allowance_pct),

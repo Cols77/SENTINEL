@@ -300,6 +300,7 @@ def run_count_return(
     clock: Callable[[], float], wall_clock: Callable[[], datetime],
     before_takeoff: Callable[[], None], landing_upper_bound_s: float = 10.0,
     provider_wait_s: float = 10.0, acceptance: AcceptancePolicy | None = None,
+    disable_battery_guard: bool = False,
 ) -> LiveSessionOutcome:
     """Build, take off, run to a terminal state and return the outcome.
 
@@ -314,7 +315,8 @@ def run_count_return(
             energy_profile=energy_profile, limits=limits, calibration_profiles=calibration_profiles,
             flight_stack_factory=flight_stack_factory, judge=judge, detector=detector,
             assurances=assurances, request_text=request_text, frames_dir=frames_dir, clock=clock,
-            wall_clock=wall_clock, landing_upper_bound_s=landing_upper_bound_s)
+            wall_clock=wall_clock, landing_upper_bound_s=landing_upper_bound_s,
+            disable_battery_guard=disable_battery_guard)
         if isinstance(prepared, LiveSessionOutcome):
             return prepared
         # Task V2: the room loop's per-kind Jev acceptance thresholds (and
@@ -363,13 +365,14 @@ def run_count_return(
 
 def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, calibration_profiles,
              flight_stack_factory, judge, detector, assurances, request_text, frames_dir, clock, wall_clock,
-             landing_upper_bound_s):
+             landing_upper_bound_s, disable_battery_guard):
     """Everything up to (not including) takeoff; returns an outcome only when
     the session ends on the ground (a goal ledger that is not PENDING)."""
     session_id = manifest.run_id
     tracker = LocalizationTracker(drift_profile, clock=clock, real_mode=True,
                                   canonical_heading_deg=limits.canonical_heading_deg)
-    reserve = ReserveGuard(energy_profile, clock)
+    reserve = ReserveGuard(energy_profile, clock,
+                           disable_predictive_guard=disable_battery_guard)
     pose_profile = _pose_profile(calibration_profiles)
     try:
         stack = flight_stack_factory(tracker=tracker, clock=clock, site=site)

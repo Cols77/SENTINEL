@@ -635,6 +635,7 @@ def _cmd_live(
                     assurances=verified_assurances, request_text=request_text,
                     frames_dir=run.root / "frames", clock=clock, wall_clock=wall_clock,
                     before_takeoff=before_takeoff, acceptance=acceptance,
+                    disable_battery_guard=args.disable_battery_guard,
                 )
             except live_session.LiveSessionError as exc:
                 try:
@@ -748,6 +749,12 @@ def build_parser() -> argparse.ArgumentParser:
     live_parser.add_argument("--location", default=None)
     live_parser.add_argument("--date", default=None)
     live_parser.add_argument("--i-authorise-paid-calls", action="store_true")
+    battery_guard = live_parser.add_mutually_exclusive_group()
+    battery_guard.add_argument("--disable-battery-guard", dest="disable_battery_guard",
+                               action="store_true", default=True,
+                               help="skip projected battery cost in Live mode (default; keeps the landing floor)")
+    battery_guard.add_argument("--enable-battery-guard", dest="disable_battery_guard",
+                               action="store_false", help="enforce projected battery cost in Live mode")
     live_parser.add_argument("--site", default=None)
     live_parser.add_argument("--assurance", action="append", default=[])
     live_parser.add_argument("--clock-domain-id", default=None)
