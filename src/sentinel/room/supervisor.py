@@ -129,6 +129,8 @@ class SafetySupervisor:
         self._dispatch_lock = RLock()
         #: checkpoint_id -> the controller's re-plan callable (see prepare).
         self._replans: dict = {}
+        from .semantic import clear_home_offset
+        clear_home_offset(site)
         self.recovery, self.mapped_heading_tag_ids = recovery, mapped_heading_tag_ids
         self._last_clock = None
         self._terminal = False
@@ -748,6 +750,10 @@ class SafetySupervisor:
                 raise ValueError("executor home must match the surveyed home route")
             if self._measured_home is not None and self._measured_home != home:
                 raise ValueError("session measured home cannot change")
+            if self._measured_home is None:
+                from .semantic import set_home_offset
+                nominal = self.site.home.nominal_pose
+                set_home_offset(self.site, home.pose.x_cm - nominal.x_cm, home.pose.y_cm - nominal.y_cm)
             self._measured_home = home
 
     def start(self, executor) -> HomeState:

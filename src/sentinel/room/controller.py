@@ -51,6 +51,10 @@ _MAX_RETURN_ATTEMPTS = 5
 #: heading before coverage is ever credited.
 _POSE_POSITION_TOLERANCE_CM = 5.0
 _POSE_HEADING_TOLERANCE_DEG = 5.0
+#: A real checkpoint arrival counts as reaching its declared pose within these.
+_ARRIVAL_XY_TOLERANCE_CM = 30.0
+_ARRIVAL_Z_TOLERANCE_CM = 40.0
+_ARRIVAL_HEADING_TOLERANCE_DEG = 10.0
 
 #: Task 4b item 4: reply-shape refusals re-asked once, like a provider error.
 _MALFORMED_OUTCOMES = ("MALFORMED_ANSWER", "ILLEGAL_OR_MALFORMED", "MISSING_OR_NON_MAX_SELECTION")
@@ -1099,12 +1103,17 @@ class RoomController:
         # arrival is within the dead band of the declared pose, plus the
         # measurement tolerance -- never within the tolerance alone, which
         # refused every such observation as TOOL_FAILURE.
+        # Live 2026-09-24: a real Tello overshoots a 20 cm move by ~13 cm and
+        # its altimeter wanders ~20 cm, so the dead-band tolerance refused
+        # every real observation. Grounding places detections at the
+        # *measured* pose, so an arrival this close still observes its region.
         limits = getattr(self.supervisor, "limits", None)
-        tolerance_cm = _POSE_POSITION_TOLERANCE_CM + float(getattr(limits, "dead_band_cm", 0) or 0)
+        tolerance_cm = max(_ARRIVAL_XY_TOLERANCE_CM,
+                           _POSE_POSITION_TOLERANCE_CM + float(getattr(limits, "dead_band_cm", 0) or 0))
         distance_cm = math.hypot(pose.x_cm - resolved.x_cm, pose.y_cm - resolved.y_cm)
-        if distance_cm > tolerance_cm or abs(pose.z_cm - resolved.z_cm) > tolerance_cm:
+        if distance_cm > tolerance_cm or abs(pose.z_cm - resolved.z_cm) > _ARRIVAL_Z_TOLERANCE_CM:
             return False
-        return _heading_within_tolerance(health.heading_deg, resolved.yaw_deg)
+        return _heading_within_tolerance(health.heading_deg, resolved.yaw_deg, _ARRIVAL_HEADING_TOLERANCE_DEG)
 
     def _capture_completed(self, plan, result) -> bool:
         """Fix round 2 (Q5): a dispatched ``CheckpointOutcome`` can report
