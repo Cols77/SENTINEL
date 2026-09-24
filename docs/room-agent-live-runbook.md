@@ -433,13 +433,14 @@ python scripts/room_assurance.py --site fixtures/room_agent/v1/canningst-site.js
 3. **Pre-flight checklist (before the motors-on step).** Do not run step 4
    until every line is true:
 
-   - [ ] Battery at least **85 %** (check in the Tello app or the L0 line
-         `battery=<n>%`). Each observation is admitted only while it can
-         still pay, above the 20 % floor, its own worst case, a recovery and
-         the whole return (35 % center, 40 % left/right at 0.288 %/s): the
-         center needs about 55 %, left/right about 60 %; below that the
-         aircraft returns. Below about 45 % takeoff itself is refused. A
-         real observation burns about 5-8 %, so 85 % leaves room for three.
+   - [ ] Battery at least **20 %** (check in the Tello app or the L0 line
+         `battery=<n>%`). This is the landing reserve floor, not an
+         unconditional takeoff permit. Each observation is admitted only
+         while it can still pay, above that floor, its own worst case, a
+         recovery and the whole return (35 % center, 40 % left/right at
+         0.288 %/s): the center needs about 55 %, left/right about 60 %;
+         below that the aircraft returns. Below about 45 % takeoff itself is
+         refused. A real observation burns about 5-8 %.
    - [ ] The Tello sits on the start mark (250, 190 cm), nose toward the tag
          stands, and both tags are in view of its camera.
    - [ ] Clear distance **measured with the tape** in each move direction

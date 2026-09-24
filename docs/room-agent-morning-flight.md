@@ -5,7 +5,7 @@ The full background is in [the live runbook](room-agent-live-runbook.md).
 
 ## 1. Aircraft and room
 
-- [ ] **Battery at least 85 %**, on a fresh pack. Check it in the Tello app or on the L0 line `battery=<n>%`. Takeoff is refused below about 45 %. Each region needs 55-60 % before it is admitted.
+- [ ] **Battery at least 20 %**. Check it in the Tello app or on the L0 line `battery=<n>%`. This is the landing reserve floor, not a promise of takeoff: the calibrated guard refuses takeoff below about 45 % and may require 55-60 % before an observation.
 - [ ] **Tello on the CanningSt pad at (250, 190) cm**, nose toward the tag stands, with both tags in its camera view.
 - [ ] **Cube clear.** Measure the free distance from the pad **with the tape** in every direction the aircraft moves:
   - left and right: at least 90 cm;
@@ -70,7 +70,7 @@ Mission Control's Live run repeats the same motors-off preflight before it takes
 
 ## 6. Search flight
 
-- [ ] Swap in a fresh battery if the pack is under 85 %. Put the Tello back on the pad and re-check the cube.
+- [ ] Check the battery again. Fit a charged pack if it is under 20 % or the calibrated reserve cannot admit the next flight. Put the Tello back on the pad and re-check the cube.
 - [ ] **Re-run the prepare script** (no `--consent-confirmed` is needed the same day). A run that has flown is never reused, so this gives a new run, a new grant and fresh 30-minute assurances. Do the same whenever the 30 minutes have run out. Mission Control reads `runs/live.pack.json` again at each approval, so it does not need a restart.
 - [ ] In Mission Control: **Live**, then **"find the phone"**, then **Propose run** and **Approve**. Watch it the same way as the count flight.
 
