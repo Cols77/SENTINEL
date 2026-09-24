@@ -654,6 +654,11 @@ class DjitellopyClient:
             raise DjitellopyBackendError("video stream is not enabled")
         return self._video.read(timeout)
 
+    def peek_frame(self) -> Any | None:
+        """Return the latest decoded video frame for a read-only operator preview."""
+        video = self._video
+        return video.peek() if self._streaming and video is not None and hasattr(video, "peek") else None
+
     def emergency(self) -> str:
         with self._emergency_lock:
             if self._emergency_triggered:

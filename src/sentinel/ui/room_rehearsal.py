@@ -234,6 +234,7 @@ class FakeVideo:
         self.frames = 0
         self.last_pose = None
         self.pose_by_frame = {}
+        self.last_frame = None
 
     def __call__(self, **_values):
         return self
@@ -254,7 +255,12 @@ class FakeVideo:
         x, y, _z, heading = self.last_pose
         data[0, :6, 0] = (self.frames % 256, self.frames // 256 % 256, int(x) % 256, int(y) % 256,
                           int(heading) % 256, 255)
-        return VideoFrame(width=960, height=720, pixel_format="rgb24", frame_number=self.frames, data=data)
+        self.last_frame = VideoFrame(width=960, height=720, timestamp=datetime.now(timezone.utc),
+                                     pixel_format="rgb24", frame_number=self.frames, data=data)
+        return self.last_frame
+
+    def peek(self):
+        return self.last_frame
 
 
 class FakeEmergencySocket:

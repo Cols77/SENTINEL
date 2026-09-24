@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 from dataclasses import dataclass, replace
+import errno
 from ipaddress import IPv4Address, IPv4Network
 import os
 import socket
@@ -49,6 +50,10 @@ class RouteDiscoveryError(NetworkSelectionError):
 
 class NoTelloAdapter(NetworkSelectionError):
     """Raised when no safe adapter matches the requested selection."""
+
+
+class TelloCommandPortInUse(NetworkSelectionError):
+    """Raised when another process already owns the local Tello SDK port."""
 
 
 class AmbiguousAdapter(NetworkSelectionError):
@@ -365,7 +370,16 @@ def probe_tello_endpoint(
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         probe.settimeout(timeout)
-        probe.bind((adapter.local_ip, TELLO_COMMAND_PORT))
+        try:
+            probe.bind((adapter.local_ip, TELLO_COMMAND_PORT))
+        except OSError as error:
+            if (error.errno in (errno.EADDRINUSE, 10048)
+                    or getattr(error, "winerror", None) == 10048):
+                raise TelloCommandPortInUse(
+                    f"local UDP port {TELLO_COMMAND_PORT} on {adapter.local_ip} is already in use; "
+                    "close the other Tello session before starting this one"
+                ) from error
+            raise
         probe.connect((TELLO_ENDPOINT, TELLO_COMMAND_PORT))
         if probe.getsockname()[0] != adapter.local_ip:
             return False
@@ -542,6 +556,8 @@ def _probe_with_retry(adapter: AdapterInfo, reachability_probe: ReachabilityProb
     try:
         if reachability_probe(adapter):
             return True
+    except TelloCommandPortInUse:
+        raise
     except Exception:
         pass
     if not _is_tello_address(adapter.local_ip):
@@ -550,6 +566,8 @@ def _probe_with_retry(adapter: AdapterInfo, reachability_probe: ReachabilityProb
         if reachability_probe is _DEFAULT_PROBE_MARKER:
             return bool(probe_tello_endpoint(adapter, timeout=TELLO_RETRY_TIMEOUT_S))
         return bool(reachability_probe(adapter))
+    except TelloCommandPortInUse:
+        raise
     except Exception:
         return False
 

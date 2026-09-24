@@ -15,6 +15,7 @@ import threading
 
 from sentinel.room.association import associate_static
 from sentinel.room.grounding import FrameCountEvidence
+from sentinel.room.goals import GOAL_ACT_AT
 
 HOME_TOLERANCE_CM = 25.0
 _REGION_LABELS = {"center": "Center", "left": "Left", "right": "Right"}
@@ -70,6 +71,7 @@ class RoomAgentProjection:
             battery_percent=None,
             airborne=False,
             goal=None,
+            goal_rejection=None,
             regions={},
             captures=0,
             detections=[],
@@ -87,6 +89,7 @@ class RoomAgentProjection:
         self._offered_regions = []
         self._class_order = []
         self._count_frames = []
+        self._last_goal_choice = None
 
     # -- external steps (bursts are observed at the stack, not the ledger) ----
     def note_burst(self, *, heading_deg, tags, reports, purpose="recovery burst"):
@@ -183,6 +186,26 @@ class RoomAgentProjection:
             f"{o.get('kind')} {', '.join(o.get('target_classes') or ())} in {str(o.get('spatial_scope', '')).lower()}"
             f" then {str(o.get('terminal_condition', '')).lower().replace('_', ' ')}"
             for o in objectives) or None
+
+    def _on_goal_compile_rejected(self, payload):
+        # This is the preflight reason recorded in the ledger. The terminal
+        # reason only says GOAL_LEDGER_NOT_PENDING and loses this detail.
+        choice = self._last_goal_choice or {}
+        assessment = choice.get("assessment") or {}
+        state = choice.get("state") or {}
+        clause = next((row.get("text") for row in state.get("clauses") or ()
+                       if row.get("clause_id") == state.get("clause_id")), None)
+        self.state["goal_rejection"] = dict(
+            status=payload.get("status"), code=payload.get("reason"),
+            choice=choice.get("name"), clause=clause, attempt=choice.get("attempt"),
+            selected_label=assessment.get("selected_label"),
+            confidence=assessment.get("confidence"),
+            selected_probability=assessment.get("selected_probability"),
+            required_confidence=GOAL_ACT_AT,
+        )
+
+    def _on_goal_choice_attempt(self, payload):
+        self._last_goal_choice = payload
 
     def _on_drone_state_recorded(self, payload):
         state = payload.get("state") or {}
