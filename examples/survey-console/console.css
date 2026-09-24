@@ -527,6 +527,7 @@ summary {
 .site-profile-placard p{grid-column:2/-1;margin:0;overflow-wrap:anywhere}
 .site-profile-placard #retry-site-profiles{grid-column:3;justify-self:start}
 .mission-layout{display:grid;grid-template-columns:minmax(250px, .85fr) minmax(350px,1.65fr) minmax(240px, .85fr);gap:20px;align-items:start}
+.mission-layout[hidden]{display:none}
 .mission-layout>*{min-width:0;background:var(--surface-panel);border:1px solid var(--border-control);padding:18px;border-radius:8px}
 .mission-chat h2,.mission-workspace h2{font-size:22px}.mission-transcript{max-height:340px;overflow:auto;scrollbar-gutter:stable}
 .mission-chat textarea{display:block;width:100%;resize:vertical;font:inherit;color:var(--text-primary);background:var(--surface-canvas);border:1px solid var(--border-control);padding:12px;border-radius:6px;margin:8px 0}

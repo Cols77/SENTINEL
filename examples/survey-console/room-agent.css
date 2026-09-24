@@ -1,78 +1,223 @@
-/* Room-agent mode (Task C). Uses the console's design tokens only. */
+/* A compact flight instrument panel within Mission Control. */
 .architecture-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 16px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--border-default);
+  display:flex; flex-wrap:wrap; align-items:center; gap:8px 16px;
+  padding:12px 16px; border-bottom:1px solid var(--border-default);
 }
-.architecture-bar .meta { margin: 0; }
-.room-agent { padding: 12px 16px 24px; }
-.room-agent[hidden] { display: none; }
+.architecture-bar .meta { margin:0; }
+.architecture-bar select { min-width:16rem; }
+.mission-console:has(.room-agent:not([hidden])) { overflow-x:clip; }
+.room-agent { padding:0 0 24px; }
+.room-agent[hidden] { display:none; }
+
 .room-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
+  position:sticky; top:0; z-index:12;
+  display:flex; justify-content:space-between; align-items:center; gap:16px;
+  min-height:76px; padding:12px 16px;
+  border-bottom:1px solid var(--border-default);
+  background:var(--surface-canvas);
 }
-.room-safety { display: flex; gap: 8px; }
-.room-safety button { min-width: 7rem; }
+.room-header .section-label { margin:0; color:var(--text-primary); font-weight:700; }
+.room-safety { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
+.room-safety button {
+  display:inline-flex; align-items:center; justify-content:center; gap:8px;
+  min-width:8.5rem; min-height:48px; font-weight:700;
+}
+.room-safety #room-land { border-color:var(--status-warning); color:var(--status-warning); }
+.room-safety #room-land:not(:disabled):hover {
+  background:color-mix(in srgb,var(--surface-raised) 85%,var(--status-warning));
+}
+.room-safety #room-emergency {
+  min-width:12.5rem; border:2px solid var(--status-emergency);
+  background:color-mix(in srgb,var(--surface-panel) 86%,var(--status-emergency));
+  color:var(--text-primary);
+}
+.room-safety #room-emergency::before {
+  content:''; width:20px; height:20px; flex:none; background:var(--status-emergency);
+  -webkit-mask:url('/assets/sentinel-ui/icons/emergency-stop.svg') center / contain no-repeat;
+  mask:url('/assets/sentinel-ui/icons/emergency-stop.svg') center / contain no-repeat;
+}
+.room-safety #room-emergency:not(:disabled):hover {
+  background:color-mix(in srgb,var(--surface-panel) 72%,var(--status-emergency));
+}
+.room-safety button:disabled { opacity:.7; }
+.room-agent > [data-testid='room-message'] {
+  margin:12px 0; padding:8px 12px; border-left:3px solid var(--accent-primary);
+  background:var(--surface-panel); color:var(--text-primary);
+}
+.room-agent > [data-testid='room-message']:empty { display:none; }
+
 .room-grid {
-  display: grid;
-  grid-template-columns: minmax(280px, 1.1fr) minmax(280px, 1.2fr) minmax(240px, 0.9fr);
-  gap: 16px;
-  align-items: start;
+  display:grid;
+  grid-template-columns:minmax(0,1.12fr) minmax(0,1.45fr) minmax(0,.86fr);
+  grid-template-areas:'setup state results' 'setup logs results';
+  gap:16px; align-items:start; padding-top:16px;
 }
-@media (max-width: 1100px) {
-  .room-grid { grid-template-columns: 1fr; }
+.room-col {
+  min-width:0; padding:16px;
+  border:1px solid var(--border-control); border-radius:var(--radius-panel);
+  background:var(--surface-panel);
 }
-.room-col h3 { margin: 12px 0 6px; font-size: 1rem; }
+.room-setup-col { grid-area:setup; border-top:3px solid var(--border-control); }
+.room-dynamic { grid-area:state; border-top:3px solid var(--accent-primary); }
+.room-logs { grid-area:logs; }
+.room-results { grid-area:results; }
+.room-col h3 { margin:4px 0 10px; font-size:16px; line-height:1.25; }
+.room-col h3:not(:first-child) { margin-top:24px; }
 .room-setup {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 6px 10px;
-  align-items: center;
+  display:grid; grid-template-columns:minmax(0,1fr);
+  gap:5px; align-items:center;
 }
-.room-setup textarea { grid-column: 1 / -1; width: 100%; box-sizing: border-box; }
-.room-setup label[for="room-request"] { grid-column: 1 / -1; }
-.room-setup button { grid-column: 1 / -1; justify-self: start; }
+.room-setup label { margin-top:7px; font-size:14px; color:var(--text-secondary); }
+.room-setup :is(select,input,textarea) {
+  min-width:0; width:100%; padding:9px 10px;
+  border:1px solid var(--border-control); border-radius:4px;
+  background:var(--surface-canvas); color:var(--text-primary); font:14px Mission Plex,var(--font-body);
+}
+.room-setup :is(select,input,textarea):disabled { opacity:.68; }
+.room-setup textarea { grid-column:1 / -1; min-height:66px; resize:vertical; }
+.room-setup label[for='room-request'] { grid-column:1 / -1; margin-top:2px; }
+.room-setup button {
+  grid-column:1 / -1; justify-self:start; min-height:44px;
+  border-color:var(--accent-primary); color:var(--accent-primary); font-weight:700;
+}
+.room-setup :is(input,textarea):focus-visible {
+  outline:2px solid var(--focus-color); outline-offset:3px;
+}
+
 .room-approval {
-  margin: 12px 0;
-  padding: 10px 12px;
-  border: 1px solid var(--accent-primary);
-  background: var(--surface-raised);
+  margin:16px 0; padding:16px;
+  border:1px solid var(--status-warning); border-left-width:4px;
+  border-radius:var(--radius-panel);
+  background:color-mix(in srgb,var(--surface-raised) 88%,var(--status-warning));
 }
-.room-approval h3 { margin-top: 0; }
-.room-approval button { margin-right: 8px; }
+.room-approval h3 { margin:0 0 8px; font-size:20px; }
+.room-approval p { margin:0 0 12px; font-size:16px; font-weight:700; overflow-wrap:anywhere; }
+.room-approval ul { margin:0 0 16px; padding-left:20px; color:var(--text-secondary); }
+.room-approval li { margin:5px 0; }
+.room-approval button { min-height:44px; margin:0 8px 8px 0; }
+.room-approval button:first-of-type:not(.danger) {
+  border-color:var(--accent-primary); background:var(--accent-primary);
+  color:var(--text-on-accent); font-weight:700;
+}
+.room-approval button.danger {
+  border-color:var(--status-warning); background:var(--status-warning);
+  color:var(--text-on-accent); font-weight:700;
+}
+
 .room-facts {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 4px 12px;
-  margin: 12px 0;
+  display:grid; grid-template-columns:minmax(78px,max-content) minmax(0,1fr);
+  gap:7px 12px; margin:0;
 }
-.room-facts dt { color: var(--text-secondary); }
-.room-facts dd { margin: 0; font-family: var(--font-mono); }
-.room-facts .loc-anchored { color: var(--text-primary); }
-.room-facts .loc-coasting,
-.room-facts .loc-recovery_required,
-.room-facts .loc-lost { font-weight: 700; }
-.room-answer-summary { font-size: 1.15rem; font-weight: 700; margin: 4px 0; }
+.room-facts dt { align-self:start; color:var(--text-secondary); font-size:14px; }
+.room-facts dd {
+  min-width:0; margin:0; overflow-wrap:anywhere;
+  font:14px/1.45 Mission Mono,var(--font-mono);
+}
+.room-facts dd[data-testid='room-status'] {
+  color:var(--text-primary); font:700 16px/1.35 Mission Plex,var(--font-body);
+}
+.room-facts dd[data-testid='room-localization-state'] {
+  justify-self:start; padding:4px 10px;
+  border:1px solid var(--border-control); border-radius:var(--radius-pill);
+  font:700 16px/1.2 Mission Mono,var(--font-mono); letter-spacing:.025em;
+}
+.room-facts .loc-anchored {
+  border-color:var(--accent-primary) !important; color:var(--accent-primary);
+  background:color-mix(in srgb,var(--surface-panel) 86%,var(--accent-primary));
+}
+.room-facts .loc-coasting,.room-facts .loc-recovery_required {
+  border-color:var(--status-warning) !important; color:var(--status-warning);
+  background:color-mix(in srgb,var(--surface-panel) 86%,var(--status-warning));
+}
+.room-facts .loc-lost {
+  border-color:var(--status-emergency) !important; color:var(--status-emergency);
+  background:color-mix(in srgb,var(--surface-panel) 86%,var(--status-emergency));
+}
+.room-facts .outcome-complete {
+  color:var(--accent-primary); font-weight:700;
+}
+.room-facts .outcome-emergency {
+  color:var(--status-emergency); font-weight:700;
+}
+.room-answer {
+  margin-top:18px; padding:16px; border-left:4px solid var(--border-control);
+  background:var(--surface-raised);
+}
+.room-answer.is-complete { border-left-color:var(--accent-primary); }
+.room-answer h3 {
+  margin:0 0 8px; color:var(--text-secondary);
+  font:14px Mission Mono,var(--font-mono);
+  letter-spacing:.08em; text-transform:uppercase;
+}
+.room-answer-summary {
+  margin:0; font-size:clamp(20px,1.8vw,26px); line-height:1.22;
+  font-weight:700; overflow-wrap:anywhere;
+}
 .room-answer pre {
-  white-space: pre-wrap;
-  font: 13px/1.4 var(--font-mono);
-  color: var(--text-secondary);
-  margin: 0;
+  margin:12px 0 0; padding-top:12px; border-top:1px solid var(--border-default);
+  max-height:7.5rem; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere;
+  font:14px/1.5 Mission Mono,var(--font-mono); color:var(--text-secondary);
 }
+.room-answer pre:empty { display:none; }
+
 .room-log {
-  margin: 0;
-  padding-left: 1.4rem;
-  max-height: 22rem;
-  overflow: auto;
-  font-size: 0.92rem;
+  max-height:21rem; margin:0; padding:0; overflow:auto;
+  scrollbar-gutter:stable; list-style:none;
+  font:14px/1.5 Mission Mono,var(--font-mono);
 }
-.room-log li { margin: 2px 0; }
-.room-log li[data-kind="YAW_ROTATION"],
-.room-log li[data-kind="REANCHOR_ACCEPTED"] { font-weight: 700; }
-.room-log li[data-kind="RECOVERY"],
-.room-log li[data-kind="LOCALIZATION"] { font-style: italic; }
+.room-log li {
+  margin:0; padding:9px 10px; border-top:1px solid var(--border-default);
+  overflow-wrap:anywhere;
+}
+.room-log li:first-child { border-top:0; }
+[data-testid='room-decision-log'] li {
+  padding-left:14px; border-left:2px solid var(--border-control);
+}
+[data-testid='room-reanchor-log'] li[data-kind='YAW_ROTATION'] {
+  border-left:4px solid var(--status-warning);
+  background:color-mix(in srgb,var(--surface-panel) 90%,var(--status-warning));
+  color:var(--status-warning); font-weight:700;
+}
+[data-testid='room-reanchor-log'] li[data-kind='REANCHOR_ACCEPTED'] {
+  border-left:4px solid var(--accent-primary);
+  background:color-mix(in srgb,var(--surface-panel) 90%,var(--accent-primary));
+  color:var(--accent-primary); font-weight:700;
+}
+[data-testid='room-reanchor-log'] li[data-kind='RECOVERY'],
+[data-testid='room-reanchor-log'] li[data-kind='LOCALIZATION'] {
+  border-left:2px solid var(--status-warning);
+}
+[data-testid='room-regions'],[data-testid='room-detections'] { max-height:20rem; }
+[data-testid='room-regions'] li,[data-testid='room-detections'] li {
+  margin:0 0 7px; padding:8px 10px; border:1px solid var(--border-default);
+  border-radius:4px; background:var(--surface-canvas);
+}
+.room-region-state {
+  display:inline-block; padding:2px 6px;
+  border:1px solid var(--accent-primary); border-radius:var(--radius-pill);
+  color:var(--accent-primary); font-size:12px; font-weight:700;
+  letter-spacing:.04em; white-space:nowrap;
+}
+.room-region-state.is-offered {
+  border-color:var(--border-control); color:var(--text-secondary);
+}
+.room-region-state.is-low_confidence {
+  border-color:var(--status-warning); color:var(--status-warning);
+}
+
+@media (max-width:1100px) {
+  .room-grid {
+    grid-template-columns:minmax(0,1fr);
+    grid-template-areas:'state' 'setup' 'logs' 'results';
+  }
+}
+@media (max-width:680px) {
+  .architecture-bar { padding-inline:0; }
+  .architecture-bar select { width:100%; }
+  .room-header { flex-wrap:wrap; padding-inline:0; }
+  .room-safety { width:100%; justify-content:stretch; }
+  .room-safety button { flex:1 1 8rem; min-width:0; }
+  .room-safety #room-emergency { min-width:0; }
+  .room-grid { gap:12px; }
+  .room-col { padding:14px; }
+}

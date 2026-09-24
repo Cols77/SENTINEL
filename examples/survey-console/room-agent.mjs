@@ -22,7 +22,12 @@ function createRoomClient(base='/api/v1',fetchImpl=fetch){
 }
 
 const option=(row,selected)=>el('option',{value:row.value,selected:row.value===selected,disabled:Boolean(row.disabled),title:row.title||null},[row.label]);
-const list=(testid,lines,empty)=>el('ol',{'data-testid':testid,class:'room-log'},lines.length?lines.map(line=>typeof line==='string'?el('li',{},[line]):el('li',{'data-kind':line.kind},[line.text])):[el('li',{class:'meta'},[empty])]);
+const regionParts=line=>{
+ const state=/\b(OBSERVED|OFFERED|LOW_CONFIDENCE)\b/.exec(line);
+ if(!state)return [line];
+ return [line.slice(0,state.index),el('span',{class:`room-region-state is-${state[0].toLowerCase()}`},[state[0]]),line.slice(state.index+state[0].length)];
+};
+const list=(testid,lines,empty,parts=line=>[line])=>el('ol',{'data-testid':testid,class:'room-log'},lines.length?lines.map(line=>typeof line==='string'?el('li',{},parts(line)):el('li',{'data-kind':line.kind},[line.text])):[el('li',{class:'meta'},[empty])]);
 
 export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
  let catalogue=null,state=null,session=null,architecture=SURVEY,message='',timer=null,landAttempt=null,emergencyAttempt=null;
@@ -111,17 +116,18 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
  const emergencyButton=button('EMERGENCY STOP',()=>void emergency(),{id:'room-emergency','data-testid':'room-emergency',class:'emergency-control'});
  const messageLine=el('p',{'data-testid':'room-message',role:'status',class:'meta'});
  const approvalHost=el('div',{});
- const dynamic=el('div',{class:'room-dynamic'});
- const logs=el('div',{class:'room-col'});
- const lists=el('div',{class:'room-col'});
+ const dynamic=el('div',{class:'room-dynamic room-col'});
+ const logs=el('div',{class:'room-col room-logs'});
+ const lists=el('div',{class:'room-col room-results'});
  panel.append(
   el('header',{class:'room-header'},[el('p',{class:'section-label'},['ROOM AGENT · JEV ADAPTIVE']),el('div',{class:'room-safety'},[landButton,emergencyButton])]),
   messageLine,
-  el('div',{class:'room-grid'},[el('div',{class:'room-col'},[setup,approvalHost,dynamic]),logs,lists]),
+  el('div',{class:'room-grid'},[el('div',{class:'room-col room-setup-col'},[setup,approvalHost]),dynamic,logs,lists]),
  );
  let lastModes='',lastScenarios='';
 
  function render(){
+  const scrollPositions=new Map([...panel.querySelectorAll('.room-log, .room-answer pre')].map(node=>[node.dataset.testid,node.scrollTop]));
   const view=roomViewModel(state);
   const modes=modeOptions(catalogue),scenarios=scenarioOptions(catalogue);
   const modesKey=JSON.stringify(modes)+form.mode,scenariosKey=JSON.stringify(scenarios)+form.scenario;
@@ -156,10 +162,10 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
     el('dt',{},['Pose']),el('dd',{'data-testid':'room-pose'},[`${view.pose} · ${view.battery}`]),
     el('dt',{},['Goal']),el('dd',{'data-testid':'room-goal'},[view.goal||'--']),
     el('dt',{},['Captures']),el('dd',{'data-testid':'room-captures'},[String(view.captures)]),
-    el('dt',{},['Return home']),el('dd',{'data-testid':'room-returned-home'},[view.returnedHome]),
-    el('dt',{},['Landing']),el('dd',{'data-testid':'room-landing'},[view.landing]),
+    el('dt',{},['Return home']),el('dd',{'data-testid':'room-returned-home',class:view.returnedHome==='Returned home'?'outcome-complete':''},[view.returnedHome]),
+    el('dt',{},['Landing']),el('dd',{'data-testid':'room-landing',class:/EMERGENCY|FAILED/.test(view.landing)?'outcome-emergency':/^Landing: LANDED\b/.test(view.landing)?'outcome-complete':''},[view.landing]),
    ]),
-   el('div',{class:'room-answer'},[
+   el('div',{class:`room-answer${view.answer==='Awaiting answer…'||view.answer==='No answer recorded.'?'':' is-complete'}`},[
     el('h3',{},['Answer']),
     el('p',{'data-testid':'room-answer',class:'room-answer-summary'},[view.answer]),
     el('pre',{'data-testid':'room-answer-detail'},[view.answerDetail]),
@@ -171,9 +177,13 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
    list('room-reanchor-log',view.reanchor,'No re-anchor or recovery step yet.'),
   ]);
   replace(lists,[
-   el('h3',{},['Regions']),list('room-regions',view.regions,'No region offered yet.'),
+   el('h3',{},['Regions']),list('room-regions',view.regions,'No region offered yet.',regionParts),
    el('h3',{},['Detections']),list('room-detections',view.detections,'No detection yet.'),
   ]);
+  for(const node of panel.querySelectorAll('.room-log, .room-answer pre')){
+   const top=scrollPositions.get(node.dataset.testid);
+   if(top!==undefined)node.scrollTop=top;
+  }
  }
 
  function start(){
