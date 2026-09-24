@@ -88,8 +88,15 @@ HOME_TOLERANCE_CM = 150.0
 #: and carries at least these uncertainties (one tag cannot rule out a flip).
 SINGLE_TAG_XY_UNCERTAINTY_CM = 15.0
 SINGLE_TAG_HEADING_UNCERTAINTY_DEG = 5.0
-#: Airborne home bursts: one retry when the first saw no two-tag view.
+#: Airborne home bursts: one retry when the first gave no two-tag fix but
+#: showed the camera framing the tags (``_frames_the_tags``).
 HOME_BURST_ATTEMPTS = 2
+#: Listening time per home attempt. A hovering Tello that frames both tags
+#: delivers its readings in under a second (recorded bursts: 12 reports in
+#: 0.5-1.1 s, so localise's 8 samples take at most ~0.7 s); one that sees
+#: nothing waited the full 12 s burst, twice, drifting blind (live 2026-09-24
+#: 18:31 and 18:54: 33-34 s airborne before landing).
+HOME_BURST_MAX_S = 4.0
 #: A burst with at least this many two-tag reports is localised from those
 #: alone (``localise``'s own minimum sample count).
 MIN_JOINT_REPORTS = 8
@@ -410,6 +417,18 @@ def wp5_pose_burst(client, tag_map: TagMap, conn: sqlite3.Connection, *, run_id:
 _BUSY = object()
 
 
+def _frames_the_tags(burst: list) -> bool:
+    """Whether a burst shows the camera framing the tags, not a blind drone.
+
+    One report that saw two tags, or localise's own sample count of reports,
+    is framing. A stray frame is not: the blind 2026-09-24 18:54 hover
+    recorded exactly one single-tag report, and retrying on it only doubled
+    the time airborne before landing.
+    """
+    return (len(burst) >= MIN_JOINT_REPORTS
+            or any(len({obs.tag_id for obs in report.tag_observations}) >= 2 for report in burst))
+
+
 @dataclass(frozen=True)
 class _TagFix:
     x_cm: int
@@ -525,12 +544,20 @@ class _TelloStack:
     def _tag_fix(self, duration_s: float, *, blocking: bool = True) -> _TagFix | None | object:
         """A tag fix from one burst; with ``blocking`` False, ``_BUSY`` when
         another burst (a recovery burst) already holds the video reader."""
+        burst = self._read_burst(duration_s, blocking=blocking)
+        return burst if burst is _BUSY else self._fix_from_burst(burst)
+
+    def _read_burst(self, duration_s: float, *, blocking: bool = True) -> list | object:
+        """One burst's reports; ``_BUSY`` when not ``blocking`` and the reader is held."""
         if not self._burst_lock.acquire(blocking=blocking):
             return _BUSY
         try:  # one video reader at a time
-            burst = list(self._burst(self.client, duration_s=duration_s))
+            return list(self._burst(self.client, duration_s=duration_s))
         finally:
             self._burst_lock.release()
+
+    def _fix_from_burst(self, burst: list) -> _TagFix | None:
+        """The tag fix one burst supports, or None; reads no stream."""
         # LocalizationTracker.accept_fix's mapped_joint_tags gate requires at
         # least two distinct tag IDs as evidence that the fix was *jointly*
         # triangulated, not merely that different single tags drifted across
@@ -708,13 +735,22 @@ class _TelloStack:
         time.sleep(self._home_settle_s)
         fix = None
         for _ in range(HOME_BURST_ATTEMPTS):
-            # A burst that saw no joint (two-tag) view is retried once: a
-            # hovering Tello often frames both tags a moment later.
-            fix = self._tag_fix(BURST_MAX_S)
-            if fix is not None and len(fix.tag_ids) >= 2:
+            # Only a two-tag fix is a home: the tracker's accept_fix refuses a
+            # single-tag one, and set_home_offset would shift the semantic
+            # frame on one tag's word. A burst that framed the tags without
+            # such a fix is retried once: a hovering Tello often frames both
+            # tags a moment later. A blind burst (no tag, or a stray frame)
+            # is not: the aircraft is lost or drifting, and it lands now
+            # rather than hover blind for another attempt.
+            burst = self._read_burst(HOME_BURST_MAX_S)
+            candidate = self._fix_from_burst(burst)
+            if candidate is not None and len(candidate.tag_ids) >= 2:
+                fix = candidate
+                break
+            if not _frames_the_tags(burst):
                 break
         if fix is None:
-            raise LiveStackError("home: no reliable tag fix after takeoff; the home is never assumed")
+            raise LiveStackError("home: no two-tag fix after takeoff; the home is never assumed")
         z_cm = self._passive_height_cm()
         if not self.tracker.initialized:
             # Takeoff is not gated on a pad fix; this airborne fix is the
@@ -839,7 +875,7 @@ class TelloFlightStackFactory:
         deadline = None if self.max_duration_s is None else clock() + self.max_duration_s
         executor = StepExecutor(runner, clock=clock, deadline=deadline, measure_home=stack.measure_home,
                                 command_sink=stack.command_sink, home_tolerance_cm=HOME_TOLERANCE_CM,
-                                home_measurement_timeout_s=(self.home_settle_s + HOME_BURST_ATTEMPTS * BURST_MAX_S
+                                home_measurement_timeout_s=(self.home_settle_s + HOME_BURST_ATTEMPTS * HOME_BURST_MAX_S
                                                             + 2 * HEIGHT_READ_SLACK_S))
         stack.executor = executor
         headings = mapped_heading_tag_ids(self.tag_map)

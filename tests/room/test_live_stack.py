@@ -643,6 +643,57 @@ def test_start_with_no_reliable_fix_after_takeoff_raises_and_lands_never_assumin
     assert stack.executor.home is None
 
 
+@pytest.mark.parametrize("blind", [[], reports(n=1, tags=(1,))], ids=["no-tag", "stray-frame"])
+def test_a_blind_home_burst_lands_after_one_attempt(tmp_path, blind):
+    # Live 2026-09-24 18:31 (no report) and 18:54 (one single-tag report):
+    # a drone that is not framing the tags lands now, never hovers blind
+    # through a retry.
+    from sentinel.cube.step_executor import HomeMeasurementError
+
+    bursts = Bursts(blind)
+    stack, tello, _, site, _ = build_stack(tmp_path, bursts=bursts)
+    with pytest.raises(HomeMeasurementError):
+        stack.executor.start(site.home)
+    assert bursts.durations == [live_stack.HOME_BURST_MAX_S]
+    assert "land" in tello.sent and stack.executor.home is None
+
+
+@pytest.mark.parametrize("pad_anchored", [True, False], ids=["pad-anchored", "unanchored"])
+def test_a_single_tag_fix_is_never_the_home(tmp_path, pad_anchored):
+    # Only a two-tag fix is a home: a single-tag one is refused by the
+    # tracker's accept_fix and would shift the semantic frame on one tag.
+    from sentinel.cube.step_executor import HomeMeasurementError
+
+    single = reports(110, 100, tags=(1,))
+    bursts = Bursts(reports(), single) if pad_anchored else Bursts(single)
+    stack, tello, tracker, site, _ = build_stack(tmp_path, bursts=bursts)
+    if pad_anchored:
+        stack.refresh()
+    with pytest.raises(HomeMeasurementError):
+        stack.executor.start(site.home)
+    home_bursts = bursts.durations[1:] if pad_anchored else bursts.durations
+    assert home_bursts == [live_stack.HOME_BURST_MAX_S] * live_stack.HOME_BURST_ATTEMPTS
+    assert "land" in tello.sent and stack.executor.home is None
+    assert tracker.initialized is pad_anchored
+    if pad_anchored:
+        assert tracker.health.position.x_cm == 100  # still the pad fix, never the one-tag x=110
+
+
+def test_a_home_burst_that_frames_one_tag_is_retried_and_takes_the_two_tag_fix(tmp_path):
+    bursts = Bursts(reports(110, 100, tags=(1,)), reports(104, 97))
+    stack, _, tracker, site, _ = build_stack(tmp_path, bursts=bursts)
+    home = stack.executor.start(site.home)
+    assert (home.pose.x_cm, home.pose.y_cm) == (104, 97)
+    assert bursts.durations == [live_stack.HOME_BURST_MAX_S] * 2
+    assert tracker.health.state is LocalizationState.ANCHORED
+
+
+def test_home_measurement_timeout_covers_every_short_home_burst(tmp_path):
+    stack, *_ = build_stack(tmp_path)
+    assert stack.executor.home_measurement_timeout_s == pytest.approx(
+        live_stack.HOME_BURST_ATTEMPTS * live_stack.HOME_BURST_MAX_S + 2 * live_stack.HEIGHT_READ_SLACK_S)
+
+
 def test_localise_with_no_reliable_fix_fails_the_checkpoint(tmp_path):
     bursts = Bursts(reports(), reports(), reports(), reports(n=3))
     stack, _, _, site, _ = build_stack(tmp_path, bursts=bursts)
