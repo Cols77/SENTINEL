@@ -1,5 +1,7 @@
 from argparse import ArgumentParser
 from pathlib import Path
+import os
+import subprocess
 import sys
 from .bootstrap import SessionConfig, StartupError, build_service
 from .app import build_app
@@ -64,5 +66,32 @@ def main(argv=None):
     finally:service.close()
     return 0
 
+_ROOM_WORKER_FLAG = '--room-ui-worker'
+_ROOM_RESTART_EXIT = 75
+
+
+def _entry():
+    argv = sys.argv[1:]
+    if _ROOM_WORKER_FLAG in argv:
+        argv.remove(_ROOM_WORKER_FLAG)
+        os.environ['SENTINEL_ROOM_UI_SUPERVISED'] = '1'
+        return main(argv)
+    # DJITelloPy owns process-global UDP receivers which cannot be rebound
+    # after a run. Keep the HTTP server in a replaceable child process.
+    if '--room-live-config' not in argv and not any(
+            arg.startswith('--room-live-config=') for arg in argv):
+        return main(argv)
+    while True:
+        child = subprocess.Popen([sys.executable, '-m', 'sentinel.ui', *argv, _ROOM_WORKER_FLAG])
+        try:
+            code = child.wait()
+        except KeyboardInterrupt:
+            child.wait()
+            return 130
+        if code != _ROOM_RESTART_EXIT:
+            return code
+        print('Mission Control: starting a fresh Live server for the next flight.', flush=True)
+
+
 if __name__=='__main__':
-    raise SystemExit(main())
+    raise SystemExit(_entry())

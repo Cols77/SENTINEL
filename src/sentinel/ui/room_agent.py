@@ -202,6 +202,7 @@ class RoomAgentService:
         self._preparing = False
         self._port_checked_at = 0.0
         self._port_snapshot = None
+        self._live_link_used = False
 
     # -- catalogue ------------------------------------------------------------
     def modes(self):
@@ -246,7 +247,7 @@ class RoomAgentService:
         if self._preparing:
             return "PREPARATION_ACTIVE"
         run = self.run
-        if run is not None and (run.status in ("RUNNING", "AWAITING_APPROVAL") or
+        if run is not None and (run.status == "RUNNING" or
                                 (run.thread is not None and not run.done.is_set())):
             return "ROOM_RUN_ACTIVE"
         return self._mission_busy()
@@ -328,9 +329,14 @@ class RoomAgentService:
             with self._lock:
                 self.live_config_path = result["current_pack"]
                 self._port_checked_at = 0.0
+                restart_server = (self._live_link_used and
+                                  os.environ.get("SENTINEL_ROOM_UI_SUPERVISED") == "1")
+                restart_required = self._live_link_used and not restart_server
+                self.run = None
             new_pack = result["pack"]
             return dict(status="ACKNOWLEDGED", run_id=new_pack["run_id"],
-                        assurances_expire_at=new_pack["assurances_expire_at"])
+                        assurances_expire_at=new_pack["assurances_expire_at"],
+                        server_restarting=restart_server, restart_required=restart_required)
         except (OSError, ValueError, KeyError, RuntimeError) as exc:
             return dict(status="UNAVAILABLE", reason_code="ROOM_PREPARATION_FAILED", detail=str(exc))
         finally:
@@ -652,6 +658,7 @@ class RoomAgentService:
         return argv, run_dir, manifest_run_id
 
     def _run_live(self, run):
+        self._live_link_used = True
         argv, run_dir, manifest_run_id = self.live_argv(run)
         run.id = manifest_run_id
         run.frame_root = run_dir
@@ -742,6 +749,12 @@ def build_room_agent_router(room: RoomAgentService):
 
     router = APIRouter(prefix="/api/v1/room-agent")
 
+    def restart_worker():
+        # Let the acknowledgement reach the browser before the process closes
+        # its HTTP connection and releases DJITelloPy's global UDP sockets.
+        time.sleep(0.25)
+        os._exit(75)
+
     def result(body):
         return JSONResponse(body, status_code={"CONFLICT": 409, "INVALID": 422, "UNAVAILABLE": 503}.get(
             body.get("status"), 200))
@@ -812,7 +825,15 @@ def build_room_agent_router(room: RoomAgentService):
 
     @router.post("/preparations")
     async def prepare(request: Request):
-        return result(await run_in_threadpool(room.prepare, await body_of(request)))
+        from starlette.background import BackgroundTask
+
+        body = await run_in_threadpool(room.prepare, await body_of(request))
+        response = result(body)
+        if body.get("server_restarting"):
+            # The response is sent before the worker exits. The parent in
+            # sentinel.ui.__main__ starts a clean receiver process.
+            response.background = BackgroundTask(restart_worker)
+        return response
 
     @router.post("/decisions")
     async def decide(request: Request):

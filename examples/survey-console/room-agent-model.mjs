@@ -87,9 +87,16 @@ export function preflightBlock(run){
  const rejection=run?.goal_rejection;
  if(!rejection||run?.took_off)return null;
  const code=rejection.code??'UNKNOWN';
+ const scope=rejection.choice==='spatial_scope';
+ const confidence=Number(rejection.confidence);
+ const probability=Number(rejection.selected_probability);
+ const threshold=Number(rejection.required_confidence);
+ const scopeDetail=scope&&Number.isFinite(confidence)&&Number.isFinite(threshold)
+  ?`For “${rejection.clause??'this request'}”, Jev leaned toward ${String(rejection.selected_label??'a scope').replaceAll('_',' ').toLowerCase()}${Number.isFinite(probability)?` (probability ${probability.toFixed(2)})`:''}, but its confidence ${confidence.toFixed(2)} stayed below the required ${threshold.toFixed(2)} after ${rejection.attempt??1} attempts. State a supported area explicitly, such as “in the room”.`
+  :null;
  const explanations={
   AMBIGUOUS_ENTITY_REFERENCE:'The request refers to a target or position the planner cannot identify unambiguously. Name the area and target explicitly.',
-  LOW_CONFIDENCE:'Jev could not choose a safe interpretation of the request with enough confidence.',
+  LOW_CONFIDENCE:scopeDetail??'Jev could not choose a safe interpretation of the request with enough confidence.',
   UNSUPPORTED:'The requested goal cannot be represented by the current room agent.',
  };
  return {title:'No takeoff attempted',detail:explanations[code]??'The room agent could not turn this request into an approved flight goal.',code};

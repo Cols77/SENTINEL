@@ -112,7 +112,7 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
   prepBusy=true;message='Creating the next flight pack…';render();
   try{
    const r=await client.prepare({local_ip:form.localIp.trim()||null});
-   message=r.ok?`New flight pack ${r.body.run_id} prepared.`:
+   message=r.ok?`New flight pack ${r.body.run_id} prepared.${r.body.server_restarting?' Resetting the Tello connection…':r.body.restart_required?' Restart Mission Control to release the Tello receiver.':''}`:
     `Preparation refused: ${r.body.detail??r.body.reason_code??r.status}`;
   }catch{message='Preparation failed: room-agent service unavailable.';}
   finally{prepBusy=false;await refresh();}
@@ -218,8 +218,8 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
   const packLabel=prep?.pack_run_id?`${prep.pack_used?'Pack used':!Number.isFinite(expiry)?'Pack status unknown':expired?'Pack expired':'Pack staged'} · ${prep.pack_run_id} · assurances until ${expiryLabel}`:'No flight pack staged.';
   if(prepPack.textContent!==packLabel)prepPack.textContent=packLabel;
   prepPack.classList.toggle('is-expired',expired||Boolean(prep?.pack_used));
-  prepPort.textContent=view.running?'Tello command port is in use by the active flight.':
-   port?.owner_is_this_server?'This Mission Control server still owns Tello port 8889. Restart it before another Live run.':
+  prepPort.textContent=view.running?'Tello command port is in use by the active flight. Land before preparing another run.':
+   port?.owner_is_this_server?'This server still owns Tello port 8889. Prepare will restart its receiver for the next Live run.':
    port?.status==='BUSY'?`Another process${port.owner_pid?` (${port.owner_pid})`:''} owns Tello port 8889. Close that session before a Live run.`:
    port?.status==='FREE'?'Tello command port 8889 is free.':'Tello command port status unavailable.';
   prepPort.classList.toggle('is-busy',port?.status==='BUSY');
