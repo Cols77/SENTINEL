@@ -8,6 +8,7 @@ the payload to PyAV's H.264 parser.
 from __future__ import annotations
 
 import socket
+import queue
 import threading
 import time
 from datetime import datetime, timezone
@@ -93,6 +94,10 @@ class VideoReceiver:
         self._preview_frame: DecodedVideoFrame | None = None
         self._frame_payload = bytearray()
         self._record_file: Any | None = None
+        self._record_queue: queue.Queue[bytes] | None = None
+        self._record_thread: threading.Thread | None = None
+        self._record_stop = threading.Event()
+        self._record_error: str | None = None
         self._last_error: VideoError | None = None
         self._last_frame_at: datetime | None = None
         self._frames_decoded = 0
@@ -138,19 +143,29 @@ class VideoReceiver:
     def frames_decoded(self) -> int:
         return self._frames_decoded
 
+    @property
+    def recording_error(self) -> str | None:
+        return self._record_error
+
     def start(self) -> None:
         """Bind the receiver and start the decoder worker."""
 
         with self._condition:
             if self._running:
                 return
+            previous_writer_active = self._record_thread is not None and self._record_thread.is_alive()
             self._last_error = None
+            self._record_error = ("previous recording writer still active"
+                                  if previous_writer_active else None)
             self._last_frame_at = None
             self._frames_decoded = 0
             self._frame = None
             self._preview_frame = None
             self._frame_payload.clear()
             self._stop_event.clear()
+            self._record_queue = None
+            if not previous_writer_active:
+                self._record_stop.clear()
 
             receiver_socket = self._socket_factory(socket.AF_INET, socket.SOCK_DGRAM)
             self._socket = receiver_socket
@@ -163,13 +178,23 @@ class VideoReceiver:
                     set_timeout(self._poll_interval)
                 receiver_socket.bind(self.bound_address)
                 self._decoder = self._decoder_factory()
-                if self._record_path is not None:
-                    self._record_path.parent.mkdir(parents=True, exist_ok=True)
-                    self._record_file = self._record_path.open("wb")
             except Exception:
                 self._close_record_file()
                 self._close_socket()
                 raise
+            if self._record_path is not None and not previous_writer_active:
+                try:
+                    self._record_path.parent.mkdir(parents=True, exist_ok=True)
+                    self._record_file = self._record_path.open("wb")
+                except OSError as exc:
+                    self._record_error = f"{type(exc).__name__}: {exc}"
+                else:
+                    self._record_queue = queue.Queue(maxsize=32)
+                    self._record_thread = threading.Thread(
+                        target=self._record_loop, args=(self._record_queue,),
+                        name="sentinel-tello-recorder", daemon=True,
+                    )
+                    self._record_thread.start()
 
             self._running = True
             self._thread = threading.Thread(
@@ -192,7 +217,16 @@ class VideoReceiver:
 
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=max(1.0, self._poll_interval * 4))
-        self._close_record_file()
+        self._record_stop.set()
+        record_thread = self._record_thread
+        if record_thread is not None and record_thread is not threading.current_thread():
+            record_thread.join(timeout=2.0)
+            if record_thread.is_alive() and self._record_error is None:
+                self._record_error = "recording writer did not stop"
+        else:
+            self._close_record_file()
+        self._record_thread = record_thread if record_thread is not None and record_thread.is_alive() else None
+        self._record_queue = None
         self._thread = None
         self._decoder = None
 
@@ -259,9 +293,15 @@ class VideoReceiver:
 
             frame_payload = bytes(self._frame_payload)
             self._frame_payload.clear()
-            if self._record_file is not None:
-                self._record_file.write(frame_payload)
-                self._record_file.flush()
+            record_queue = self._record_queue
+            if record_queue is not None:
+                try:
+                    record_queue.put_nowait(frame_payload)
+                except queue.Full:
+                    # Recording may drop out; never block the live decoder.
+                    self._record_error = "recording buffer full"
+                    self._record_queue = None
+                    self._record_stop.set()
             try:
                 for packet in self._packets_from_payload(decoder, frame_payload):
                     decoded_frames: Iterable[Any] = decoder.decode(packet)
@@ -279,6 +319,26 @@ class VideoReceiver:
                 self._set_error(VideoDecoderError(f"video decoder failed: {exc}"))
                 return
 
+    def _record_loop(self, records: queue.Queue[bytes]) -> None:
+        try:
+            while not self._record_stop.is_set() or not records.empty():
+                try:
+                    payload = records.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                record_file = self._record_file
+                if record_file is None:
+                    return
+                try:
+                    record_file.write(payload)
+                    record_file.flush()
+                except OSError as exc:
+                    self._record_error = f"{type(exc).__name__}: {exc}"
+                    self._record_queue = None
+                    return
+        finally:
+            self._close_record_file()
+
     def _packets_from_payload(self, decoder: Any, payload: bytes) -> Iterable[Any]:
         """Create one codec packet from a reassembled Tello frame.
 
@@ -293,7 +353,10 @@ class VideoReceiver:
         record_file = self._record_file
         self._record_file = None
         if record_file is not None:
-            record_file.close()
+            try:
+                record_file.close()
+            except OSError as exc:
+                self._record_error = f"{type(exc).__name__}: {exc}"
 
     @staticmethod
     def _is_recoverable_decoder_error(error: Exception) -> bool:

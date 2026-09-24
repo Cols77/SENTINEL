@@ -366,3 +366,15 @@
   .room-camera-heading h3 { font-size:20px; }
   .room-camera-source { max-width:45%; }
 }
+
+.room-recorded-review {
+  margin-top:16px; padding:18px;
+  border:1px solid var(--border-control); border-radius:var(--radius-panel);
+  background:var(--surface-panel);
+}
+.room-recorded-review[hidden] { display:none; }
+.room-recorded-review h3 { margin:0 0 8px; }
+.room-recorded-review a, .room-recorded-review button { margin-right:14px; }
+.room-recorded-review video { display:block; width:min(100%,960px); margin:14px 0; }
+.room-recorded-review video[hidden] { display:none; }
+.room-recorded-review .room-log { max-height:220px; overflow:auto; }

@@ -74,6 +74,48 @@ def test_the_catalogue_offers_the_room_agent_next_to_the_survey(tmp_path):
     assert body["run"] is None
 
 
+def test_recorded_review_is_a_separate_live_only_proposal_choice(tmp_path):
+    service, room, client = _client(tmp_path, room_live_config=_live_pack(tmp_path),
+                                    authorise_paid_calls=True)
+    with client:
+        catalogue = client.get("/api/v1/room-agent").json()["catalogue"]
+        assert [row["id"] for row in catalogue["perception_reviews"]] == ["STANDARD", "RECORDED_REVIEW"]
+        rejected = client.post("/api/v1/room-agent/proposals", json=dict(
+            mode="REHEARSAL", scenario="a", request_text=REQUEST,
+            perception_review="RECORDED_REVIEW"))
+        assert rejected.status_code == 422
+        proposed = client.post("/api/v1/room-agent/proposals", json=dict(
+            mode="LIVE", scenario="a", request_text=REQUEST,
+            perception_review="RECORDED_REVIEW")).json()
+    assert proposed["run"]["proposal"]["perception_review"] == "RECORDED_REVIEW"
+    assert "record" in " ".join(proposed["run"]["proposal"]["lines"]).lower()
+    argv, _, _ = room.live_argv(room.run)
+    assert "--record-video" in argv
+
+
+def test_current_completed_run_exposes_recording_and_rejects_unstaged_analysis(tmp_path):
+    service, room, client = _client(tmp_path)
+    run_dir = tmp_path / "completed"
+    run_dir.mkdir()
+    (run_dir / "flight.h264").write_bytes(b"recorded-stream")
+    run = room_agent.RoomAgentRun(mode="LIVE", scenario="a", request_text=REQUEST,
+                                  local_ip=None, perception_review="RECORDED_REVIEW")
+    run.id = "l3-completed"
+    run.frame_root = run_dir
+    run.status = "COMPLETED"
+    run.done.set()
+    room.run = run
+    with client:
+        state = client.get("/api/v1/room-agent").json()["run"]
+        assert state["review"]["recording"]["status"] == "READY"
+        recording = client.get("/api/v1/room-agent/runs/l3-completed/recording")
+        assert recording.content == b"recorded-stream"
+        refused = client.post("/api/v1/room-agent/runs/l3-completed/analysis")
+        assert refused.status_code == 503
+        assert refused.json()["reason_code"] == "MODEL_NOT_STAGED"
+        assert client.get("/api/v1/room-agent/runs/other/recording").status_code == 404
+
+
 def test_a_rehearsal_run_reaches_an_answer_and_returns_home(tmp_path, fast):
     service, room, client = _client(tmp_path)
     with client:

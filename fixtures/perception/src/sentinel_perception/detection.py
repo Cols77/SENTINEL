@@ -72,7 +72,8 @@ class GroundingDinoDetector:
     """Local Grounding DINO. Loads on construction, freed by models.stage()."""
 
     def __init__(self, model_id: str, model_sha: str = "",
-                 box_threshold: float = 0.15, text_threshold: float = 0.20):
+                 box_threshold: float = 0.15, text_threshold: float = 0.20,
+                 *, revision: str | None = None, local_files_only: bool = False):
         self.model_id = model_id
         self.model_sha = model_sha
         self.box_threshold = box_threshold
@@ -80,9 +81,12 @@ class GroundingDinoDetector:
         self.device = pick_device()
         self.dtype = pick_dtype(self.device)
 
-        self.processor = AutoProcessor.from_pretrained(model_id)
+        source_options = {"local_files_only": local_files_only}
+        if revision:
+            source_options["revision"] = revision
+        self.processor = AutoProcessor.from_pretrained(model_id, **source_options)
         self.model = AutoModelForZeroShotObjectDetection.from_pretrained(
-            model_id, dtype=self.dtype
+            model_id, dtype=self.dtype, **source_options
         ).to(self.device).eval()
 
         # transformers renamed post-processing kwargs across versions. Resolve

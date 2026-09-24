@@ -140,6 +140,139 @@ def test_video_receiver_records_reassembled_h264_stream(tmp_path):
     assert output.read_bytes() == b"a" * 1460 + b"frame"
 
 
+def test_recording_write_failure_does_not_stop_decoding(tmp_path):
+    fake_socket = FakeSocket()
+    receiver = VideoReceiver(
+        local_ip="192.168.10.2", socket_factory=lambda *_a, **_k: fake_socket,
+        decoder_factory=lambda: FakeDecoder([]), packet_factory=lambda payload: payload,
+        record_path=tmp_path / "tello.h264",
+    )
+
+    class BrokenFile:
+        def write(self, _payload):
+            raise OSError("disk full")
+
+        def close(self):
+            pass
+
+    receiver.start()
+    receiver._record_file.close()
+    receiver._record_file = BrokenFile()
+    fake_socket.packets.append(b"frame")
+    frame = receiver.read(timeout=1.0)
+    receiver.stop()
+
+    assert frame.width == 640
+    assert "disk full" in receiver.recording_error
+
+
+def test_recording_close_failure_is_reported_without_failing_stop(tmp_path):
+    receiver = VideoReceiver(local_ip="192.168.10.2", record_path=tmp_path / "tello.h264")
+
+    class BrokenFile:
+        def close(self):
+            raise OSError("flush failed")
+
+    receiver._record_file = BrokenFile()
+    receiver.stop()
+
+    assert "flush failed" in receiver.recording_error
+
+
+def test_recording_open_failure_keeps_live_frames_available(tmp_path):
+    receiver = VideoReceiver(
+        local_ip="192.168.10.2", socket_factory=lambda *_a, **_k: FakeSocket([b"frame"]),
+        decoder_factory=lambda: FakeDecoder([]), packet_factory=lambda payload: payload,
+        record_path=tmp_path,
+    )
+
+    receiver.start()
+    frame = receiver.read(timeout=1.0)
+    receiver.stop()
+
+    assert frame.width == 640
+    assert receiver.recording_error is not None
+
+
+def test_slow_recording_disk_does_not_delay_live_decode(tmp_path):
+    fake_socket = FakeSocket()
+    decoder = FakeDecoder([])
+    receiver = VideoReceiver(
+        local_ip="192.168.10.2", socket_factory=lambda *_a, **_k: fake_socket,
+        decoder_factory=lambda: decoder, packet_factory=lambda payload: payload,
+        record_path=tmp_path / "flight.h264",
+    )
+    writing = threading.Event()
+    release = threading.Event()
+
+    class SlowFile:
+        def write(self, _payload):
+            writing.set()
+            release.wait(timeout=2)
+
+        def flush(self):
+            pass
+
+        def close(self):
+            pass
+
+    receiver.start()
+    receiver._record_file.close()
+    receiver._record_file = SlowFile()
+    try:
+        fake_socket.packets.append(b"first")
+        assert writing.wait(timeout=1)
+        fake_socket.packets.append(b"second")
+        deadline = time.monotonic() + 0.5
+        while len(decoder.packets) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert decoder.packets == [b"first", b"second"]
+        assert receiver.peek() is not None
+    finally:
+        release.set()
+        receiver.stop()
+
+
+def test_recording_buffer_overflow_marks_only_the_recording_failed(tmp_path):
+    fake_socket = FakeSocket()
+    decoder = FakeDecoder([])
+    receiver = VideoReceiver(
+        local_ip="192.168.10.2", socket_factory=lambda *_a, **_k: fake_socket,
+        decoder_factory=lambda: decoder, packet_factory=lambda payload: payload,
+        record_path=tmp_path / "flight.h264",
+    )
+    writing = threading.Event()
+    release = threading.Event()
+
+    class SlowFile:
+        def write(self, _payload):
+            writing.set()
+            release.wait(timeout=3)
+
+        def flush(self):
+            pass
+
+        def close(self):
+            pass
+
+    receiver.start()
+    receiver._record_file.close()
+    receiver._record_file = SlowFile()
+    try:
+        fake_socket.packets.append(b"first")
+        assert writing.wait(timeout=1)
+        fake_socket.packets.extend([b"frame"] * 40)
+        deadline = time.monotonic() + 1
+        while len(decoder.packets) < 41 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert len(decoder.packets) == 41
+        assert receiver.recording_error == "recording buffer full"
+        assert receiver.is_running
+    finally:
+        release.set()
+        receiver.stop()
+
+
 @pytest.mark.parametrize("pixel_format", ["rgb24", "bgr24"])
 def test_video_receiver_makes_rgb_bgr_conversion_explicit(pixel_format):
     fake_socket = FakeSocket([b"frame"])

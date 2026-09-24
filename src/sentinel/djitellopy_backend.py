@@ -222,6 +222,10 @@ class DjitellopyClient:
         return tuple(self.records)
 
     @property
+    def video_recording_error(self) -> str | None:
+        return getattr(self._video, "recording_error", None)
+
+    @property
     def transport_limits(self) -> TransportLimits:
         """Timing policy exported to pure planners without exposing DJITelloPy."""
 
