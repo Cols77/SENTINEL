@@ -58,7 +58,8 @@ def test_jev_sees_localization_health_without_coordinates(safety):
     health = state["localization"]
     assert health["state"] == "COASTING"
     assert set(health) == {"state", "last_tag_fix_age_s", "position_uncertainty_cm",
-                           "margin_before_mandatory_recovery_pct"}
+                           "margin_before_mandatory_recovery_pct", "recent_positioning_events"}
+    assert health["recent_positioning_events"] == []
     assert 0 <= health["margin_before_mandatory_recovery_pct"] <= 100
     assert "REANCHOR" in criteria and "COASTING" in criteria["REANCHOR"]
 
@@ -88,6 +89,9 @@ def test_jev_picks_reanchor_while_coasting_and_the_next_snapshot_shows_anchored(
     assert state["localization"]["last_tag_fix_age_s"] == 0
     assert "REANCHOR" not in criteria  # anchored on a fresh fix: nothing to re-anchor
     assert any(o["code"] == "REANCHORED" for o in state["outcomes"])
+    events = state["localization"]["recent_positioning_events"]
+    assert events[0].startswith("Voluntary re-anchor started")
+    assert "position re-anchored near x " in events[-1]
 
 
 def test_jev_ignores_staleness_and_the_supervisor_forces_recovery_at_the_threshold(safety):

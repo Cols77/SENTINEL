@@ -13,6 +13,8 @@ _MAX_UNRESOLVED = 12
 _MAX_PAIR_CHARS = 70
 _MAX_OBSERVE_IDS = 8
 _MAX_ID_CHARS = 70
+_MAX_ATTEMPTS = 6
+_MAX_DETAIL_CHARS = 160
 
 
 def _clip(value: object, limit: int) -> str:
@@ -68,6 +70,12 @@ def build_decision_instruction(snapshot: ReadSnapshot, coverage: CoverageProject
             f"margin before mandatory recovery: "
             f"{localization.get('margin_before_mandatory_recovery_pct')}%.")
 
+    attempts = [f"{_clip(o.candidate_id, _MAX_ID_CHARS)}: "
+                + ("succeeded" if o.refusal_code is None else
+                   f"failed ({o.code}" + (f": {_clip(o.detail, _MAX_DETAIL_CHARS)}" if o.detail else "") + ")")
+                for o in getattr(snapshot, "outcomes", ()) if o.kind == CandidateKind.OBSERVE][-_MAX_ATTEMPTS:]
+    events = [_clip(e, _MAX_DETAIL_CHARS) for e in (localization or {}).get("recent_positioning_events") or ()]
+
     return "\n".join((
         "Choose exactly one legal candidate ID from the supplied choices; never coordinates.",
         f"Operator request: {_clip(request_text, _MAX_REQUEST_CHARS)}",
@@ -79,12 +87,18 @@ def build_decision_instruction(snapshot: ReadSnapshot, coverage: CoverageProject
         if statuses_by_cell else "Coverage cells: none declared.",
         "Unexplored or unresolved cell/class pairs: " + (unresolved or "none"),
         localization_line,
+        "Recent positioning events: " + ("; ".join(events) or "none"),
+        "Recent observation attempts (oldest first): " + ("; ".join(attempts) or "none"),
         "Admissible OBSERVE candidate IDs: " + (observation_ids or "none"),
         "Prefer observing unexplored zones for counts: choose an admissible OBSERVE that adds coverage before "
         "ANSWER or ESCALATE. An unvisited declared search viewpoint is progress even when count coverage is "
         "complete. Answer only when no admissible observation adds coverage for a count, or no unvisited "
         "search viewpoint can advance a search; use an explicit incomplete answer when that is the legal route. "
-        "Re-anchor when the position is stale. Escalate only when "
+        "Re-anchor when the position is stale. When an observation failed because positioning was lost or "
+        "the drone arrived off the pose, do not simply repeat it: prefer a different admissible pose (ideally "
+        "one closer to the tags or home), or re-anchor first. If positioning keeps failing and the remaining "
+        "views are unreachable, answer explicitly incomplete with what was observed. A detector failure is not "
+        "a positioning problem; that pose may be retried. Escalate only when "
         "nothing else can make progress (no admissible observation, read, re-anchor, or answer).",
         "Reads are historical. Never compose factual values.",
     ))

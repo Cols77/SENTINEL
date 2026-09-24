@@ -188,6 +188,20 @@ class TurnOutcome:
     persistence_error: str | None = None
 
 
+
+def _failure(code: str, detail: str) -> dict:
+    """A failed OBSERVE payload with a plain reason Jev reads next turn."""
+    return {"code": code, "refusal": code, "detail": detail}
+
+
+def _arrival_miss(resolved, pose, health) -> str:
+    if pose is None:
+        return "the drone's position after the move is unknown"
+    off_cm = math.hypot(pose.x_cm - resolved.x_cm, pose.y_cm - resolved.y_cm)
+    turn = abs((health.heading_deg - resolved.yaw_deg + 180) % 360 - 180)
+    return (f"the drone arrived {off_cm:.0f} cm (height {abs(pose.z_cm - resolved.z_cm):.0f} cm, "
+            f"heading {turn:.0f} deg) away from the pose, too far to credit coverage")
+
 class RoomController:
     def __init__(self, store: RoomStore, judge: ChoiceJudge, *,
                  survey_store: SurveyStore | None = None, survey_run_id: str | None = None,
@@ -528,6 +542,7 @@ class RoomController:
             "last_tag_fix_age_s": round(max(0.0, health.fix_age_s), 1),
             "position_uncertainty_cm": round(max(0.0, health.xy_uncertainty_cm), 1),
             "margin_before_mandatory_recovery_pct": round(100 * min(margins)) if margins else None,
+            "recent_positioning_events": list(getattr(self.supervisor, "positioning_log", ()))[-5:],
         }
 
     def _reanchor_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
@@ -637,7 +652,7 @@ class RoomController:
         ))
 
     def _outcome(self, snapshot, candidate_id, kind, digest, code, *, facts=(), terminal=None, refusal=None,
-                answer=None, observed_at=None, count_evidence=None, count_evidences=None):
+                answer=None, observed_at=None, count_evidence=None, count_evidences=None, detail=None):
         # Every refusal path, including stale decisions before dispatch, shares
         # the persisted progress rule. Audit-only version changes are not new
         # relevant evidence and cannot create an unbounded invalid-choice loop.
@@ -656,6 +671,8 @@ class RoomController:
             result["count_evidence"] = count_evidence
         if count_evidences is not None:
             result["count_evidences"] = count_evidences
+        if detail is not None:
+            result["detail"] = detail
         return result
 
     def _has_flown(self, session_id: str) -> bool:
@@ -981,7 +998,8 @@ class RoomController:
                 payload = self._outcome(snapshot, candidate_id, kind, digest, outcome["code"],
                                         refusal=outcome.get("refusal"), observed_at=outcome.get("observed_at"),
                                         count_evidence=outcome.get("count_evidence"),
-                                        count_evidences=outcome.get("count_evidences"))
+                                        count_evidences=outcome.get("count_evidences"),
+                                        detail=outcome.get("detail"))
                 return self._record(snapshot, correlation, payload, prior=prior)
             elif selected.kind == CandidateKind.REANCHOR:
                 # Task B item 2c: the supervisor's own stationary recovery,
@@ -1210,7 +1228,7 @@ class RoomController:
         pose_id = candidate.candidate_id.rsplit(":", 1)[-1]
         resolved = resolve_pose_id(self.supervisor.site, pose_id)
         if plan is None or resolved is None or not self._checkpoint_targets_declared_pose(resolved, plan):
-            return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
+            return _failure("TOOL_FAILURE", "no flight plan to this pose from the current position")
         # The full plan proves the declared destination and sweep shape. In
         # live sessions each look is then planned from a fresh tracker pose
         # and admitted as its own checkpoint. Forecasting all three looks as
@@ -1222,7 +1240,8 @@ class RoomController:
             try:
                 leg = resolver(candidate, snapshot) if self.resolve_sweep_checkpoints else plan
                 if not self._checkpoint_targets_declared_pose(resolved, leg):
-                    return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
+                    return _failure("TOOL_FAILURE", f"look {index + 1} could not be planned from the "
+                                    "current position")
                 admission = self.supervisor.prepare(
                     snapshot_version=(expected_version if index == 0 else self.store.session_version(session_id)),
                     checkpoint=leg, provider_wait_s=self.provider_wait_s if index == len(resolvers) - 1 else 0,
@@ -1234,22 +1253,25 @@ class RoomController:
                 leg_result = self.supervisor.dispatch(admission, self.flight_executor)
             except VersionConflict:
                 if self._checkpoint_completed_since(session_id, expected_version):
-                    return {"code": "CHECKPOINT_FAILED", "refusal": "CHECKPOINT_FAILED"}
+                    return _failure("CHECKPOINT_FAILED", f"look {index + 1} was interrupted mid-flight")
                 return {"code": "STALE_DECISION", "refusal": "STALE_DECISION"}
             except Exception:
-                return {"code": "CHECKPOINT_FAILED", "refusal": "CHECKPOINT_FAILED"}
+                return _failure("CHECKPOINT_FAILED", f"look {index + 1} failed to execute")
             if admission.transition != "CONTINUE" or isinstance(leg_result, TerminalOutcome):
                 terminal_outcome = leg_result if isinstance(leg_result, TerminalOutcome) else None
                 return self._preempted(session_id, admission, terminal_outcome=terminal_outcome)
             if (leg_result.status != "COMPLETED" or not leg_result.completion_known
                     or not self._capture_completed(leg, leg_result)):
-                return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
+                reason = ("positioning was lost and the tag search had not re-anchored yet"
+                          if leg_result.status == "RECOVERY_PENDING"
+                          else f"the flight step ended {leg_result.status}")
+                return _failure("TOOL_FAILURE", f"look {index + 1} of {len(resolvers)} did not capture: {reason}")
             completed_legs.append(leg_result)
         result = replace(completed_legs[-1],
                          command_states=tuple(state for leg in completed_legs for state in leg.command_states),
                          observation_ids=tuple(frame for leg in completed_legs for frame in leg.observation_ids))
         if len(result.observation_ids) != sum(command.kind == "CAPTURE" for command in plan.commands):
-            return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
+            return _failure("TOOL_FAILURE", "not every look captured a frame")
         # Fix round 4 (Q2): capture the tracker's health exactly once, here,
         # right after dispatch -- the same sample the measured-pose check
         # below uses -- and thread it through to grounding. Previously
@@ -1266,7 +1288,7 @@ class RoomController:
             # but the aircraft's own measured post-dispatch pose does not
             # actually match it -- never credit coverage off a checkpoint
             # that merely claimed the right pose.
-            return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
+            return _failure("TOOL_FAILURE", _arrival_miss(resolved, result.pose, health))
         try:
             captured = self.perception_capture(candidate, result, snapshot)
             captures = (captured if isinstance(captured, tuple)
@@ -1311,7 +1333,8 @@ class RoomController:
         else:
             perception_results, provider_errors = (), (waited.status,)
         if provider_errors or len(perception_results) != len(captures):
-            return {"code": "PROVIDER_ERROR", "refusal": "PROVIDER_ERROR"}
+            return _failure("PROVIDER_ERROR", "the detector did not answer in time ("
+                            + ", ".join(sorted(set(provider_errors))) + "); the flight itself was fine")
         # Fix round 1 (S1/Q4): the result must actually correlate to the
         # request this turn issued, and ingestion's own authorization must be
         # checked -- a stale snapshot_version, a session mismatch or a

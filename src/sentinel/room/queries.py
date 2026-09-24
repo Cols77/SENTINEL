@@ -61,6 +61,9 @@ class ToolOutcome:
     #: All grounded frames from one completed sweep. Legacy events use the
     #: singular field above and leave this empty.
     count_evidences: tuple[FrameCountEvidence, ...] = ()
+    #: A short plain-language reason for a failed physical action (why an
+    #: OBSERVE did not complete), shown to Jev; None when there is none.
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -292,6 +295,7 @@ class ReadQueries:
                     event.event_id, data.get("observed_at"),
                     FrameCountEvidence.from_payload(data["count_evidence"]) if data.get("count_evidence") else None,
                     tuple(FrameCountEvidence.from_payload(item) for item in data.get("count_evidences", ())),
+                    data.get("detail") if isinstance(data.get("detail"), str) else None,
                 )
                 outcomes.append(outcome)
                 if outcome.terminal_state is not None:

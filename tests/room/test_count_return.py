@@ -1221,6 +1221,22 @@ def test_measured_pose_mismatch_after_dispatch_is_refused_and_uncredited(safety,
     from sentinel.room.queries import ReadQueries
     snapshot = ReadQueries(store).project(SESSION)
     assert "cell1:computer" in controller._coverage(snapshot).uncovered
+    # Jev is told why, both in its prompt and on the pose if it is offered again.
+    assert "arrived" in payload["detail"] and "away from the pose" in payload["detail"]
+    assert snapshot.outcomes[-1].detail == payload["detail"]
+    from sentinel.room.decision_prompt import build_decision_instruction
+    instruction = build_decision_instruction(snapshot, controller._coverage(snapshot),
+                                             controller.localization_health(), ())
+    assert payload["detail"] in instruction
+    # The same pose is suppressed until coverage changes; once offered again
+    # (the failure is from an older coverage state), it carries the reason.
+    from dataclasses import replace
+    older = replace(snapshot, outcomes=tuple(replace(o, relevant_state_sha256="older-coverage")
+                                             if o.candidate_id.startswith("OBSERVE:") else o
+                                             for o in snapshot.outcomes))
+    offered = [c for c in controller._legal_candidates(older)
+               if c.candidate_id == "OBSERVE:g1:left-rear-bottom-toward_targets"]
+    assert offered and all("last attempt failed (TOOL_FAILURE: the drone arrived" in c.description for c in offered)
 
 
 # --- 23. a perception wait preempted after a completed capture is recorded -

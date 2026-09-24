@@ -6,6 +6,7 @@ never published as measurements. A session has one supervisor/clock domain.
 """
 from __future__ import annotations
 
+from collections import deque
 from copy import copy
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
@@ -100,6 +101,14 @@ class _AuditPersistenceFailure(RuntimeError):
     """The durable safety boundary is unavailable; only emergency may run."""
 
 
+
+def _where(position) -> str:
+    """A position as whole centimetres for Jev-facing text."""
+    try:
+        return f"x {position.x_cm:.0f} cm, y {position.y_cm:.0f} cm"
+    except (AttributeError, TypeError, ValueError):
+        return "an unknown position"
+
 class SafetySupervisor:
     def __init__(self, *, store: RoomStore, session_id: str, site: RoomSite,
                  tracker: LocalizationTracker, reserve: ReserveGuard, limits: CommandLimits,
@@ -140,6 +149,9 @@ class SafetySupervisor:
         self.last_persistence_error = None
         self.last_preempted_version = 0
         self.last_preemption = None
+        #: Plain-language positioning events (recovery starts, each search
+        #: burst's result) for Jev's next decision -- facts, never commands.
+        self.positioning_log: deque[str] = deque(maxlen=8)
         #: The grant the most recent successful ``validate_bindings`` admitted
         #: this session under (None until bindings validate, and reset to None
         #: by any later failed validation). ``RoomController`` reads it to
@@ -987,6 +999,7 @@ class SafetySupervisor:
             navigation_contingency_id=navigation.contingency_id, now_monotonic_ms=self.clock() * 1000,
             mapped_heading_tag_ids=self.mapped_heading_tag_ids)
         def stop(reason):
+            self._log_positioning(f"Tag search gave up ({reason})")
             if voluntary and reason in {"RECOVERY_ROTATION_BOUND_UNAVAILABLE", "RECOVERY_WAIT_FAILED"}:
                 return CheckpointOutcome("VOLUNTARY_REANCHOR_REFUSED", (), (), None,
                                          self.tracker.health.position, True)
@@ -999,6 +1012,8 @@ class SafetySupervisor:
 
         print(f"Recovery for {current.reason} (voluntary={voluntary}) at {current.request.pose.position}, "
               f"state {current.request.pose.state.value}", file=sys.stderr, flush=True)
+        self._log_positioning(("Voluntary re-anchor" if voluntary else "Positioning recovery")
+                              + f" started ({current.reason}) near {_where(current.request.pose.position)}")
         if getattr(recovery, "episode_succeeded", False) and not self._begin_recovery_episode(
                 current, environment):
             return stop("RECOVERY_EPISODE_NOT_ADMITTED")
@@ -1008,6 +1023,8 @@ class SafetySupervisor:
             return self._recovery_contingency(action, current, executor)
         if action.kind == "EMERGENCY":
             return stop(action.reason)
+        look = ("hovering in place" if action.kind == "STATIONARY_BURST"
+                else f"yawed to heading {action.heading_deg:.0f} deg")
         deadline = self.clock() + action.upper_bound_s
         delta = ((action.heading_deg - current.request.pose.heading_deg + 180) % 360 - 180
                  if action.kind != "STATIONARY_BURST" else 0.0)
@@ -1076,10 +1093,17 @@ class SafetySupervisor:
             return stop("REANCHOR_SYNC_FAILED")
         if not accepted.accepted:
             print(f"Recovery burst rejected: {accepted.reason}", file=sys.stderr, flush=True)
+            self._log_positioning(f"Tag search {look}: no usable fix ({accepted.reason})")
+        else:
+            self._log_positioning(f"Tag search {look}: position re-anchored near "
+                                  f"{_where(self.tracker.health.position)}")
         result = CheckpointOutcome("COMPLETED" if accepted.accepted else "RECOVERY_PENDING", (), (), None,
                                    self.tracker.health.position, True)
         self._record_completion(result, current, event, executor)
         return result
+
+    def _log_positioning(self, message: str) -> None:
+        self.positioning_log.append(message)
 
     def voluntary_reanchor(self, executor, *, snapshot_version):
         """Task B item 2c: a Jev-chosen, bounded re-anchor before it is mandatory.

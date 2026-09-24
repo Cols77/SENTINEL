@@ -142,3 +142,26 @@ def test_unresolvable_cell_is_resolved_without_claiming_it_was_explored():
 
     assert "Explored cells: 0 of 1" in instruction
     assert "Resolved cells: 1 of 1" in instruction
+
+
+def test_jev_sees_why_observations_failed_and_what_positioning_did():
+    from sentinel.room.queries import ToolOutcome
+
+    snapshot = SimpleNamespace(request_text="count phones", ledger=None, outcomes=(
+        ToolOutcome("OBSERVE:g1:front", CandidateKind.OBSERVE, "d", "OBSERVE_SUCCEEDED"),
+        ToolOutcome("OBSERVE:g1:rear", CandidateKind.OBSERVE, "d", "TOOL_FAILURE", "TOOL_FAILURE",
+                    detail="look 2 of 3 did not capture: positioning was lost"),
+        ToolOutcome("READ_DRONE", CandidateKind.READ_DRONE, "d", "READ_SUCCEEDED"),
+    ))
+    localization = {"state": "COASTING", "last_tag_fix_age_s": 3.0, "position_uncertainty_cm": 20.0,
+                    "margin_before_mandatory_recovery_pct": 40,
+                    "recent_positioning_events": ["Tag search yawed to heading 105 deg: position re-anchored"]}
+
+    instruction = build_decision_instruction(snapshot, CoverageProjection((), False, (), ()), localization, ())
+
+    attempts = instruction.split("Recent observation attempts")[1].split("\n")[0]
+    assert "OBSERVE:g1:front: succeeded" in attempts
+    assert "OBSERVE:g1:rear: failed (TOOL_FAILURE: look 2 of 3 did not capture: positioning was lost)" in attempts
+    assert "READ_DRONE" not in attempts
+    assert "Tag search yawed to heading 105 deg: position re-anchored" in instruction
+    assert "do not simply repeat it" in instruction

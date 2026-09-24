@@ -335,6 +335,11 @@ def _observe_candidate(objective: GoalObjective, pose_id: str, description: str,
     description = (f"{description.rstrip('.')}: {_resolves_text(pose_id, site, coverage)}; "
                    f"Approximate direct distance from nominal home: {distance_cm:.0f} cm; "
                    "battery cost is assessed by the supervisor.")
+    failures = [o for o in outcomes if o.candidate_id == candidate_id and o.refusal_code is not None]
+    if failures:
+        last = failures[-1]
+        description += (f" Tried {len(failures)} time(s) before; last attempt failed ({last.code}"
+                        + (f": {last.detail}" if last.detail else "") + ").")
     return RoomCandidate(candidate_id, CandidateKind.OBSERVE, snapshot_version, digest, description, description,
                          coverage.evidence_refs, (), PhysicalCost(distance_cm=distance_cm, requires_airborne=True))
 
