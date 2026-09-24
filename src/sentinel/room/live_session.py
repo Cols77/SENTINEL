@@ -360,12 +360,19 @@ def run_count_return(
     )
     try:
         terminal = controller.run_until_terminal(manifest.run_id)
-    except Exception:
-        landing = supervisor.refresh_failure(stack.executor)
+    except Exception as exc:
+        print(f"Live session loop failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        # An operator Land (or any executor-owned landing) already recorded
+        # the real terminal outcome; never replace it with a second landing.
+        landing = supervisor.last_terminal_outcome or getattr(stack.executor, "terminal_outcome", None)
+        if landing is None:
+            landing = supervisor.refresh_failure(stack.executor)
         return LiveSessionOutcome(TerminalState.ABORTED, True, ledger.status.value, landing,
                                   "SESSION_LOOP_FAILED")
-    return LiveSessionOutcome(terminal, True, ledger.status.value, supervisor.last_terminal_outcome,
-                              "CONTROLLER_TERMINAL")
+    # An operator Land goes through the executor directly: its outcome is
+    # the landing when the supervisor recorded none.
+    landing = supervisor.last_terminal_outcome or getattr(stack.executor, "terminal_outcome", None)
+    return LiveSessionOutcome(terminal, True, ledger.status.value, landing, "CONTROLLER_TERMINAL")
 
 
 def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, calibration_profiles,

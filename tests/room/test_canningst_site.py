@@ -93,9 +93,11 @@ def test_canningst_geometry_uses_the_measured_clearance_and_faces_the_tags():
     assert volumes["cube"].z_interval_cm == (-20, 250)
     assert volumes["flight"].polygon_xy_cm == ((120, 140), (380, 140), (380, 360), (120, 360))
     assert volumes["flight"].z_interval_cm == (0, 250)
+    # The runner's envelope is the declared flight volume (where the aircraft
+    # may be); the observation box only bounds where poses sit.
     envelope = live_stack.site_envelope(site)
-    assert (envelope.min_x_cm, envelope.max_x_cm, envelope.min_y_cm, envelope.max_y_cm) == (190, 310, 160, 220)
-    assert (envelope.min_z_cm, envelope.max_z_cm) == (0, 140)
+    assert (envelope.min_x_cm, envelope.max_x_cm, envelope.min_y_cm, envelope.max_y_cm) == (120, 380, 140, 360)
+    assert (envelope.min_z_cm, envelope.max_z_cm) == (0, 250)
     assert site.semantic_frame.rear_to_front_axis_xy == (0.0, 1.0)  # front = max Y, the tag stands' side
     poses = {pose_id: resolve_pose_id(site, pose_id) for pose_id in (LEFT, CENTER, RIGHT)}
     assert [(p.x_cm, p.y_cm, p.z_cm) for p in poses.values()] == [(210, 170, 70), (250, 170, 70), (290, 170, 70)]
@@ -238,7 +240,7 @@ def test_canningst_takeoff_is_admitted_under_one_trial_grant_with_the_history_pr
 
 
 def _airborne_supervisor(tmp_path, drift_override=None, battery=90, *, recovery=False, drift_changes=None,
-                         site_changes=None):
+                         site_changes=None, battery_guard=True):
     """The CanningSt supervisor with the committed history profiles (drift
     optionally overridden), airborne over the pad after the real stack's
     takeoff; bindings are item 5's concern and are stubbed here.
@@ -276,7 +278,7 @@ def _airborne_supervisor(tmp_path, drift_override=None, battery=90, *, recovery=
                                      energy_admits=lambda action: True)
     supervisor = SafetySupervisor(
         store=store, session_id="run-0001", site=binding.site, tracker=tracker,
-        reserve=ReserveGuard(binding.energy_profile, clock), limits=binding.limits,
+        reserve=ReserveGuard(binding.energy_profile, clock, disable_predictive_guard=not battery_guard), limits=binding.limits,
         aircraft_id=binding.energy_profile.aircraft_id, mode=ExecutionMode.REAL, refresh=stack.refresh,
         emergency=stack.emergency, clock=clock, capability="count_return", recovery=adapter,
         mapped_heading_tag_ids=headings)
@@ -435,18 +437,3 @@ def test_the_expected_reanchor_does_not_relieve_an_absurd_drift(tmp_path):
     assert all(d.transition != "CONTINUE" and d.expected_reanchor is None
                for d in decisions.values())
 
-
-def test_observation_poses_follow_the_measured_home_so_an_off_mark_takeoff_still_observes(tmp_path, monkeypatch):
-    """Live 2026-09-24: the Tello took off at (256, 240), 50 cm from the
-    declared pad, and every fixed rear pose was refused
-    (PROJECTED_TERMINATION_PATH_INVALID). Poses now follow the measured home."""
-    original = Bursts
-    monkeypatch.setattr(sys.modules[__name__], "Bursts", lambda *a: original(reports(256, 240, 90.0)))
-    supervisor, store, link, binding = _airborne_supervisor(tmp_path, recovery=True)
-    try:
-        decisions = {pose_id: _admission(supervisor, store, binding, pose_id)
-                     for pose_id, _ in binding.site.pose_visibility}
-    finally:
-        store.close()
-        link.close()
-    assert all(d.transition == "CONTINUE" for d in decisions.values()), {k: d.reason for k, d in decisions.items()}

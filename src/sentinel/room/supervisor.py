@@ -753,6 +753,8 @@ class SafetySupervisor:
             if self._measured_home is None:
                 from .semantic import set_home_offset
                 nominal = self.site.home.nominal_pose
+                # x/y only: heights stay declared, because measured coverage is
+                # generated for the declared viewpoint height.
                 set_home_offset(self.site, home.pose.x_cm - nominal.x_cm, home.pose.y_cm - nominal.y_cm)
             self._measured_home = home
 

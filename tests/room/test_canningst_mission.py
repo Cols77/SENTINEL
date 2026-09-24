@@ -12,6 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import sys
 import time
 from types import SimpleNamespace
 
@@ -386,3 +387,16 @@ def test_delayed_left_tags_are_not_assumed_before_the_lateral_leg(tmp_path, monk
     assert outcome.landing is not None and outcome.landing.state == "LANDED" and not tello.flying
     assert tello.blind_hits == 0 and not any(c.split()[0] in ("left", "right") for c in tello.sent)
     assert not [e for e in events if e.event_type == "POSE_REANCHORED"]
+
+
+def test_an_off_mark_takeoff_still_observes_and_answers(tmp_path, monkeypatch):
+    """Live 2026-09-24: the Tello took off 35-50 cm from the declared pad.
+    Declared poses follow the measured home, so the mission still observes
+    the table and answers its count."""
+    original = FlyingTello
+    monkeypatch.setattr(sys.modules[__name__], "FlyingTello",
+                        lambda **kwargs: original(x_cm=256.0, y_cm=225.0, **kwargs))
+    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch)
+    assert outcome.landing is not None and outcome.landing.state == "LANDED", outcome
+    assert succeeded_observations(events) == [CENTER], refusals(events)
+    assert ("ANSWER:COUNTS", "ANSWERED_COUNT") in tool_outcomes(events)

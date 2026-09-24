@@ -152,17 +152,25 @@ def resolve_semantic_sequence(site: RoomSite, poses: Sequence[SemanticPose]) -> 
     return tuple(resolve_semantic_pose(site, pose) for pose in poses)
 
 
-#: site_id -> (dx_cm, dy_cm): the measured airborne home's offset from the
-#: declared pad. Declared observation poses are placed relative to where the
-#: aircraft actually took off, so a pad placed off the nominal mark does not
-#: turn every observation into a long out-and-back the supervisor refuses.
-_HOME_OFFSETS: dict[str, tuple[int, int]] = {}
+#: site_id -> (dx_cm, dy_cm, dz_cm): the measured airborne home's offset from
+#: the declared pad (x/y) and from the envelope's middle height (z). Declared
+#: observation poses are placed relative to where the aircraft actually took
+#: off and hovers, so an off-mark pad or a low altimeter reading does not turn
+#: every observation into a long out-and-back (and a climb/descent the drift
+#: budget charges like translation) that the supervisor refuses.
+_HOME_OFFSETS: dict[str, tuple[int, int, int]] = {}
 
 
-def set_home_offset(site: RoomSite, dx_cm: float, dy_cm: float) -> None:
-    """Place declared poses relative to the measured home (x/y only; the
-    declared heights stay, since the altimeter is not trusted for them)."""
-    _HOME_OFFSETS[site.site_id] = (round(dx_cm), round(dy_cm))
+def middle_height_cm(site: RoomSite) -> float:
+    """The height a ``middle`` pose resolves to without a home offset."""
+    z_min, z_max = _volume_by_id(site, _require_frame(site).envelope_volume_id).z_interval_cm
+    return z_min + _HEIGHT_FRACTIONS["middle"] * (z_max - z_min)
+
+
+def set_home_offset(site: RoomSite, dx_cm: float, dy_cm: float, dz_cm: float = 0.0) -> None:
+    """Place declared poses relative to the measured home: x/y by the home's
+    offset from the pad, heights so that ``middle`` is the home hover height."""
+    _HOME_OFFSETS[site.site_id] = (round(dx_cm), round(dy_cm), round(dz_cm))
 
 
 def clear_home_offset(site: RoomSite) -> None:
@@ -170,17 +178,19 @@ def clear_home_offset(site: RoomSite) -> None:
 
 
 def _shift_to_home(site: RoomSite, resolved: ResolvedPose) -> ResolvedPose:
-    dx, dy = _HOME_OFFSETS.get(site.site_id, (0, 0))
-    if not dx and not dy:
+    dx, dy, dz = _HOME_OFFSETS.get(site.site_id, (0, 0, 0))
+    if not dx and not dy and not dz:
         return resolved
     volume = _volume_by_id(site, _require_frame(site).envelope_volume_id)
     xs = [p[0] for p in volume.polygon_xy_cm]
     ys = [p[1] for p in volume.polygon_xy_cm]
+    z_min, z_max = volume.z_interval_cm
     x = min(max(resolved.x_cm + dx, math.ceil(min(xs))), math.floor(max(xs)))
     y = min(max(resolved.y_cm + dy, math.ceil(min(ys))), math.floor(max(ys)))
-    if not volume_contains(volume, Position(x, y, resolved.z_cm)):
+    z = min(max(resolved.z_cm + dz, math.ceil(z_min)), math.floor(z_max))
+    if not volume_contains(volume, Position(x, y, z)):
         return resolved
-    return ResolvedPose(pose_id=resolved.pose_id, x_cm=x, y_cm=y, z_cm=resolved.z_cm, yaw_deg=resolved.yaw_deg)
+    return ResolvedPose(pose_id=resolved.pose_id, x_cm=x, y_cm=y, z_cm=z, yaw_deg=resolved.yaw_deg)
 
 
 def resolve_pose_id(site: RoomSite, pose_id: str) -> ResolvedPose | None:
