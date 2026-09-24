@@ -481,6 +481,10 @@ def test_capture_returns_a_saved_frame_observation_and_localise_returns_the_tag_
     saved = list((tmp_path / "captures").glob("*.png"))
     assert len(saved) == 1
     assert observation == f"frame-{saved[0].stem}-{hashlib.sha256(saved[0].read_bytes()).hexdigest()[:16]}"
+    frame_path, captured_at, heading_deg = stack.capture_records[observation]
+    assert frame_path == saved[0]
+    assert datetime.fromisoformat(captured_at).tzinfo is not None
+    assert heading_deg == pytest.approx(90)
     assert outcome.pose == Position(104, 97, 100)
 
 
@@ -543,6 +547,22 @@ def test_rotate_is_sent_once_with_the_exact_sdk_command_and_tracks_the_look(tmp_
     assert outcome.status == "COMPLETED", outcome
     assert tello.sent[before + 1:] == ["ccw 30"]
     assert _inner(stack)._looking_away is False
+
+
+def test_retarget_to_side_heading_suppresses_expected_tagless_refresh(tmp_path):
+    bursts = Bursts(reports(), reports(), reports(), reports(n=3))
+    stack, _, tracker, site, _ = build_stack(tmp_path, bursts=bursts)
+    stack.refresh()
+    stack.executor.start(site.home)
+    stack.refresh()
+    retarget = PlannedCommand.from_mapping(
+        "ROTATE", {"degrees": 90, "direction": "ccw", "phase": "retarget"},
+        upper_bound_s=5.0, interruptible=False)
+    assert stack.executor.execute(_plan(retarget)).status == "COMPLETED"
+    assert _inner(stack)._looking_away is True
+    before = tracker.health.estimator_failures
+    stack.refresh()
+    assert tracker.health.estimator_failures == before
 
 
 def test_set_speed_is_sent_once_with_the_exact_sdk_command(tmp_path):

@@ -58,6 +58,9 @@ class ToolOutcome:
     #: detections) an OBSERVE_SUCCEEDED outcome persisted for its frame
     #: (Plan 03 residual task R, F2); None for every other outcome.
     count_evidence: FrameCountEvidence | None = None
+    #: All grounded frames from one completed sweep. Legacy events use the
+    #: singular field above and leave this empty.
+    count_evidences: tuple[FrameCountEvidence, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -154,7 +157,7 @@ class ReadQueries:
                 events = self.store.events(session_id)
                 try:
                     observations = connection.execute(
-                        "SELECT o.observation_id, o.frame_id, o.captured_at, r.result_id, "
+                        "SELECT o.observation_id, o.frame_id, o.action_id, o.captured_at, r.result_id, "
                         "d.detection_id, d.class_name, d.confidence_band, d.raw_score, d.score_kind "
                         "FROM room_observations o JOIN room_perception_results r "
                         "ON r.session_id = o.session_id AND r.observation_id = o.observation_id "
@@ -191,7 +194,22 @@ class ReadQueries:
                                        data["uncertainty"], (event.event_id,)))
             except Exception as exc:
                 failures.append(SourceFailure(CandidateKind.READ_DRONE, type(exc).__name__))
+        # A sweep is one OBSERVE result. An early frame may already be in the
+        # ingestion tables when a later frame fails; only frames named by a
+        # successful durable outcome are readable as observation evidence.
+        committed_frames = {
+            (frame.get("observation_id"), frame.get("frame_id"))
+            for event in events if event.event_type == "ROOM_TOOL_OUTCOME"
+            and event.payload.get("kind") == CandidateKind.OBSERVE.value
+            and event.payload.get("code") == "OBSERVE_SUCCEEDED"
+            for frame in (event.payload.get("count_evidences")
+                          or ([event.payload["count_evidence"]] if event.payload.get("count_evidence") else []))
+            if isinstance(frame, dict)
+        }
         for row in observations:
+            if (row["action_id"].startswith("OBSERVE:")
+                    and (row["observation_id"], row["frame_id"]) not in committed_frames):
+                continue
             facts.append(_fact(CandidateKind.READ_OBSERVATIONS,
                                {key: row[key] for key in ("class_name", "confidence_band", "raw_score", "score_kind")},
                                row["captured_at"], f"observation:{row['observation_id']}/frame:{row['frame_id']}",
@@ -273,6 +291,7 @@ class ReadQueries:
                     TerminalState(data["terminal_state"]) if data.get("terminal_state") else None,
                     event.event_id, data.get("observed_at"),
                     FrameCountEvidence.from_payload(data["count_evidence"]) if data.get("count_evidence") else None,
+                    tuple(FrameCountEvidence.from_payload(item) for item in data.get("count_evidences", ())),
                 )
                 outcomes.append(outcome)
                 if outcome.terminal_state is not None:

@@ -17,6 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sentinel.room import live_stack
+from sentinel.room.store import RoomStore
 from sentinel.ui import room_agent, room_rehearsal
 from sentinel.ui.app import build_app
 from sentinel.ui.bootstrap import SessionConfig, build_service
@@ -70,17 +71,51 @@ def test_a_rehearsal_run_reaches_an_answer_and_returns_home(tmp_path, fast):
         run = _run(client, room)
     assert run["status"] == "COMPLETED", run["error"]
     assert run["answer"]["code"] == "ANSWERED_COUNT"
-    assert run["answer"]["summary"] == "phones: 1 confirmed, 1 uncertain; computers: 2 confirmed", run["answer"]
+    # Three overlapping frames from one declared pose are one corroborating
+    # view, so each unique object remains uncertain until another pose sees it.
+    assert run["answer"]["summary"] == (
+        "phones: 0 confirmed, 2 uncertain; computers: 0 confirmed, 2 uncertain"), run["answer"]
     assert run["returned_home"] is True
     assert run["landing"] == {"state": "LANDED", "reason": "REQUESTED"}
-    assert [r["status"] for r in run["regions"]] == ["OBSERVED"] * 3
-    assert run["captures"] >= 3 and len(run["detections"]) >= 4
+    assert any(region["status"] == "OBSERVED" for region in run["regions"])
+    session_path = tmp_path / "data" / "room-agent" / run["id"] / "session.sqlite3"
+    assert session_path.exists()
+    store = RoomStore.open(session_path)
+    try:
+        observed = [event.payload for event in store.events(run["id"])
+                    if event.event_type == "ROOM_TOOL_OUTCOME"
+                    and event.payload.get("code") == "OBSERVE_SUCCEEDED"]
+    finally:
+        store.close()
+    assert observed
+    assert all(len(payload["count_evidences"]) == 3 for payload in observed)
+    assert run["captures"] == room.run.world.detector.calls == 3 * len(observed)
+    assert len(run["detections"]) >= 4
     assert any(d["confidence"] == "low" for d in run["detections"])
     assert run["decisions"] and all(d["reason"] for d in run["decisions"])
     assert run["decisions"][-1]["action"] == "ANSWER:COUNTS"
     assert run["yaw_rotations"] == 0
+    assert sum(command in ("cw 30", "ccw 30") for command in room.run.world.world.sent) >= 3
     # The runner is released once the run is terminal.
     assert service.registry.get(service.config.run_id) is None
+
+
+@pytest.mark.parametrize("battery,succeeds", [(70, False), (71, True)])
+def test_rehearsal_sweep_battery_admission(tmp_path, fast, monkeypatch, battery, succeeds):
+    original_build = room_rehearsal.build_world
+
+    def build_with_battery(*args, **kwargs):
+        built = original_build(*args, **kwargs)
+        built.world.battery = battery
+        return built
+
+    monkeypatch.setattr(room_rehearsal, "build_world", build_with_battery)
+    service, room, client = _client(tmp_path)
+    with client:
+        run = _run(client, room)
+    assert run["captures"] == (3 if succeeds else 0)
+    assert run["status"] == ("COMPLETED" if succeeds else "SAFE_LANDED")
+    assert run["returned_home"] and run["landing"]["state"] == "LANDED"
 
 
 def test_scenario_b_recovers_by_a_yaw_rotation_and_an_accepted_reanchor(tmp_path, fast):

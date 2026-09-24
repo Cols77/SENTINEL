@@ -75,7 +75,9 @@ class FlightStack:
     ``refresh()`` returns the current ``(PoseHealth, EnergySample)`` measured
     from the aircraft; ``emergency(executor)`` performs a forced landing and
     returns its ``TerminalOutcome``; ``frame_source.read_frame(timeout=...)``
-    reads the connected video stream for perception. ``trigger_emergency``,
+    reads the connected video stream for legacy single-frame perception;
+    ``capture_records`` points at frames saved by completed CAPTURE commands.
+    ``trigger_emergency``,
     when the stack reaches real hardware, is the operator's direct motor-stop
     path (``FlightTestRunner.trigger_emergency``): the CLI arms it under the
     operator's emergency hotkey for the whole flight. It is ``None`` for a
@@ -86,6 +88,7 @@ class FlightStack:
     refresh: Callable[[], tuple]
     emergency: Callable[[object], TerminalOutcome]
     frame_source: object
+    capture_records: object | None = None
     trigger_emergency: Callable[[], None] | None = None
     #: Task B item 2c: a stationary tag burst as ``PoseReport``s for the
     #: supervisor's recovery policy (``RecoveryController.burst_source``),
@@ -409,11 +412,15 @@ def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, ca
     try:
         resolve_checkpoint = wiring.make_resolve_checkpoint(
             site=site, profile=pose_profile, pose_source=lambda: supervisor.tracker.health, limits=limits)
+        resolve_sweep_checkpoints = tuple(wiring.make_resolve_checkpoint(
+            site=site, profile=pose_profile, pose_source=lambda: supervisor.tracker.health,
+            limits=limits, sweep_offsets_deg=(offset,)) for offset in (-30, 0, 30))
     except wiring.WiringError as exc:
         raise LiveSessionError(str(exc)) from exc
     perception_capture = wiring.make_perception_capture(
         store=store, flight_client=stack.frame_source, frames_dir=frames_dir,
-        requested_model=manifest.requested_detector_identity, run_id=session_id)
+        requested_model=manifest.requested_detector_identity, run_id=session_id,
+        capture_records=stack.capture_records)
     perception_provider = wiring.make_perception_provider(detector_factory=lambda: detector)
 
     compiler = GoalCompiler(judge, store, input_limit_bytes=REQUEST_LIMIT_BYTES,
@@ -424,7 +431,9 @@ def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, ca
         # on the ground (no supervisor, so no physical action is possible).
         terminal = RoomController(store, judge).run_until_terminal(session_id)
         return LiveSessionOutcome(terminal, False, ledger.status.value, None, "GOAL_LEDGER_NOT_PENDING")
-    collaborators = {"resolve_checkpoint": resolve_checkpoint, "perception_capture": perception_capture,
+    collaborators = {"resolve_checkpoint": resolve_checkpoint,
+                     "resolve_sweep_checkpoints": resolve_sweep_checkpoints,
+                     "perception_capture": perception_capture,
                      "perception_provider": perception_provider,
                      # Task B item 3: the calibrated Tello camera and the
                      # site's declared support planes place detections.

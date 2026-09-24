@@ -55,7 +55,10 @@ from .store import RoomStore, _canonical_json, _canonical_payload, _event_sha256
 #: one entry per COUNT objective with the objective's own scope/pose_id, and
 #: rebuilds and compares the whole answer for equality rather than
 #: containment.
-PROJECTOR_REVISION = "room-projectors-v3"
+#: v4 (room observation sweep): ``ReadQueries.project`` restores the
+#: ``count_evidences`` tuple on every tool outcome. Legacy events restore an
+#: empty tuple, which still changes the canonical final snapshot shape.
+PROJECTOR_REVISION = "room-projectors-v4"
 
 _REQUIRED_MANIFEST_KEYS = (
     "session_id", "request_text", "label", "room_schema_revision", "projector_revision", "files", "expected",

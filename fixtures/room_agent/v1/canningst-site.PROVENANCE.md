@@ -1,86 +1,68 @@
 # `canningst-site.json` provenance
 
-The room-site document for the operator's usual test space, Mission Control
-profile **`CanningSt`**. Source of truth (read-only):
-`C:/coding/sentinel/.worktrees/lightcode-mission-control-docs/config/mission-control-sites.v1.json`,
-entry `CanningSt`:
+This is the CanningSt room-agent site used by Mission Control. The bound
+`docs/wp5-flight1-site.json` and `docs/wp5-flight3-map.json` SHA-256 values
+still identify the original cube survey and mapped tags. The larger free
+space below comes from the operator's 2026-09-24 measurements in
+`docs/handoffs/2026-09-24-room-agent-coverage-codex.md` (the handoff may live
+in the `jev-agentic-room-loop` worktree). It supersedes the smaller WP5 cube
+for this room-agent site; the hash binding is not a claim that its dimensions
+still equal the old cube file.
 
-| Registry field | Value |
-|---|---|
-| `site_path` | `../docs/wp5-flight1-site.json` |
-| `tag_map_path` | `../docs/wp5-flight3-map.json` |
-| `pose_mode` | `off` |
-| `surface_z_cm` | `50` |
-| `start_x_cm`, `start_y_cm` | `250`, `190` |
+## Clearance and home
 
-`docs/wp5-flight1-site.json` (cube-site-v1) supplies: cube x 1.6–3.4 m,
-y 1.6–3.0 m, z ≤ 2.0 m; commanded inset 0.3 m, commanded z 60–180 cm; two
-tag stands on the line y = 4.0 m (x 2.156 m and 2.844 m, tags at 0.55 m).
-Both files in this checkout are content-identical to the Mission Control
-worktree's copies (same LF-normalized SHA-256). `docs/wp5-flight3-corners.json`
-is not used.
+The measured horizontal free space is x 90–410 cm, centred on x 250, and
+y 109–400 cm measured from the tag wall at y 400. The commanded `flight`
+volume is x 120–380 and y 140–360: at least 30 cm in from the measured
+width and rear edge, and 40 cm from the tag wall. `cube` and `home-corridor`
+use the measured horizontal extent so the checked landing area and home
+route are contained in it. The landing polygons have the same footprint.
+The home pad at (250,190,0) and route checkpoint at (250,190,80) are inside
+the corridor; the checkpoint is also inside `flight` and `observation`.
 
-Every value below is either **derived** (from a named source), **contract**
-(forced by a room-agent code contract, named), or **`operator_confirm`**
-(not derivable from those sources; the operator must confirm it before the
-L3 trial). Nothing is invented silently.
+The operator measured clear true height from about 70 to 300 cm. The Tello
+height reading is 30–40 cm lower: it reads about 40 cm immediately after
+takeoff when true height is roughly 70–80 cm. Site altitude uses that Tello
+reading. `flight` spans reported z 0–250 cm: its minimum is 0 by the operator's 2026-09-24 decision (integration commit 56d6784), because the Tello height reading is faulty and must not refuse a low but real hover. The `cube` and
+`home-corridor` extend to z −20 to include the 20 cm forecast error below
+the floor for landing checks; their ceiling is reported z 250. Landing
+contingencies span z 0–250, including the floor. The flight bounds no
+longer refuse low reported heights; the coverage design still resolves
+every viewpoint at reported z 70.
 
-## Bindings
+The `observation` semantic envelope is x 190–310, y 160–220, reported
+z 0–140 (minimum 0 per 56d6784; the ceiling 140 keeps the middle height
+at reported z 70, the height the coverage matrix was generated for). It keeps the eight resolved viewpoints inside `flight` while
+placing the camera low enough to see the existing demo surface. Its middle
+height resolves to reported z 70. All three left/center/right rear poses
+resolve at y 170, front poses at y 210, and the two side looks at y 190.
+The front side is +y, toward the wall tags.
 
-| Field | Value | Status | Source |
-|---|---|---|---|
-| `site_id` | `canningst` | derived | registry `id` |
-| `cube_site_sha256` | `0770fca6…83b2` | derived | SHA-256 of `docs/wp5-flight1-site.json`, LF line endings (the committed blob; platform-stable) |
-| `tag_map_sha256` | `b78f1262…f80a` | derived | SHA-256 of `docs/wp5-flight3-map.json`, LF line endings. `live_stack.load_bound_tag_map` accepts this hash for a CRLF working copy too |
+Both `NAVIGATION_UNAVAILABLE` and `RETURN_ENERGY_UNAVAILABLE` retain the
+`LAND_IN_PLACE` contingency with a current operator clear-floor assurance.
+Landing never depends on a tag fix. The assurance lasts 30 minutes.
 
-## Volumes
+## Coverage and tags
 
-| Field | Value | Status | Source |
-|---|---|---|---|
-| free space `cube` footprint | x 160–340, y 120–300 cm | derived + later site adjustment | the historical WP5 cube starts at y 160; the room site extends its rear edge to y 120 |
-| free space `cube` z | −20 to 200 cm | derived + contract | top: cube `max_z_m` 2.0. Bottom: the floor (0) minus the drift profile's `max_height_error_cm` (20, see the history profile). `admit_terminal_contingency` requires one free-space prism to contain the swept landing disk down to touchdown minus that height error |
-| free space `flight` | x 160–340, y 120–300, z 50–180 cm | derived + operator limit | the room's declared flight volume uses a 50 cm lower bound; the historical WP5 cube-site document retains its 60 cm commanded minimum |
-| free space `observation` (semantic envelope) | x 200–300, y 160–300, z 50–140 cm | **operator_confirm** | the live runner's commanded envelope is this volume (`live_stack.site_envelope`); it admits 50 cm and refuses lower commanded heights |
-| forbidden volumes | none | derived | the WP5 cube is the surveyed clear volume; nothing is declared inside it |
-| corridor `home-corridor` | x 160–340, y 120–300, z −20 to 200 cm | derived + contract | cube footprint; bottom = pad z minus `max_height_error_cm` (Task A carry-over: takeoff is refused unless the home corridor reaches it) |
+The existing declared demo surface footprint x 190–310, y 190–270 and
+support plane z 50 are retained. `scripts/room_site_coverage.py` partitions
+that footprint into six 40 × 40 cm cells. Each cell requires `computer` and
+`phone`. The generator uses `TELLO_MEASURED` (960 × 720, fx 892.58,
+fy 893.74, 8.6° downward pitch), projects each cell centre from the eight
+resolved poses at −30°, 0°, and +30° sweep headings, and limits detection
+range to 250 cm. A cell with no such geometric view is omitted and logged.
+The committed grid has six cells, each visible from at least one pose, and
+zero omitted cells. This is geometric visibility; objects may still be
+occluded in a real frame. Re-run with `PYTHONPATH=src;.` and
+`python scripts/room_site_coverage.py --check` to verify the committed matrix.
 
-## Home and route
+The tag map places tag 2 at x 215.6 and tag 0 at x 284.4, both at y 400,
+z about 53 and facing −y. At the six forward-facing poses, the tag wall is
+190–230 cm ahead and both tags are within about 3 m and the camera's
+horizontal field. Those poses declare both tag IDs, which is the minimum
+for expected re-anchor credit. The `center-middle-middle-left` and
+`center-middle-middle-right` poses look sideways and declare no tag view.
 
-| Field | Value | Status | Source |
-|---|---|---|---|
-| `home.nominal_pose` x, y | 250, 190 cm | derived | registry `start_x_cm`, `start_y_cm` |
-| `home.nominal_pose` z | 0 cm | **operator_confirm** | the drone takes off from the floor at the start mark. `live_stack` anchors the pre-takeoff tracker at this height, and the landing contingency's `z_band_cm[0]` must equal it |
-| `home.heading_deg` | 90 | derived | canonical heading (+y, facing the tag stands); every WP5 START fix read ≈ 90° (e.g. 89.9°, 2026-09-23 12:21) |
-| `home.pad_id` | `canningst-start` | derived | name only |
-| `home-route` checkpoint | (250, 190, 80) | derived + **operator_confirm** (z) | ends over the pad (`SafetySupervisor._termination` contract). z 80 cm is the airborne home altitude start admission assesses before takeoff; WP5 START hovers read 60–70 cm. After takeoff the measured home replaces it |
-
-## Terminal contingencies
-
-Both triggers (`NAVIGATION_UNAVAILABLE`, `RETURN_ENERGY_UNAVAILABLE`) are
-`LAND_IN_PLACE` over the cube footprint, z band 0–200 cm, pose state
-`COASTING` or better.
-
-| Field | Value | Status | Source |
-|---|---|---|---|
-| landing polygon | cube footprint | derived | cube |
-| `z_band_cm` | 0–200 | derived + contract | floor to cube top; `z_band_cm[0]` must equal the home z for a home landing |
-| `clearance_source`, `assurance_policy_id` | `operator-checked-clear-cube`, `operator-clear-floor-check` | **operator_confirm** | the operator's pre-flight check that the floor inside the cube is clear (recorded per session as an assurance file) |
-| `max_assurance_age_ms` | 1 800 000 (30 min) | **operator_confirm** | an assurance recorded before the run must outlive preview, connectivity and the whole flight |
-
-## Semantic frame, coverage and supports
-
-| Field | Value | Status | Source |
-|---|---|---|---|
-| axes | left→right +x, rear→front +y | derived | front = max y, the tag stands' side (y 4.0 m) |
-| landmarks | none | derived | the tag stands are outside the cube; no other landmark is surveyed |
-| coverage cells | left / center / right strips x 190–230 / 230–270 / 270–310, y 190–270, z 0–80 | derived + **operator_confirm** | the commanded (inset 0.3 m) area; z 0–80 = floor to the demo surface plus the 30 cm resting band. Required classes `computer`, `phone` (the L3 request) |
-| `pose_visibility` | `left/center/right-rear-middle-toward_targets` → its own strip | **operator_confirm** | a declared visibility matrix, not a calibrated frustum. The left/right regions resolve to x 230/270 (the `observation` envelope), on the inner edges of their strips |
-| `pose_tag_visibility` | each of the three poses → tags `0`, `2` | derived + **operator_confirm** (Task V2) | the tag map puts tags 2 and 0 on the stands at x 215.6 / 284.4 cm, y 400 cm, z 53 cm, facing −y. From x 230–270, y 183, z 100 facing +y (the poses' yaw 90°) both are about 217 cm ahead and at most 16° off the camera axis, inside the Tello's ~28° half field of view; every WP5 START fix from the pad saw both. The supervisor credits an expected re-anchor at a pose only when two declared tags are mapped at its yaw; if the fix does not come, the pose is latched RECOVERY_REQUIRED (yaw-scan recovery, then landing) |
-| support plane `FLOOR` | z 0, no classes | derived | the floor |
-| support plane `demo-surface` | z 50, classes `computer`, `phone`, `pen` | derived + **operator_confirm** (classes) | registry `surface_z_cm` 50. The survey path rays every detection onto this surface (`sentinel.survey.cube_bridge`); which classes rest on it (vs the floor) is the operator's to confirm |
-
-## Clearance provenance
-
-`clearance_provenance` names the registry profile, the cube file and the WP5
-flights of 2026-09-21..23 (`artifacts/trials/*-reanchor` in the integration
-worktree), all flown in this cube.
+`FLOOR` at z 0 has no classes; `demo-surface` at z 50 supports `computer`,
+`phone`, and `pen`. The surface footprint and supported class list remain
+operator declarations from the earlier room site, not a new measurement.

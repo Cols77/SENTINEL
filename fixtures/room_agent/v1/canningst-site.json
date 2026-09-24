@@ -6,38 +6,130 @@
   "free_space_volumes": [
     {
       "volume_id": "cube",
-      "polygon_xy_cm": [[160, 120], [340, 120], [340, 300], [160, 300]],
-      "z_interval_cm": [-20, 200]
+      "polygon_xy_cm": [
+        [
+          90,
+          109
+        ],
+        [
+          410,
+          109
+        ],
+        [
+          410,
+          400
+        ],
+        [
+          90,
+          400
+        ]
+      ],
+      "z_interval_cm": [
+        -20,
+        250
+      ]
     },
     {
       "volume_id": "flight",
-      "polygon_xy_cm": [[160, 120], [340, 120], [340, 300], [160, 300]],
-      "z_interval_cm": [0, 180]
+      "polygon_xy_cm": [
+        [
+          120,
+          140
+        ],
+        [
+          380,
+          140
+        ],
+        [
+          380,
+          360
+        ],
+        [
+          120,
+          360
+        ]
+      ],
+      "z_interval_cm": [
+        0,
+        250
+      ]
     },
     {
       "volume_id": "observation",
-      "polygon_xy_cm": [[200, 160], [300, 160], [300, 300], [200, 300]],
-      "z_interval_cm": [0, 140]
+      "polygon_xy_cm": [
+        [
+          190,
+          160
+        ],
+        [
+          310,
+          160
+        ],
+        [
+          310,
+          220
+        ],
+        [
+          190,
+          220
+        ]
+      ],
+      "z_interval_cm": [
+        0,
+        140
+      ]
     }
   ],
   "forbidden_volumes": [],
   "corridors": [
     {
       "volume_id": "home-corridor",
-      "polygon_xy_cm": [[160, 120], [340, 120], [340, 300], [160, 300]],
-      "z_interval_cm": [-20, 200]
+      "polygon_xy_cm": [
+        [
+          90,
+          109
+        ],
+        [
+          410,
+          109
+        ],
+        [
+          410,
+          400
+        ],
+        [
+          90,
+          400
+        ]
+      ],
+      "z_interval_cm": [
+        -20,
+        250
+      ]
     }
   ],
   "routes": [
     {
       "route_id": "home-route",
-      "checkpoints": [{"x_cm": 250, "y_cm": 190, "z_cm": 80}],
-      "corridor_volume_ids": ["home-corridor"]
+      "checkpoints": [
+        {
+          "x_cm": 250,
+          "y_cm": 190,
+          "z_cm": 80
+        }
+      ],
+      "corridor_volume_ids": [
+        "home-corridor"
+      ]
     }
   ],
   "home": {
     "pad_id": "canningst-start",
-    "nominal_pose": {"x_cm": 250, "y_cm": 190, "z_cm": 0},
+    "nominal_pose": {
+      "x_cm": 250,
+      "y_cm": 190,
+      "z_cm": 0
+    },
     "heading_deg": 90,
     "route_id": "home-route"
   },
@@ -46,8 +138,28 @@
       "contingency_id": "canningst-land-in-place-navigation",
       "trigger": "NAVIGATION_UNAVAILABLE",
       "kind": "LAND_IN_PLACE",
-      "landing_polygon_xy_cm": [[160, 120], [340, 120], [340, 300], [160, 300]],
-      "z_band_cm": [0, 200],
+      "landing_polygon_xy_cm": [
+        [
+          90,
+          109
+        ],
+        [
+          410,
+          109
+        ],
+        [
+          410,
+          400
+        ],
+        [
+          90,
+          400
+        ]
+      ],
+      "z_band_cm": [
+        0,
+        250
+      ],
       "required_pose_state": "COASTING",
       "clearance_source": "operator-checked-clear-cube",
       "assurance_policy_id": "operator-clear-floor-check",
@@ -57,54 +169,351 @@
       "contingency_id": "canningst-land-in-place-energy",
       "trigger": "RETURN_ENERGY_UNAVAILABLE",
       "kind": "LAND_IN_PLACE",
-      "landing_polygon_xy_cm": [[160, 120], [340, 120], [340, 300], [160, 300]],
-      "z_band_cm": [0, 200],
+      "landing_polygon_xy_cm": [
+        [
+          90,
+          109
+        ],
+        [
+          410,
+          109
+        ],
+        [
+          410,
+          400
+        ],
+        [
+          90,
+          400
+        ]
+      ],
+      "z_band_cm": [
+        0,
+        250
+      ],
       "required_pose_state": "COASTING",
       "clearance_source": "operator-checked-clear-cube",
       "assurance_policy_id": "operator-clear-floor-check",
       "max_assurance_age_ms": 1800000
     }
   ],
-  "clearance_provenance": "mission-control-sites.v1 CanningSt: docs/wp5-flight1-site.json cube; WP5 flights 2026-09-21..23",
+  "clearance_provenance": "CanningSt operator-measured free space 2026-09-24; docs/wp5-flight1-site.json and docs/wp5-flight3-map.json bindings",
   "semantic_frame": {
     "envelope_volume_id": "observation",
-    "left_to_right_axis_xy": [1.0, 0.0],
-    "rear_to_front_axis_xy": [0.0, 1.0],
+    "left_to_right_axis_xy": [
+      1.0,
+      0.0
+    ],
+    "rear_to_front_axis_xy": [
+      0.0,
+      1.0
+    ],
     "target_side": "FRONT",
     "landmarks": []
   },
   "coverage_cells": [
     {
-      "cell_id": "left-strip",
-      "polygon_xy_cm": [[190, 190], [230, 190], [230, 270], [190, 270]],
-      "z_band_cm": [0, 80],
-      "required_classes": ["computer", "phone"]
+      "cell_id": "demo-x190-y190",
+      "polygon_xy_cm": [
+        [
+          190,
+          190
+        ],
+        [
+          230,
+          190
+        ],
+        [
+          230,
+          230
+        ],
+        [
+          190,
+          230
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
     },
     {
-      "cell_id": "center-strip",
-      "polygon_xy_cm": [[230, 190], [270, 190], [270, 270], [230, 270]],
-      "z_band_cm": [0, 80],
-      "required_classes": ["computer", "phone"]
+      "cell_id": "demo-x230-y190",
+      "polygon_xy_cm": [
+        [
+          230,
+          190
+        ],
+        [
+          270,
+          190
+        ],
+        [
+          270,
+          230
+        ],
+        [
+          230,
+          230
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
     },
     {
-      "cell_id": "right-strip",
-      "polygon_xy_cm": [[270, 190], [310, 190], [310, 270], [270, 270]],
-      "z_band_cm": [0, 80],
-      "required_classes": ["computer", "phone"]
+      "cell_id": "demo-x270-y190",
+      "polygon_xy_cm": [
+        [
+          270,
+          190
+        ],
+        [
+          310,
+          190
+        ],
+        [
+          310,
+          230
+        ],
+        [
+          270,
+          230
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x190-y230",
+      "polygon_xy_cm": [
+        [
+          190,
+          230
+        ],
+        [
+          230,
+          230
+        ],
+        [
+          230,
+          270
+        ],
+        [
+          190,
+          270
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x230-y230",
+      "polygon_xy_cm": [
+        [
+          230,
+          230
+        ],
+        [
+          270,
+          230
+        ],
+        [
+          270,
+          270
+        ],
+        [
+          230,
+          270
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x270-y230",
+      "polygon_xy_cm": [
+        [
+          270,
+          230
+        ],
+        [
+          310,
+          230
+        ],
+        [
+          310,
+          270
+        ],
+        [
+          270,
+          270
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
     }
   ],
   "pose_visibility": [
-    ["center-rear-middle-toward_targets", ["center-strip"]],
-    ["left-rear-middle-toward_targets", ["left-strip"]],
-    ["right-rear-middle-toward_targets", ["right-strip"]]
+    [
+      "center-front-middle-toward_targets",
+      [
+        "demo-x190-y230",
+        "demo-x230-y230",
+        "demo-x270-y230"
+      ]
+    ],
+    [
+      "center-middle-middle-left",
+      [
+        "demo-x190-y190",
+        "demo-x190-y230"
+      ]
+    ],
+    [
+      "center-middle-middle-right",
+      [
+        "demo-x270-y190",
+        "demo-x270-y230"
+      ]
+    ],
+    [
+      "center-rear-middle-toward_targets",
+      [
+        "demo-x190-y190",
+        "demo-x230-y190",
+        "demo-x270-y190",
+        "demo-x190-y230",
+        "demo-x230-y230",
+        "demo-x270-y230"
+      ]
+    ],
+    [
+      "left-front-middle-toward_targets",
+      [
+        "demo-x190-y230",
+        "demo-x230-y230"
+      ]
+    ],
+    [
+      "left-rear-middle-toward_targets",
+      [
+        "demo-x190-y190",
+        "demo-x230-y190",
+        "demo-x190-y230",
+        "demo-x230-y230",
+        "demo-x270-y230"
+      ]
+    ],
+    [
+      "right-front-middle-toward_targets",
+      [
+        "demo-x230-y230",
+        "demo-x270-y230"
+      ]
+    ],
+    [
+      "right-rear-middle-toward_targets",
+      [
+        "demo-x230-y190",
+        "demo-x270-y190",
+        "demo-x190-y230",
+        "demo-x230-y230",
+        "demo-x270-y230"
+      ]
+    ]
   ],
   "pose_tag_visibility": [
-    ["center-rear-middle-toward_targets", [0, 2]],
-    ["left-rear-middle-toward_targets", [0, 2]],
-    ["right-rear-middle-toward_targets", [0, 2]]
+    [
+      "center-rear-middle-toward_targets",
+      [
+        0,
+        2
+      ]
+    ],
+    [
+      "center-front-middle-toward_targets",
+      [
+        0,
+        2
+      ]
+    ],
+    [
+      "left-rear-middle-toward_targets",
+      [
+        0,
+        2
+      ]
+    ],
+    [
+      "left-front-middle-toward_targets",
+      [
+        0,
+        2
+      ]
+    ],
+    [
+      "right-rear-middle-toward_targets",
+      [
+        0,
+        2
+      ]
+    ],
+    [
+      "right-front-middle-toward_targets",
+      [
+        0,
+        2
+      ]
+    ]
   ],
   "support_planes": [
-    {"plane_id": "FLOOR", "z_cm": 0, "classes": []},
-    {"plane_id": "demo-surface", "z_cm": 50, "classes": ["computer", "phone", "pen"]}
+    {
+      "plane_id": "FLOOR",
+      "z_cm": 0,
+      "classes": []
+    },
+    {
+      "plane_id": "demo-surface",
+      "z_cm": 50,
+      "classes": [
+        "computer",
+        "phone",
+        "pen"
+      ]
+    }
   ]
 }

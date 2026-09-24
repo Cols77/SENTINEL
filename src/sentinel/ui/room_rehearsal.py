@@ -233,6 +233,7 @@ class FakeVideo:
         self.world = world
         self.frames = 0
         self.last_pose = None
+        self.pose_by_frame = {}
 
     def __call__(self, **_values):
         return self
@@ -246,6 +247,7 @@ class FakeVideo:
     def read(self, timeout):
         self.frames += 1
         self.last_pose = self.world.pose()
+        self.pose_by_frame[self.frames] = self.last_pose
         data = np.full((720, 960, 3), 40, dtype=np.uint8)
         # Every frame is distinct content (the provider cache is keyed on the
         # frame bytes): stamp the frame number and the pose into one row.
@@ -318,12 +320,20 @@ class SceneDetector:
     def __init__(self, scenario: Scenario, video: FakeVideo, world: FakeTelloWorld, *, delay_s=0.0):
         self.scenario, self.video, self.world, self.delay_s = scenario, video, world, delay_s
         self.calls = 0
+        self._calls_lock = threading.Lock()
 
     def detect(self, image_path, classes):
-        self.calls += 1
+        from PIL import Image
+
+        with self._calls_lock:
+            self.calls += 1
+            call_number = self.calls
         if self.delay_s:
             time.sleep(self.delay_s)
-        pose = self.video.last_pose or self.world.pose()
+        with Image.open(image_path) as image:
+            rgb = image.convert("RGB")
+            frame_number = rgb.getpixel((0, 0))[0] + 256 * rgb.getpixel((1, 0))[0]
+        pose = self.video.pose_by_frame[frame_number]
         detections, bands = [], []
         for obj in self.scenario.objects:
             if obj.class_name not in classes:
@@ -334,7 +344,7 @@ class SceneDetector:
             detections.append({"class": obj.class_name, "bbox": box, "raw_score": None, "score_kind": None})
             bands.append(obj.band)
         gust = self.scenario.gust_after_observation
-        if gust is not None and self.calls == gust:
+        if gust is not None and call_number == gust:
             self.world.gust(self.scenario.gust_heading_deg)
         return DetectionBatch(detections=tuple(detections), status="OK", bands=tuple(bands), dropped=(),
                               raw={"model": REHEARSAL_DETECTOR_ID})

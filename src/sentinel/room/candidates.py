@@ -74,15 +74,23 @@ def can_answer_objectives(snapshot: ReadSnapshot, objectives: tuple[GoalObjectiv
 _COUNT_TERMINALS = ("REPORTED", "OBSERVED", "RETURN_HOME")
 
 
-def build_candidates(snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
+def build_candidates(snapshot: ReadSnapshot, *, observation_legal: bool = False) -> tuple[RoomCandidate, ...]:
     if snapshot.terminal_state:
         return ()
     kinds = (*READ_KINDS, CandidateKind.ANSWER, CandidateKind.CLARIFY, CandidateKind.ESCALATE)
     candidates = []
+    physical_mission_reads = (CandidateKind.READ_OBSERVATIONS, CandidateKind.READ_COUNTS)
     for kind in kinds:
         if kind == CandidateKind.ANSWER and not can_answer(snapshot):
             continue
         digest = relevant_hash(kind, snapshot)
+        prior_reads = tuple(o for o in snapshot.outcomes if o.candidate_id == kind.value
+                            and kind in physical_mission_reads and o.code in ("READ_SUCCEEDED", "NO_EVIDENCE"))
+        if observation_legal and kind in physical_mission_reads:
+            seen = {fact.fact_id for outcome in prior_reads for fact in outcome.facts}
+            available = {fact.fact_id for fact in snapshot.sources if fact.kind == kind}
+            if not (prior_reads and available - seen):
+                continue
         if any(o.candidate_id == kind.value and o.relevant_state_sha256 == digest
                and (o.refusal_code is not None or (kind in READ_KINDS and o.code in ("READ_SUCCEEDED", "NO_EVIDENCE")))
                for o in snapshot.outcomes):
@@ -237,6 +245,20 @@ def _benefit(cell_ids, coverage: CoverageProjection) -> int:
     return sum(1 for entry in coverage.uncovered if entry.split(":", 1)[0] in cell_ids)
 
 
+def _coverage_gain_description(pose_id: str, site: RoomSite, coverage: CoverageProjection) -> str:
+    """Describe the unresolved coverage a declared pose can add this turn."""
+    visible = set(dict(site.pose_visibility).get(pose_id, ()))
+    pairs = tuple(entry for entry in coverage.uncovered if entry.split(":", 1)[0] in visible)
+    cells = sorted({entry.split(":", 1)[0] for entry in pairs})
+    if not cells:
+        return "no declared unexplored cells are mapped to this pose"
+    cell_word = "cell" if len(cells) == 1 else "cells"
+    pair_word = "pair" if len(pairs) == 1 else "pairs"
+    sample = ", ".join(cells[:3])
+    if len(cells) > 3:
+        sample += f", +{len(cells) - 3} more"
+    return (f"adds a view of {len(cells)} unexplored {cell_word} ({sample}); "
+            f"could resolve {len(pairs)} unresolved cell/class {pair_word}")
 #: Refusals decided by the choice gate itself (``assess_choice`` and the
 #: provider call), not by the world: Jev was unsure, malformed or
 #: unreachable, while the action stays physically possible. Task 4b item 1:
@@ -249,11 +271,13 @@ CONFIDENCE_GATE_REFUSALS = frozenset({
     "MISSING_OR_NON_MAX_SELECTION", "PROVIDER_ERROR",
 })
 
+_NON_BURNING_REFUSALS = CONFIDENCE_GATE_REFUSALS | {"STALE_DECISION"}
+
 
 def _burns(outcome: ToolOutcome) -> bool:
     """Whether a refused outcome suppresses its candidate: physical, tool
     and supervisor refusals do; confidence-gate refusals do not."""
-    return outcome.refusal_code is not None and outcome.refusal_code not in CONFIDENCE_GATE_REFUSALS
+    return outcome.refusal_code is not None and outcome.refusal_code not in _NON_BURNING_REFUSALS
 
 
 def _observe_suppressed(outcomes: tuple[ToolOutcome, ...], candidate_id: str, digest: str) -> bool:
@@ -279,7 +303,10 @@ def _resolves_text(pose_id: str, site: RoomSite, coverage: CoverageProjection) -
     count = sum(len(classes) for classes in by_cell.values())
     if not count:
         return "resolves no unexplored cell/class pair"
-    detail = "; ".join(f"{cell_id}: {', '.join(classes)}" for cell_id, classes in by_cell.items())
+    entries = [(cell_id, class_name) for cell_id, classes in by_cell.items() for class_name in classes]
+    detail = "; ".join(f"{cell_id}: {class_name}" for cell_id, class_name in entries[:3])
+    if len(entries) > 3:
+        detail += f"; +{len(entries) - 3} more"
     return f"resolves {count} unexplored cell/class pair{'' if count == 1 else 's'} ({detail})"
 
 
@@ -305,7 +332,9 @@ def _observe_candidate(objective: GoalObjective, pose_id: str, description: str,
     distance_cm = math.hypot(resolved.x_cm - home.x_cm, resolved.y_cm - home.y_cm)
     # Task 4b item 2: what this view resolves and roughly how far it is, so
     # Jev has a reason to prefer one region over an otherwise identical one.
-    description = f"{description.rstrip('.')}: {_resolves_text(pose_id, site, coverage)}; about {distance_cm:.0f} cm from home."
+    description = (f"{description.rstrip('.')}: {_resolves_text(pose_id, site, coverage)}; "
+                   f"Approximate direct distance from nominal home: {distance_cm:.0f} cm; "
+                   "battery cost is assessed by the supervisor.")
     return RoomCandidate(candidate_id, CandidateKind.OBSERVE, snapshot_version, digest, description, description,
                          coverage.evidence_refs, (), PhysicalCost(distance_cm=distance_cm, requires_airborne=True))
 
@@ -393,8 +422,11 @@ def _search_candidates(objective: GoalObjective, site: RoomSite, coverage: Cover
     for pose_id in search_pose_ids(objective, site):
         if pose_id in observed:
             continue
-        description = (f"Search for {classes}: fly to declared pose {pose_id} and look for it there "
-                       f"(objective {objective.objective_id}).")
+        gain = _benefit(set(dict(site.pose_visibility).get(pose_id, ())), coverage)
+        coverage_note = (f"; {_coverage_gain_description(pose_id, site, coverage)}" if gain else "")
+        description = (f"Search for {classes}: observe unvisited declared search viewpoint {pose_id} "
+                       f"(objective {objective.objective_id}); this advances the search"
+                       f"{coverage_note}.")
         candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version)
         if candidate is not None:
             candidates.append(candidate)
@@ -484,8 +516,8 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
                     if candidate is not None:
                         region_candidates.append(candidate)
                 continue
-            description = (f"Observe declared pose {pose_id}, the region requested "
-                           f"(objective {objective.objective_id}).")
+            description = (f"Observe declared pose {pose_id}, the requested region for objective "
+                           f"{objective.objective_id}; {_coverage_gain_description(pose_id, site, coverage)}.")
             candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version)
             if candidate is None:
                 candidate = _incomplete_answer_candidate(objective, coverage, outcomes, snapshot_version,
@@ -502,7 +534,8 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
             benefit = _benefit(set(cell_ids), coverage)
             if benefit <= 0:
                 continue
-            description = f"Observe declared pose {pose_id} (objective {objective.objective_id})."
+            description = (f"Observe declared pose {pose_id} for objective {objective.objective_id}: "
+                           f"{_coverage_gain_description(pose_id, site, coverage)}.")
             candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version)
             if candidate is not None:
                 scored.append((benefit, candidate))

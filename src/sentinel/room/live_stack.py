@@ -22,6 +22,7 @@ builds its stack only when ``live_session`` calls it after every CLI gate.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
@@ -53,6 +54,7 @@ from sentinel.runner import FlightTestRunner
 
 from .connectivity import ProbeResult
 from .live_session import FlightStack
+from .semantic import resolve_pose_id
 from .site import RoomSite
 
 #: The one Tello this build flies: the SDK's fixed access-point address.
@@ -418,11 +420,16 @@ class _TelloStack:
                  recorder: FrameRecorder, home_settle_s: float) -> None:
         self.client, self.runner, self.tracker, self.clock = client, runner, tracker, clock
         self._burst, self._recorder, self._home_settle_s = burst, recorder, home_settle_s
+        self.capture_records: dict[str, tuple[Path, str, float]] = {}
         self._pad_z_cm = round(site.home.nominal_pose.z_cm)
         self._burst_lock = threading.Lock()
         self._climb_applied = False
         self._looking_away = False
         self._last_battery: int | None = None
+        tag_headings = tuple(pose.yaw_deg for pose_id, tags in site.pose_tag_visibility
+                             if len(tags) >= 2
+                             for pose in (resolve_pose_id(site, pose_id),) if pose is not None)
+        self._tag_bearing_headings = tag_headings or (site.home.heading_deg,)
         self.executor: StepExecutor | None = None
         #: Set when the session's supervisor gets a recovery adapter (mapped
         #: tag headings exist): refresh then leaves RECOVERY_REQUIRED to it.
@@ -631,14 +638,13 @@ class _TelloStack:
             if not runner._is_ok(response):
                 raise RuntimeError(f"rotation failed: {response}")
             self._dead_reckon(command)
-            # checkpoint.py's plan_checkpoint gives an intentional look-away
-            # rotation phase="look" and its return rotation phase="restore";
-            # refresh() reads this to stop counting an expected tagless burst
-            # as an estimator failure while the camera is deliberately turned.
-            if args.get("phase") == "look":
-                self._looking_away = True
-            elif args.get("phase") == "restore":
-                self._looking_away = False
+            # Look/restore and between-pose retargets can all turn the camera
+            # away from the tag-bearing headings. Phase alone is not enough:
+            # a side-facing pose must not turn expected tagless refreshes into
+            # localization failures before its three-frame sweep begins.
+            heading = self.tracker.health.heading_deg
+            self._looking_away = all(abs(heading_delta_deg(heading, bearing)) > 20
+                                     for bearing in self._tag_bearing_headings)
             return CommandOutcome()
         if kind == "SET_SPEED":
             response = runner._call(lambda: client.set_speed(args["speed_cm_s"]))
@@ -662,7 +668,10 @@ class _TelloStack:
         # Video is a separate transport: a stalled frame never holds the SDK lock.
         frame = self.runner._call_locked(lambda: self.client.read_frame(timeout=timeout))
         path = self._recorder.save(frame)
-        return f"frame-{path.stem}-{hashlib.sha256(path.read_bytes()).hexdigest()[:16]}"
+        observation_id = f"frame-{path.stem}-{hashlib.sha256(path.read_bytes()).hexdigest()[:16]}"
+        self.capture_records[observation_id] = (
+            path, datetime.now(timezone.utc).isoformat(), self.tracker.health.heading_deg)
+        return observation_id
 
     def _localise(self, command: PlannedCommand, cancellation: threading.Event) -> Position:
         settle_s = float(dict(command.arguments).get("settle_s", 0.0))
@@ -733,5 +742,6 @@ class TelloFlightStackFactory:
         stack.defer_recovery_fixes = bool(headings)
         runner._call(client.stream_on)
         return FlightStack(executor=executor, refresh=stack.refresh, emergency=stack.emergency, frame_source=client,
+                           capture_records=stack.capture_records,
                            trigger_emergency=runner.trigger_emergency, recovery_burst=stack.recovery_burst,
                            mapped_heading_tag_ids=headings)

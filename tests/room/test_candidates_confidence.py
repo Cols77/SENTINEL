@@ -93,8 +93,9 @@ def test_observe_descriptions_name_the_cells_they_resolve_and_the_distance(safet
     assert "resolves 1 unexplored cell/class pair (cell1: computer)" in left
     assert "resolves 1 unexplored cell/class pair (cell2: computer)" in right
     for text in (left, right):
-        assert text.startswith("Observe declared pose ") and text.endswith(" cm from home.")
-        assert "about " in text
+        assert text.startswith("Observe declared pose ")
+        assert "Approximate direct distance from nominal home:" in text
+        assert "battery cost is assessed by the supervisor" in text
 
 
 # --- item 3 -------------------------------------------------------------------
