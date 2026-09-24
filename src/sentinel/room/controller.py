@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import re
+import sys
 import time
 from typing import Callable, TYPE_CHECKING
 import uuid
@@ -1259,12 +1260,18 @@ class RoomController:
             return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
 
         def perceive(cancel):
+            started = time.monotonic()
             try:
                 return self.perception_provider(request), None
             except Exception as exc:
+                print(f"Perception failed after {time.monotonic() - started:.1f} s: "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
                 return None, type(exc).__name__
 
         waited = self.wait_for_perception(perceive, session_id=session_id)
+        if waited.status != "COMPLETED":
+            print(f"Perception wait ended {waited.status} (limit {self.provider_wait_s} s)",
+                  file=sys.stderr, flush=True)
         if waited.status == "PREEMPTED":
             self._record_perception_preempted(session_id, candidate, snapshot, correlation, request)
             return self._preempted(session_id, self.supervisor.last_preemption)
