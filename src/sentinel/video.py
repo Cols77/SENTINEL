@@ -90,6 +90,7 @@ class VideoReceiver:
         self._stop_event = threading.Event()
         self._condition = threading.Condition()
         self._frame: DecodedVideoFrame | None = None
+        self._preview_frame: DecodedVideoFrame | None = None
         self._frame_payload = bytearray()
         self._record_file: Any | None = None
         self._last_error: VideoError | None = None
@@ -147,6 +148,7 @@ class VideoReceiver:
             self._last_frame_at = None
             self._frames_decoded = 0
             self._frame = None
+            self._preview_frame = None
             self._frame_payload.clear()
             self._stop_event.clear()
 
@@ -185,6 +187,7 @@ class VideoReceiver:
             self._close_socket()
             thread = self._thread
             self._running = False
+            self._preview_frame = None
             self._condition.notify_all()
 
         if thread is not None and thread is not threading.current_thread():
@@ -220,6 +223,11 @@ class VideoReceiver:
             f"no decoded video frame received within {timeout:.3f}s "
             f"from {self.local_ip}:{self.port}"
         )
+
+    def peek(self) -> DecodedVideoFrame | None:
+        """Read the newest decoded frame without consuming the flight pipeline's frame."""
+        with self._condition:
+            return self._preview_frame if self._running else None
 
     def _close_socket(self) -> None:
         receiver_socket = self._socket
@@ -261,6 +269,7 @@ class VideoReceiver:
                         frame = self._convert_frame(decoded)
                         with self._condition:
                             self._frame = frame
+                            self._preview_frame = frame
                             self._last_frame_at = frame.timestamp
                             self._frames_decoded += 1
                             self._condition.notify_all()

@@ -3,7 +3,8 @@
 // existing Land and Emergency endpoints, which act on the room run's
 // registered flight runner. Every control carries a stable data-testid.
 import {el,button,replace} from './dom.mjs';
-import {ROOM_AGENT,SURVEY,architectureOptions,selectArchitecture,modeOptions,scenarioOptions,proposalCommand,roomViewModel,safetyIdentity} from './room-agent-model.mjs';
+import {ROOM_AGENT,SURVEY,architectureOptions,selectArchitecture,modeOptions,proposalCommand,roomViewModel,safetyIdentity} from './room-agent-model.mjs';
+import {createRoomCamera} from './room-camera.mjs';
 
 const STORAGE_KEY='sentinel:architecture';
 const store={get(){try{return localStorage.getItem(STORAGE_KEY);}catch{return null;}},set(v){try{localStorage.setItem(STORAGE_KEY,v);}catch{}}};
@@ -29,6 +30,36 @@ const regionParts=line=>{
 };
 const list=(testid,lines,empty,parts=line=>[line])=>el('ol',{'data-testid':testid,class:'room-log'},lines.length?lines.map(line=>typeof line==='string'?el('li',{},parts(line)):el('li',{'data-kind':line.kind},[line.text])):[el('li',{class:'meta'},[empty])]);
 
+function decisionList(decisions){
+ const rows=decisions?.length?decisions.map(d=>{
+  const action=d.action?.startsWith('OBSERVE:')?'observe':d.action?.startsWith('REANCHOR')?'reanchor':d.action?.startsWith('ANSWER')?'answer':'other';
+  const tone=d.refused?'refused':action;
+  const result=d.result||d.refused||d.outcome||'PENDING';
+  const confidence=d.probability??d.confidence;
+  const odds=confidence==null?'':`Jev p ${Number(confidence).toFixed(2)}`;
+  const mass=d.kind_mass==null?'':` · observe mass ${Number(d.kind_mass).toFixed(2)}`;
+  return el('li',{class:`room-decision is-${tone}`},[
+   el('div',{class:'room-decision-top'},[
+    el('span',{class:'room-decision-turn'},[`TURN ${String(d.turn).padStart(2,'0')}`]),
+    el('strong',{},[d.label||'No usable choice']),
+    el('span',{class:'room-decision-result'},[result.replaceAll('_',' ')]),
+   ]),
+   el('p',{class:'room-decision-reason'},[d.reason||'No reason recorded.']),
+   el('p',{class:'room-decision-meta'},[d.refused?`Refused · ${d.refused}`:'Jev selected this action',odds?` · ${odds}${mass}`:'']),
+  ]);
+ }):[el('li',{class:'meta'},['No Jev turn yet.'])];
+ return el('ol',{'data-testid':'room-decision-log',class:'room-log room-decision-list','aria-label':'Jev decisions'},rows);
+}
+
+function reanchorList(steps){
+ return el('ol',{'data-testid':'room-reanchor-log',class:'room-log room-reanchor-list'},steps.length
+  ?steps.map(row=>el('li',{'data-kind':row.kind,class:row.kind==='TAG_BURST'&&row.text.includes('no tags in view')?'is-tagless':''},[
+    el('span',{class:'room-reanchor-kind'},[row.kind.replaceAll('_',' ')]),
+    el('span',{class:'room-reanchor-text'},[row.text]),
+   ]))
+  :[el('li',{class:'meta'},['No re-anchor or recovery step yet.'])]);
+}
+
 export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
  let catalogue=null,state=null,session=null,architecture=SURVEY,message='',timer=null,landAttempt=null,emergencyAttempt=null;
  const form={mode:'REHEARSAL',scenario:'a',requestText:'',localIp:''};
@@ -51,6 +82,7 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
   panel.hidden=!room;
   if(surveyLayout)surveyLayout.hidden=room;
   if(room)render();
+  else camera.render(null);
  }
 
  async function refresh(){
@@ -99,8 +131,6 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
  // only its options/disabled state and the dynamic facts are re-rendered.
  const modeSelect=el('select',{id:'room-mode','data-testid':'room-mode-select'});
  modeSelect.addEventListener('change',()=>{form.mode=modeSelect.value;render();});
- const scenarioSelect=el('select',{id:'room-scenario','data-testid':'room-scenario-select'});
- scenarioSelect.addEventListener('change',()=>{form.scenario=scenarioSelect.value;render();});
  const request=el('textarea',{id:'room-request','data-testid':'room-request',rows:2,placeholder:'count the phones and computers in the room'});
  request.addEventListener('input',()=>{form.requestText=request.value;});
  const ip=el('input',{id:'room-local-ip','data-testid':'room-local-ip',type:'text',inputmode:'decimal',placeholder:'auto (192.168.10.x)'});
@@ -108,7 +138,6 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
  const submit=button('Propose run',()=>void propose(),{id:'room-propose','data-testid':'room-propose'});
  const setup=el('div',{class:'room-setup'},[
   el('label',{for:'room-mode'},['Run mode']),modeSelect,
-  el('label',{for:'room-scenario'},['Rehearsal scenario']),scenarioSelect,
   el('label',{for:'room-local-ip'},['Tello local IP (Live)']),ip,
   el('label',{for:'room-request'},['Request']),request,submit,
  ]);
@@ -116,33 +145,34 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
  const emergencyButton=button('EMERGENCY STOP',()=>void emergency(),{id:'room-emergency','data-testid':'room-emergency',class:'emergency-control'});
  const messageLine=el('p',{'data-testid':'room-message',role:'status',class:'meta'});
  const approvalHost=el('div',{});
+ const cameraHost=el('section',{class:'room-col room-camera','aria-label':'Drone camera'});
+ const camera=createRoomCamera(cameraHost);
  const dynamic=el('div',{class:'room-dynamic room-col'});
  const logs=el('div',{class:'room-col room-logs'});
  const lists=el('div',{class:'room-col room-results'});
  panel.append(
   el('header',{class:'room-header'},[el('p',{class:'section-label'},['ROOM AGENT · JEV ADAPTIVE']),el('div',{class:'room-safety'},[landButton,emergencyButton])]),
   messageLine,
-  el('div',{class:'room-grid'},[el('div',{class:'room-col room-setup-col'},[setup,approvalHost]),dynamic,logs,lists]),
+  el('div',{class:'room-grid'},[el('div',{class:'room-col room-setup-col'},[setup,approvalHost]),cameraHost,dynamic,logs,lists]),
  );
- let lastModes='',lastScenarios='';
+ let lastModes='';
 
  function render(){
   const scrollPositions=new Map([...panel.querySelectorAll('.room-log, .room-answer pre')].map(node=>[node.dataset.testid,node.scrollTop]));
   const view=roomViewModel(state);
-  const modes=modeOptions(catalogue),scenarios=scenarioOptions(catalogue);
-  const modesKey=JSON.stringify(modes)+form.mode,scenariosKey=JSON.stringify(scenarios)+form.scenario;
+  const modes=modeOptions(catalogue);
+  const modesKey=JSON.stringify(modes)+form.mode;
   if(modesKey!==lastModes){lastModes=modesKey;replace(modeSelect,modes.map(row=>option(row,form.mode)));modeSelect.value=form.mode;}
-  if(scenariosKey!==lastScenarios){lastScenarios=scenariosKey;replace(scenarioSelect,scenarios.map(row=>option(row,form.scenario)));scenarioSelect.value=form.scenario;}
   if(document.activeElement!==ip&&ip.value!==form.localIp)ip.value=form.localIp;
   if(catalogue?.default_request)request.placeholder=catalogue.default_request;
   modeSelect.disabled=!view.canPropose;
-  scenarioSelect.disabled=!view.canPropose||form.mode==='LIVE';
   request.disabled=!view.canPropose;
   ip.disabled=!view.canPropose||form.mode!=='LIVE';
   submit.disabled=!view.canPropose;
   landButton.disabled=!view.running;
   emergencyButton.disabled=!view.running;
   messageLine.textContent=message;
+  camera.render(state?.run);
   const proposalId=view.proposal?.id??'';
   if(approvalHost.dataset.proposal!==proposalId){
    approvalHost.dataset.proposal=proposalId;
@@ -172,9 +202,9 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
    ]),
   ]);
   replace(logs,[
-   el('h3',{},['Jev decisions']),list('room-decision-log',view.decisions,'No Jev turn yet.'),
+   el('h3',{},['Jev decisions']),decisionList(state?.run?.decisions),
    el('h3',{'data-testid':'room-reanchor-heading'},[`Re-anchor and recovery (${view.yawRotations} yaw rotations, ${view.reanchorsAccepted} accepted)`]),
-   list('room-reanchor-log',view.reanchor,'No re-anchor or recovery step yet.'),
+   reanchorList(view.reanchor),
   ]);
   replace(lists,[
    el('h3',{},['Regions']),list('room-regions',view.regions,'No region offered yet.',regionParts),
@@ -192,7 +222,7 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
  }
  architecture=store.get()??SURVEY;
  apply();start();
- return {dispose(){clearTimeout(timer);},refresh,getState:()=>state};
+ return {dispose(){clearTimeout(timer);camera.dispose();},refresh,getState:()=>state};
 }
 
 export function injectRoomAgentStyles(doc=document){

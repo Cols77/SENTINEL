@@ -128,6 +128,8 @@ class RoomAgentRun:
         self.clock = time.monotonic
         self.store = None
         self.store_path = None
+        self.frame_root = None
+        self.camera_source = None
         self.world = None
         self.thread = None
         self.done = threading.Event()
@@ -164,9 +166,6 @@ class RoomAgentRun:
         flies = self.mode == "LIVE"
         lines = [MODES[self.mode], getattr(self, "site_line", SITE_LINE),
                  "Capability: count_return TRIAL grant, CanningSt calibration profiles"]
-        if self.mode != "LIVE":
-            scenario = room_rehearsal.SCENARIOS[self.scenario]
-            lines.append(f"Scenario: {scenario.label}")
         if self.mode in ("JEV_REHEARSAL", "LIVE"):
             lines.append("Approving authorises paid Jev (OpenRouter) calls" +
                          (" and paid detector calls" if flies else ""))
@@ -361,6 +360,7 @@ class RoomAgentService:
         """Observe the built stack: the active runner for Land/Emergency, the
         tracker for live localization, and each recovery burst for display."""
         run.tracker = tracker
+        run.camera_source = stack.frame_source
         if clock is not None:
             run.clock = clock
         run.safety.attach(stack)
@@ -404,6 +404,7 @@ class RoomAgentService:
 
         scenario = room_rehearsal.SCENARIOS[run.scenario]
         run_dir = self.data_dir / run.id
+        run.frame_root = run_dir
         binding = room_rehearsal.flight_binding()
         world = room_rehearsal.build_world(scenario, run_id=run.id, run_dir=run_dir, pace=self.pace)
         run.world = world
@@ -415,6 +416,7 @@ class RoomAgentService:
         manifest = room_rehearsal.rehearsal_manifest(binding, run.id, world.detector.identity)
         grant = room_rehearsal.trial_grant(binding, run.id, manifest)
         store = RoomStore.open(run_dir / "session.sqlite3")
+        run.store_path = run_dir / "session.sqlite3"
         store.create_session(run.id, run.request_text, CapabilityProfile((grant,)))
         with run.lock:
             run.store = store
@@ -529,6 +531,7 @@ class RoomAgentService:
     def _run_live(self, run):
         argv, run_dir, manifest_run_id = self.live_argv(run)
         run.id = manifest_run_id
+        run.frame_root = run_dir
         run.store_path = run_dir / "session.sqlite3"
         room_session = _import_room_session()
         buffer = io.StringIO()
@@ -611,7 +614,7 @@ def attach_room_agent(mission, **kwargs) -> RoomAgentService:
 
 def build_room_agent_router(room: RoomAgentService):
     from fastapi import APIRouter, Request
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, Response
     from starlette.concurrency import run_in_threadpool
 
     router = APIRouter(prefix="/api/v1/room-agent")
@@ -629,6 +632,56 @@ def build_room_agent_router(room: RoomAgentService):
     @router.get("")
     def state():
         return room.state()
+
+    def current_run(run_id):
+        with room._lock:
+            run = room.run
+        return run if run is not None and run.id == run_id else None
+
+    @router.get("/camera/live/{run_id}")
+    def camera_live(run_id: str):
+        from .room_camera import live_frame
+        run = current_run(run_id)
+        if run is None:
+            return Response(status_code=404)
+        try:
+            frame = live_frame(run)
+        except Exception:
+            return Response(status_code=503, headers={"cache-control": "no-store"})
+        if frame is None:
+            return Response(status_code=204, headers={"cache-control": "no-store"})
+        return Response(frame["payload"], media_type="image/jpeg", headers={
+            "cache-control": "no-store", "x-frame-at": frame["observed_at"],
+            "x-frame-width": str(frame["width"]), "x-frame-height": str(frame["height"]),
+            "x-apriltags": json.dumps(frame["tags"], separators=(",", ":")),
+        })
+
+    @router.get("/camera/captures/{run_id}/latest")
+    def camera_capture_latest(run_id: str):
+        from .room_camera import capture_record
+        run = current_run(run_id)
+        if run is None:
+            return Response(status_code=404)
+        try:
+            record = capture_record(run)
+        except Exception:
+            return Response(status_code=503, headers={"cache-control": "no-store"})
+        if record is None:
+            return Response(status_code=204, headers={"cache-control": "no-store"})
+        return JSONResponse({key: value for key, value in record.items() if key not in ("path", "sha256")},
+                            headers={"cache-control": "no-store"})
+
+    @router.get("/camera/captures/{run_id}/{observation_id}")
+    def camera_capture_image(run_id: str, observation_id: str):
+        from .room_camera import capture_bytes, capture_record
+        run = current_run(run_id)
+        try:
+            record = capture_record(run, observation_id) if run is not None else None
+            payload = capture_bytes(record) if record is not None else None
+        except Exception:
+            return Response(status_code=503, headers={"cache-control": "no-store"})
+        return (Response(payload, media_type="image/png", headers={"cache-control": "no-store"})
+                if payload is not None else Response(status_code=404))
 
     @router.post("/proposals")
     async def propose(request: Request):
