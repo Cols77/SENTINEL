@@ -471,7 +471,10 @@ def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, ca
         raise LiveSessionError(str(exc)) from exc
     perception_capture = wiring.make_perception_capture(
         store=store, flight_client=stack.frame_source, frames_dir=frames_dir,
-        requested_model=manifest.requested_detector_identity, run_id=session_id,
+        # The provider reports the model it ran ("google/gemini-2.5-flash"),
+        # so check against the detector's pinned model, not the manifest's
+        # detector name ("gemini-openrouter"), which never matches.
+        requested_model=getattr(detector, "model", None) or manifest.requested_detector_identity, run_id=session_id,
         capture_records=stack.capture_records)
     perception_provider = wiring.make_perception_provider(detector_factory=lambda: detector)
 

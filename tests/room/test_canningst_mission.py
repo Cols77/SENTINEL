@@ -410,3 +410,64 @@ def test_an_off_mark_takeoff_still_observes_and_answers(tmp_path, monkeypatch):
     assert outcome.landing is not None and outcome.landing.state == "LANDED", outcome
     assert succeeded_observations(events) == [CENTER], refusals(events)
     assert ("ANSWER:COUNTS", "ANSWERED_COUNT") in tool_outcomes(events)
+
+
+def _facing(monkeypatch, heading_deg):
+    original = FlyingTello
+
+    def build(**kwargs):
+        tello = original(**kwargs)
+        tello.heading_deg = heading_deg
+        return tello
+
+    monkeypatch.setattr(sys.modules[__name__], "FlyingTello", build)
+
+
+def test_a_five_degree_heading_error_is_aligned_then_the_zone_is_admitted(tmp_path, monkeypatch):
+    """Live 2026-09-25 08:35: facing 95 deg, the turns back to the tags pushed
+    the fixless out-and-back just over the drift limit and every zone was
+    refused. The controller turns to the tags, takes the fresh fix and asks
+    for the same zone again."""
+    _facing(monkeypatch, 95.0)
+    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch)
+    assert landed_over_the_pad(outcome, tello), outcome
+    assert succeeded_observations(events) == [CENTER], (tool_outcomes(events), zone_refusals(events))
+    assert "cw 5" in tello.sent
+    assert ("ANSWER:COUNTS", "ANSWERED_COUNT") in tool_outcomes(events)
+
+
+def test_a_sub_degree_alignment_turn_does_not_fail_the_step(tmp_path, monkeypatch):
+    """Live 2026-09-25 08:46: a 0.48 deg admission turn rounded to 'cw 0',
+    which the SDK refuses; the step failed and the run aborted."""
+    _facing(monkeypatch, 90.4)
+    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch)
+    assert landed_over_the_pad(outcome, tello), outcome
+    assert succeeded_observations(events) == [CENTER], tool_outcomes(events)
+    assert not any(command.split()[0] in ("cw", "ccw") and command.split()[1] == "0" for command in tello.sent)
+
+
+def test_a_drift_refusal_names_the_tripped_limit_and_the_heading_offset(tmp_path, monkeypatch):
+    """Jev reads why a zone was refused, not only the generic advice."""
+    _facing(monkeypatch, 95.0)
+    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch, xy_drift_per_cm=0.45)
+    refused = zone_refusals(events)
+    assert refused, tool_outcomes(events)
+    assert all("position error" in item["detail"] for item in refused), [item["detail"] for item in refused]
+
+
+def test_the_detector_is_checked_against_its_pinned_model_not_its_detector_name(tmp_path, monkeypatch):
+    """Live 2026-09-25 08:46: the pack names the detector 'gemini-openrouter'
+    but OpenRouter reports the model it ran, 'google/gemini-2.5-flash'. Every
+    capture failed IDENTITY_MISMATCH although the pinned model answered."""
+    original = Detector.detect
+
+    def detect(self, image_path, classes):
+        batch = original(self, image_path, classes)
+        return replace(batch, raw={"model": "google/gemini-test"})
+
+    monkeypatch.setattr(Detector, "detect", detect)
+    monkeypatch.setattr(Detector, "model", "google/gemini-test", raising=False)
+    monkeypatch.setattr(sys.modules[__name__], "DETECTOR_ID", "gemini-openrouter")
+    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch)
+    assert succeeded_observations(events) == [CENTER], tool_outcomes(events)
+    assert ("ANSWER:COUNTS", "ANSWERED_COUNT") in tool_outcomes(events)

@@ -353,7 +353,7 @@ class SceneDetector:
         if gust is not None and call_number == gust:
             self.world.gust(self.scenario.gust_heading_deg)
         return DetectionBatch(detections=tuple(detections), status="OK", bands=tuple(bands), dropped=(),
-                              raw={"model": REHEARSAL_DETECTOR_ID})
+                              raw={"model": self.model})
 
 
 # ---------------------------------------------------------------------------

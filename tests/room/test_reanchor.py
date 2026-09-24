@@ -58,7 +58,8 @@ def test_jev_sees_localization_health_without_coordinates(safety):
     health = state["localization"]
     assert health["state"] == "COASTING"
     assert set(health) == {"state", "last_tag_fix_age_s", "position_uncertainty_cm",
-                           "margin_before_mandatory_recovery_pct", "recent_positioning_events"}
+                           "margin_before_mandatory_recovery_pct", "recent_positioning_events",
+                           "heading_offset_from_tags_deg"}
     assert health["recent_positioning_events"] == []
     assert 0 <= health["margin_before_mandatory_recovery_pct"] <= 100
     assert "REANCHOR" in criteria and "COASTING" in criteria["REANCHOR"]

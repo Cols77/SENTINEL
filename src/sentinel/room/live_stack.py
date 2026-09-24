@@ -796,6 +796,11 @@ class _TelloStack:
             self._dead_reckon(command)
             return position
         if kind == "ROTATE":
+            if round(args["degrees"]) < 1:
+                # Below the SDK's 1-degree resolution (it refuses "cw 0"):
+                # live 2026-09-25, a 0.48 deg alignment turn failed the step
+                # and aborted the run. Nothing turns, so nothing is dead-reckoned.
+                return CommandOutcome()
             response = runner._call(lambda: client.rotate(args["direction"], round(args["degrees"])))
             if not runner._is_ok(response):
                 raise RuntimeError(f"rotation failed: {response}")

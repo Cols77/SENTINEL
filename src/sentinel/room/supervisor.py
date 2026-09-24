@@ -824,6 +824,29 @@ class SafetySupervisor:
                 raise
             return home
 
+    def heading_alignment(self) -> CheckpointPlan | None:
+        """A stationary turn to the tag-facing (canonical) heading, or None.
+
+        Offered only for an error of at least the SDK's 1 degree and within
+        the profile's canonical tolerance, from an ANCHORED or COASTING pose.
+        A zone refused for drift is retried after it: the forecast then no
+        longer charges the turns back to the tags as fixless drift, and the
+        next refresh takes its fix facing them. Admitted like any checkpoint
+        (``prepare``/``dispatch``); it never bypasses the assessment.
+        """
+        health, profile = self.tracker.health, self.tracker.profile
+        if profile is None or health.state not in {LocalizationState.ANCHORED, LocalizationState.COASTING}:
+            return None
+        delta = (self.limits.canonical_heading_deg - health.heading_deg + 180) % 360 - 180
+        if round(abs(delta)) < 1 or abs(delta) > profile.canonical_heading_tolerance_deg:
+            return None
+        rotate = PlannedCommand.from_mapping(
+            "ROTATE", {"degrees": abs(delta), "direction": "ccw" if delta > 0 else "cw"},
+            upper_bound_s=rotate_reply_upper_bound_s(
+                degrees=abs(delta), base_timeout_s=self.limits.transport_limits.reply_timeout_s),
+            interruptible=False)
+        return self._plan(health, (rotate,), "heading-alignment")
+
     def refresh_failure(self, executor):
         """Fail closed when no sample exists; absent measurements stay null."""
         with self._dispatch_lock:

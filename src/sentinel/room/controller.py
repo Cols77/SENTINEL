@@ -200,6 +200,23 @@ _ZONE_REFUSAL_DETAIL = {
 }
 
 
+#: Forecast limits (``LocalizationTracker._limits``) in the words Jev reads.
+_LIMIT_WORDS = {
+    "xy_uncertainty": "predicted position error over the {profile.max_xy_uncertainty_cm:g} cm limit",
+    "heading_uncertainty": "predicted heading error over the {profile.max_heading_uncertainty_deg:g} deg limit",
+    "translation": "more than {profile.max_translation_cm:g} cm of travel without a tag fix",
+    "yaw": "more than {profile.max_yaw_deg:g} deg of turning without a tag fix",
+    "look_away": "facing away from the tags for too long",
+    "fix_age": "the last tag fix would be too old",
+    "camera_age": "the last camera frame would be too old",
+}
+
+
+def _heading_offset_deg(heading_deg: float, canonical_deg: float) -> float:
+    """Signed offset from the tag-facing heading; positive is counter-clockwise (left)."""
+    return (heading_deg - canonical_deg + 180) % 360 - 180
+
+
 def _failure(code: str, detail: str) -> dict:
     """A failed OBSERVE payload with a plain reason Jev reads next turn."""
     return {"code": code, "refusal": code, "detail": detail}
@@ -556,6 +573,9 @@ class RoomController:
             "last_tag_fix_age_s": round(max(0.0, health.fix_age_s), 1),
             "position_uncertainty_cm": round(max(0.0, health.xy_uncertainty_cm), 1),
             "margin_before_mandatory_recovery_pct": round(100 * min(margins)) if margins else None,
+            # Positive: turned left (counter-clockwise) of facing the tags.
+            "heading_offset_from_tags_deg": round(_heading_offset_deg(
+                health.heading_deg, self.supervisor.limits.canonical_heading_deg)),
             "recent_positioning_events": list(getattr(self.supervisor, "positioning_log", ()))[-5:],
         }
 
@@ -587,6 +607,43 @@ class RoomController:
                        f"recovery.")
         return (RoomCandidate("REANCHOR", CandidateKind.REANCHOR, snapshot.state_version, digest, description,
                               description, (), (), PhysicalCost(requires_airborne=True)),)
+
+    def _align_heading(self, session_id):
+        """Turn to face the tags before retrying a zone refused for drift.
+
+        True once the turn completed; False when there is nothing to turn or
+        it did not complete (the refusal then stands); a failure payload or
+        the TurnOutcome of a mandatory transition that preempted it."""
+        plan = self.supervisor.heading_alignment()
+        if plan is None:
+            return False
+        try:
+            admission = self.supervisor.prepare(snapshot_version=self.store.session_version(session_id),
+                                                checkpoint=plan)
+        except Exception:
+            return self._preempted(session_id, None, self.supervisor.refresh_failure(self.flight_executor))
+        try:
+            result = self.supervisor.dispatch(admission, self.flight_executor)
+        except VersionConflict:
+            return False
+        except Exception:
+            return _failure("CHECKPOINT_FAILED", "the turn to face the tags failed to execute")
+        if admission.transition != "CONTINUE" or isinstance(result, TerminalOutcome):
+            return self._preempted(session_id, admission,
+                                   terminal_outcome=result if isinstance(result, TerminalOutcome) else None)
+        return result.status == "COMPLETED" and result.completion_known
+
+    def _refusal_cause(self, admission) -> str:
+        """Which drift limit tripped, and how far the aircraft faces from the
+        tags, for the refusal detail Jev reads (live 2026-09-25: a generic
+        "too far" hid a 5 deg heading error)."""
+        profile = self.supervisor.tracker.profile
+        parts = [_LIMIT_WORDS[reason].format(profile=profile)
+                 for reason in admission.pose_forecast.reasons if reason in _LIMIT_WORDS]
+        offset = _heading_offset_deg(admission.request.pose.heading_deg, self.supervisor.limits.canonical_heading_deg)
+        if round(abs(offset)) >= 1:
+            parts.append(f"facing {abs(offset):.0f} deg {'left' if offset > 0 else 'right'} of the tags")
+        return f"; cause: {', '.join(parts)}" if parts else ""
 
     def _execute_reanchor(self, session_id, expected_version):
         """Run the voluntary re-anchor; a dict payload, or a TurnOutcome when
@@ -1250,7 +1307,10 @@ class RoomController:
         # individually supervised leg is safe.
         resolvers = self.resolve_sweep_checkpoints or (self.resolve_checkpoint,)
         completed_legs = []
-        for index, resolver in enumerate(resolvers):
+        aligned = False
+        index = 0
+        while index < len(resolvers):
+            resolver = resolvers[index]
             try:
                 leg = resolver(candidate, snapshot) if self.resolve_sweep_checkpoints else plan
                 # A chained sweep's earlier looks end facing their own look;
@@ -1261,16 +1321,33 @@ class RoomController:
                     return _failure("TOOL_FAILURE", f"look {index + 1} could not be planned from the "
                                     "current position")
                 admission = self.supervisor.prepare(
-                    snapshot_version=(expected_version if index == 0 else self.store.session_version(session_id)),
+                    snapshot_version=(expected_version if index == 0 and not aligned
+                                      else self.store.session_version(session_id)),
                     checkpoint=leg, provider_wait_s=self.provider_wait_s if index == len(resolvers) - 1 else 0,
                     replan=lambda resolver=resolver: resolver(candidate, snapshot), zone_admission=True)
             except Exception:
                 terminal = self.supervisor.refresh_failure(self.flight_executor)
                 return self._preempted(session_id, None, terminal)
             if admission.transition == "REFUSE":
+                if index == 0 and not aligned and admission.reason == "LOCALIZATION_RECOVERY_REQUIRED":
+                    # Live 2026-09-25: facing 95 deg, the turns back to the tags
+                    # tipped the fixless out-and-back over the drift limit. Face
+                    # the tags, take that fix, then ask for this zone once more.
+                    aligned = True
+                    turned = self._align_heading(session_id)
+                    if isinstance(turned, (TurnOutcome, dict)):
+                        return turned
+                    if turned:
+                        if not self.resolve_sweep_checkpoints:
+                            try:
+                                plan = self.resolve_checkpoint(candidate, snapshot)
+                            except Exception:
+                                return _failure("TOOL_FAILURE", "no flight plan to this pose after facing the tags")
+                        continue
                 # Only this zone is out of reach; the aircraft hovers where it is.
                 return _failure("ZONE_REFUSED", _ZONE_REFUSAL_DETAIL.get(
-                    admission.reason, "the supervisor refused this zone") + f" (look {index + 1})")
+                    admission.reason, "the supervisor refused this zone") + f" (look {index + 1})"
+                    + self._refusal_cause(admission))
             try:
                 leg_result = self.supervisor.dispatch(admission, self.flight_executor)
             except VersionConflict:
@@ -1292,6 +1369,7 @@ class RoomController:
                           else f"the flight step ended {leg_result.status}")
                 return _failure("TOOL_FAILURE", f"look {index + 1} of {len(resolvers)} did not capture: {reason}")
             completed_legs.append(leg_result)
+            index += 1
         result = replace(completed_legs[-1],
                          command_states=tuple(state for leg in completed_legs for state in leg.command_states),
                          observation_ids=tuple(frame for leg in completed_legs for frame in leg.observation_ids))
