@@ -135,6 +135,36 @@ def test_the_prepared_pack_passes_every_live_gate_up_to_the_drone_probe(tmp_path
     assert ("drone_probe",) in hardware.calls
 
 
+def test_the_wide_scenario_pack_binds_its_site_and_drift_and_passes_every_gate(tmp_path, capsys, hardware):
+    run_root = tmp_path / "runs"
+    code, out, err = _prepare(run_root, "--scenario", "wide", "--consent-confirmed", "--new-run",
+                              "--local-ip", "192.168.10.2", capsys=capsys)
+    assert code == 0, err
+    pack = _pack(run_root)
+    assert pack["scenario"] == "wide" and "(scenario wide)" in out
+    assert Path(pack["site"]).name == "canningst-wide-site.json"
+    assert Path(pack["drift_profile"]).name == "canningst-wide-drift.json"
+
+    service = build_service(SessionConfig(data_dir=tmp_path / "data", room_live_config=run_root / prepare.CURRENT_PACK_NAME,
+                                          authorise_paid_calls=True))
+    room = attach_room_agent(service, pace=False)
+    with TestClient(build_app(service, repository_root=ROOT)) as client:
+        proposed = client.post("/api/v1/room-agent/proposals",
+                               json=dict(mode="LIVE", scenario="a", request_text=REQUEST)).json()
+        assert "Site: CanningSt, wide scenario (canningst-wide-site.json)" in proposed["run"]["proposal"]["lines"]
+        client.post("/api/v1/room-agent/decisions",
+                    json=dict(proposal_id=proposed["run"]["proposal"]["id"], decision="APPROVE"))
+        assert room.wait(30)
+        run = client.get("/api/v1/room-agent").json()["run"]
+    assert "connectivity preflight not ready" in run["error"], run["error"]
+    assert ("drone_probe",) in hardware.calls
+
+    # The default stays the compact CanningSt scenario.
+    assert _prepare(run_root, "--new-run", capsys=capsys)[0] == 0
+    assert _pack(run_root)["scenario"] == "canningst"
+    assert Path(_pack(run_root)["site"]).name == "canningst-site.json"
+
+
 def test_rerunning_reuses_the_registry_the_run_and_its_grant(tmp_path, capsys):
     run_root = tmp_path / "runs"
     assert _prepare(run_root, "--consent-confirmed", "--local-ip", "192.168.10.3", capsys=capsys)[0] == 0

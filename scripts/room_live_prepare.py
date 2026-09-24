@@ -60,6 +60,15 @@ ENERGY_PATH = PROFILES / "canningst-energy.json"
 LIMITS_PATH = PROFILES / "canningst-command-limits.json"
 FLIGHT_PROFILE_PATH = PROFILES / "canningst-flight-profile.json"
 TAG_MAP_PATH = REPO_ROOT / "docs" / "wp5-flight3-map.json"
+#: Flight scenarios in the same room: (site, drift profile). ``wide`` spreads
+#: a 3x3 tag-facing viewpoint grid over most of the flight volume, declares
+#: home where the operator places the drone (~180 cm from the tag wall) and
+#: allows the aircraft further from a tag fix (see the wide site PROVENANCE).
+SCENARIOS = {
+    "canningst": (SITE_PATH, DRIFT_PATH),
+    "wide": (FIXTURES / "canningst-wide-site.json", PROFILES / "canningst-wide-drift.json"),
+}
+_scenario = "canningst"
 
 LOCATION = "CanningSt"
 CAPABILITY = "count_return"
@@ -91,7 +100,8 @@ def _quiet(func, argv):
 
 
 def _flight_files() -> dict[str, str]:
-    return dict(site=str(SITE_PATH), drift_profile=str(DRIFT_PATH), energy_profile=str(ENERGY_PATH),
+    site_path, drift_path = SCENARIOS[_scenario]
+    return dict(site=str(site_path), drift_profile=str(drift_path), energy_profile=str(ENERGY_PATH),
                 command_limits=str(LIMITS_PATH), profile_file=str(FLIGHT_PROFILE_PATH))
 
 
@@ -291,7 +301,11 @@ def ensure_manifest(run_root: Path, run_id: str, grant, registry_path: Path, *, 
 # -- main -----------------------------------------------------------------------
 def prepare(*, run_root: Path, local_ip: str | None, consent_confirmed: bool, run_id: str | None = None,
             new_run: bool = False, request: str = DEFAULT_REQUEST, today: str | None = None,
-            now: datetime | None = None) -> dict:
+            now: datetime | None = None, scenario: str = "canningst") -> dict:
+    global _scenario
+    if scenario not in SCENARIOS:
+        raise PrepareError(f"unknown scenario {scenario!r}; choose one of {', '.join(SCENARIOS)}")
+    _scenario = scenario
     now = now or utc_now()
     day = today or date.today().isoformat()
     run_root = Path(run_root)
@@ -312,13 +326,14 @@ def prepare(*, run_root: Path, local_ip: str | None, consent_confirmed: bool, ru
     notes.append(note)
     clock_domain_id = f"operator-{run}"
     assurance_paths = room_assurance.write_assurances(
-        site_path=SITE_PATH, session_id=run, clock_domain_id=clock_domain_id, out_dir=run_root, prefix=run,
+        site_path=_flight_files()["site"], session_id=run, clock_domain_id=clock_domain_id, out_dir=run_root,
+        prefix=run,
         evidence_ref="operator-floor-check")
     valid_ms = min(entry.max_assurance_age_ms for entry in binding.site.terminal_contingencies)
     expires_local = (datetime.now().astimezone() + timedelta(milliseconds=valid_ms))
     files = _flight_files()
     pack = dict(
-        run_id=run, manifest=str(manifest_path.resolve()), authorization_digest=digest,
+        run_id=run, scenario=scenario, manifest=str(manifest_path.resolve()), authorization_digest=digest,
         grant_registry=str(registry_path.resolve()), grant_sha256=grant.grant_sha256,
         consent_db=str((run_root / "consent.sqlite3").resolve()), location=LOCATION, date=day,
         clock_domain_id=clock_domain_id, assurances=[str(Path(p).resolve()) for p in assurance_paths],
@@ -346,7 +361,7 @@ def _report(result, run_root: Path, local_ip: str | None) -> str:
     lines = [*result["notes"],
              f"assurances: {', '.join(Path(p).name for p in pack['assurances'])}",
              "",
-             f"run:  {pack['run_id']}",
+             f"run:  {pack['run_id']} (scenario {pack.get('scenario', 'canningst')})",
              f"pack: {result['run_pack'].as_posix()}",
              f"      (also {current}; Mission Control re-reads it at each approval)",
              f"site assurances expire at {expires:%H:%M:%S} local time (UTC{expires:%z}); "
@@ -378,6 +393,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", default=None, help="use this run id (default: reuse the unflown current run "
                                                        "or make a fresh l3-<time>)")
     parser.add_argument("--new-run", action="store_true", help="always prepare a fresh run")
+    parser.add_argument("--scenario", choices=sorted(SCENARIOS), default="canningst",
+                        help="flight scenario: canningst (compact, near the pad) or wide (3x3 zones over the room)")
     parser.add_argument("--request", default=DEFAULT_REQUEST,
                         help="label only: the manifest does not bind the request text")
     return parser
@@ -388,7 +405,7 @@ def main(argv: list[str] | None = None) -> int:
     run_root = Path(args.run_root)
     try:
         result = prepare(run_root=run_root, local_ip=args.local_ip, consent_confirmed=args.consent_confirmed,
-                         run_id=args.run_id, new_run=args.new_run, request=args.request)
+                         run_id=args.run_id, new_run=args.new_run, request=args.request, scenario=args.scenario)
     except (PrepareError, live_session.LiveSessionError, capabilities.GrantRegistryError, OSError,
             ValueError) as exc:
         print(f"refused: {exc}", file=sys.stderr)

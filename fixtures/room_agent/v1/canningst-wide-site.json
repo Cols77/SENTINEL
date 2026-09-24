@@ -1,0 +1,876 @@
+{
+  "schema_version": "room-site-base-v1",
+  "site_id": "canningst-wide",
+  "cube_site_sha256": "0770fca67cdbf6d94ec8e65b6586196d260f962a7dee2f3f126d9935662d83b2",
+  "tag_map_sha256": "b78f12620ee0e6df80c3b3e740c7d22b4d4c9ed1c65df78ec9c42558c885f80a",
+  "free_space_volumes": [
+    {
+      "volume_id": "cube",
+      "polygon_xy_cm": [
+        [
+          90,
+          109
+        ],
+        [
+          410,
+          109
+        ],
+        [
+          410,
+          400
+        ],
+        [
+          90,
+          400
+        ]
+      ],
+      "z_interval_cm": [
+        -20,
+        250
+      ]
+    },
+    {
+      "volume_id": "flight",
+      "polygon_xy_cm": [
+        [
+          120,
+          140
+        ],
+        [
+          380,
+          140
+        ],
+        [
+          380,
+          360
+        ],
+        [
+          120,
+          360
+        ]
+      ],
+      "z_interval_cm": [
+        0,
+        250
+      ]
+    },
+    {
+      "volume_id": "observation",
+      "polygon_xy_cm": [
+        [
+          140,
+          170
+        ],
+        [
+          360,
+          170
+        ],
+        [
+          360,
+          330
+        ],
+        [
+          140,
+          330
+        ]
+      ],
+      "z_interval_cm": [
+        0,
+        140
+      ]
+    }
+  ],
+  "forbidden_volumes": [],
+  "corridors": [
+    {
+      "volume_id": "home-corridor",
+      "polygon_xy_cm": [
+        [
+          90,
+          109
+        ],
+        [
+          410,
+          109
+        ],
+        [
+          410,
+          400
+        ],
+        [
+          90,
+          400
+        ]
+      ],
+      "z_interval_cm": [
+        -20,
+        250
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "route_id": "home-route",
+      "checkpoints": [
+        {
+          "x_cm": 250,
+          "y_cm": 220,
+          "z_cm": 80
+        }
+      ],
+      "corridor_volume_ids": [
+        "home-corridor"
+      ]
+    }
+  ],
+  "home": {
+    "pad_id": "canningst-start",
+    "nominal_pose": {
+      "x_cm": 250,
+      "y_cm": 220,
+      "z_cm": 0
+    },
+    "heading_deg": 90,
+    "route_id": "home-route"
+  },
+  "terminal_contingencies": [
+    {
+      "contingency_id": "canningst-land-in-place-navigation",
+      "trigger": "NAVIGATION_UNAVAILABLE",
+      "kind": "LAND_IN_PLACE",
+      "landing_polygon_xy_cm": [
+        [
+          90,
+          109
+        ],
+        [
+          410,
+          109
+        ],
+        [
+          410,
+          400
+        ],
+        [
+          90,
+          400
+        ]
+      ],
+      "z_band_cm": [
+        0,
+        250
+      ],
+      "required_pose_state": "COASTING",
+      "clearance_source": "operator-checked-clear-cube",
+      "assurance_policy_id": "operator-clear-floor-check",
+      "max_assurance_age_ms": 1800000
+    },
+    {
+      "contingency_id": "canningst-land-in-place-energy",
+      "trigger": "RETURN_ENERGY_UNAVAILABLE",
+      "kind": "LAND_IN_PLACE",
+      "landing_polygon_xy_cm": [
+        [
+          90,
+          109
+        ],
+        [
+          410,
+          109
+        ],
+        [
+          410,
+          400
+        ],
+        [
+          90,
+          400
+        ]
+      ],
+      "z_band_cm": [
+        0,
+        250
+      ],
+      "required_pose_state": "COASTING",
+      "clearance_source": "operator-checked-clear-cube",
+      "assurance_policy_id": "operator-clear-floor-check",
+      "max_assurance_age_ms": 1800000
+    }
+  ],
+  "clearance_provenance": "CanningSt wide scenario 2026-09-24: canningst-site.json free space, with the observation envelope widened to most of the flight volume; see canningst-wide-site.PROVENANCE.md",
+  "semantic_frame": {
+    "envelope_volume_id": "observation",
+    "left_to_right_axis_xy": [
+      1.0,
+      0.0
+    ],
+    "rear_to_front_axis_xy": [
+      0.0,
+      1.0
+    ],
+    "target_side": "FRONT",
+    "landmarks": []
+  },
+  "coverage_cells": [
+    {
+      "cell_id": "demo-x130-y240",
+      "polygon_xy_cm": [
+        [
+          130,
+          240
+        ],
+        [
+          170,
+          240
+        ],
+        [
+          170,
+          280
+        ],
+        [
+          130,
+          280
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x170-y240",
+      "polygon_xy_cm": [
+        [
+          170,
+          240
+        ],
+        [
+          210,
+          240
+        ],
+        [
+          210,
+          280
+        ],
+        [
+          170,
+          280
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x210-y240",
+      "polygon_xy_cm": [
+        [
+          210,
+          240
+        ],
+        [
+          250,
+          240
+        ],
+        [
+          250,
+          280
+        ],
+        [
+          210,
+          280
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x250-y240",
+      "polygon_xy_cm": [
+        [
+          250,
+          240
+        ],
+        [
+          290,
+          240
+        ],
+        [
+          290,
+          280
+        ],
+        [
+          250,
+          280
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x290-y240",
+      "polygon_xy_cm": [
+        [
+          290,
+          240
+        ],
+        [
+          330,
+          240
+        ],
+        [
+          330,
+          280
+        ],
+        [
+          290,
+          280
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x330-y240",
+      "polygon_xy_cm": [
+        [
+          330,
+          240
+        ],
+        [
+          370,
+          240
+        ],
+        [
+          370,
+          280
+        ],
+        [
+          330,
+          280
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x130-y280",
+      "polygon_xy_cm": [
+        [
+          130,
+          280
+        ],
+        [
+          170,
+          280
+        ],
+        [
+          170,
+          320
+        ],
+        [
+          130,
+          320
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x170-y280",
+      "polygon_xy_cm": [
+        [
+          170,
+          280
+        ],
+        [
+          210,
+          280
+        ],
+        [
+          210,
+          320
+        ],
+        [
+          170,
+          320
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x210-y280",
+      "polygon_xy_cm": [
+        [
+          210,
+          280
+        ],
+        [
+          250,
+          280
+        ],
+        [
+          250,
+          320
+        ],
+        [
+          210,
+          320
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x250-y280",
+      "polygon_xy_cm": [
+        [
+          250,
+          280
+        ],
+        [
+          290,
+          280
+        ],
+        [
+          290,
+          320
+        ],
+        [
+          250,
+          320
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x290-y280",
+      "polygon_xy_cm": [
+        [
+          290,
+          280
+        ],
+        [
+          330,
+          280
+        ],
+        [
+          330,
+          320
+        ],
+        [
+          290,
+          320
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x330-y280",
+      "polygon_xy_cm": [
+        [
+          330,
+          280
+        ],
+        [
+          370,
+          280
+        ],
+        [
+          370,
+          320
+        ],
+        [
+          330,
+          320
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x130-y320",
+      "polygon_xy_cm": [
+        [
+          130,
+          320
+        ],
+        [
+          170,
+          320
+        ],
+        [
+          170,
+          360
+        ],
+        [
+          130,
+          360
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x170-y320",
+      "polygon_xy_cm": [
+        [
+          170,
+          320
+        ],
+        [
+          210,
+          320
+        ],
+        [
+          210,
+          360
+        ],
+        [
+          170,
+          360
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x210-y320",
+      "polygon_xy_cm": [
+        [
+          210,
+          320
+        ],
+        [
+          250,
+          320
+        ],
+        [
+          250,
+          360
+        ],
+        [
+          210,
+          360
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x250-y320",
+      "polygon_xy_cm": [
+        [
+          250,
+          320
+        ],
+        [
+          290,
+          320
+        ],
+        [
+          290,
+          360
+        ],
+        [
+          250,
+          360
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x290-y320",
+      "polygon_xy_cm": [
+        [
+          290,
+          320
+        ],
+        [
+          330,
+          320
+        ],
+        [
+          330,
+          360
+        ],
+        [
+          290,
+          360
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x330-y320",
+      "polygon_xy_cm": [
+        [
+          330,
+          320
+        ],
+        [
+          370,
+          320
+        ],
+        [
+          370,
+          360
+        ],
+        [
+          330,
+          360
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    }
+  ],
+  "pose_visibility": [
+    [
+      "center-front-middle-toward_targets",
+      [
+        "demo-x170-y320",
+        "demo-x210-y320",
+        "demo-x250-y320",
+        "demo-x290-y320"
+      ]
+    ],
+    [
+      "center-middle-middle-toward_targets",
+      [
+        "demo-x170-y280",
+        "demo-x210-y280",
+        "demo-x250-y280",
+        "demo-x290-y280",
+        "demo-x170-y320",
+        "demo-x210-y320",
+        "demo-x250-y320",
+        "demo-x290-y320"
+      ]
+    ],
+    [
+      "center-rear-middle-toward_targets",
+      [
+        "demo-x130-y240",
+        "demo-x170-y240",
+        "demo-x210-y240",
+        "demo-x250-y240",
+        "demo-x290-y240",
+        "demo-x330-y240",
+        "demo-x210-y280",
+        "demo-x250-y280"
+      ]
+    ],
+    [
+      "left-front-middle-toward_targets",
+      [
+        "demo-x130-y320",
+        "demo-x170-y320",
+        "demo-x210-y320"
+      ]
+    ],
+    [
+      "left-middle-middle-toward_targets",
+      [
+        "demo-x130-y280",
+        "demo-x170-y280",
+        "demo-x210-y280",
+        "demo-x130-y320",
+        "demo-x170-y320",
+        "demo-x210-y320"
+      ]
+    ],
+    [
+      "left-rear-middle-toward_targets",
+      [
+        "demo-x130-y240",
+        "demo-x170-y240",
+        "demo-x210-y240",
+        "demo-x250-y240",
+        "demo-x130-y280",
+        "demo-x170-y280",
+        "demo-x210-y280"
+      ]
+    ],
+    [
+      "right-front-middle-toward_targets",
+      [
+        "demo-x250-y320",
+        "demo-x290-y320",
+        "demo-x330-y320"
+      ]
+    ],
+    [
+      "right-middle-middle-toward_targets",
+      [
+        "demo-x250-y280",
+        "demo-x290-y280",
+        "demo-x330-y280",
+        "demo-x250-y320",
+        "demo-x290-y320",
+        "demo-x330-y320"
+      ]
+    ],
+    [
+      "right-rear-middle-toward_targets",
+      [
+        "demo-x210-y240",
+        "demo-x250-y240",
+        "demo-x290-y240",
+        "demo-x330-y240",
+        "demo-x250-y280",
+        "demo-x290-y280",
+        "demo-x330-y280"
+      ]
+    ]
+  ],
+  "pose_tag_visibility": [
+    [
+      "center-front-middle-toward_targets",
+      [
+        0,
+        2
+      ]
+    ],
+    [
+      "center-middle-middle-toward_targets",
+      [
+        0,
+        2
+      ]
+    ],
+    [
+      "center-rear-middle-toward_targets",
+      [
+        0,
+        2
+      ]
+    ]
+  ],
+  "support_planes": [
+    {
+      "plane_id": "FLOOR",
+      "z_cm": 0,
+      "classes": []
+    },
+    {
+      "plane_id": "demo-surface",
+      "z_cm": 50,
+      "classes": [
+        "computer",
+        "phone",
+        "pen"
+      ]
+    }
+  ]
+}

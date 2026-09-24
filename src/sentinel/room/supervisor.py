@@ -63,7 +63,10 @@ class SupervisorRequest:
 
 @dataclass(frozen=True)
 class SupervisorOutcome:
-    transition: Literal["CONTINUE", "RECOVER", "RETURN_NOW", "LAND_CONTINGENCY"]
+    #: ``REFUSE`` (a zone the aircraft may not fly to from here) is only
+    #: ever returned by ``prepare`` for a fresh OBSERVE admission and is
+    #: never dispatched: the aircraft keeps hovering where it is.
+    transition: Literal["CONTINUE", "RECOVER", "RETURN_NOW", "LAND_CONTINGENCY", "REFUSE"]
     reason: str
     invalidates_snapshot: bool
     energy: EnergyEstimate
@@ -95,6 +98,11 @@ class SupervisorOutcome:
 PAD_XY_UNCERTAINTY_CM = 5.0
 PAD_HEADING_UNCERTAINTY_DEG = 5.0
 _REANCHOR_RELIEVES = frozenset({"PROJECTED_TERMINATION_LANDING_INVALID", "LOCALIZATION_RECOVERY_REQUIRED"})
+#: Refusals of an optional zone that say nothing about the aircraft's
+#: current safety: its own return from here is checked separately (and
+#: first), so it can stay and let Jev choose another zone.
+_ZONE_ONLY_REFUSALS = frozenset({"OPTIONAL_PATH_INVALID", "PROJECTED_TERMINATION_PATH_INVALID",
+                                 "PROJECTED_TERMINATION_LANDING_INVALID", "OPTIONAL_LANDING_INVALID"})
 
 
 class _AuditPersistenceFailure(RuntimeError):
@@ -705,6 +713,8 @@ class SafetySupervisor:
             outcome = self.assess(SupervisorRequest(snapshot_version, checkpoint, provider_wait_s, pose, sample), self.site)
             if missed and outcome.transition == "RECOVER":
                 outcome = replace(outcome, reason="EXPECTED_REANCHOR_MISSING")
+            if remaining_commands is None and not missed:
+                outcome = self._zone_refusal(outcome, checkpoint, pose)
             if outcome.transition == "CONTINUE":
                 if getattr(self.recovery, "resume_required", False):
                     validated = self.recovery.confirm_resume(pose, route_validated=True, energy_validated=True)
@@ -714,6 +724,29 @@ class SafetySupervisor:
                         route_validated=True, energy_validated=True)
                     outcome = replace(outcome, request=replace(outcome.request, pose=validated))
             return outcome
+
+    def _zone_refusal(self, outcome, checkpoint, pose):
+        """Refuse just this zone, instead of recovering or returning, when the
+        zone itself is the problem: the flight there and back does not fit
+        the drift budget or the declared free space, although the aircraft is
+        fine where it is. A re-anchor cannot help an aircraft that already
+        holds a fix as good as a burst gives, and a return home is not needed
+        when only the projected route from the *zone* is invalid. Only a fresh
+        OBSERVE admission is refused; mid-plan and return decisions are
+        unchanged."""
+        profile = self.tracker.profile
+        if (checkpoint is None or not checkpoint.checkpoint_id.startswith("OBSERVE:") or profile is None
+                or self._returning or self.reserve.return_latched):
+            return outcome
+        fresh_fix = (pose.state == LocalizationState.ANCHORED
+                     and pose.xy_uncertainty_cm <= profile.max_burst_spread_cm
+                     and pose.heading_uncertainty_deg <= profile.max_burst_heading_spread_deg)
+        if ((outcome.transition == "RECOVER" and outcome.reason == "LOCALIZATION_RECOVERY_REQUIRED" and fresh_fix)
+                or (outcome.transition == "RETURN_NOW" and outcome.reason in _ZONE_ONLY_REFUSALS)):
+            self._log_positioning(f"Zone {checkpoint.checkpoint_id.rsplit(':', 1)[-1]} refused "
+                                  f"({outcome.reason}); hovering near {_where(pose.position)}")
+            return replace(outcome, transition="REFUSE", invalidates_snapshot=False)
+        return outcome
 
     def _pre_takeoff_pose(self, pose, site):
         """Task B item 4: before takeoff the real stack anchors the tracker on
@@ -1266,6 +1299,8 @@ class SafetySupervisor:
         return False
 
     def dispatch(self, outcome: SupervisorOutcome, executor) -> CheckpointOutcome | TerminalOutcome:
+        if outcome.transition == "REFUSE":
+            raise ValueError("a refused zone is never dispatched")
         with self._dispatch_lock:
             try:
                 return self._dispatch(outcome, executor)

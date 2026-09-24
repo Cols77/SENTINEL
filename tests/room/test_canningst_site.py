@@ -329,7 +329,9 @@ def test_an_unsegmented_three_look_checkpoint_is_refused_at_90_percent(tmp_path)
     """
     decisions = _decisions(tmp_path)
     assert all(d.transition != "CONTINUE" for d in decisions.values())
-    assert decisions[CENTER].transition == "RECOVER"
+    # Freshly anchored, a re-anchor cannot shorten the trip: only this zone
+    # is refused (never dispatched) and the aircraft stays where it is.
+    assert decisions[CENTER].transition == "REFUSE"
     assert decisions[CENTER].reason == "LOCALIZATION_RECOVERY_REQUIRED"
     assert "xy_uncertainty" in decisions[CENTER].pose_forecast.reasons
 

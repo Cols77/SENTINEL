@@ -297,18 +297,19 @@ def test_with_an_absurd_drift_the_count_mission_returns_without_observing(tmp_pa
 
 
 @pytest.mark.parametrize("capture_number", [1, 3])
-def test_a_tag_losing_yaw_gust_during_a_sweep_lands_in_place_without_translation(
+def test_a_tag_losing_yaw_gust_during_a_sweep_ends_safely_without_translation(
         tmp_path, monkeypatch, capture_number):
     """An early or late tag loss during the three-look sweep ends safely.
 
-    The measured pose is already 20 cm behind the pad. When the pose health
-    becomes LOST, the supervisor lands there; the old single-frame test's
-    assumed yaw recovery and lateral continuation are not available.
+    The measured pose is already 20 cm behind the pad. The aircraft either
+    lands there, or -- when the lateral zones are refused on their own and
+    Jev answers -- returns the 20 cm to the pad and lands on it; the lateral
+    continuation is never flown.
     """
     outcome, tello, events, detector = run_mission(
         tmp_path, monkeypatch, yaw_gust_after_capture=capture_number, site_changes=THREE_VIEW_SITE)
     assert outcome.landing is not None and outcome.landing.state == "LANDED"
-    assert not tello.flying and abs(tello.x_cm - 250) < 1 and abs(tello.y_cm - 170) < 1
+    assert not tello.flying and abs(tello.x_cm - 250) < 1 and round(tello.y_cm) in (170, 190)
     assert any(transition == "LAND_CONTINGENCY" for transition, _ in safety_reasons(events)), safety_reasons(events)
     assert not any(c.split()[0] in ("left", "right") for c in tello.sent)
     assert set(succeeded_observations(events)) <= {CENTER}
@@ -340,20 +341,29 @@ def safety_reasons(events):
             if e.event_type == "SAFETY_ASSESSED"]
 
 
-def test_if_the_next_region_is_not_admissible_the_aircraft_lands_without_a_lateral_leg(
+def zone_refusals(events):
+    return [e.payload for e in events
+            if e.event_type == "ROOM_TOOL_OUTCOME" and e.payload.get("code") == "ZONE_REFUSED"]
+
+
+def test_if_the_next_region_is_not_admissible_it_is_refused_and_the_aircraft_answers_from_the_pad(
         tmp_path, monkeypatch):
     """Force more than one visit only in this test's visibility matrix.
 
     The first centre sweep succeeds. The next 40 cm leg to left-rear fails
-    the forecast's xy-uncertainty gate despite fresh wall-tag bursts, and the
-    controller exhausts recovery attempts without issuing that translation.
+    the forecast's xy-uncertainty gate although the aircraft is freshly
+    anchored, so a re-anchor cannot help: that zone alone is refused, with a
+    reason Jev sees, and no translation is issued. With nothing else
+    reachable Jev answers incomplete and the aircraft returns to the pad.
     The production matrix does not demand this second visit.
     """
     outcome, tello, events, detector = run_mission(tmp_path, monkeypatch, site_changes=THREE_VIEW_SITE)
     assert succeeded_observations(events) == [CENTER] and detector.calls == 3
-    assert ("LAND_CONTINGENCY", "recovery_exhausted") in safety_reasons(events)
+    refused = zone_refusals(events)
+    assert refused and all("tag fix" in item["detail"] for item in refused)
+    assert ("LAND_CONTINGENCY", "recovery_exhausted") not in safety_reasons(events)
     assert outcome.landing is not None and outcome.landing.state == "LANDED"
-    assert not tello.flying and abs(tello.x_cm - 250) < 1 and abs(tello.y_cm - 170) < 1
+    assert not tello.flying and abs(tello.x_cm - 250) < 1 and abs(tello.y_cm - 190) < 1
     assert not any(c.split()[0] in ("left", "right") for c in tello.sent)
     assert not [e for e in events if e.event_type == "POSE_REANCHORED"]
     assert ("ANSWER:COUNTS", "ANSWERED_COUNT") not in tool_outcomes(events)
@@ -372,7 +382,7 @@ def test_no_left_tag_fix_does_not_cause_an_unsafe_lateral_leg(tmp_path, monkeypa
     """The left blind source is unreachable because the forecast refuses its leg."""
     outcome, tello, events, detector = run_mission(
         tmp_path, monkeypatch, blind_x_cm=210.0, site_changes=THREE_VIEW_SITE, **DOUBLED_HOVER)
-    assert ("LAND_CONTINGENCY", "recovery_exhausted") in safety_reasons(events)
+    assert zone_refusals(events)
     assert outcome.landing is not None and outcome.landing.state == "LANDED" and not tello.flying
     assert tello.blind_hits == 0 and not any(c.split()[0] in ("left", "right") for c in tello.sent)
     assert not [e for e in events if e.event_type == "POSE_REANCHORED"]
@@ -383,7 +393,7 @@ def test_delayed_left_tags_are_not_assumed_before_the_lateral_leg(tmp_path, monk
     outcome, tello, events, detector = run_mission(
         tmp_path, monkeypatch, blind_x_cm=210.0, blind_bursts=2,
         site_changes=THREE_VIEW_SITE, **DOUBLED_HOVER)
-    assert ("LAND_CONTINGENCY", "recovery_exhausted") in safety_reasons(events)
+    assert zone_refusals(events)
     assert outcome.landing is not None and outcome.landing.state == "LANDED" and not tello.flying
     assert tello.blind_hits == 0 and not any(c.split()[0] in ("left", "right") for c in tello.sent)
     assert not [e for e in events if e.event_type == "POSE_REANCHORED"]

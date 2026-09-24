@@ -56,6 +56,7 @@ MODES = {
     "LIVE": "Live: real Tello, real detector, real Jev",
 }
 DEFAULT_REQUEST = "count the phones and computers in the room"
+SITE_LINE = "Site: CanningSt (fixtures/room_agent/v1/canningst-site.json)"
 def _now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -161,7 +162,7 @@ class RoomAgentRun:
 
     def proposal(self):
         flies = self.mode == "LIVE"
-        lines = [MODES[self.mode], "Site: CanningSt (fixtures/room_agent/v1/canningst-site.json)",
+        lines = [MODES[self.mode], getattr(self, "site_line", SITE_LINE),
                  "Capability: count_return TRIAL grant, CanningSt calibration profiles"]
         if self.mode != "LIVE":
             scenario = room_rehearsal.SCENARIOS[self.scenario]
@@ -265,6 +266,11 @@ class RoomAgentService:
                 return dict(status="CONFLICT", reason_code=busy)
             self.run = RoomAgentRun(mode=mode, scenario=scenario, request_text=text.strip(),
                                     local_ip=local_ip or (self._default_local_ip() if mode == "LIVE" else None))
+            if mode == "LIVE":
+                pack = self._live_pack(optional=True) or {}
+                if pack.get("site"):
+                    self.run.site_line = (f"Site: CanningSt, {pack.get('scenario', 'canningst')} scenario "
+                                          f"({Path(pack['site']).name})")
             self.run.projection.note("PROPOSAL", f"Proposal ready: {MODES[mode]}")
             return dict(status="ACKNOWLEDGED", run=self.run.public())
 

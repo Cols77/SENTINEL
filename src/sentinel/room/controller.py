@@ -189,6 +189,17 @@ class TurnOutcome:
 
 
 
+_ZONE_REFUSAL_DETAIL = {
+    "LOCALIZATION_RECOVERY_REQUIRED": "too far to fly there and back without a tag fix on the way; "
+                                      "try a zone closer to the tags or to the current position",
+    "OPTIONAL_PATH_INVALID": "the path there would leave the declared free space",
+    "PROJECTED_TERMINATION_PATH_INVALID": "from there the way home would not stay clear of the walls "
+                                          "without a tag fix; try a nearer zone first",
+    "PROJECTED_TERMINATION_LANDING_INVALID": "from there a safe landing could not be guaranteed",
+    "OPTIONAL_LANDING_INVALID": "a safe landing along the way could not be guaranteed",
+}
+
+
 def _failure(code: str, detail: str) -> dict:
     """A failed OBSERVE payload with a plain reason Jev reads next turn."""
     return {"code": code, "refusal": code, "detail": detail}
@@ -1249,6 +1260,10 @@ class RoomController:
             except Exception:
                 terminal = self.supervisor.refresh_failure(self.flight_executor)
                 return self._preempted(session_id, None, terminal)
+            if admission.transition == "REFUSE":
+                # Only this zone is out of reach; the aircraft hovers where it is.
+                return _failure("ZONE_REFUSED", _ZONE_REFUSAL_DETAIL.get(
+                    admission.reason, "the supervisor refused this zone") + f" (look {index + 1})")
             try:
                 leg_result = self.supervisor.dispatch(admission, self.flight_executor)
             except VersionConflict:

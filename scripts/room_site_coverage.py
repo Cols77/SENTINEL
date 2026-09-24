@@ -116,9 +116,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--site", type=Path, default=SITE_PATH)
     parser.add_argument("--check", action="store_true", help="check committed output without writing")
+    parser.add_argument("--surface", type=int, nargs=4, metavar=("X_MIN", "X_MAX", "Y_MIN", "Y_MAX"),
+                        default=SURFACE_BOUNDS_CM, help="demo-surface footprint to grid (cm, multiples of 40)")
+    parser.add_argument("--range-cm", type=float, default=DETECTION_RANGE_CM,
+                        help="farthest lens-to-cell distance counted as a view")
     args = parser.parse_args()
     document = json.loads(args.site.read_text(encoding="utf-8"))
-    generated, dropped = generate_coverage(document)
+    generated, dropped = generate_coverage(document, surface_bounds_cm=tuple(args.surface),
+                                           max_range_cm=args.range_cm)
     for cell_id in dropped:
         print(f"dropped uncovered cell: {cell_id}", file=sys.stderr)
     if args.check:
