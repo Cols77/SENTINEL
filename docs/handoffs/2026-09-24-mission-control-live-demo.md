@@ -6,7 +6,7 @@ The operator wants a **real Live** CanningSt Tello observation through the integ
 
 Work on `integration/mission-control-room-jev-ui`, which already combines the room Jev branch and the polished Mission Control UI. The UI is running at `http://127.0.0.1:8794/console/`; its Live mode is available and no run is active. The other UI servers on ports 8772 and 8773 belong to earlier readiness and OpenRouter sessions and are not part of this flight.
 
-**No observation flight succeeded today.** Two authorized Live attempts took off and landed before the first capture. The operator confirmed the aircraft physically grounded and the cube clear after each. The last motors-off camera check also failed to see tags. Wi-Fi 2 subsequently disconnected from `TELLO-57CD36`; Windows reported that the network was unavailable on reconnection. Do not approve another Live run until the link and tag view are stable.
+**No observation flight succeeded today.** Two authorized Live attempts took off and landed before the first capture. The operator confirmed the aircraft physically grounded and the cube clear after each. The motors-off camera checks also failed to see tags. Wi-Fi 2 intermittently disconnects from `TELLO-57CD36`; Windows reported that the network was unavailable on several reconnection attempts. Do not approve another Live run until the link and tag view are stable.
 
 ## Code and configuration already committed
 
@@ -24,6 +24,7 @@ No software test suite was run after the CLI change, per the operator's instruct
 1. `l3-20260924-130522`: motors-off check passed at 93%; UI preflight read 91%. The Tello took off, then landed with terminal `ABORTED`, reason `START_FAILED`, safety reason `TELEMETRY_UNAVAILABLE`. No capture, yaw, or re-anchor. The pose database has 24 reports, all showing mapped tags 0 and 2. This happened before exact startup-exception logging was added, so the underlying exception is unknown.
 2. `l3-20260924-131550`: motors-off check passed at 85%. The Tello took off, then landed with `ABORTED` / `START_FAILED`. Server stderr reported `HomeMeasurementError: home measurement: FAILED`. Its 12 pose reports showed only tag 0, so the required joint-tag home fix was unavailable. No capture, yaw, or re-anchor.
 3. After a pad adjustment, a motors-off video burst received 94 frames but detected no tags. This was a camera/view check, not a flight. Shortly afterward Wi-Fi 2 lost `TELLO-57CD36`. The Windows WLAN event at 13:26:35 local says the TP-Link USB adapter was disconnected by its driver; repeated join attempts at 13:26–13:28 failed with “the specified network is unavailable.” This does not yet identify whether the aircraft AP, adapter, or radio conditions caused the instability.
+4. At about 13:32 local, the link returned and a second motors-off burst received 121 frames with **zero** tags. Its saved frame at `runs/pose-preview/000000.png` (private, ignored) shows a nearby object across the lower camera image and a chair/wall ahead, with neither tag stand in view. The operator was asked to clear and aim the camera. This is the current immediate blocker.
 
 The latest prepared pack, `runs/live.pack.json`, points to unflown `l3-20260924-132245`. Its site assurances expire at **13:52:45 Sydney time**; prepare a fresh pack if that time has passed. The current UI server re-reads the pack at approval.
 
