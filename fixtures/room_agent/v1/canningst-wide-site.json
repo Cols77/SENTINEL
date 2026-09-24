@@ -213,6 +213,35 @@
   },
   "coverage_cells": [
     {
+      "cell_id": "demo-x90-y240",
+      "polygon_xy_cm": [
+        [
+          90,
+          240
+        ],
+        [
+          130,
+          240
+        ],
+        [
+          130,
+          280
+        ],
+        [
+          90,
+          280
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
       "cell_id": "demo-x130-y240",
       "polygon_xy_cm": [
         [
@@ -375,6 +404,64 @@
         [
           330,
           280
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x370-y240",
+      "polygon_xy_cm": [
+        [
+          370,
+          240
+        ],
+        [
+          410,
+          240
+        ],
+        [
+          410,
+          280
+        ],
+        [
+          370,
+          280
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x90-y280",
+      "polygon_xy_cm": [
+        [
+          90,
+          280
+        ],
+        [
+          130,
+          280
+        ],
+        [
+          130,
+          320
+        ],
+        [
+          90,
+          320
         ]
       ],
       "z_band_cm": [
@@ -561,6 +648,64 @@
       ]
     },
     {
+      "cell_id": "demo-x370-y280",
+      "polygon_xy_cm": [
+        [
+          370,
+          280
+        ],
+        [
+          410,
+          280
+        ],
+        [
+          410,
+          320
+        ],
+        [
+          370,
+          320
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
+      "cell_id": "demo-x90-y320",
+      "polygon_xy_cm": [
+        [
+          90,
+          320
+        ],
+        [
+          130,
+          320
+        ],
+        [
+          130,
+          360
+        ],
+        [
+          90,
+          360
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
+    },
+    {
       "cell_id": "demo-x130-y320",
       "polygon_xy_cm": [
         [
@@ -733,6 +878,35 @@
         "computer",
         "phone"
       ]
+    },
+    {
+      "cell_id": "demo-x370-y320",
+      "polygon_xy_cm": [
+        [
+          370,
+          320
+        ],
+        [
+          410,
+          320
+        ],
+        [
+          410,
+          360
+        ],
+        [
+          370,
+          360
+        ]
+      ],
+      "z_band_cm": [
+        50,
+        80
+      ],
+      "required_classes": [
+        "computer",
+        "phone"
+      ]
     }
   ],
   "pose_visibility": [
@@ -742,6 +916,26 @@
         "demo-x170-y320",
         "demo-x210-y320",
         "demo-x250-y320",
+        "demo-x290-y320"
+      ]
+    ],
+    [
+      "center-middle-middle-left",
+      [
+        "demo-x130-y240",
+        "demo-x170-y240",
+        "demo-x130-y280",
+        "demo-x170-y280",
+        "demo-x170-y320"
+      ]
+    ],
+    [
+      "center-middle-middle-right",
+      [
+        "demo-x290-y240",
+        "demo-x330-y240",
+        "demo-x290-y280",
+        "demo-x330-y280",
         "demo-x290-y320"
       ]
     ],
@@ -780,11 +974,22 @@
       ]
     ],
     [
+      "left-middle-middle-right",
+      [
+        "demo-x210-y240",
+        "demo-x250-y240",
+        "demo-x210-y280",
+        "demo-x250-y280"
+      ]
+    ],
+    [
       "left-middle-middle-toward_targets",
       [
+        "demo-x90-y280",
         "demo-x130-y280",
         "demo-x170-y280",
         "demo-x210-y280",
+        "demo-x90-y320",
         "demo-x130-y320",
         "demo-x170-y320",
         "demo-x210-y320"
@@ -793,6 +998,7 @@
     [
       "left-rear-middle-toward_targets",
       [
+        "demo-x90-y240",
         "demo-x130-y240",
         "demo-x170-y240",
         "demo-x210-y240",
@@ -811,14 +1017,25 @@
       ]
     ],
     [
+      "right-middle-middle-left",
+      [
+        "demo-x210-y240",
+        "demo-x250-y240",
+        "demo-x210-y280",
+        "demo-x250-y280"
+      ]
+    ],
+    [
       "right-middle-middle-toward_targets",
       [
         "demo-x250-y280",
         "demo-x290-y280",
         "demo-x330-y280",
+        "demo-x370-y280",
         "demo-x250-y320",
         "demo-x290-y320",
-        "demo-x330-y320"
+        "demo-x330-y320",
+        "demo-x370-y320"
       ]
     ],
     [
@@ -828,6 +1045,7 @@
         "demo-x250-y240",
         "demo-x290-y240",
         "demo-x330-y240",
+        "demo-x370-y240",
         "demo-x250-y280",
         "demo-x290-y280",
         "demo-x330-y280"

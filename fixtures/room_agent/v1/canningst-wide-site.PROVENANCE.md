@@ -12,9 +12,9 @@ verifies the committed files). Select it for a Live flight with
 | | compact `canningst-site.json` | wide `canningst-wide-site.json` |
 |---|---|---|
 | observation envelope | x 190–310, y 160–220 | x 140–360, y 170–330 |
-| viewpoints | 8 in an 80 × 40 cm box (6 tag-facing, 2 sideways) | 9 tag-facing, 3 × 3 at x 177/250/323, y 197/250/303 |
+| viewpoints | 8 in an 80 × 40 cm box (6 tag-facing, 2 sideways) | 13: 9 tag-facing (3 × 3 at x 177/250/323, y 197/250/303) plus 4 sideways (centre looks at each side wall; each side column looks across the room) |
 | home pad / route | (250, 190) | (250, 220): where the operator places the drone, 180 cm from the tag wall |
-| demo surface cells | x 190–310, y 190–270: 6 cells | x 130–370, y 240–360: 18 cells |
+| demo surface cells | x 190–310, y 190–270: 6 cells | x 90–410 (wall to wall), y 240–360: 24 cells |
 | detection range for coverage | 250 cm | 120 cm (a phone is ~100 px wide at that range) |
 | drift profile | `canningst-drift.json` | `canningst-wide-drift.json` |
 
@@ -24,10 +24,14 @@ plane at z 50, the tag map binding and the cube-site hash.
 
 ## Why these choices
 
-**Tag-facing grid only.** A sideways look needs a 90° turn plus the three-look
-sweep; that yaw exceeds the drift profile's budget between fixes, and a
-re-anchor cannot shorten a planned rotation, so such poses could never be
-admitted.
+**Sideways looks.** A sideways zone turns 90° out, sweeps ±30° and turns
+back: about 300° of yaw with the return. The compact profile allows 360°
+between tag fixes, which refused them. The wide profile allows 720°: at 0.02°
+of heading drift per degree turned, that adds at most about 7° of heading
+uncertainty. The tags are out of view while the drone faces a side wall, so
+it coasts until it turns back. There is no "look behind" in the pose
+grammar. The side columns' forward sweeps already see the wall strips, so
+Jev picks a sideways look for its view, not for new coverage.
 
 **Tags.** Only the centre column sees both wall tags head-on (the minimum for
 an expected re-anchor credit), so only those three poses declare tags. The
@@ -45,7 +49,7 @@ rear wall.
 **Drift limits.** `canningst-wide-drift.json` keeps every measured drift rate
 (0.157 cm per cm flown, heading drift, hover drift). It only raises how far
 the aircraft may get from a tag fix: position uncertainty 30 to 90 cm,
-heading uncertainty 15 to 30°. This is the operator's 2026-09-24 decision to
+heading uncertainty 15 to 30°, and total yaw between fixes 360 to 720°. This is the operator's 2026-09-24 decision to
 use the drone more permissively. Walls and landings are still enforced by the
 free-space and landing checks, which use the full uncertainty disk. The
 longest hop in the grid (73 cm) sits in the calibrated flight envelope's
@@ -57,9 +61,13 @@ about 56 cm).
 `tests/room/test_canningst_wide.py` flies the real production stack against a
 fake Tello from (250, 220):
 
-- **Wide limits:** the mission observes the centre-rear, centre-middle,
-  left-middle and right-middle zones (146 cm side to side), covers all 18
-  cells, answers the count and lands on the pad.
+- **Wide limits:** a greedy stand-in for Jev (always the top-ranked zone)
+  tours the centre and both side columns, 146 cm side to side. Its order can
+  leave the last wall-corner zone refused, because it was asked for from
+  across the room. It answers (complete or explicitly incomplete) and lands
+  on the pad.
+- **Sideways-first stand-in:** the centre zone turns 90° to each side wall,
+  and the side column looks across the room. It still lands on the pad.
 - **Compact limits:** the far zones are refused one by one, each with a reason
   Jev reads. The drone keeps the zones it can reach, answers, and lands.
 

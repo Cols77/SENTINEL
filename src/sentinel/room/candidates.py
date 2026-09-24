@@ -316,7 +316,7 @@ def _observe_digest(objective_id: str, pose_id: str, coverage: CoverageProjectio
 
 def _observe_candidate(objective: GoalObjective, pose_id: str, description: str, site: RoomSite,
                        coverage: CoverageProjection, outcomes: tuple[ToolOutcome, ...],
-                       snapshot_version: int) -> RoomCandidate | None:
+                       snapshot_version: int, origin=None) -> RoomCandidate | None:
     candidate_id = f"OBSERVE:{objective.objective_id}:{pose_id}"
     digest = _observe_digest(objective.objective_id, pose_id, coverage)
     if _observe_suppressed(outcomes, candidate_id, digest):
@@ -328,12 +328,15 @@ def _observe_candidate(objective: GoalObjective, pose_id: str, description: str,
         # zero would let an unresolvable declared view sort ahead of every
         # legitimate one in the benefit/cost/ID ordering.
         return None
-    home = site.home.nominal_pose
-    distance_cm = math.hypot(resolved.x_cm - home.x_cm, resolved.y_cm - home.y_cm)
+    # From the aircraft's current position when known (so the order and
+    # Jev's reading favour a short hop over a cross-room one), else home.
+    start = origin if origin is not None else site.home.nominal_pose
+    distance_cm = math.hypot(resolved.x_cm - start.x_cm, resolved.y_cm - start.y_cm)
     # Task 4b item 2: what this view resolves and roughly how far it is, so
     # Jev has a reason to prefer one region over an otherwise identical one.
     description = (f"{description.rstrip('.')}: {_resolves_text(pose_id, site, coverage)}; "
-                   f"Approximate direct distance from nominal home: {distance_cm:.0f} cm; "
+                   f"Approximate direct distance from the drone's "
+                   f"{'current position' if origin is not None else 'nominal home'}: {distance_cm:.0f} cm; "
                    "battery cost is assessed by the supervisor.")
     failures = [o for o in outcomes if o.candidate_id == candidate_id and o.refusal_code is not None]
     if failures:
@@ -418,7 +421,8 @@ def search_sightings(objective: GoalObjective, site: RoomSite,
 
 
 def _search_candidates(objective: GoalObjective, site: RoomSite, coverage: CoverageProjection,
-                       outcomes: tuple[ToolOutcome, ...], snapshot_version: int) -> list[RoomCandidate]:
+                       outcomes: tuple[ToolOutcome, ...], snapshot_version: int,
+                       origin=None) -> list[RoomCandidate]:
     if search_sightings(objective, site, outcomes):
         return []  # found (confirmed or uncertain): stop searching
     observed = {_observed_pose_id(outcome) for outcome in outcomes}
@@ -432,7 +436,8 @@ def _search_candidates(objective: GoalObjective, site: RoomSite, coverage: Cover
         description = (f"Search for {classes}: observe unvisited declared search viewpoint {pose_id} "
                        f"(objective {objective.objective_id}); this advances the search"
                        f"{coverage_note}.")
-        candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version)
+        candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version,
+                                       origin)
         if candidate is not None:
             candidates.append(candidate)
     return candidates
@@ -481,7 +486,7 @@ def search_answer_candidate(snapshot: ReadSnapshot, site: RoomSite,
 
 def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: RoomSite,
                                  coverage: CoverageProjection, outcomes: tuple[ToolOutcome, ...],
-                                 snapshot_version: int) -> tuple[RoomCandidate, ...]:
+                                 snapshot_version: int, origin=None) -> tuple[RoomCandidate, ...]:
     """OBSERVE candidates for COUNT objectives.
 
     User-requested semantic regions are generated first, in their original
@@ -523,7 +528,8 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
                 continue
             description = (f"Observe declared pose {pose_id}, the requested region for objective "
                            f"{objective.objective_id}; {_coverage_gain_description(pose_id, site, coverage)}.")
-            candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version)
+            candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version,
+                                           origin)
             if candidate is None:
                 candidate = _incomplete_answer_candidate(objective, coverage, outcomes, snapshot_version,
                                                          region_pose_id=pose_id)
@@ -541,10 +547,15 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
                 continue
             description = (f"Observe declared pose {pose_id} for objective {objective.objective_id}: "
                            f"{_coverage_gain_description(pose_id, site, coverage)}.")
-            candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version)
+            candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version,
+                                           origin)
             if candidate is not None:
                 scored.append((benefit, candidate))
-        scored.sort(key=lambda item: (-item[0], item[1].physical_cost.distance_cm, item[1].candidate_id))
+        # Coverage gained per distance flown (each metre costs one extra
+        # unit), so a nearby zone beats a slightly better one across the
+        # room: fewer long fixless hops, which the supervisor refuses.
+        scored.sort(key=lambda item: (-item[0] / (1 + item[1].physical_cost.distance_cm / 100),
+                                      item[1].physical_cost.distance_cm, item[1].candidate_id))
         objective_candidates = [candidate for _, candidate in scored]
         # Fix round 4 (Q3/Q4): fall back to the explicit incomplete answer
         # whenever this objective is not ready to complete -- not only when
@@ -567,7 +578,7 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
     search_candidates: list[RoomCandidate] = []
     offered = {c.candidate_id for c in (*region_candidates, *room_candidates)}
     for objective in sorted((o for o in objectives if is_search_objective(o)), key=lambda o: o.ordinal):
-        for candidate in _search_candidates(objective, site, coverage, outcomes, snapshot_version):
+        for candidate in _search_candidates(objective, site, coverage, outcomes, snapshot_version, origin):
             if candidate.candidate_id not in offered:
                 offered.add(candidate.candidate_id)
                 search_candidates.append(candidate)

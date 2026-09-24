@@ -25,7 +25,7 @@
   "max_recovery_attempts": 3,
   "max_translation_cm": 300,
   "max_xy_uncertainty_cm": 90,
-  "max_yaw_deg": 360,
+  "max_yaw_deg": 720,
   "min_burst_reports": 8,
   "profile_id": "canningst-wide-20260924-drift",
   "recovery_action_upper_bound_s": 15,

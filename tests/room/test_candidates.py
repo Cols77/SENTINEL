@@ -189,9 +189,13 @@ def test_observation_description_names_unresolved_classes_and_known_distance():
 
     assert "table-left: computer" in candidate.description
     assert "table-left: phone" in candidate.description
-    assert "Approximate direct distance from nominal home:" in candidate.description
+    assert "Approximate direct distance from the drone's nominal home:" in candidate.description
     assert "battery cost is assessed by the supervisor" in candidate.description
     assert "%" not in candidate.description
+    # Airborne, the distance is from where the drone actually is.
+    from sentinel.models import Position
+    (airborne,) = build_observation_candidates((objective,), site, coverage, (), 1, origin=Position(0, 0, 70))
+    assert "Approximate direct distance from the drone's current position:" in airborne.description
 
 
 def test_search_description_treats_an_unvisited_view_as_progress_after_count_coverage():

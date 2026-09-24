@@ -1,7 +1,8 @@
 """Generate the CanningSt *wide* scenario from the compact CanningSt site.
 
 Same room, tag map and measured drift rates. The observation envelope is
-spread over most of the flight volume as a 3x3 grid of tag-facing viewpoints,
+spread over most of the flight volume as a 3x3 grid of tag-facing viewpoints
+plus four sideways looks,
 home is declared where the operator places the drone (about 180 cm from the
 tag wall), the demo surface is gridded over the room width, and the drift
 profile allows the aircraft further from a tag fix. See
@@ -32,10 +33,18 @@ WIDE_DRIFT = FIXTURES / "profiles" / "canningst-wide-drift.json"
 
 OBSERVATION_XY_CM = [[140, 170], [360, 170], [360, 330], [140, 330]]
 HOME_XY_CM = (250, 220)
-SURFACE_BOUNDS_CM = (130, 370, 240, 360)
+SURFACE_BOUNDS_CM = (90, 410, 240, 360)  # wall to wall: the side strips need the sideways looks
 DETECTION_RANGE_CM = 120  # a phone is ~100 px wide at this range in the 960x720 stream
 MAX_XY_UNCERTAINTY_CM = 90
 MAX_HEADING_UNCERTAINTY_DEG = 30
+#: Total yaw allowed between tag fixes. A sideways zone turns 90 deg out,
+#: sweeps +-30 and turns back (~300 deg with the return): 720 leaves room for
+#: that at 0.02 deg of heading drift per deg turned (+7 deg at most).
+MAX_YAW_DEG = 720
+#: Sideways zones: the centre looks at each side wall; each side column looks
+#: across the room. There is no "look behind" in the pose grammar.
+SIDEWAYS_POSES = ("center-middle-middle-left", "center-middle-middle-right",
+                  "left-middle-middle-right", "right-middle-middle-left")
 
 TAGS_XY_CM = {2: (215.6, 400.0), 0: (284.4, 400.0)}
 TAG_HALF_WIDTH_CM = 8.0
@@ -73,8 +82,8 @@ def build_site() -> dict:
     for route in doc["routes"]:
         if route["route_id"] == doc["home"]["route_id"]:
             route["checkpoints"] = [{"x_cm": x, "y_cm": y, "z_cm": 80}]
-    poses = sorted(f"{h}-{d}-middle-toward_targets" for h in ("left", "center", "right")
-                   for d in ("rear", "middle", "front"))
+    poses = sorted([*(f"{h}-{d}-middle-toward_targets" for h in ("left", "center", "right")
+                      for d in ("rear", "middle", "front")), *SIDEWAYS_POSES])
     doc["pose_visibility"] = [[pose_id, []] for pose_id in poses]
     doc["coverage_cells"] = []
     site = parse_room_site({**doc, "pose_visibility": [], "pose_tag_visibility": []})
@@ -95,6 +104,7 @@ def build_drift() -> dict:
         profile_id="canningst-wide-20260924-drift",
         max_xy_uncertainty_cm=MAX_XY_UNCERTAINTY_CM,
         max_heading_uncertainty_deg=MAX_HEADING_UNCERTAINTY_DEG,
+        max_yaw_deg=MAX_YAW_DEG,
         evidence_refs=[*profile["evidence_refs"], "operator-declared:wide-scenario-uncertainty-limits-20260924"],
     )
     return profile

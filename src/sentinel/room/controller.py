@@ -441,8 +441,11 @@ class RoomController:
     def _observation_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
         if not self._observation_enabled:
             return ()
+        tracker = getattr(self.supervisor, "tracker", None)
+        origin = tracker.health.position if tracker is not None and tracker.initialized else None
         return build_observation_candidates(self._observation_objectives(snapshot), self.supervisor.site,
-                                            self._coverage(snapshot), snapshot.outcomes, snapshot.state_version)
+                                            self._coverage(snapshot), snapshot.outcomes, snapshot.state_version,
+                                            origin=origin)
 
     def _legacy_count_answer_blocked(self, snapshot: ReadSnapshot) -> bool:
         """Fix round 1 (Q2) / residual F2: once this session can observe, a
