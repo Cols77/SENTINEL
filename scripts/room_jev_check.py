@@ -258,9 +258,7 @@ class Environment:
     captures: list[str] = field(default_factory=list)
 
 
-#: All three CanningSt regions this fixture declares (Task V adapts the
-#: brief's illustrative "front-left-top" wording to the regions this site
-#: actually has -- see the report's "known gaps" section).
+#: Every observation pose declared by the bound site, including side looks.
 def declared_regions(site: RoomSite) -> tuple[str, ...]:
     return tuple(sorted(pose_id for pose_id, _cells in site.pose_visibility))
 
@@ -272,14 +270,10 @@ def build_environment(*, db_path: Path, site: RoomSite | None = None) -> Environ
                                    .01, 1, 20, 2, "SIMULATION_ONLY")
     limits = CommandLimits(trim_rounds=0, localise=False)
     clock = _Clock()
-    # Every checkpoint this site's pose_visibility offers declares the same
-    # yaw (all "toward_targets"), so one fixed fix at that yaw satisfies
-    # ``RoomController._measured_pose_matches_declared_pose`` (a direct,
-    # unconverted comparison against ``resolved.yaw_deg``) for every region
-    # without ever needing to move the tracker between observations. A site
-    # whose declared poses face different directions would need a resolver
-    # that also updates the tracker's heading per pose -- out of this
-    # harness's scope (see the task report).
+    # This offline fake fixes the heading at the first forward-facing pose.
+    # The current cases complete coverage before needing either side look;
+    # exercising those poses would require the fake resolver to refresh the
+    # tracker heading as well as the executor's reported position.
     regions = declared_regions(site)
     declared_yaw = resolve_pose_id(site, regions[0]).yaw_deg if regions else site.home.heading_deg
     home = site.home.nominal_pose
@@ -752,17 +746,22 @@ def run_readonly_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path
 def run_count_computers_case(judge_factory: Callable[[], ChoiceJudge], *, tmp_dir: Path,
                              artifact_root: Path = ARTIFACT_ROOT,
                              acceptance: AcceptancePolicy = ROOM_LOOP_ACCEPTANCE) -> CaseResult:
-    """Task V2's fifth case: "count the computers in the room" with two
-    computers seen in two different regions (left and right; the center
-    shows none)."""
+    """Count computers in the two views the measured site's grid requires.
+
+    The front-centre view covers the front row; rear-centre then resolves the
+    remaining row. Side views are optional and must not hold the only fake
+    computer evidence, since completing coverage need not visit them.
+    """
     env = build_environment(db_path=tmp_dir / "count_computers.sqlite3")
     try:
         regions = declared_regions(env.site)
-        if len(regions) < 3:
-            return CaseResult("count_computers", False, "the site declares fewer than three regions", None, 0)
+        if len(regions) < 2:
+            return CaseResult("count_computers", False, "the site declares fewer than two regions", None, 0)
         detector = FakeDetector(env, SESSION, tmp_dir)
         camera = env.count_geometry.camera
-        holding = {regions[1], regions[2]}
+        holding = {"center-front-middle-toward_targets", "center-rear-middle-toward_targets"}
+        if not holding <= set(regions):
+            return CaseResult("count_computers", False, "the site lacks the front/rear count views", None, 0)
         for index, pose_id in enumerate(regions):
             detections = (_detection("computer", "high", camera, index=index),) if pose_id in holding else ()
             detector.set_region(pose_id, detections)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
@@ -22,6 +23,7 @@ from sentinel.models import Position
 from .candidates import (build_candidates, build_observation_candidates, count_answer_candidate, count_scope,
                          is_search_objective, search_answer_candidate, search_pose_ids, search_sightings)
 from .coverage import CellObservation, CoverageProjection, project_coverage, render_coverage_note
+from .decision_prompt import build_decision_instruction
 from .grounding import CountGeometry, ground_frame, project_objective_count, render_objective_count
 from .ingest import ingest_result
 from .models import CandidateKind, GoalKind, GoalStatus, PhysicalCost, RoomCandidate, TerminalState
@@ -29,6 +31,7 @@ from .queries import READ_KINDS, ReadFact, ReadQueries, ReadSnapshot, ToolOutcom
 from .semantic import resolve_pose_id, semantic_region_of
 from .spatial import PoseEvidence, semantic_heading_to_compass_deg
 from .store import RoomStore, VersionConflict
+from .wiring import CapturedRequest
 
 if TYPE_CHECKING:
     from sentinel.survey.store import SurveyStore
@@ -159,7 +162,8 @@ class RoomController:
                  executor: Callable[[RoomCandidate, ReadSnapshot], tuple[ReadFact, ...]] | None = None,
                  ingest_pending: Callable[[str], object] | None = None,
                  supervisor=None, flight_executor=None, provider_wait_s: float = 10.0,
-                 resolve_checkpoint=None, perception_capture=None, perception_provider=None,
+                 resolve_checkpoint=None, resolve_sweep_checkpoints=None,
+                 perception_capture=None, perception_provider=None,
                  count_geometry: CountGeometry | None = None, acceptance: AcceptancePolicy | None = None):
         for value in (act_at, min_margin):
             if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
@@ -196,6 +200,9 @@ class RoomController:
             raise ValueError("resolve_checkpoint, perception_capture and perception_provider "
                              "must be supplied together")
         self.resolve_checkpoint, self.perception_capture = resolve_checkpoint, perception_capture
+        self.resolve_sweep_checkpoints = tuple(resolve_sweep_checkpoints or ())
+        if self.resolve_sweep_checkpoints and resolve_checkpoint is None:
+            raise ValueError("sweep checkpoints require resolve_checkpoint")
         self.perception_provider = perception_provider
         # Residual F2: the camera model and per-class support declarations
         # grounded counting places static detections with. Optional: without
@@ -290,7 +297,8 @@ class RoomController:
         for outcome in snapshot.outcomes:
             if outcome.kind != CandidateKind.OBSERVE.value or outcome.code != "OBSERVE_SUCCEEDED":
                 continue
-            if outcome.count_evidence is not None and outcome.count_evidence.pose.stale:
+            frames = outcome.count_evidences or ((outcome.count_evidence,) if outcome.count_evidence else ())
+            if frames and any(frame.pose.stale for frame in frames):
                 # Fix round 4 (Q4): a frame grounded from a pose already
                 # known stale at capture time placed nothing (spatial.py
                 # invalidates every estimate outright for it) -- crediting
@@ -302,14 +310,15 @@ class RoomController:
             observed_pose_id = outcome.candidate_id.rsplit(":", 1)[-1]
             if pose_id is not None and observed_pose_id != pose_id:
                 continue
-            observed_at = outcome.observed_at or outcome.event_id
-            for cell_id in dict(site.pose_visibility).get(observed_pose_id, ()):
-                cell = cells_by_id.get(cell_id)
-                if cell is None:
-                    continue
-                for class_name in cell.required_classes:
-                    observations.append(CellObservation(cell_id, class_name, observed_pose_id, "OBSERVED",
-                                                         observed_at, evidence_refs=(outcome.event_id,)))
+            observed_times = tuple(frame.captured_at for frame in frames) or (outcome.observed_at or outcome.event_id,)
+            for observed_at in observed_times:
+                for cell_id in dict(site.pose_visibility).get(observed_pose_id, ()):
+                    cell = cells_by_id.get(cell_id)
+                    if cell is None:
+                        continue
+                    for class_name in cell.required_classes:
+                        observations.append(CellObservation(cell_id, class_name, observed_pose_id, "OBSERVED",
+                                                             observed_at, evidence_refs=(outcome.event_id,)))
         return project_coverage(cells, tuple(observations),
                                 declared_views_by_cell={k: tuple(v) for k, v in declared_views_by_cell.items()})
 
@@ -326,9 +335,9 @@ class RoomController:
         room's coverage; a region objective counts only the frames taken
         from its requested region's declared pose, against that pose's own
         coverage cells. A scope with no count route contributes nothing."""
-        frames = tuple(o.count_evidence for o in snapshot.outcomes
+        frames = tuple(frame for o in snapshot.outcomes
                        if o.kind == CandidateKind.OBSERVE.value and o.code == "OBSERVE_SUCCEEDED"
-                       and o.count_evidence is not None)
+                       for frame in (o.count_evidences or ((o.count_evidence,) if o.count_evidence else ())))
         projections = []
         for objective in self._count_objectives(snapshot):
             scope, pose_id = count_scope(objective)
@@ -571,12 +580,13 @@ class RoomController:
                            tuple(e.event_id for e in events if e.state_version > version),
                            snapshot.terminal_state)
 
-    def wait_for_perception(self, operation, *, session_id):
+    def wait_for_perception(self, operation, *, session_id, timeout_s=None):
         """Bound a data-returning detector operation; its caller owns ingestion."""
+        timeout_s = self.provider_wait_s if timeout_s is None else timeout_s
         if self.supervisor is not None:
             return self.supervisor.run_wait(operation, snapshot_version=self.store.session_version(session_id),
-                                           timeout_s=self.provider_wait_s, executor=self.flight_executor)
-        return SupervisedWait().run(operation, time.monotonic() + self.provider_wait_s, lambda: None)
+                                           timeout_s=timeout_s, executor=self.flight_executor)
+        return SupervisedWait().run(operation, time.monotonic() + timeout_s, lambda: None)
 
     def _append(self, session_id, version, correlation, entries, causation=None):
         return self.store.append_events(session_id=session_id, expected_version=version, events=tuple(
@@ -586,7 +596,7 @@ class RoomController:
         ))
 
     def _outcome(self, snapshot, candidate_id, kind, digest, code, *, facts=(), terminal=None, refusal=None,
-                answer=None, observed_at=None, count_evidence=None):
+                answer=None, observed_at=None, count_evidence=None, count_evidences=None):
         # Every refusal path, including stale decisions before dispatch, shares
         # the persisted progress rule. Audit-only version changes are not new
         # relevant evidence and cannot create an unbounded invalid-choice loop.
@@ -603,6 +613,8 @@ class RoomController:
             result["observed_at"] = observed_at
         if count_evidence is not None:
             result["count_evidence"] = count_evidence
+        if count_evidences is not None:
+            result["count_evidences"] = count_evidences
         return result
 
     def _has_flown(self, session_id: str) -> bool:
@@ -802,6 +814,9 @@ class RoomController:
             # Task B item 2c: this turn's localization health, so Jev can
             # choose an early bounded re-anchor (never coordinates).
             state["localization"] = self.localization_health()
+        coverage = self._coverage(snapshot) if self.supervisor is not None else project_coverage((), ())
+        instruction = build_decision_instruction(snapshot, coverage, state.get("localization"),
+                                                 tuple(candidates.values()))
         started = time.monotonic_ns()
         policy = self.acceptance
 
@@ -809,7 +824,7 @@ class RoomController:
             def choose(cancel):
                 try:
                     return self.judge.choice(deepcopy(asked_state),
-                        "Choose one legal action. Reads are historical. Never compose factual values.",
+                        instruction,
                         criteria=dict(criteria), name="room_action"), None
                 except Exception as exc:
                     return None, type(exc).__name__
@@ -918,7 +933,8 @@ class RoomController:
                     return replace(outcome, event_ids=tuple(e.event_id for e in prior) + outcome.event_ids)
                 payload = self._outcome(snapshot, candidate_id, kind, digest, outcome["code"],
                                         refusal=outcome.get("refusal"), observed_at=outcome.get("observed_at"),
-                                        count_evidence=outcome.get("count_evidence"))
+                                        count_evidence=outcome.get("count_evidence"),
+                                        count_evidences=outcome.get("count_evidences"))
                 return self._record(snapshot, correlation, payload, prior=prior)
             elif selected.kind == CandidateKind.REANCHOR:
                 # Task B item 2c: the supervisor's own stationary recovery,
@@ -1079,8 +1095,11 @@ class RoomController:
         of this plan's declared commands -- never inferred merely from the
         outcome's top-level status/observation_ids, which a recovery or
         partial re-dispatch outcome can satisfy vacuously."""
-        return any(state.status == "COMPLETED" and state.command.kind == "CAPTURE"
-                   and state.command in plan.commands for state in result.command_states)
+        planned = tuple(command for command in plan.commands if command.kind == "CAPTURE")
+        completed = tuple(state.command for state in result.command_states
+                          if state.status == "COMPLETED" and state.command.kind == "CAPTURE"
+                          and state.command in planned)
+        return bool(planned) and len(completed) == len(planned) == len(result.observation_ids)
 
     def _checkpoint_completed_since(self, session_id, version) -> bool:
         """Whether any command was executed and recorded after ``version``
@@ -1094,10 +1113,10 @@ class RoomController:
         except Exception:
             return True
 
-    def _record_perception_preempted(self, session_id, candidate, snapshot, correlation, request):
+    def _record_perception_preempted(self, session_id, candidate, snapshot, correlation, requests):
         """Fix round 3 (F4): a perception wait preempted by a mandatory
         safety transition after the checkpoint's own CAPTURE already
-        completed must never silently drop that capture. Persist a durable,
+        completed must never silently drop those captures. Persist a durable,
         non-terminal OBSERVE outcome referencing the issued perception
         request (so a later delivery, or a fresh OBSERVE retry, is never
         mistaken for a session that flew this checkpoint and captured
@@ -1110,8 +1129,13 @@ class RoomController:
         digest = candidate.relevant_state_sha256
         payload = self._outcome(snapshot, candidate.candidate_id, candidate.kind, digest,
                                 "PERCEPTION_PREEMPTED", refusal="PERCEPTION_PREEMPTED")
+        request = requests[0]
         payload["perception_request"] = {"observation_id": request.observation_id, "frame_id": request.frame_id,
                                          "frame_path": request.frame_path, "captured_at": request.captured_at}
+        payload["perception_requests"] = [
+            {"observation_id": item.observation_id, "frame_id": item.frame_id,
+             "frame_path": item.frame_path, "captured_at": item.captured_at}
+            for item in requests]
         try:
             self._append(session_id, self.store.session_version(session_id),
                         correlation + ":perception-preempted", (("ROOM_TOOL_OUTCOME", payload),))
@@ -1120,7 +1144,7 @@ class RoomController:
 
     def _execute_observation(self, session_id, candidate, snapshot, expected_version, correlation):
         """Resolve, admit and dispatch exactly one checkpoint for ``candidate``,
-        then wait for and ingest its correlated perception result.
+        then wait for and ingest every correlated perception result.
 
         Returns a plain dict payload (``{"code": ..., "refusal": ...}``) for the
         normal ROOM_TOOL_OUTCOME append path, or a fully-formed ``TurnOutcome``
@@ -1135,55 +1159,44 @@ class RoomController:
         resolved = resolve_pose_id(self.supervisor.site, pose_id)
         if plan is None or resolved is None or not self._checkpoint_targets_declared_pose(resolved, plan):
             return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
-        # Fix round 1 (Q6): admit the checkpoint AND the airborne perception
-        # wait that follows it as one action -- a checkpoint that is only
-        # affordable by itself, but not together with its own provider wait,
-        # must never be admitted only to be preempted before perception runs.
-        # Fix round 1 (Q7): a refresh/dispatch failure here is a typed,
-        # fail-closed outcome, never the shared tail's fixed-CAS append (which
-        # would misreport already-executed motion as a stale decision).
-        try:
-            admission = self.supervisor.prepare(snapshot_version=expected_version, checkpoint=plan,
-                                                provider_wait_s=self.provider_wait_s,
-                                                replan=lambda: self.resolve_checkpoint(candidate, snapshot))
-        except Exception:
-            terminal = self.supervisor.refresh_failure(self.flight_executor)
-            return self._preempted(session_id, None, terminal)
-        # Fix round 3 (F9): a concurrent write racing this checkpoint's own
-        # admission -- not only one that preempts the Jev choice itself
-        # (see ``_decide``'s ``VersionConflict`` handling before dispatch) --
-        # is a typed STALE_DECISION, never a physical CHECKPOINT_FAILED.
-        # Residual NB1: ``SafetySupervisor._dispatch`` can also raise a plain
-        # VersionConflict *after* earlier commands of this same checkpoint
-        # already executed (the per-command CAS audit of a later command).
-        # STALE_DECISION ("nothing was dispatched") is only true when no
-        # command of this turn completed; otherwise motion happened and the
-        # outcome is a physical CHECKPOINT_FAILED.
-        try:
-            result = self.supervisor.dispatch(admission, self.flight_executor)
-        except VersionConflict:
-            if self._checkpoint_completed_since(session_id, expected_version):
+        # The full plan proves the declared destination and sweep shape. In
+        # live sessions each look is then planned from a fresh tracker pose
+        # and admitted as its own checkpoint. Forecasting all three looks as
+        # one leg exceeds the calibrated drift envelope even though each
+        # individually supervised leg is safe.
+        resolvers = self.resolve_sweep_checkpoints or (self.resolve_checkpoint,)
+        completed_legs = []
+        for index, resolver in enumerate(resolvers):
+            try:
+                leg = resolver(candidate, snapshot) if self.resolve_sweep_checkpoints else plan
+                if not self._checkpoint_targets_declared_pose(resolved, leg):
+                    return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
+                admission = self.supervisor.prepare(
+                    snapshot_version=(expected_version if index == 0 else self.store.session_version(session_id)),
+                    checkpoint=leg, provider_wait_s=self.provider_wait_s if index == len(resolvers) - 1 else 0,
+                    replan=lambda resolver=resolver: resolver(candidate, snapshot))
+            except Exception:
+                terminal = self.supervisor.refresh_failure(self.flight_executor)
+                return self._preempted(session_id, None, terminal)
+            try:
+                leg_result = self.supervisor.dispatch(admission, self.flight_executor)
+            except VersionConflict:
+                if self._checkpoint_completed_since(session_id, expected_version):
+                    return {"code": "CHECKPOINT_FAILED", "refusal": "CHECKPOINT_FAILED"}
+                return {"code": "STALE_DECISION", "refusal": "STALE_DECISION"}
+            except Exception:
                 return {"code": "CHECKPOINT_FAILED", "refusal": "CHECKPOINT_FAILED"}
-            return {"code": "STALE_DECISION", "refusal": "STALE_DECISION"}
-        except Exception:
-            return {"code": "CHECKPOINT_FAILED", "refusal": "CHECKPOINT_FAILED"}
-        if admission.transition != "CONTINUE" or isinstance(result, TerminalOutcome):
-            # Mandatory recovery/return/contingency: the checkpoint the candidate
-            # asked for was never (fully) executed as chosen. No perception is
-            # attempted; a fresh Jev choice must wait for the next turn.
-            terminal_outcome = result if isinstance(result, TerminalOutcome) else None
-            return self._preempted(session_id, admission, terminal_outcome=terminal_outcome)
-        if (result.status != "COMPLETED" or not result.completion_known or not result.observation_ids
-                or not self._capture_completed(plan, result)):
-            # SDK/command completion uncertainty -- or a mid-plan safety
-            # re-dispatch that resolved through recovery instead of actually
-            # running this checkpoint's commands (fix round 1, Q5: recovery's
-            # own vacuous CheckpointOutcome always carries empty
-            # observation_ids, never a real capture; fix round 2, Q5: never
-            # trust status/observation_ids alone -- require the per-command
-            # record to show this plan's own CAPTURE actually completed) --
-            # is never treated as a success, and never releases a second
-            # optional checkpoint this turn.
+            if admission.transition != "CONTINUE" or isinstance(leg_result, TerminalOutcome):
+                terminal_outcome = leg_result if isinstance(leg_result, TerminalOutcome) else None
+                return self._preempted(session_id, admission, terminal_outcome=terminal_outcome)
+            if (leg_result.status != "COMPLETED" or not leg_result.completion_known
+                    or not self._capture_completed(leg, leg_result)):
+                return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
+            completed_legs.append(leg_result)
+        result = replace(completed_legs[-1],
+                         command_states=tuple(state for leg in completed_legs for state in leg.command_states),
+                         observation_ids=tuple(frame for leg in completed_legs for frame in leg.observation_ids))
+        if len(result.observation_ids) != sum(command.kind == "CAPTURE" for command in plan.commands):
             return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
         # Fix round 4 (Q2): capture the tracker's health exactly once, here,
         # right after dispatch -- the same sample the measured-pose check
@@ -1203,62 +1216,90 @@ class RoomController:
             # that merely claimed the right pose.
             return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
         try:
-            request = self.perception_capture(candidate, result, snapshot)
+            captured = self.perception_capture(candidate, result, snapshot)
+            captures = (captured if isinstance(captured, tuple)
+                        else (CapturedRequest(captured, health.heading_deg),))
+            if not captures or len(captures) != len(result.observation_ids):
+                return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
         except Exception:
             return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
 
         def perceive(cancel):
+            results, errors = [], []
+            # Each request is independent; run the three provider calls in
+            # parallel so the supervisor's one bounded wait is the actual
+            # worst-case airborne detector interval. Results are restored to
+            # capture order before correlation and durable ingestion.
+            pool = ThreadPoolExecutor(max_workers=len(captures), thread_name_prefix="room-perception")
             try:
-                return self.perception_provider(request), None
-            except Exception as exc:
-                return None, type(exc).__name__
+                futures = tuple(pool.submit(self.perception_provider, item.request) for item in captures)
+                for future in futures:
+                    if cancel.is_set():
+                        break
+                    try:
+                        results.append(future.result())
+                    except Exception as exc:
+                        errors.append(type(exc).__name__)
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+            return tuple(results), tuple(errors)
 
-        waited = self.wait_for_perception(perceive, session_id=session_id)
+        waited = self.wait_for_perception(perceive, session_id=session_id,
+                                          timeout_s=self.provider_wait_s)
         if waited.status == "PREEMPTED":
-            self._record_perception_preempted(session_id, candidate, snapshot, correlation, request)
+            self._record_perception_preempted(session_id, candidate, snapshot, correlation,
+                                              tuple(item.request for item in captures))
             return self._preempted(session_id, self.supervisor.last_preemption)
         if waited.status == "COMPLETED":
-            perception_result, provider_error = waited.value
+            perception_results, provider_errors = waited.value
         else:
-            perception_result, provider_error = None, waited.status
-        if provider_error or perception_result is None:
+            perception_results, provider_errors = (), (waited.status,)
+        if provider_errors or len(perception_results) != len(captures):
             return {"code": "PROVIDER_ERROR", "refusal": "PROVIDER_ERROR"}
         # Fix round 1 (S1/Q4): the result must actually correlate to the
         # request this turn issued, and ingestion's own authorization must be
         # checked -- a stale snapshot_version, a session mismatch or a
         # replayed/duplicate delivery must never be reported the same as a
         # freshly authorized observation.
-        if perception_result.request != request or request.session_id != session_id:
+        if any(perception_result.request != captured_frame.request
+               or captured_frame.request.session_id != session_id
+               for captured_frame, perception_result in zip(captures, perception_results)):
             return {"code": "PERCEPTION_MISMATCH", "refusal": "PERCEPTION_MISMATCH"}
         try:
             current_version = self.store.session_version(session_id)
-            ingest_outcome = ingest_result(self.store, perception_result, current_snapshot_version=current_version)
+            ingest_outcomes = tuple(ingest_result(self.store, perception_result,
+                                                  current_snapshot_version=current_version)
+                                    for perception_result in perception_results)
         except Exception:
             return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
-        if perception_result.status != "SUCCEEDED":
+        if any(perception_result.status != "SUCCEEDED" for perception_result in perception_results):
             return {"code": "PROVIDER_ERROR", "refusal": "PROVIDER_ERROR"}
-        if not ingest_outcome.authorizes_current_state:
+        if not all(outcome.authorizes_current_state for outcome in ingest_outcomes):
             return {"code": "STALE_RESULT", "refusal": "STALE_RESULT"}
         # Residual F2: ground this frame's detections at the pose the
         # checkpoint actually measured, now -- the pose, camera model and
         # support declarations are persisted with the outcome, so later
         # counts are a pure projection of append-only session state.
         try:
-            count_evidence = self._ground_observation(resolved, result, request, perception_result, health)
+            count_evidences = tuple(self._ground_observation(
+                resolved, result, captured_frame.request, perception_result, health,
+                heading_deg=captured_frame.heading_deg)
+                for captured_frame, perception_result in zip(captures, perception_results))
         except Exception:
             return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
         # Fix round 1 (Q12): carry the perception's own measured capture time
         # forward for coverage bookkeeping, never a fabricated timestamp and
         # never the durable event ID (see _coverage).
-        return {"code": "OBSERVE_SUCCEEDED", "observed_at": perception_result.completed_at,
-                "count_evidence": count_evidence.to_payload()}
+        return {"code": "OBSERVE_SUCCEEDED", "observed_at": perception_results[-1].completed_at,
+                "count_evidence": count_evidences[0].to_payload(),
+                "count_evidences": [evidence.to_payload() for evidence in count_evidences]}
 
-    def _ground_observation(self, resolved, result, request, perception_result, health):
-        """Residual F2: turn one authorized observation into persisted count
+    def _ground_observation(self, resolved, result, request, perception_result, health, *, heading_deg=None):
+        """Residual F2: turn one authorized frame into persisted count
         evidence. The camera position is the checkpoint's *measured*
         post-dispatch position (already verified against the declared pose,
-        see ``_measured_pose_matches_declared_pose``) and the tracker's
-        heading, converted once into the compass convention
+        see ``_measured_pose_matches_declared_pose``) and the recorded heading
+        at this frame's CAPTURE, converted once into the compass convention
         ``estimate_detection`` uses. A tag-anchored pose is MEASURED; any
         other pose source is dead-reckoned (COMMANDED, wider covariance); a
         pose needing recovery or lost is stale, so nothing is placed from it.
@@ -1271,7 +1312,7 @@ class RoomController:
         against."""
         pose = PoseEvidence(
             result.pose.x_cm, result.pose.y_cm, result.pose.z_cm,
-            semantic_heading_to_compass_deg(health.heading_deg), 0.0,
+            semantic_heading_to_compass_deg(health.heading_deg if heading_deg is None else heading_deg), 0.0,
             "MEASURED" if health.source == "mapped_joint_tags" else "COMMANDED",
             request.captured_at,
             health.state in (LocalizationState.RECOVERY_REQUIRED, LocalizationState.LOST),

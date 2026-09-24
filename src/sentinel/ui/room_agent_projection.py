@@ -13,6 +13,9 @@ from copy import deepcopy
 import math
 import threading
 
+from sentinel.room.association import associate_static
+from sentinel.room.grounding import FrameCountEvidence
+
 HOME_TOLERANCE_CM = 25.0
 _REGION_LABELS = {"center": "Center", "left": "Left", "right": "Right"}
 _PLURAL = {"computer": "computers", "phone": "phones", "person": "people", "pen": "pens"}
@@ -80,6 +83,7 @@ class RoomAgentProjection:
         self._last_localization = None
         self._offered_regions = []
         self._class_order = []
+        self._count_frames = []
 
     # -- external steps (bursts are observed at the stack, not the ledger) ----
     def note_burst(self, *, heading_deg, tags, reports, purpose="recovery burst"):
@@ -277,17 +281,30 @@ class RoomAgentProjection:
             s["decisions"][-1]["result"] = code
         if candidate_id.startswith("OBSERVE:"):
             region = self._region(candidate_id.rsplit(":", 1)[-1])
-            evidence = payload.get("count_evidence") or {}
             if code == "OBSERVE_SUCCEEDED":
                 region["status"] = "OBSERVED"
-                low = set(evidence.get("low_confidence_estimate_ids") or ())
-                for estimate in evidence.get("estimates") or ():
+                frames = payload.get("count_evidences") or (
+                    (payload["count_evidence"],) if payload.get("count_evidence") else ())
+                self._count_frames.extend(FrameCountEvidence.from_payload(frame) for frame in frames)
+                estimates = tuple(estimate for frame in self._count_frames for estimate in frame.estimates)
+                objects = associate_static((), estimates)
+                low = {estimate_id for frame in self._count_frames
+                       for estimate_id in frame.low_confidence_estimate_ids}
+                region_by_estimate = {estimate.estimate_id: region_label(frame.pose_id)
+                                      for frame in self._count_frames for estimate in frame.estimates}
+                for row in s["regions"].values():
+                    row["detections"] = 0
+                s["detections"] = []
+                for obj in objects:
+                    label = region_by_estimate[obj.member_estimate_ids[0]]
                     s["detections"].append(dict(
-                        class_name=estimate.get("class_name"), region=region["label"],
-                        x_cm=round(float(estimate.get("x_cm", 0)), 1), y_cm=round(float(estimate.get("y_cm", 0)), 1),
-                        confidence="low" if estimate.get("estimate_id") in low else "high"))
-                    region["detections"] += 1
-                s["unplaced"] += len(evidence.get("unplaced") or ())
+                        class_name=obj.class_name, region=label,
+                        x_cm=round(obj.x_cm, 1), y_cm=round(obj.y_cm, 1),
+                        confidence="low" if all(member in low for member in obj.member_estimate_ids) else "high"))
+                    region_row = next((row for row in s["regions"].values() if row["label"] == label), None)
+                    if region_row is not None:
+                        region_row["detections"] += 1
+                s["unplaced"] = sum(len(frame.unplaced) for frame in self._count_frames)
             elif region["status"] != "OBSERVED":
                 region["status"] = "FAILED" if code in ("TOOL_FAILURE",) else code or "FAILED"
         if payload.get("answer"):

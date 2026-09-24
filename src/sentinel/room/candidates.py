@@ -232,6 +232,22 @@ def _benefit(cell_ids, coverage: CoverageProjection) -> int:
     return sum(1 for entry in coverage.uncovered if entry.split(":", 1)[0] in cell_ids)
 
 
+def _coverage_gain_description(pose_id: str, site: RoomSite, coverage: CoverageProjection) -> str:
+    """Describe the unresolved coverage a declared pose can add this turn."""
+    visible = set(dict(site.pose_visibility).get(pose_id, ()))
+    pairs = tuple(entry for entry in coverage.uncovered if entry.split(":", 1)[0] in visible)
+    cells = sorted({entry.split(":", 1)[0] for entry in pairs})
+    if not cells:
+        return "no declared unexplored cells are mapped to this pose"
+    cell_word = "cell" if len(cells) == 1 else "cells"
+    pair_word = "pair" if len(pairs) == 1 else "pairs"
+    sample = ", ".join(cells[:3])
+    if len(cells) > 3:
+        sample += f", +{len(cells) - 3} more"
+    return (f"adds a view of {len(cells)} unexplored {cell_word} ({sample}); "
+            f"could resolve {len(pairs)} unresolved cell/class {pair_word}")
+
+
 def _observe_suppressed(outcomes: tuple[ToolOutcome, ...], candidate_id: str, digest: str) -> bool:
     return any(o.candidate_id == candidate_id and o.relevant_state_sha256 == digest
                and (o.refusal_code is not None or o.code == "OBSERVE_SUCCEEDED")
@@ -350,8 +366,11 @@ def _search_candidates(objective: GoalObjective, site: RoomSite, coverage: Cover
     for pose_id in search_pose_ids(objective, site):
         if pose_id in observed:
             continue
-        description = (f"Search for {classes}: fly to declared pose {pose_id} and look for it there "
-                       f"(objective {objective.objective_id}).")
+        gain = _benefit(set(dict(site.pose_visibility).get(pose_id, ())), coverage)
+        coverage_note = (f"; {_coverage_gain_description(pose_id, site, coverage)}" if gain else "")
+        description = (f"Search for {classes}: observe unvisited declared search viewpoint {pose_id} "
+                       f"(objective {objective.objective_id}); this advances the search"
+                       f"{coverage_note}.")
         candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version)
         if candidate is not None:
             candidates.append(candidate)
@@ -441,7 +460,8 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
                     if candidate is not None:
                         region_candidates.append(candidate)
                 continue
-            description = f"Observe declared pose {pose_id}, the region requested for objective {objective.objective_id}."
+            description = (f"Observe declared pose {pose_id}, the requested region for objective "
+                           f"{objective.objective_id}; {_coverage_gain_description(pose_id, site, coverage)}.")
             candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version)
             if candidate is None:
                 candidate = _incomplete_answer_candidate(objective, coverage, outcomes, snapshot_version,
@@ -458,8 +478,8 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
             benefit = _benefit(set(cell_ids), coverage)
             if benefit <= 0:
                 continue
-            description = (f"Observe declared pose {pose_id}: resolves {benefit} currently unresolved "
-                           f"coverage cell/class pair(s) for objective {objective.objective_id}.")
+            description = (f"Observe declared pose {pose_id} for objective {objective.objective_id}: "
+                           f"{_coverage_gain_description(pose_id, site, coverage)}.")
             candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version)
             if candidate is not None:
                 scored.append((benefit, candidate))

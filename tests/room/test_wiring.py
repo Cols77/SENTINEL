@@ -67,6 +67,21 @@ def test_resolve_checkpoint_targets_the_resolved_pose_at_its_declared_heading():
     assert any(command.kind == "CAPTURE" for command in plan.commands)
 
 
+def test_resolve_checkpoint_sweeps_three_headings_and_restores_declared_yaw():
+    site = room_site(coverage=True)
+    resolved = resolve_pose_id(site, POSE_ID)
+    pose = SimpleNamespace(position=Position(0, 0, 100), heading_deg=90.0)
+    plan = wiring.make_resolve_checkpoint(
+        site=site, profile=_profile(), pose_source=lambda: pose, limits=_limits(),
+    )(_candidate(), None)
+    captures = [command for command in plan.commands if command.kind == "CAPTURE"]
+    assert [dict(command.arguments)["look_deg"] for command in captures] == [
+        resolved.yaw_deg - 90 - 30, resolved.yaw_deg - 90, resolved.yaw_deg - 90 + 30,
+    ]
+    assert plan.terminal_heading_deg == pytest.approx(resolved.yaw_deg)
+    assert _propagate(plan).heading_deg % 360 == pytest.approx(resolved.yaw_deg % 360)
+
+
 def test_resolve_checkpoint_uses_the_slowest_validated_calibration_speed():
     site = room_site(coverage=True)
     pose = SimpleNamespace(position=Position(0, 0, 100), heading_deg=90.0)
@@ -225,6 +240,28 @@ def test_perception_capture_writes_a_valid_correlated_request(tmp_path):
     assert request.requested_model == "test-model-v1"
     assert request.action_id == _candidate().candidate_id
     assert client.calls == [10.0]
+
+
+def test_perception_capture_uses_every_saved_checkpoint_frame_and_capture_heading(tmp_path):
+    store = _session(tmp_path)
+    paths = [tmp_path / f"checkpoint-{i}.png" for i in range(3)]
+    for path in paths:
+        _write_png(path)
+    records = {f"capture-{i}": (path, f"2026-09-23T00:00:0{i}+00:00", heading)
+               for i, (path, heading) in enumerate(zip(paths, (60.0, 90.0, 120.0)))}
+    client = FakeFlightClient(_small_frame())
+    capture = wiring.make_perception_capture(
+        store=store, flight_client=client, frames_dir=tmp_path / "frames",
+        requested_model="test-model-v1", run_id="run-1", capture_records=records,
+    )
+    outcome = SimpleNamespace(observation_ids=tuple(records))
+    captures = capture(_candidate(), outcome, SimpleNamespace(session_id="session", pose_revision=0))
+    assert [item.request.frame_path for item in captures] == [str(path) for path in paths]
+    assert [item.heading_deg for item in captures] == [60.0, 90.0, 120.0]
+    assert [item.request.captured_at for item in captures] == [record[1] for record in records.values()]
+    assert len({item.request.request_digest for item in captures}) == 3
+    assert all(validate_request(item.request) is None for item in captures)
+    assert client.calls == []
 
 
 def test_perception_capture_reads_the_session_version_fresh_not_stale(tmp_path):

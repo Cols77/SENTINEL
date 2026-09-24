@@ -1,13 +1,15 @@
 """Read projections use persisted evidence, never live providers."""
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import pytest
 
 from sentinel.room.goals import EntityRef, GoalLedger, GoalObjective
+from sentinel.room.grounding import FrameCountEvidence
 from sentinel.room.ingest import ingest_result
 from sentinel.room.models import CandidateKind, CapabilityProfile, GoalKind, GoalStatus, TerminalState
 from sentinel.room.queries import ReadFact, ReadQueries, render_answer
 from sentinel.room.store import RoomStore
+from sentinel.room.spatial import PoseEvidence
 from sentinel.survey.store import SurveyStore
 from tests.room.test_ingest import sample
 
@@ -102,6 +104,29 @@ def test_observations_are_historical_and_do_not_invent_numeric_confidence(room, 
     assert set(fact.evidence_ids) == {"o1", "f1", "d1", outcome.result_id}
     assert "historical" in fact.uncertainty
     assert "VLM_CONFIDENCE_BAND" in render_answer((fact,))
+
+
+def test_failed_observe_sweep_does_not_publish_partially_ingested_frame(room, tmp_path):
+    result = sample(tmp_path)
+    result = replace(result, request=replace(result.request, action_id="OBSERVE:g1:pose1"))
+    ingest_result(room, result, current_snapshot_version=0)
+    append(room, "ROOM_TOOL_OUTCOME", {
+        "candidate_id": result.request.action_id, "kind": "OBSERVE",
+        "relevant_state_sha256": "digest", "code": "PROVIDER_ERROR",
+    })
+    queries = ReadQueries(room)
+    assert queries.read(CandidateKind.READ_OBSERVATIONS, queries.project("s1")) == ()
+
+    frame = FrameCountEvidence(result.request.observation_id, result.request.frame_id,
+                               "pose1", result.request.captured_at,
+                               PoseEvidence(0, 0, 100, 90, captured_at=result.request.captured_at))
+    append(room, "ROOM_TOOL_OUTCOME", {
+        "candidate_id": result.request.action_id, "kind": "OBSERVE",
+        "relevant_state_sha256": "digest2", "code": "OBSERVE_SUCCEEDED",
+        "count_evidences": [frame.to_payload()],
+    })
+    fact, = queries.read(CandidateKind.READ_OBSERVATIONS, queries.project("s1"))
+    assert fact.scope == "observation:o1/frame:f1"
 
 
 @pytest.mark.parametrize("recorded_at", [None, "2026-09-23T00:00:00.999000+00:00",

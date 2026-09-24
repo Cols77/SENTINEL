@@ -1,8 +1,8 @@
-"""Task B item 4: the flyable CanningSt room site.
+"""The measured CanningSt room site and its safety admissions.
 
 ``fixtures/room_agent/v1/canningst-site.json`` is the room-site document for
-Mission Control's ``CanningSt`` profile: the WP5 cube of
-``docs/wp5-flight1-site.json``, the tag map ``docs/wp5-flight3-map.json``,
+Mission Control's ``CanningSt`` profile: the 2026-09-24 operator-measured
+clearance, the tag map ``docs/wp5-flight3-map.json``,
 start 250,190 cm and the demo surface at 50 cm. These tests pin it to those
 sources and prove the supervisor admits takeoff from it with the real
 stack's pre-takeoff tracker anchoring (the tracker anchored on the pad at pad
@@ -29,12 +29,27 @@ from sentinel.room.site import parse_room_site, room_site_document
 from sentinel.room.store import RoomStore
 from sentinel.room.supervisor import SafetySupervisor
 from tests.room import test_live_session as live_fakes
-from tests.room.test_live_stack import Bursts, FakeTransport, reports
+from tests.room.test_live_stack import Bursts, FakeTello, FakeTransport, reports
 
 ROOT = Path(__file__).resolve().parents[2]
 SITE_PATH = ROOT / "fixtures" / "room_agent" / "v1" / "canningst-site.json"
 CUBE_PATH = ROOT / "docs" / "wp5-flight1-site.json"
 TAG_MAP_PATH = ROOT / "docs" / "wp5-flight3-map.json"
+
+
+class MeasuredHeightTello(FakeTello):
+    """The CanningSt unit reports 40 cm at takeoff, 30–40 below true height."""
+
+    def takeoff(self):
+        result = super().takeoff()
+        self.height_dm = 4
+        return result
+
+
+class MeasuredHeightTransport(FakeTransport):
+    def __init__(self, **tello_kwargs):
+        super().__init__(**tello_kwargs)
+        self.tello = MeasuredHeightTello(**tello_kwargs)
 
 
 def canningst_site():
@@ -52,26 +67,29 @@ def test_canningst_site_binds_the_mission_control_cube_and_tag_map():
     assert parse_room_site(room_site_document(site)) == site
 
 
-def test_canningst_geometry_is_the_wp5_cube_with_front_toward_the_tags():
+def test_canningst_geometry_uses_the_measured_clearance_and_faces_the_tags():
     site = canningst_site()
-    cube = json.loads(CUBE_PATH.read_text(encoding="utf-8"))["cube"]
     volumes = {volume.volume_id: volume for volume in site.free_space_volumes}
-    footprint = ((round(cube["min_x_m"] * 100), round(cube["min_y_m"] * 100)),
-                 (round(cube["max_x_m"] * 100), round(cube["min_y_m"] * 100)),
-                 (round(cube["max_x_m"] * 100), round(cube["max_y_m"] * 100)),
-                 (round(cube["min_x_m"] * 100), round(cube["max_y_m"] * 100)))
-    assert volumes["cube"].polygon_xy_cm == volumes["flight"].polygon_xy_cm == footprint
-    assert volumes["flight"].z_interval_cm == (60, 180)  # WP5 commanded altitude band
-    # Task B2 fix 1: the semantic (and runner) envelope is the smaller
-    # observation volume inside the cube, so the three regions stand 20 cm
-    # apart at the takeoff height: the history drift admits them (the WP5
-    # inset corners x 190/310 at z 120 it does not, see below).
+    # 2026-09-24 operator measurement replaces the smaller WP5 cube. The
+    # reported-height floor 40 accounts for Tello's 30–40 cm under-reading.
+    assert volumes["cube"].polygon_xy_cm == ((90, 109), (410, 109), (410, 400), (90, 400))
+    assert volumes["cube"].z_interval_cm == (-20, 250)
+    assert volumes["flight"].polygon_xy_cm == ((120, 140), (380, 140), (380, 360), (120, 360))
+    assert volumes["flight"].z_interval_cm == (40, 250)
     envelope = live_stack.site_envelope(site)
-    assert (envelope.min_x_cm, envelope.max_x_cm, envelope.min_y_cm, envelope.max_y_cm) == (220, 280, 160, 300)
-    assert (envelope.min_z_cm, envelope.max_z_cm) == (60, 140)
+    assert (envelope.min_x_cm, envelope.max_x_cm, envelope.min_y_cm, envelope.max_y_cm) == (190, 310, 160, 220)
+    assert (envelope.min_z_cm, envelope.max_z_cm) == (40, 100)
     assert site.semantic_frame.rear_to_front_axis_xy == (0.0, 1.0)  # front = max Y, the tag stands' side
     poses = {pose_id: resolve_pose_id(site, pose_id) for pose_id in (LEFT, CENTER, RIGHT)}
-    assert [(p.x_cm, p.y_cm, p.z_cm) for p in poses.values()] == [(230, 183, 100), (250, 183, 100), (270, 183, 100)]
+    assert [(p.x_cm, p.y_cm, p.z_cm) for p in poses.values()] == [(210, 170, 70), (250, 170, 70), (290, 170, 70)]
+    assert len(site.pose_visibility) == 8
+    assert all(resolve_pose_id(site, pose_id) is not None for pose_id, _ in site.pose_visibility)
+    assert {pose_id.split("-")[1] for pose_id, _ in site.pose_visibility} == {"rear", "middle", "front"}
+    corridor = site.corridors[0]
+    assert corridor.polygon_xy_cm == volumes["cube"].polygon_xy_cm
+    assert corridor.z_interval_cm == volumes["cube"].z_interval_cm
+    assert all(entry.landing_polygon_xy_cm == corridor.polygon_xy_cm
+               and entry.z_band_cm == (0, 250) for entry in site.terminal_contingencies)
 
 
 def test_canningst_home_is_the_start_pad_and_its_route_ends_over_it():
@@ -82,8 +100,9 @@ def test_canningst_home_is_the_start_pad_and_its_route_ends_over_it():
     assert (route.checkpoints[-1].x_cm, route.checkpoints[-1].y_cm) == (250, 190)
 
 
-def test_canningst_coverage_cells_lie_inside_the_commanded_flyable_area_and_planes_are_declared():
+def test_canningst_coverage_cells_tile_the_declared_demo_surface_and_planes_are_declared():
     site = canningst_site()
+    assert len(site.coverage_cells) == 6  # 120 × 80 cm surface, 40 cm grid.
     for cell in site.coverage_cells:
         assert all(190 <= x <= 310 and 190 <= y <= 270 for x, y in cell.polygon_xy_cm)
     planes = {plane.plane_id: plane.z_cm for plane in site.support_planes}
@@ -94,7 +113,7 @@ def test_supervisor_admits_takeoff_for_canningst_with_the_real_stack_pad_anchori
     site = canningst_site()
     clock = time.monotonic
     tracker = LocalizationTracker(live_fakes.drift_profile(), clock=clock, real_mode=True)
-    transport = FakeTransport()
+    transport = MeasuredHeightTransport()
     link = live_stack.TelloLink(build_client=transport, clock=clock)
     # The drone sits a few centimetres off the surveyed pad, facing the tags.
     factory = live_stack.TelloFlightStackFactory(
@@ -121,7 +140,7 @@ def test_supervisor_admits_takeoff_for_canningst_with_the_real_stack_pad_anchori
 
         home = supervisor.start(stack.executor)
         assert stack.executor.state == ExecutorState.AIRBORNE
-        assert (home.pose.x_cm, home.pose.y_cm) == (253, 186) and home.pose.z_cm == 100
+        assert (home.pose.x_cm, home.pose.y_cm) == (253, 186) and home.pose.z_cm == 40
         assert "takeoff" in transport.tello.sent and "land" not in transport.tello.sent
     finally:
         store.close()
@@ -173,7 +192,7 @@ def test_canningst_takeoff_is_admitted_under_one_trial_grant_with_the_history_pr
     grant = replace(grant, grant_sha256=canonical_grant_sha256(grant))
     clock = time.monotonic
     tracker = LocalizationTracker(binding.drift_profile, clock=clock, real_mode=True)
-    transport = FakeTransport(battery=90)
+    transport = MeasuredHeightTransport(battery=90)
     link = live_stack.TelloLink(build_client=transport, clock=clock)
     stack = live_stack.TelloFlightStackFactory(
         link=link, tag_map=None, run_id="run-0001", run_dir=tmp_path,
@@ -226,7 +245,7 @@ def _airborne_supervisor(tmp_path, drift_override=None, battery=90, *, recovery=
         drift = replace(drift, **drift_changes)
     clock = time.monotonic
     tracker = LocalizationTracker(drift, clock=clock, real_mode=True)
-    link = live_stack.TelloLink(build_client=FakeTransport(battery=battery), clock=clock)
+    link = live_stack.TelloLink(build_client=MeasuredHeightTransport(battery=battery), clock=clock)
     stack = live_stack.TelloFlightStackFactory(
         link=link, tag_map=None, run_id="run-0001", run_dir=tmp_path,
         pose_burst=Bursts(reports(250, 190, 90.0)), home_settle_s=0.0)(tracker=tracker, clock=clock, site=binding.site)
@@ -263,41 +282,44 @@ def _admission(supervisor, store, binding, pose_id):
 
 
 def _decisions(tmp_path, **kwargs):
-    supervisor, store, link, binding = _airborne_supervisor(tmp_path, **kwargs)
-    try:
-        return {pose_id: _admission(supervisor, store, binding, pose_id)
-                for pose_id, _ in binding.site.pose_visibility}
-    finally:
-        store.close()
-        link.close()
+    # A refusal latches RETURN_NOW on that supervisor. Assess each newly
+    # declared viewpoint from a fresh airborne home, as a separate flight
+    # opportunity, so an early refusal cannot poison the following results.
+    decisions = {}
+    for index, (pose_id, _) in enumerate(canningst_site().pose_visibility):
+        pose_dir = tmp_path / f"pose-{index}"
+        pose_dir.mkdir(parents=True)
+        supervisor, store, link, binding = _airborne_supervisor(pose_dir, **kwargs)
+        try:
+            decisions[pose_id] = _admission(supervisor, store, binding, pose_id)
+        finally:
+            store.close()
+            link.close()
+    return decisions
 
 
 CENTER, LEFT, RIGHT = ("center-rear-middle-toward_targets", "left-rear-middle-toward_targets",
                        "right-rear-middle-toward_targets")
 
 
-def test_the_regenerated_history_profiles_admit_every_region_after_takeoff(tmp_path):
-    """Task B2 item 3, the runbook's "What L3 will do": with the committed
-    profiles (robust drift 0.157 cm/cm, p90 of the nominal legs + 20 %) and
-    site (regions at x 230/250/270, the takeoff height) every region is
-    admitted at 90 % battery."""
+def test_an_unsegmented_three_look_checkpoint_is_refused_at_90_percent(tmp_path):
+    """A whole sweep has a longer uncertainty horizon than one SDK leg.
+
+    The controller segments it into three safely rechecked looks; this direct
+    supervisor test must not claim the whole sweep is admitted at takeoff.
+    """
     decisions = _decisions(tmp_path)
-    assert all(d.transition == "CONTINUE" for d in decisions.values()), {k: d.reason for k, d in decisions.items()}
-    # The reservation is well inside what 90 % leaves above the 20 % floor.
-    assert max(d.energy.action_cost_pct for d in decisions.values()) <= 45
+    assert all(d.transition != "CONTINUE" for d in decisions.values())
+    assert decisions[CENTER].transition == "RECOVER"
+    assert decisions[CENTER].reason == "LOCALIZATION_RECOVERY_REQUIRED"
+    assert "xy_uncertainty" in decisions[CENTER].pose_forecast.reasons
 
 
-def test_the_old_outlier_drift_is_still_refused_wherever_the_aircraft_must_move(tmp_path):
-    """The 0.45 cm/cm leg of the excluded run, declared as the drift: both
-    lateral regions are refused (the supervisor still refuses an absurd
-    drift). The center stays admitted: it is a hover over the pad (no
-    translation, so no per-centimetre drift)."""
+def test_the_old_outlier_drift_is_still_refused_for_the_new_translated_poses(tmp_path):
+    """Every new view translates from the pad; none merits this outlier drift."""
     decisions = _decisions(tmp_path, drift_override=0.45)
-    for pose_id in (LEFT, RIGHT):
-        assert decisions[pose_id].transition == "RETURN_NOW", (pose_id, decisions[pose_id].reason)
-        assert decisions[pose_id].reason in {"OPTIONAL_PATH_INVALID", "PROJECTED_TERMINATION_PATH_INVALID",
-                                             "PROJECTED_TERMINATION_LANDING_INVALID"}
-    assert decisions[CENTER].transition == "CONTINUE", decisions[CENTER].reason
+    assert all(d.transition != "CONTINUE" for d in decisions.values())
+    assert all(d.expected_reanchor is None for d in decisions.values())
 
 
 def test_at_30_percent_battery_the_mission_is_refused_before_takeoff(tmp_path):
@@ -313,25 +335,21 @@ def test_takeoff_needs_about_45_percent(tmp_path):
         _decisions(tmp_path / "refused", battery=40)
 
 
-@pytest.mark.parametrize("battery, center, lateral", [
-    (90, "CONTINUE", "CONTINUE"), (65, "CONTINUE", "CONTINUE"), (57, "CONTINUE", "RETURN_NOW"),
-    (50, "RETURN_NOW", "RETURN_NOW")])
-def test_the_battery_an_observation_needs(tmp_path, battery, center, lateral):
-    """The runbook's battery figures: an observation reserves its own worst
-    case, a recovery and the whole return (35 % center, 40 % left/right at
-    0.288 %/s): the center needs about 55 %, left/right about 60 %."""
+@pytest.mark.parametrize("battery", [50, 57, 65])
+def test_low_battery_refuses_the_full_three_look_checkpoint(tmp_path, battery):
+    """The old 55/60% figures were for one frame, not three looks.
+
+    This directly offered full checkpoint reserves all provider waits and is
+    unaffordable even though 50% still admits takeoff. The segmented live
+    mission exercises the actual observation path separately.
+    """
     decisions = _decisions(tmp_path, battery=battery)
-    assert decisions[CENTER].transition == center, decisions[CENTER].reason
-    for pose_id in (LEFT, RIGHT):
-        assert decisions[pose_id].transition == lateral, (pose_id, decisions[pose_id].reason)
+    assert all(d.transition == "RETURN_NOW" and d.reason == "OPTIONAL_WORK_UNAFFORDABLE"
+               for d in decisions.values())
 
 
-def test_the_wp5_corner_regions_are_refused_at_the_history_drift_even_without_hover_drift(tmp_path):
-    """Why the site has an observation envelope (Task B2 fix 1): over the
-    whole cube the left/right regions resolve to WP5's inset corners (x
-    190/310, z 120). Their out-and-back ends at the pad, 30 cm from the rear
-    face; 160 cm without a fix at 0.157 cm/cm is 25 cm, more than the 18 cm
-    the 12 cm rotation radius leaves -- refused even with zero hover drift."""
+def test_widening_the_semantic_envelope_does_not_bypass_the_full_sweep_guard(tmp_path):
+    """Even zero hover drift cannot make an unsegmented sweep admissible."""
     from dataclasses import replace
     from sentinel.room import live_session
     original = live_session.load_flight_binding
@@ -347,9 +365,7 @@ def test_the_wp5_corner_regions_are_refused_at_the_history_drift_even_without_ho
         decisions = _decisions(tmp_path)
     finally:
         live_session.load_flight_binding = original
-    assert decisions[CENTER].transition == "CONTINUE", decisions[CENTER].reason
-    for pose_id in (LEFT, RIGHT):
-        assert decisions[pose_id].transition == "RETURN_NOW", (pose_id, decisions[pose_id].reason)
+    assert all(d.transition != "CONTINUE" for d in decisions.values())
 
 
 # ---------------------------------------------------------------------------
@@ -361,9 +377,11 @@ def test_the_wp5_corner_regions_are_refused_at_the_history_drift_even_without_ho
 DOUBLED_HOVER = {"xy_drift_cm_s": 0.1}
 
 
-def test_the_site_declares_both_mapped_wall_tags_visible_from_every_region():
+def test_the_site_declares_tags_only_for_the_six_wall_facing_views():
     site = canningst_site()
-    assert dict(site.pose_tag_visibility) == {CENTER: (0, 2), LEFT: (0, 2), RIGHT: (0, 2)}
+    forward = {pose_id for pose_id, _ in site.pose_visibility if pose_id.endswith("toward_targets")}
+    assert len(forward) == 6  # Side looks face away from the two wall tags.
+    assert dict(site.pose_tag_visibility) == {pose_id: (0, 2) for pose_id in forward}
 
 
 def test_a_tag_visibility_declaration_must_name_a_declared_pose_and_valid_tags():
@@ -375,28 +393,20 @@ def test_a_tag_visibility_declaration_must_name_a_declared_pose_and_valid_tags()
             replace(site, pose_tag_visibility=bad).validate()
 
 
-def test_without_the_expected_reanchor_the_lateral_regions_are_refused_at_the_doubled_hover_drift(tmp_path):
-    """The control: no recovery adapter (so no yaw-scan recovery can be
-    reserved), or no declared tag visibility, and the fixless out-and-back
-    is refused exactly as before."""
+def test_no_tag_credit_is_granted_to_a_refused_full_sweep(tmp_path):
+    """A tag declaration cannot compensate for unaffordable full sweeps."""
     for label, kwargs in (("no-recovery", {}), ("no-tags", {"recovery": True,
                                                             "site_changes": {"pose_tag_visibility": ()}})):
         decisions = _decisions(tmp_path / label, drift_changes=DOUBLED_HOVER, **kwargs)
-        assert decisions[CENTER].transition == "CONTINUE", decisions[CENTER].reason
-        for pose_id in (LEFT, RIGHT):
-            assert decisions[pose_id].transition == "RETURN_NOW", (label, pose_id, decisions[pose_id].reason)
-            assert decisions[pose_id].expected_reanchor is None
+        assert all(d.transition != "CONTINUE" and d.expected_reanchor is None
+                   for d in decisions.values()), label
 
 
-def test_an_expected_reanchor_at_the_tag_visible_checkpoint_admits_the_lateral_regions(tmp_path):
-    """Task V2 item 0: the return may start from the tag fix the checkpoint
-    is expected to get (both wall tags declared and mapped at the pose's yaw,
-    one stationary yaw-scan recovery reserved there). The drift per cm is
-    the unchanged history value; the outcome names the credited pose."""
+def test_declared_tags_do_not_override_a_refused_full_sweep(tmp_path):
+    """The tag pair is geometrically in view, but safety still gates motion."""
     decisions = _decisions(tmp_path, drift_changes=DOUBLED_HOVER, recovery=True)
-    assert all(d.transition == "CONTINUE" for d in decisions.values()), {k: d.reason for k, d in decisions.items()}
-    assert decisions[LEFT].expected_reanchor == LEFT and decisions[RIGHT].expected_reanchor == RIGHT
-    assert decisions[CENTER].expected_reanchor is None  # admitted without it, as before
+    assert all(d.transition != "CONTINUE" for d in decisions.values())
+    assert all(d.expected_reanchor is None for d in decisions.values())
 
 
 def test_the_expected_reanchor_does_not_relieve_an_absurd_drift(tmp_path):
@@ -405,7 +415,5 @@ def test_the_expected_reanchor_does_not_relieve_an_absurd_drift(tmp_path):
     outlier is still refused wherever the aircraft must move, even with the
     recovery adapter and the declared tags."""
     decisions = _decisions(tmp_path, drift_override=0.45, recovery=True)
-    for pose_id in (LEFT, RIGHT):
-        assert decisions[pose_id].transition == "RETURN_NOW", (pose_id, decisions[pose_id].reason)
-        assert decisions[pose_id].reason == "PROJECTED_TERMINATION_PATH_INVALID"
-        assert decisions[pose_id].expected_reanchor is None
+    assert all(d.transition != "CONTINUE" and d.expected_reanchor is None
+               for d in decisions.values())

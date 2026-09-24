@@ -54,12 +54,16 @@ class GreedyJudge:
         return {"value": picked, "probabilities": probabilities, "confidence": .95}
 
 
-def test_load_site_prefers_canningst_and_declares_at_least_two_regions():
+def test_load_site_prefers_canningst_and_declares_forward_and_side_views():
     site, path = load_site()
     assert path.name == "canningst-site.json"
     regions = declared_regions(site)
-    assert len(regions) >= 2
-    assert all("toward_targets" in region for region in regions)
+    # The measured site now offers six wall-facing and two side-looking
+    # viewpoints. The harness must expose all declared poses, not silently
+    # filter away the two side views to preserve the old three-strip shape.
+    assert set(regions) == {pose_id for pose_id, _ in site.pose_visibility}
+    assert len([region for region in regions if region.endswith("toward_targets")]) == 6
+    assert len([region for region in regions if region.endswith(("-left", "-right"))]) == 2
 
 
 def test_search_case_finds_the_phone_and_returns_home(tmp_path):

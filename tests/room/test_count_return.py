@@ -15,7 +15,9 @@ responsibility, and Task 4 only wires the execution loop around it (see the
 task report for this scoping decision).
 """
 from dataclasses import asdict, replace
+import hashlib
 import math
+import threading
 
 import pytest
 
@@ -27,6 +29,7 @@ from sentinel.cube.step_executor import CheckpointOutcome, CommandState, Executo
 from sentinel.cube.energy import EnergySample
 from sentinel.models import Position
 from sentinel.room.controller import RoomController, TurnOutcome
+from sentinel.room.wiring import CapturedRequest
 from sentinel.room.coverage import CoverageCell
 from sentinel.room.goals import GoalLedger, GoalObjective
 from sentinel.room.grounding import CountGeometry
@@ -162,7 +165,7 @@ COUNT_GEOMETRY = CountGeometry(LEVEL_CAMERA, (("computer", SupportDeclaration(Su
                                               ("phone", SupportDeclaration(SupportKind.FLOOR))))
 
 
-def grounded_result(tmp_path, site, pose_id, targets, *, captured_at):
+def grounded_result(tmp_path, site, pose_id, targets, *, captured_at, heading_deg=None):
     """A perception result whose detections are real floor objects as seen
     from ``pose_id``'s declared endpoint: each target is
     ``(class_name, confidence_band, (x_cm, y_cm) or None)``; a floor target's
@@ -170,7 +173,8 @@ def grounded_result(tmp_path, site, pose_id, targets, *, captured_at):
     so grounding places it back at that room position. ``None`` (for people)
     uses a fixed box -- people are never placed."""
     resolved = resolve_pose_id(site, pose_id)
-    angle = math.radians(semantic_heading_to_compass_deg(resolved.yaw_deg))
+    angle = math.radians(semantic_heading_to_compass_deg(
+        resolved.yaw_deg if heading_deg is None else heading_deg))
     detections = []
     for index, (class_name, band, target) in enumerate(targets):
         if target is None:
@@ -300,6 +304,98 @@ def test_airborne_without_any_checkpoint_still_requests_a_safe_return(safety):
 
 
 # --- 2. ordered corner observations ------------------------------------------
+
+def test_one_sweep_persists_three_frames_and_merges_overlapping_detections(safety, tmp_path):
+    from sentinel.room.queries import ReadQueries
+
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    executor = Executor(store, clock)
+    pose_id = POSE_A
+    resolved = resolve_pose_id(supervisor.site, pose_id)
+    executor.reported_pose = Position(resolved.x_cm, resolved.y_cm, resolved.z_cm)
+    capture_commands = tuple(command(seconds=0.01, index=i, look_deg=offset)
+                             for i, offset in enumerate((-30, 0, 30)))
+
+    def resolve(candidate, snapshot):
+        health = supervisor.tracker.health
+        return CheckpointPlan("sweep", health.position, executor.reported_pose,
+                              health.heading_deg, resolved.yaw_deg,
+                              capture_commands, sum(c.upper_bound_s for c in capture_commands))
+
+    original_execute = executor.execute
+
+    def execute(plan):
+        result = original_execute(plan)
+        return replace(result, observation_ids=tuple(
+            f"capture-{dict(c.arguments)['index']}" for c in plan.commands if c.kind == "CAPTURE"))
+
+    executor.execute = execute
+    results = {}
+    target = (resolved.x_cm + 60, resolved.y_cm + 250)
+    for index, heading in enumerate((resolved.yaw_deg - 30, resolved.yaw_deg,
+                                      resolved.yaw_deg + 30)):
+        detected = (("computer", "high", target),) if index < 2 else ()
+        result = grounded_result(tmp_path, supervisor.site, pose_id, detected,
+                                 captured_at=f"2026-09-23T00:00:0{index}+00:00", heading_deg=heading)
+        frame_path = tmp_path / f"sweep-{index}.png"
+        frame_path.write_bytes(f"sweep-frame-{index}".encode())
+        digest = hashlib.sha256(frame_path.read_bytes()).hexdigest()
+        request = replace(result.request, observation_id=f"capture-{index}", frame_id=f"frame-{index}",
+                          frame_path=str(frame_path), frame_sha256=digest, request_digest=digest)
+        results[request.observation_id] = replace(
+            result, request=request, completed_at=f"2026-09-23T00:00:0{index + 1}+00:00")
+
+    def capture(candidate, outcome, snapshot):
+        assert outcome.observation_ids == tuple(results)
+        version = store.session_version(SESSION)
+        return tuple(CapturedRequest(replace(results[f"capture-{i}"].request, snapshot_version=version),
+                                     resolved.yaw_deg + (-30, 0, 30)[i]) for i in range(3))
+
+    calls = []
+    concurrent_calls = threading.Barrier(3)
+
+    def provide(request):
+        calls.append(request.observation_id)
+        concurrent_calls.wait(timeout=0.75)
+        return replace(results[request.observation_id], request=request)
+
+    controller = RoomController(store, Judge(f"OBSERVE:g1:{pose_id}"), supervisor=supervisor,
+                                flight_executor=executor, resolve_checkpoint=resolve,
+                                perception_capture=capture, perception_provider=provide,
+                                count_geometry=COUNT_GEOMETRY, provider_wait_s=1)
+    outcome = controller.step(SESSION)
+    assert outcome.accepted, store.events(SESSION)[-1].payload
+    assert executor.calls == ["CAPTURE"] * 3
+    assert set(calls) == {"capture-0", "capture-1", "capture-2"}
+    replayed = ReadQueries(store).project(SESSION)
+    observation = replayed.outcomes[-1]
+    assert len(observation.count_evidences) == 3
+    assert [frame.pose.heading_deg for frame in observation.count_evidences] == [30, 0, 330]
+    assert [len(frame.estimates) for frame in observation.count_evidences] == [1, 1, 0]
+    assert all(abs(frame.estimates[0].x_cm - target[0]) < 1 and
+               abs(frame.estimates[0].y_cm - target[1]) < 1
+               for frame in observation.count_evidences[:2])
+    projection, = controller._count_projections(replayed)
+    assert projection.frame_ids == ("frame-0", "frame-1", "frame-2")
+    computer, = projection.counts
+    assert computer.confirmed + computer.uncertain == 1
+    assert projection.coverage.analysed_frames == 3
+
+
+def test_partial_sweep_cannot_be_recorded_as_a_completed_observation(safety):
+    _, store, _, *_ = safety
+    controller = RoomController(store, Judge("ESCALATE"))
+    commands = tuple(command(index=i) for i in range(3))
+    plan = CheckpointPlan("sweep", Position(100, 100, 100), Position(100, 100, 100),
+                          90, 90, commands, sum(c.upper_bound_s for c in commands))
+    incomplete = CheckpointOutcome("COMPLETED", tuple(CommandState(c, "COMPLETED", 0, 1)
+                                                       for c in commands[:2]),
+                                   ("capture-0", "capture-1"), None, plan.target, True)
+    assert not controller._capture_completed(plan, incomplete)
+
 
 def test_ordered_region_observations_execute_in_original_request_order(safety, tmp_path):
     supervisor, store, clock, *_ = safety

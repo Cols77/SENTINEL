@@ -19,9 +19,10 @@ or protocol of its own.
 """
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Callable, Mapping
 import uuid
 
@@ -35,7 +36,7 @@ from . import calibration
 from .artifacts import atomic_write_bytes
 from .grounding import CountGeometry
 from .spatial import SupportDeclaration, SupportKind
-from .ingest import PerceptionRequest, PerceptionResult, capture_request, result_from_dict
+from .ingest import PerceptionRequest, PerceptionResult, capture_request, frame_digest, result_from_dict
 from .semantic import resolve_pose_id
 from .site import RoomSite
 from .store import RoomStore
@@ -49,13 +50,9 @@ class WiringError(ValueError):
 # resolve_checkpoint: semantic pose_id -> cube checkpoint plan
 # ---------------------------------------------------------------------------
 
-#: A single capture, facing the resolved pose's own declared yaw (never a
-#: fixed offset -- see ``make_resolve_checkpoint``). Real waypoint look-arcs
-#: (multiple looks per checkpoint) are a later task; this wiring only needs a
-#: checkpoint that actually reaches the declared pose and captures once
-#: there, matching what the controller's own pose-verification guard
-#: requires (``_checkpoint_targets_declared_pose``/``_measured_pose_matches_declared_pose``).
-_SINGLE_CAPTURE_COUNT = 1
+#: Three looks around each resolved pose yaw. The final restore/retarget
+#: rotation keeps the checkpoint's terminal heading at that declared yaw.
+_SWEEP_OFFSETS_DEG = (-30, 0, 30)
 
 
 def _retarget_terminal_heading(plan: CheckpointPlan, target_heading_deg: float, limits: CommandLimits) -> CheckpointPlan:
@@ -93,6 +90,7 @@ def _retarget_terminal_heading(plan: CheckpointPlan, target_heading_deg: float, 
 def make_resolve_checkpoint(
     *, site: RoomSite, profile: calibration.CalibrationProfile,
     pose_source: Callable[[], object], limits: CommandLimits,
+    sweep_offsets_deg: tuple[int, ...] = _SWEEP_OFFSETS_DEG,
 ) -> Callable[[object, object], CheckpointPlan]:
     """Build the production ``resolve_checkpoint`` collaborator.
 
@@ -118,8 +116,8 @@ def make_resolve_checkpoint(
     resolved pose's own declared yaw instead (the prior bug) silently
     rotated every commanded displacement by ``pose_yaw - canonical``,
     landing the aircraft anywhere but the declared target for any pose whose
-    look is not the canonical direction. The single capture instead faces
-    the pose's own yaw via a ``looks_deg`` offset from canonical, and the
+    look is not the canonical direction. The sweep faces the pose's yaw plus
+    each offset via ``looks_deg`` relative to canonical, and the
     checkpoint holds that yaw as its terminal heading (added back on with
     ``_retarget_terminal_heading``) -- so the controller's declared-pose
     check (``_checkpoint_targets_declared_pose``) still sees the checkpoint
@@ -130,6 +128,8 @@ def make_resolve_checkpoint(
     """
     if not profile.speeds_cm_s:
         raise WiringError("resolve_checkpoint requires a calibration profile with a validated speed")
+    if not sweep_offsets_deg:
+        raise WiringError("resolve_checkpoint requires at least one look")
     speed_cm_s = min(profile.speeds_cm_s)
     canonical_heading_deg = limits.canonical_heading_deg
 
@@ -142,11 +142,12 @@ def make_resolve_checkpoint(
         target = Position(resolved.x_cm, resolved.y_cm, resolved.z_cm)
         pose_yaw_deg = float(resolved.yaw_deg)
         look_deg = pose_yaw_deg - canonical_heading_deg
+        looks_deg = tuple(look_deg + offset for offset in sweep_offsets_deg)
         plan = plan_checkpoint(
             checkpoint_id=candidate.candidate_id, start=pose.position, target=target,
             start_heading_deg=pose.heading_deg, terminal_heading_deg=canonical_heading_deg,
-            speed_cm_s=speed_cm_s, looks_deg=(look_deg,),
-            capture_count=_SINGLE_CAPTURE_COUNT, limits=limits,
+            speed_cm_s=speed_cm_s, looks_deg=looks_deg,
+            capture_count=len(looks_deg), limits=limits,
         )
         return _retarget_terminal_heading(plan, pose_yaw_deg, limits)
 
@@ -189,8 +190,14 @@ def make_count_geometry(site: RoomSite, *, camera: CameraModel = TELLO_MEASURED)
 
 
 # ---------------------------------------------------------------------------
-# perception_capture: a frame from the connected flight client's stream
+# perception_capture: checkpoint frames from the connected flight stack
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CapturedRequest:
+    request: PerceptionRequest
+    heading_deg: float
 
 
 def _frame_to_png_bytes(frame) -> bytes:
@@ -213,12 +220,14 @@ def _frame_to_png_bytes(frame) -> bytes:
 def make_perception_capture(
     *, store: RoomStore, flight_client, frames_dir: str | Path, requested_model: str, run_id: str,
     frame_timeout_s: float = 10.0, clock: Callable[[], str] | None = None,
-) -> Callable[[object, object, object], PerceptionRequest]:
+    capture_records: Mapping[str, tuple[Path, str, float]] | None = None,
+) -> Callable[[object, object, object], PerceptionRequest | tuple[CapturedRequest, ...]]:
     """Build the production ``perception_capture`` collaborator.
 
-    ``flight_client`` is the connected drone client (e.g. ``flight_executor.
-    client``); this never opens a connection itself, only reads whatever
-    stream ``flight_client`` already has open. The request's
+    ``capture_records`` maps completed checkpoint observation IDs to their
+    saved PNG, capture time and tracked heading. The optional legacy path
+    reads ``flight_client``'s already-open stream. This factory never opens a
+    connection itself. The request's
     ``snapshot_version`` is read fresh from *store* at capture time (fix
     round 1, Q4/S1's rule: never the stale pre-turn snapshot a candidate was
     computed against), and ``pose_revision_id`` reuses the session's own
@@ -228,12 +237,7 @@ def make_perception_capture(
     frames_dir = Path(frames_dir)
     clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
 
-    def perception_capture(candidate, checkpoint_outcome, snapshot) -> PerceptionRequest:
-        frame = flight_client.read_frame(timeout=frame_timeout_s)
-        frame_bytes = _frame_to_png_bytes(frame)
-        frame_path = frames_dir / f"{uuid.uuid4()}.png"
-        atomic_write_bytes(frame_path, frame_bytes)
-        captured_at = clock()
+    def perception_capture(candidate, checkpoint_outcome, snapshot) -> PerceptionRequest | tuple[CapturedRequest, ...]:
         context = {
             "session_id": snapshot.session_id,
             "action_id": candidate.candidate_id,
@@ -241,6 +245,26 @@ def make_perception_capture(
             "pose_revision_id": str(snapshot.pose_revision),
             "requested_model": requested_model,
         }
+        if capture_records is not None:
+            captures = []
+            for observation_id in checkpoint_outcome.observation_ids:
+                frame_path, captured_at, heading_deg = capture_records[observation_id]
+                # A repeated image still represents a distinct look. Keep its
+                # provider identity separate so two correlated results cannot
+                # collide in the durable payload cache.
+                import hashlib
+                digest = hashlib.sha256(
+                    f"{observation_id}:{frame_digest(frame_path)}:{requested_model}".encode("utf-8")
+                ).hexdigest()
+                request = capture_request({**context, "request_digest": digest}, frame_path=frame_path, run_id=run_id,
+                                          captured_at=captured_at, classes=LIVE_CLASSES)
+                captures.append(CapturedRequest(request, heading_deg))
+            return tuple(captures)
+        frame = flight_client.read_frame(timeout=frame_timeout_s)
+        frame_bytes = _frame_to_png_bytes(frame)
+        frame_path = frames_dir / f"{uuid.uuid4()}.png"
+        atomic_write_bytes(frame_path, frame_bytes)
+        captured_at = clock()
         return capture_request(context, frame_path=frame_path, run_id=run_id,
                                captured_at=captured_at, classes=LIVE_CLASSES)
 
@@ -284,10 +308,13 @@ def make_perception_provider(
     """
     factory = detector_factory or (lambda: _default_detector(environ, provider_name))
     detector_box: list[object] = []
+    detector_lock = Lock()
 
     def perception_provider(request: PerceptionRequest) -> PerceptionResult:
         if not detector_box:
-            detector_box.append(factory())
+            with detector_lock:
+                if not detector_box:
+                    detector_box.append(factory())
         detector = detector_box[0]
         record = {
             "stop": request.observation_id, "look_deg": 0, "path": request.frame_path,

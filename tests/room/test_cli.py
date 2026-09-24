@@ -800,11 +800,12 @@ def test_live_default_flight_stack_refuses_a_tag_map_not_bound_to_the_manifest(t
     assert transport.builds == 0
 
 
-def test_live_default_flight_stack_shares_the_probe_connection_and_never_takes_off_without_tag_poses(
+def test_live_default_flight_stack_shares_the_probe_connection_and_lands_without_airborne_tag_poses(
         tmp_path, capsys, monkeypatch):
     # The default drone probe and the default flight stack share one client
     # (DJITelloPy's receivers are process-global), built only after every
-    # gate. With no tag pose the supervisor refuses takeoff: nothing flies.
+    # gate. The pad cannot see tags, so takeoff precedes the first two-tag
+    # home fix; if that airborne fix fails, the aircraft lands in place.
     from dataclasses import replace
 
     tag_map_sha256 = hashlib.sha256(TAG_MAP_FIXTURE.read_bytes()).hexdigest()
@@ -818,10 +819,11 @@ def test_live_default_flight_stack_shares_the_probe_connection_and_never_takes_o
                          detector_factory=_fake_collaborator("detector-vendor-y"))
     err = capsys.readouterr().err
     assert exit_code == 2
-    assert "takeoff refused" in err and "LOCALIZATION_LOST" in err
+    assert "takeoff refused: home measurement: FAILED" in err
     assert transport.builds == 1
     assert bursts  # the default stack asked the WP5 stack for tag poses
-    assert stack_fakes.sent_motor_commands(transport.tello.sent) == []
+    assert stack_fakes.sent_motor_commands(transport.tello.sent) == ["takeoff"]
+    assert "land" in transport.tello.sent
     assert transport.tello.ended is True  # the CLI closes the shared connection
     events = _run_events(tmp_path, "runs", manifest_path)
     checked = next(e for e in events if e.event_type == "CONNECTIVITY_CHECKED").payload
