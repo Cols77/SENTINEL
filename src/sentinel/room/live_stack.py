@@ -90,6 +90,9 @@ SINGLE_TAG_XY_UNCERTAINTY_CM = 15.0
 SINGLE_TAG_HEADING_UNCERTAINTY_DEG = 5.0
 #: Airborne home bursts: one retry when the first saw no two-tag view.
 HOME_BURST_ATTEMPTS = 2
+#: A burst with at least this many two-tag reports is localised from those
+#: alone (``localise``'s own minimum sample count).
+MIN_JOINT_REPORTS = 8
 #: A height reading further than this (or than the drift profile's
 #: max_height_error_cm, if smaller) from the dead-reckoned height is ignored
 #: (the Tello altimeter drifts); it bounds any climb chasing a drift.
@@ -528,20 +531,26 @@ class _TelloStack:
             burst = list(self._burst(self.client, duration_s=duration_s))
         finally:
             self._burst_lock.release()
-        result = localise(burst)
-        if not isinstance(result, LocalisationFix):
-            return None
-        measured_at = self.clock()
-        deltas = sorted(abs(heading_delta_deg(report.heading_deg, result.heading_deg))
-                        for report in burst if report.heading_deg is not None)
-        if not deltas:
-            return None
         # LocalizationTracker.accept_fix's mapped_joint_tags gate requires at
         # least two distinct tag IDs as evidence that the fix was *jointly*
         # triangulated, not merely that different single tags drifted across
         # the burst. Only a report that itself saw two or more mapped tags is
         # joint-tag evidence; tag_ids is the union over those reports alone.
         joint_reports = [report for report in burst if len({obs.tag_id for obs in report.tag_observations}) >= 2]
+        # Live 2026-09-24 18:26: 2 m from the tags and 40 cm off-centre, 4 of
+        # 12 frames saw one tag; those single-tag solves scattered 10-22 cm and
+        # pushed the burst's spread to 16 cm, so the home was refused twice
+        # although its 8 two-tag reports agreed within 3 cm. With enough
+        # two-tag reports, the fix is theirs alone.
+        used = joint_reports if len(joint_reports) >= MIN_JOINT_REPORTS else burst
+        result = localise(used)
+        if not isinstance(result, LocalisationFix):
+            return None
+        measured_at = self.clock()
+        deltas = sorted(abs(heading_delta_deg(report.heading_deg, result.heading_deg))
+                        for report in used if report.heading_deg is not None)
+        if not deltas:
+            return None
         tag_ids = tuple(sorted({obs.tag_id for report in joint_reports for obs in report.tag_observations}))
         seen = tuple(sorted({obs.tag_id for report in burst for obs in report.tag_observations}))
         return _TagFix(round(result.x_units * CM_PER_UNIT), round(result.y_units * CM_PER_UNIT),
