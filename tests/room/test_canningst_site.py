@@ -11,6 +11,7 @@ height, Task A's carry-over).
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import sys
 import hashlib
 import json
 from pathlib import Path
@@ -433,3 +434,19 @@ def test_the_expected_reanchor_does_not_relieve_an_absurd_drift(tmp_path):
     decisions = _decisions(tmp_path, drift_override=0.45, recovery=True)
     assert all(d.transition != "CONTINUE" and d.expected_reanchor is None
                for d in decisions.values())
+
+
+def test_observation_poses_follow_the_measured_home_so_an_off_mark_takeoff_still_observes(tmp_path, monkeypatch):
+    """Live 2026-09-24: the Tello took off at (256, 240), 50 cm from the
+    declared pad, and every fixed rear pose was refused
+    (PROJECTED_TERMINATION_PATH_INVALID). Poses now follow the measured home."""
+    original = Bursts
+    monkeypatch.setattr(sys.modules[__name__], "Bursts", lambda *a: original(reports(256, 240, 90.0)))
+    supervisor, store, link, binding = _airborne_supervisor(tmp_path, recovery=True)
+    try:
+        decisions = {pose_id: _admission(supervisor, store, binding, pose_id)
+                     for pose_id, _ in binding.site.pose_visibility}
+    finally:
+        store.close()
+        link.close()
+    assert all(d.transition == "CONTINUE" for d in decisions.values()), {k: d.reason for k, d in decisions.items()}

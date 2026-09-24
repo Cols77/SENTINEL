@@ -152,6 +152,37 @@ def resolve_semantic_sequence(site: RoomSite, poses: Sequence[SemanticPose]) -> 
     return tuple(resolve_semantic_pose(site, pose) for pose in poses)
 
 
+#: site_id -> (dx_cm, dy_cm): the measured airborne home's offset from the
+#: declared pad. Declared observation poses are placed relative to where the
+#: aircraft actually took off, so a pad placed off the nominal mark does not
+#: turn every observation into a long out-and-back the supervisor refuses.
+_HOME_OFFSETS: dict[str, tuple[int, int]] = {}
+
+
+def set_home_offset(site: RoomSite, dx_cm: float, dy_cm: float) -> None:
+    """Place declared poses relative to the measured home (x/y only; the
+    declared heights stay, since the altimeter is not trusted for them)."""
+    _HOME_OFFSETS[site.site_id] = (round(dx_cm), round(dy_cm))
+
+
+def clear_home_offset(site: RoomSite) -> None:
+    _HOME_OFFSETS.pop(site.site_id, None)
+
+
+def _shift_to_home(site: RoomSite, resolved: ResolvedPose) -> ResolvedPose:
+    dx, dy = _HOME_OFFSETS.get(site.site_id, (0, 0))
+    if not dx and not dy:
+        return resolved
+    volume = _volume_by_id(site, _require_frame(site).envelope_volume_id)
+    xs = [p[0] for p in volume.polygon_xy_cm]
+    ys = [p[1] for p in volume.polygon_xy_cm]
+    x = min(max(resolved.x_cm + dx, math.ceil(min(xs))), math.floor(max(xs)))
+    y = min(max(resolved.y_cm + dy, math.ceil(min(ys))), math.floor(max(ys)))
+    if not volume_contains(volume, Position(x, y, resolved.z_cm)):
+        return resolved
+    return ResolvedPose(pose_id=resolved.pose_id, x_cm=x, y_cm=y, z_cm=resolved.z_cm, yaw_deg=resolved.yaw_deg)
+
+
 def resolve_pose_id(site: RoomSite, pose_id: str) -> ResolvedPose | None:
     """Parse a declared ``pose_id`` (``"horizontal-depth-height-look"``, as
     embedded in an OBSERVE candidate ID or ``RoomSite.pose_visibility``) and
@@ -166,7 +197,7 @@ def resolve_pose_id(site: RoomSite, pose_id: str) -> ResolvedPose | None:
         return None
     horizontal, depth, height, look = parts
     try:
-        return resolve_semantic_pose(site, SemanticPose(horizontal, depth, height, look))
+        return _shift_to_home(site, resolve_semantic_pose(site, SemanticPose(horizontal, depth, height, look)))
     except ValueError:
         return None
 

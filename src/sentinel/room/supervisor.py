@@ -127,6 +127,10 @@ class SafetySupervisor:
         self.clock_domain_id = self.clock_guard.clock_domain_id
         self._lock = RLock()
         self._dispatch_lock = RLock()
+        #: checkpoint_id -> the controller's re-plan callable (see prepare).
+        self._replans: dict = {}
+        from .semantic import clear_home_offset
+        clear_home_offset(site)
         self.recovery, self.mapped_heading_tag_ids = recovery, mapped_heading_tag_ids
         self._last_clock = None
         self._terminal = False
@@ -671,12 +675,20 @@ class SafetySupervisor:
             if remaining_commands is not None:
                 checkpoint = self._plan(pose, remaining_commands,
                                         remaining_of.checkpoint_id if remaining_of is not None else "wait")
-            elif (replan is not None and checkpoint is not None
-                  and (checkpoint.start != pose.position or checkpoint.start_heading_deg != pose.heading_deg)):
-                # Live refreshes bring new tag fixes between planning and
-                # admission; re-plan from the refreshed pose rather than
-                # landing on STALE_CHECKPOINT_START.
-                checkpoint = replan()
+            elif checkpoint is not None:
+                if replan is not None:
+                    self._replans[checkpoint.checkpoint_id] = replan
+                if checkpoint.start != pose.position or checkpoint.start_heading_deg != pose.heading_deg:
+                    # Live refreshes bring new tag fixes (or a re-anchor)
+                    # between planning and admission, including dispatch's
+                    # own re-admission; re-plan from the refreshed pose rather
+                    # than landing on STALE_CHECKPOINT_START. A stationary plan
+                    # (rotate/settle/localise) is simply rebased on the pose.
+                    rebuild = replan or self._replans.get(checkpoint.checkpoint_id)
+                    if not any(command.kind == "MOVE" for command in checkpoint.commands):
+                        checkpoint = self._plan(pose, checkpoint.commands, checkpoint.checkpoint_id)
+                    elif rebuild is not None:
+                        checkpoint = rebuild()
             outcome = self.assess(SupervisorRequest(snapshot_version, checkpoint, provider_wait_s, pose, sample), self.site)
             if missed and outcome.transition == "RECOVER":
                 outcome = replace(outcome, reason="EXPECTED_REANCHOR_MISSING")
@@ -738,6 +750,10 @@ class SafetySupervisor:
                 raise ValueError("executor home must match the surveyed home route")
             if self._measured_home is not None and self._measured_home != home:
                 raise ValueError("session measured home cannot change")
+            if self._measured_home is None:
+                from .semantic import set_home_offset
+                nominal = self.site.home.nominal_pose
+                set_home_offset(self.site, home.pose.x_cm - nominal.x_cm, home.pose.y_cm - nominal.y_cm)
             self._measured_home = home
 
     def start(self, executor) -> HomeState:

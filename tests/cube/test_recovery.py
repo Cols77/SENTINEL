@@ -85,7 +85,7 @@ def test_recovery_exhaustion_or_failed_integrity_never_translates_or_explores(mo
     first = recovery.next_action(value.health, env, ())
     recovery.assess_burst(first, ())
     if mode == "lost":
-        value.accept_fix(fix(clock, position=Position(900, 100, 100)))
+        value.mark_lost()
     elif mode == "clearance":
         env = replace(env, rotation_clearance_volumes=(RecoveryVolume("small", ((95, 95), (105, 95), (105, 105), (95, 105)), (0, 200)),))
     elif mode == "energy":
@@ -373,7 +373,7 @@ def test_stale_pose_argument_cannot_enable_yaw_after_tracker_loses_integrity():
     stale = value.health
     first = recovery.next_action(stale, environment(), ())
     recovery.assess_burst(first, ())
-    value.accept_fix(fix(clock, heading_deg=180))
+    value.mark_lost()
     assert recovery.next_action(stale, environment(), ()).kind == "CONTINGENCY"
 
 
@@ -514,18 +514,23 @@ def test_stationary_recovery_admission_requires_the_complete_safe_hover(fault):
     assert recovery.next_action(value.health, env, ()).kind == "CONTINGENCY"
 
 
-@pytest.mark.parametrize("change", [
-    {"position": Position(140, 100, 100)}, {"heading_deg": 140}, {"position": Position(100, 100, 130)},
-])
-def test_coherent_mapped_contradictory_burst_latches_lost_without_exploratory_yaw(change):
+def test_a_coherent_burst_that_contradicts_the_position_history_reanchors_there():
     recovery, value, clock = controller()
     action = recovery.next_action(value.health, environment(), ())
-    sample = tuple(replace(report, fix=replace(report.fix, **change)) for report in reports(clock))
+    sample = tuple(replace(report, fix=replace(report.fix, position=Position(140, 100, 100)))
+                   for report in reports(clock))
     outcome = recovery.assess_burst(action, sample)
-    assert not outcome.accepted and not outcome.events
-    assert value.health.state == LocalizationState.LOST
-    assert recovery.next_action(value.health, environment(), ()).kind == "CONTINGENCY"
+    assert outcome.accepted, outcome.reason
+    assert value.health.state == LocalizationState.ANCHORED and value.health.position.x_cm == 140
 
+
+def test_a_coherent_burst_at_an_unexpected_heading_rejects_only_that_action():
+    recovery, value, clock = controller()
+    action = recovery.next_action(value.health, environment(), ())
+    sample = tuple(replace(report, fix=replace(report.fix, heading_deg=140)) for report in reports(clock))
+    outcome = recovery.assess_burst(action, sample)
+    assert not outcome.accepted and outcome.reason == "contradictory_heading"
+    assert value.health.state != LocalizationState.LOST
 
 def test_one_contradictory_outlier_is_noisy_evidence_not_a_coherent_contradiction():
     recovery, value, clock = controller()

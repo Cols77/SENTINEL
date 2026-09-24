@@ -84,6 +84,18 @@ REFRESH_BURST_S = 1.5
 #: not the declared pad mark: the flight envelope (validated on the home)
 #: bounds it. The first live run measured home 43 cm from the mark.
 HOME_TOLERANCE_CM = 150.0
+#: A single-tag fix re-anchors only within these of the current estimate,
+#: and carries at least these uncertainties (one tag cannot rule out a flip).
+SINGLE_TAG_MAX_XY_CM = 30.0
+SINGLE_TAG_MAX_HEADING_DEG = 10.0
+SINGLE_TAG_XY_UNCERTAINTY_CM = 15.0
+SINGLE_TAG_HEADING_UNCERTAINTY_DEG = 5.0
+#: Airborne home bursts: one retry when the first saw no two-tag view.
+HOME_BURST_ATTEMPTS = 2
+#: A height reading further than this (or than the drift profile's
+#: max_height_error_cm, if smaller) from the dead-reckoned height is ignored
+#: (the Tello altimeter drifts); it bounds any climb chasing a drift.
+HEIGHT_TRUST_CM = 40
 #: A drone that never answers ``sdk?`` (DJITelloPy's own timeout text) is not
 #: proof of a live SDK link; SENTINEL prefers to say so plainly.
 SDK_ABORT_PREFIX = "aborting command"
@@ -358,7 +370,11 @@ def site_envelope(site: RoomSite) -> FlightEnvelope:
     if frame is None:
         raise LiveStackError("the live flight stack needs a site with a semantic frame: its envelope "
                              "volume bounds every commanded position")
-    volume = next(v for v in site.free_space_volumes if v.volume_id == frame.envelope_volume_id)
+    # The declared flight volume bounds where the aircraft may be (the
+    # observation volume only bounds where poses sit): a pad outside the
+    # observation box, as flown on 2026-09-24 at y 240, is still flyable.
+    volume = next((v for v in site.free_space_volumes if v.volume_id == "flight"),
+                  next(v for v in site.free_space_volumes if v.volume_id == frame.envelope_volume_id))
     xs = [x for x, _ in volume.polygon_xy_cm]
     ys = [y for _, y in volume.polygon_xy_cm]
     low_z, high_z = volume.z_interval_cm
@@ -402,10 +418,17 @@ class _TagFix:
     xy_uncertainty_cm: float
     heading_uncertainty_deg: float
     tag_ids: tuple[int, ...]
+    #: Every mapped tag seen in the burst, including single-tag reports.
+    seen_tag_ids: tuple[int, ...] = ()
 
     def pose_fix(self, z_cm: int) -> PoseFix:
         return PoseFix(Position(self.x_cm, self.y_cm, z_cm), self.heading_deg, self.measured_at,
                        self.xy_uncertainty_cm, self.heading_uncertainty_deg, self.tag_ids)
+
+    def single_tag_fix(self, z_cm: int) -> PoseFix:
+        return PoseFix(Position(self.x_cm, self.y_cm, z_cm), self.heading_deg, self.measured_at,
+                       self.xy_uncertainty_cm, self.heading_uncertainty_deg, self.seen_tag_ids,
+                       source="mapped_single_tag")
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +453,8 @@ class _TelloStack:
                              if len(tags) >= 2
                              for pose in (resolve_pose_id(site, pose_id),) if pose is not None)
         self._tag_bearing_headings = tag_headings or (site.home.heading_deg,)
+        self._last_height: int | None = None
+        self._site = site
         self.executor: StepExecutor | None = None
         #: Set when the session's supervisor gets a recovery adapter (mapped
         #: tag headings exist): refresh then leaves RECOVERY_REQUIRED to it.
@@ -437,10 +462,51 @@ class _TelloStack:
 
     # -- measurements -------------------------------------------------------
     def _height_cm(self) -> int:
-        """Altimeter height (relative to the takeoff pad) in the site frame."""
-        return self.runner._require_height(self.runner._call(self.client.height_cm)) + self._pad_z_cm
+        """Altimeter height (``height?``) in the site frame, sanity-checked (``_trusted_height``)."""
+        return self._trusted_height(
+            lambda: self.runner._require_height(self.runner._call(self.client.height_cm)) + self._pad_z_cm)
 
     def _passive_height_cm(self) -> int:
+        """State-stream height in the site frame, sanity-checked; issues no SDK command."""
+        return self._trusted_height(self._read_passive_height_cm)
+
+    def _trusted_height(self, read) -> int:
+        """A height the flight can act on, never a reason to abort it.
+
+        The Tello altimeter reads 30-40 cm low, drifts and sometimes fails.
+        Once the tracker has a height, a reading more than HEIGHT_TRUST_CM
+        from the height dead-reckoned from commanded moves is ignored:
+        otherwise every checkpoint would climb to chase a drifting reading.
+        A failed read falls back to the last trusted height, then to the
+        home hover height. The result is clamped to the flight envelope.
+        """
+        try:
+            raw = read()
+        except Exception:
+            raw = None
+        # Only an airborne, climb-propagated tracker height is a reference:
+        # on the pad (or before the takeoff climb is applied) it is not.
+        expected = (round(self.tracker.health.position.z_cm)
+                    if self._climb_applied and getattr(self.tracker, "initialized", False) else None)
+        # Never beyond the tracker's own height gate: a fix whose height jumps
+        # more than max_height_error_cm latches LOCALIZATION LOST (and lands).
+        profile = getattr(self.tracker, "profile", None)
+        trust_cm = min(HEIGHT_TRUST_CM, getattr(profile, "max_height_error_cm", HEIGHT_TRUST_CM))
+        if type(raw) is int and (expected is None or abs(raw - expected) <= trust_cm):
+            height = raw
+        elif expected is not None:
+            height = expected
+        elif self._last_height is not None:
+            height = self._last_height
+        else:
+            route = next((r for r in self._site.routes if r.route_id == self._site.home.route_id), None)
+            height = round(route.checkpoints[-1].z_cm) if route is not None else self._pad_z_cm
+        envelope = self.runner.envelope
+        height = min(max(height, envelope.min_z_cm), envelope.max_z_cm)
+        self._last_height = height
+        return height
+
+    def _read_passive_height_cm(self) -> int:
         """Airborne altitude from the live state stream, issuing no SDK command.
 
         StepExecutor's documented ``measure_home`` contract is that it "must
@@ -479,9 +545,10 @@ class _TelloStack:
         # joint-tag evidence; tag_ids is the union over those reports alone.
         joint_reports = [report for report in burst if len({obs.tag_id for obs in report.tag_observations}) >= 2]
         tag_ids = tuple(sorted({obs.tag_id for report in joint_reports for obs in report.tag_observations}))
+        seen = tuple(sorted({obs.tag_id for report in burst for obs in report.tag_observations}))
         return _TagFix(round(result.x_units * CM_PER_UNIT), round(result.y_units * CM_PER_UNIT),
                        result.heading_deg, measured_at, result.spread_p95_cm, deltas[int(0.95 * (len(deltas) - 1))],
-                       tag_ids)
+                       tag_ids, seen)
 
     @staticmethod
     def _within(upper_bound_s: float) -> float:
@@ -548,9 +615,20 @@ class _TelloStack:
             self.tracker.note_camera(self.clock(), estimator_failed=True,
                                      intentional_look_away=self._looking_away)
         else:
-            z_cm = self._height_cm()
+            # Climb first, so the height check compares against the airborne home.
             self._propagate_takeoff_climb()
-            self.tracker.accept_fix(fix.pose_fix(z_cm))
+            z_cm = self._height_cm()
+            if len(fix.tag_ids) >= 2 or not self.tracker.initialized:
+                self.tracker.accept_fix(fix.pose_fix(z_cm))
+            elif not self.tracker.accept_consistent_fix(
+                    fix.single_tag_fix(z_cm), max_xy_cm=SINGLE_TAG_MAX_XY_CM,
+                    max_heading_deg=SINGLE_TAG_MAX_HEADING_DEG,
+                    min_xy_uncertainty_cm=SINGLE_TAG_XY_UNCERTAINTY_CM,
+                    min_heading_uncertainty_deg=SINGLE_TAG_HEADING_UNCERTAINTY_DEG):
+                # A single-tag view that disagrees is not evidence either way:
+                # the tracker coasts (it does not demand recovery).
+                self.tracker.note_camera(self.clock(), estimator_failed=True,
+                                         intentional_look_away=self._looking_away)
         return self.tracker.health, EnergySample(self._battery(), self.clock())
 
     def _battery(self) -> int:
@@ -606,7 +684,13 @@ class _TelloStack:
         begins.
         """
         time.sleep(self._home_settle_s)
-        fix = self._tag_fix(BURST_MAX_S)
+        fix = None
+        for _ in range(HOME_BURST_ATTEMPTS):
+            # A burst that saw no joint (two-tag) view is retried once: a
+            # hovering Tello often frames both tags a moment later.
+            fix = self._tag_fix(BURST_MAX_S)
+            if fix is not None and len(fix.tag_ids) >= 2:
+                break
         if fix is None:
             raise LiveStackError("home: no reliable tag fix after takeoff; the home is never assumed")
         z_cm = self._passive_height_cm()
@@ -733,7 +817,8 @@ class TelloFlightStackFactory:
         deadline = None if self.max_duration_s is None else clock() + self.max_duration_s
         executor = StepExecutor(runner, clock=clock, deadline=deadline, measure_home=stack.measure_home,
                                 command_sink=stack.command_sink, home_tolerance_cm=HOME_TOLERANCE_CM,
-                                home_measurement_timeout_s=self.home_settle_s + BURST_MAX_S + 2 * HEIGHT_READ_SLACK_S)
+                                home_measurement_timeout_s=(self.home_settle_s + HOME_BURST_ATTEMPTS * BURST_MAX_S
+                                                            + 2 * HEIGHT_READ_SLACK_S))
         stack.executor = executor
         headings = mapped_heading_tag_ids(self.tag_map)
         # live_session gives the supervisor a recovery adapter exactly when

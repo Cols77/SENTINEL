@@ -303,7 +303,7 @@ def run_count_return(
     assurances: Iterable[ContingencyAssurance], request_text: str, frames_dir: str | Path,
     clock: Callable[[], float], wall_clock: Callable[[], datetime],
     before_takeoff: Callable[[], None], landing_upper_bound_s: float = 10.0,
-    provider_wait_s: float = 10.0, acceptance: AcceptancePolicy | None = None,
+    provider_wait_s: float = 20.0, acceptance: AcceptancePolicy | None = None,
     disable_battery_guard: bool = False,
 ) -> LiveSessionOutcome:
     """Build, take off, run to a terminal state and return the outcome.
