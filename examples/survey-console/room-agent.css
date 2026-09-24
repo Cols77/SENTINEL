@@ -6,7 +6,6 @@
 .architecture-bar .meta { margin:0; }
 .mission-console.is-room-agent .architecture-bar .meta { display:none; }
 .architecture-bar select { min-width:16rem; }
-.mission-console:has(.room-agent:not([hidden])) { overflow-x:clip; }
 .room-agent { padding:0 0 24px; }
 .room-agent[hidden] { display:none; }
 
@@ -351,7 +350,7 @@
   border-color:var(--status-warning); color:var(--status-warning);
 }
 
-@media (max-width:940px) {
+@media (max-width:960px) {
   .room-grid {
     grid-template-columns:repeat(2,minmax(0,1fr));
     grid-template-areas:'camera state' 'setup results' 'logs logs';
