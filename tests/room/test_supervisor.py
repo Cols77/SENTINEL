@@ -685,13 +685,13 @@ def test_each_command_refreshes_and_completion_is_append_only_measured_evidence(
     plan = checkpoint(samples["pose"], command(), command())
     result = supervisor.dispatch(supervisor.assess(request(safety, plan), supervisor.site), Executor(store, clock))
     assert result.status == "COMPLETED"
-    # Admission plus each command's completion; a stationary step (here the
-    # second capture) is not re-admitted mid-plan, only moves/turns/landing.
-    assert len(refreshes) >= 3
+    # Consecutive stationary steps (here two captures) go out as one batch:
+    # one admission, one completion record and one measured state.
+    assert len(refreshes) >= 2
     events = store.events("session")
-    assert len([e for e in events if e.event_type == "CHECKPOINT_COMPLETED"]) == 2
+    assert len([e for e in events if e.event_type == "CHECKPOINT_COMPLETED"]) == 1
     states = [e for e in events if e.event_type == "DRONE_STATE_RECORDED"]
-    assert len(states) == 2
+    assert len(states) == 1
     assert states[-1].payload["state"]["battery_percent"] == 80
     queries = ReadQueries(store, clock=clock, clock_domain_id=supervisor.clock_domain_id)
     snapshot = queries.project("session")
@@ -1445,7 +1445,9 @@ def test_permanent_audit_failure_uses_emergency_and_latches_local_terminal(safet
     executor = Executor(store, clock)
     result = supervisor.refresh_failure(executor) if operation == "refresh_failure" else supervisor.dispatch(outcome, executor)
     assert result.state == "EMERGENCY_ABORTED" and emergency_calls == [True]
-    assert executor.calls == (["CAPTURE"] if operation == "completion" else [])
+    # The two stationary captures go out as one batch before its completion
+    # record fails.
+    assert executor.calls == (["CAPTURE", "CAPTURE"] if operation == "completion" else [])
     assert supervisor.last_terminal_outcome == result
     assert supervisor.last_persistence_error
     with pytest.raises(RuntimeError, match="terminal"):

@@ -1253,7 +1253,11 @@ class RoomController:
         for index, resolver in enumerate(resolvers):
             try:
                 leg = resolver(candidate, snapshot) if self.resolve_sweep_checkpoints else plan
-                if not self._checkpoint_targets_declared_pose(resolved, leg):
+                # A chained sweep's earlier looks end facing their own look;
+                # only the last must end at the pose's declared heading.
+                last_leg = index == len(resolvers) - 1
+                if not (self._checkpoint_targets_declared_pose(resolved, leg) if last_leg
+                        else leg.target == Position(resolved.x_cm, resolved.y_cm, resolved.z_cm)):
                     return _failure("TOOL_FAILURE", f"look {index + 1} could not be planned from the "
                                     "current position")
                 admission = self.supervisor.prepare(

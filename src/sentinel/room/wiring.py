@@ -154,6 +154,63 @@ def make_resolve_checkpoint(
     return resolve_checkpoint
 
 
+def make_chained_sweep(*, site: RoomSite, profile, pose_source: Callable, limits: CommandLimits,
+                       sweep_offsets_deg: tuple[int, ...] = (-30, 0, 30)) -> tuple[Callable, ...]:
+    """One resolver per look of a zone's sweep, chained: the first look flies
+    to the zone and photographs; each following look only turns on from where
+    the previous one stopped, settles and photographs; the last turns back to
+    the zone's heading. Four turns for three photos, instead of turning out
+    and back for every photo (live 2026-09-24: 72 s per zone).
+
+    Each look is still its own checkpoint, admitted by the supervisor, and
+    planned from the tracker's measured heading when it is resolved."""
+    from sentinel.cube.checkpoint import _command, _rotation
+
+    if not sweep_offsets_deg:
+        raise WiringError("a sweep needs at least one look")
+    first = make_resolve_checkpoint(site=site, profile=profile, pose_source=pose_source, limits=limits,
+                                    sweep_offsets_deg=(sweep_offsets_deg[0],))
+    canonical = limits.canonical_heading_deg
+    last = len(sweep_offsets_deg) - 1
+
+    def plan(candidate_id, start, start_heading, target, terminal_heading, commands):
+        commands = tuple(commands)
+        return CheckpointPlan(checkpoint_id=candidate_id, start=start, target=target,
+                              start_heading_deg=start_heading, terminal_heading_deg=terminal_heading,
+                              commands=commands, worst_case_s=sum(c.upper_bound_s for c in commands))
+
+    def leg(index, offset):
+        def resolve(candidate, snapshot) -> CheckpointPlan:
+            pose_id = candidate.candidate_id.rsplit(":", 1)[-1]
+            resolved = resolve_pose_id(site, pose_id)
+            if resolved is None:
+                raise WiringError(f"pose_id {pose_id!r} does not resolve against this site's semantic frame")
+            target = Position(resolved.x_cm, resolved.y_cm, resolved.z_cm)
+            look_heading = float(resolved.yaw_deg) + offset
+            if index == 0:
+                full = first(candidate, snapshot)
+                if last == 0:
+                    return full
+                # Stop facing this look: the next look turns on from here.
+                cut = max(i for i, c in enumerate(full.commands) if c.kind == "CAPTURE") + 1
+                return plan(candidate.candidate_id, full.start, full.start_heading_deg, target, look_heading,
+                            full.commands[:cut])
+            pose = pose_source()
+            rotation, _ = _rotation(pose.heading_deg, look_heading, limits, "look")
+            commands = [*rotation, _command("SETTLE", limits.look_settle_s, True, after="look"),
+                        _command("CAPTURE", limits.capture_s, True, index=0,
+                                 look_deg=float(resolved.yaw_deg) - canonical + offset)]
+            terminal = look_heading
+            if index == last:
+                restore, _ = _rotation(look_heading, float(resolved.yaw_deg), limits, "restore")
+                commands += [*restore, _command("READ_TELEMETRY", limits.telemetry_s, True, phase="final")]
+                terminal = float(resolved.yaw_deg)
+            return plan(candidate.candidate_id, pose.position, pose.heading_deg, target, terminal, commands)
+        return resolve
+
+    return tuple(leg(index, offset) for index, offset in enumerate(sweep_offsets_deg))
+
+
 # ---------------------------------------------------------------------------
 # count_geometry: the calibrated Tello camera plus the site's support planes
 # ---------------------------------------------------------------------------

@@ -1378,6 +1378,12 @@ class SafetySupervisor:
                        if awaiting and not any(c.kind == "MOVE" for c in remaining) else None)
             while remaining:
                 cmd = remaining.pop(0)
+                batch = (cmd,)
+                if cmd.kind not in _CHECKED_KINDS:
+                    # Consecutive stationary steps go out as one part: one
+                    # audit, one completion record and one telemetry read.
+                    while remaining and remaining[0].kind not in _CHECKED_KINDS:
+                        batch += (remaining.pop(0),)
                 if cmd.kind == "LAND":
                     # Landing is a new physical admission, including the entire
                     # descent footprint and its current session assurance.
@@ -1398,7 +1404,7 @@ class SafetySupervisor:
                     result = (self._land(executor) if eligible is not None and eligible.kind != ContingencyKind.EMERGENCY
                               else self.emergency(executor))
                 else:
-                    part = self._plan(current.request.pose, (cmd,), plan.checkpoint_id)
+                    part = self._plan(current.request.pose, batch, plan.checkpoint_id)
                     result = executor.return_home(part) if current.transition == "RETURN_NOW" else executor.execute(part)
                 self._record_completion(result, current, event, executor)
                 if isinstance(result, TerminalOutcome):

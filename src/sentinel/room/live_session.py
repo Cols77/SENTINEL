@@ -429,9 +429,9 @@ def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, ca
     try:
         resolve_checkpoint = wiring.make_resolve_checkpoint(
             site=site, profile=pose_profile, pose_source=lambda: supervisor.tracker.health, limits=limits)
-        resolve_sweep_checkpoints = tuple(wiring.make_resolve_checkpoint(
+        resolve_sweep_checkpoints = wiring.make_chained_sweep(
             site=site, profile=pose_profile, pose_source=lambda: supervisor.tracker.health,
-            limits=limits, sweep_offsets_deg=(offset,)) for offset in (-30, 0, 30))
+            limits=limits, sweep_offsets_deg=(-30, 0, 30))
     except wiring.WiringError as exc:
         raise LiveSessionError(str(exc)) from exc
     perception_capture = wiring.make_perception_capture(
