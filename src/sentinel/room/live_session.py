@@ -333,7 +333,12 @@ def run_count_return(
         supervisor.start(stack.executor)
     except Exception as exc:
         landing = supervisor.last_terminal_outcome
-        if landing is None and getattr(stack.executor, "state", None) in _AIRBORNE_STATES:
+        attempted_takeoff = bool(getattr(stack.executor, "takeoff_attempted", False))
+        if landing is None and attempted_takeoff:
+            # StepExecutor can land and close during a failed airborne home
+            # measurement. Its state is then CLOSED, but the flight occurred.
+            landing = getattr(stack.executor, "terminal_outcome", None)
+        if landing is None and (attempted_takeoff or getattr(stack.executor, "state", None) in _AIRBORNE_STATES):
             # SafetySupervisor.start only lands for failures *after*
             # executor.start returns; a takeoff that raised with the aircraft
             # already up must still be brought down, never reported as a refusal.

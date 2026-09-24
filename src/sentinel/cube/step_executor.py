@@ -173,6 +173,7 @@ class StepExecutor:
         self.home: HomeState | None = None
         self._home_definition: HomeDefinition | None = None
         self._may_be_airborne = False
+        self._takeoff_attempted = False
         self._land_attempted = self._close_attempted = self._cleanup_started = False
         self._terminal: TerminalOutcome | None = None
         self._terminal_reason = "REQUESTED"
@@ -188,6 +189,16 @@ class StepExecutor:
     def state(self) -> ExecutorState:
         with self._state_lock:
             return self._state
+
+    @property
+    def takeoff_attempted(self) -> bool:
+        with self._state_lock:
+            return self._takeoff_attempted
+
+    @property
+    def terminal_outcome(self) -> TerminalOutcome | None:
+        with self._state_lock:
+            return self._terminal
 
     @property
     def pose_revision(self) -> int:
@@ -295,6 +306,7 @@ class StepExecutor:
                 with self._state_lock:
                     if self._state is not ExecutorState.NEW:
                         raise RuntimeError("executor became terminal before takeoff")
+                    self._takeoff_attempted = True
                     self._may_be_airborne = True
                 response = self.runner._call(self.client.takeoff)
                 if not self.runner._is_ok(response):

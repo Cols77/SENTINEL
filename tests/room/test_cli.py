@@ -800,11 +800,12 @@ def test_live_default_flight_stack_refuses_a_tag_map_not_bound_to_the_manifest(t
     assert transport.builds == 0
 
 
-def test_live_default_flight_stack_shares_the_probe_connection_and_never_takes_off_without_tag_poses(
+def test_live_default_flight_stack_reports_an_aborted_landed_flight_when_airborne_home_has_no_tag_fix(
         tmp_path, capsys, monkeypatch):
     # The default drone probe and the default flight stack share one client
     # (DJITelloPy's receivers are process-global), built only after every
-    # gate. With no tag pose the supervisor refuses takeoff: nothing flies.
+    # gate. A missing airborne tag fix after acknowledged takeoff must land
+    # and be reported as a flown, aborted session.
     from dataclasses import replace
 
     tag_map_sha256 = hashlib.sha256(TAG_MAP_FIXTURE.read_bytes()).hexdigest()
@@ -816,18 +817,20 @@ def test_live_default_flight_stack_shares_the_probe_connection_and_never_takes_o
     exit_code = cli.main([*argv, "--tag-map", str(TAG_MAP_FIXTURE)], provider_probe=_fake_probe("gemini-1"),
                          jev_factory=lambda: live_fakes.PolicyJudge(),
                          detector_factory=_fake_collaborator("detector-vendor-y"))
-    err = capsys.readouterr().err
-    assert exit_code == 2
-    assert "takeoff refused" in err and "LOCALIZATION_LOST" in err
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert json.loads(captured.out)["terminal_state"] == "ABORTED"
     assert transport.builds == 1
     assert bursts  # the default stack asked the WP5 stack for tag poses
-    assert stack_fakes.sent_motor_commands(transport.tello.sent) == []
+    assert [command for command in transport.tello.sent if command in ("takeoff", "land")] == ["takeoff", "land"]
     assert transport.tello.ended is True  # the CLI closes the shared connection
     events = _run_events(tmp_path, "runs", manifest_path)
     checked = next(e for e in events if e.event_type == "CONNECTIVITY_CHECKED").payload
     assert checked["drone_identity"].startswith("tello 192.168.10.1 ")
-    assert "LIVE_SESSION_REFUSED" in _event_types(events)
-    assert not (_run_dir(tmp_path, manifest_path) / "terminal.json").exists()
+    assert "LIVE_SESSION_REFUSED" not in _event_types(events)
+    terminal = json.loads((_run_dir(tmp_path, manifest_path) / "terminal.json").read_text())
+    assert terminal["state"] == "ABORTED" and terminal["took_off"] is True
+    assert terminal["landing_state"] == "LANDED"
 
 
 def test_live_default_flight_stack_is_built_with_the_manifests_max_duration_s(tmp_path, capsys, monkeypatch):

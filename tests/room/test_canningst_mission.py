@@ -248,7 +248,7 @@ def test_with_the_committed_profiles_the_count_mission_flies_all_three_regions_t
         tmp_path, monkeypatch):
     """Task B2 item 3 with the shipped artifacts only (no override): the
     committed CanningSt profiles (history drift 0.157 cm/cm) and site
-    (observation envelope: poses at x 230/250/270, y 183, the takeoff height)
+    (observation envelope: poses at x 217/250/283, y 190, the takeoff height)
     at 90 %: three region observations (frame, detector, grounded
     detections), the count answer, the return and the landing over the pad."""
     outcome, tello, events, detector = run_mission(tmp_path, monkeypatch)
@@ -259,15 +259,15 @@ def test_with_the_committed_profiles_the_count_mission_flies_all_three_regions_t
     # Task V2: the session records the room loop's Jev acceptance thresholds.
     policy = [e.payload for e in events if e.event_type == "ROOM_ACCEPTANCE_POLICY"]
     assert len(policy) == 1 and policy[0]["observe_act_at"] == .5 and policy[0]["answer_act_at"] == .6
-    # The lateral legs the regions need (20 cm out, 40 across, 20 back).
-    assert [c for c in tello.sent if c.split()[0] in ("left", "right")] == ["left 20", "right 40", "left 20"]
+    # The lateral legs the current three-region geometry needs.
+    assert [c for c in tello.sent if c.split()[0] in ("left", "right")] == ["left 33", "right 66", "left 33"]
 
 
 def test_with_an_absurd_drift_the_count_mission_observes_only_where_it_hovers(tmp_path, monkeypatch):
-    """The 0.45 cm/cm outlier of the excluded run, declared as the drift: the
+    """An extreme 0.6 cm/cm drift, declared as the drift: the
     supervisor refuses both lateral regions; the center (no translation from
     the pad) is still observed, and the aircraft returns and lands."""
-    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch, xy_drift_per_cm=0.45)
+    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch, xy_drift_per_cm=0.6)
     assert landed_over_the_pad(outcome, tello), outcome
     assert succeeded_observations(events) == [CENTER] and detector.calls == 1
     assert refusals(events) & PATH_REFUSALS, refusals(events)
@@ -323,10 +323,11 @@ def test_at_30_percent_battery_the_mission_is_refused_before_takeoff(tmp_path, m
 # Task V2: the expected re-anchor at a tag-visible checkpoint, flown
 # ---------------------------------------------------------------------------
 
-#: The pre-fix-1 declared hover drift (0.1 cm/s): with a fixless out-and-back
+#: The pre-fix-1 declared hover drift (0.25 cm/s): with a fixless out-and-back
 #: no lateral region is admissible at it, so it isolates the credit. The
 #: drift per cm stays the history value (0.157 cm/cm).
-DOUBLED_HOVER = {"xy_drift_cm_s": 0.1}
+HIGH_HOVER = {"xy_drift_cm_s": 0.25}
+RECOVERY_HOVER = {"xy_drift_cm_s": 0.2}
 
 
 def credited(events):
@@ -339,15 +340,15 @@ def safety_reasons(events):
             if e.event_type == "SAFETY_ASSESSED"]
 
 
-def test_with_the_expected_reanchor_the_doubled_hover_drift_still_observes_a_lateral_region(
+def test_with_the_expected_reanchor_high_hover_drift_still_observes_a_lateral_region(
         tmp_path, monkeypatch):
-    """At twice the committed hover drift the left checkpoint (both mapped
+    """At high hover drift the left checkpoint (both mapped
     wall tags declared in view) is admitted on its expected re-anchor: its
-    landing and drift budget are judged from the fix it gets there. The 40 cm
+    landing and drift budget are judged from the fix it gets there. The 66 cm
     leg on to the right region is still refused, because the corridor home is
     always judged from the fixless forecast. (With the committed profiles all
     three regions fly without any credit: the first test of this file.)"""
-    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch, **DOUBLED_HOVER)
+    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch, **HIGH_HOVER)
     assert landed_over_the_pad(outcome, tello), outcome
     assert succeeded_observations(events) == [CENTER, LEFT] and detector.calls == 2
     assert credited(events) == {LEFT}
@@ -355,11 +356,11 @@ def test_with_the_expected_reanchor_the_doubled_hover_drift_still_observes_a_lat
     assert not any(reason == "EXPECTED_REANCHOR_MISSING" for _, reason in safety_reasons(events))
 
 
-def test_without_the_declared_tags_the_doubled_hover_drift_observes_only_the_center(tmp_path, monkeypatch):
+def test_without_the_declared_tags_high_hover_drift_observes_only_the_center(tmp_path, monkeypatch):
     """The control: the same mission with no tag visibility declared credits
     no re-anchor, and the lateral regions are refused as before."""
     outcome, tello, events, detector = run_mission(
-        tmp_path, monkeypatch, site_changes={"pose_tag_visibility": ()}, **DOUBLED_HOVER)
+        tmp_path, monkeypatch, site_changes={"pose_tag_visibility": ()}, **HIGH_HOVER)
     assert landed_over_the_pad(outcome, tello), outcome
     assert succeeded_observations(events) == [CENTER] and not credited(events)
     assert not any(c.split()[0] in ("left", "right") for c in tello.sent)
@@ -372,17 +373,17 @@ def test_an_expected_fix_that_never_comes_runs_the_yaw_scan_recovery_then_lands_
     latched RECOVERY_REQUIRED (EXPECTED_REANCHOR_MISSING): the supervisor's
     stationary burst and yaw scan run (not Jev), fail, and the aircraft lands
     in place -- no translation after the arrival at the left checkpoint."""
-    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch, blind_x_cm=230.0, **DOUBLED_HOVER)
+    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch, blind_x_cm=217.0, **RECOVERY_HOVER)
     reasons = safety_reasons(events)
     assert ("RECOVER", "EXPECTED_REANCHOR_MISSING") in reasons, reasons
-    arrived = tello.sent.index("left 20")
+    arrived = tello.sent.index("left 33")
     assert not any(c.split()[0] in ("left", "right", "forward", "back") for c in tello.sent[arrived + 1:]), tello.sent
     # The arrival refresh, then the recovery's stationary burst and its yaw
     # burst at the mapped heading (the one it already faces: no SDK yaw).
     assert tello.blind_hits >= 3 and 90.0 in tello.bursts
     assert ("LAND_CONTINGENCY", "no_admissible_heading") in reasons, reasons
     assert outcome.landing is not None and outcome.landing.state == "LANDED"
-    assert not tello.flying and "land" in tello.sent[arrived:] and abs(tello.x_cm - 230) < 1
+    assert not tello.flying and "land" in tello.sent[arrived:] and abs(tello.x_cm - 217) < 1
     assert LEFT not in succeeded_observations(events)
     assert not [e for e in events if e.event_type == "POSE_REANCHORED"]
 
@@ -394,12 +395,12 @@ def test_an_expected_fix_that_comes_late_is_recovered_and_the_mission_goes_on(tm
     before any translation; the interrupted capture is a TOOL_FAILURE, and
     the mission goes on (the next leg is judged from the new fix) and home."""
     outcome, tello, events, detector = run_mission(
-        tmp_path, monkeypatch, blind_x_cm=230.0, blind_bursts=2, **DOUBLED_HOVER)
+        tmp_path, monkeypatch, blind_x_cm=217.0, blind_bursts=2, **RECOVERY_HOVER)
     reasons = safety_reasons(events)
     assert ("RECOVER", "EXPECTED_REANCHOR_MISSING") in reasons, reasons
     assert len([e for e in events if e.event_type == "POSE_REANCHORED"]) == 1
     assert tello.blind_hits == 2
     assert landed_over_the_pad(outcome, tello), outcome
     assert (f"OBSERVE:g1:c1:{LEFT}", "TOOL_FAILURE") in tool_outcomes(events)
-    arrived = tello.sent.index("left 20")
-    assert "right 20" in tello.sent[arrived + 1:]  # the leg home, flown only after the re-anchor
+    arrived = tello.sent.index("left 33")
+    assert "right 66" in tello.sent[arrived + 1:]  # the resumed route, flown only after the re-anchor
