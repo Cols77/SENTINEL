@@ -1259,7 +1259,7 @@ class RoomController:
                 admission = self.supervisor.prepare(
                     snapshot_version=(expected_version if index == 0 else self.store.session_version(session_id)),
                     checkpoint=leg, provider_wait_s=self.provider_wait_s if index == len(resolvers) - 1 else 0,
-                    replan=lambda resolver=resolver: resolver(candidate, snapshot))
+                    replan=lambda resolver=resolver: resolver(candidate, snapshot), zone_admission=True)
             except Exception:
                 terminal = self.supervisor.refresh_failure(self.flight_executor)
                 return self._preempted(session_id, None, terminal)
@@ -1278,6 +1278,9 @@ class RoomController:
             if admission.transition != "CONTINUE" or isinstance(leg_result, TerminalOutcome):
                 terminal_outcome = leg_result if isinstance(leg_result, TerminalOutcome) else None
                 return self._preempted(session_id, admission, terminal_outcome=terminal_outcome)
+            if leg_result.status == "ZONE_REFUSED":
+                return _failure("ZONE_REFUSED", _ZONE_REFUSAL_DETAIL["LOCALIZATION_RECOVERY_REQUIRED"]
+                                + f" (look {index + 1})")
             if (leg_result.status != "COMPLETED" or not leg_result.completion_known
                     or not self._capture_completed(leg, leg_result)):
                 reason = ("positioning was lost and the tag search had not re-anchored yet"

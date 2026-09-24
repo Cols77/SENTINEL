@@ -297,7 +297,8 @@ def _admission(supervisor, store, binding, pose_id):
     resolve = wiring.make_resolve_checkpoint(site=binding.site, profile=binding.calibration_profiles[0],
                                              pose_source=lambda: supervisor.tracker.health, limits=binding.limits)
     plan = resolve(SimpleNamespace(candidate_id=f"OBSERVE:g1:{pose_id}"), None)
-    return supervisor.prepare(snapshot_version=store.session_version("run-0001"), checkpoint=plan, provider_wait_s=10)
+    return supervisor.prepare(snapshot_version=store.session_version("run-0001"), checkpoint=plan, provider_wait_s=10,
+                              zone_admission=True)
 
 
 def _decisions(tmp_path, **kwargs):
@@ -319,6 +320,43 @@ def _decisions(tmp_path, **kwargs):
 
 CENTER, LEFT, RIGHT = ("center-rear-middle-toward_targets", "left-rear-middle-toward_targets",
                        "right-rear-middle-toward_targets")
+
+
+def test_a_zone_refused_on_the_dispatch_recheck_executes_nothing(tmp_path):
+    """Live 2026-09-24 17:21: a zone admitted at the edge of the drift budget
+    was refused by dispatch's own re-check a moment later. That REFUSE fell
+    through, executed the plan's first command and re-dispatched, ~75 times
+    over four minutes. Now it returns ZONE_REFUSED with nothing executed,
+    and only an explicit zone admission may refuse at all."""
+    from dataclasses import replace
+
+    supervisor, store, link, binding = _airborne_supervisor(tmp_path)
+    try:
+        refused = _admission(supervisor, store, binding, CENTER)
+        assert refused.transition == "REFUSE"
+        plan = refused.request.checkpoint
+        # Without the zone-admission flag the same checkpoint is not refused.
+        plain = supervisor.prepare(snapshot_version=store.session_version("run-0001"), checkpoint=plan,
+                                   provider_wait_s=10)
+        assert plain.transition != "REFUSE"
+        executed = []
+
+        class Recorder:
+            state = None
+            home = None
+
+            def execute(self, part):
+                executed.append(part)
+                raise AssertionError("a refused zone must not execute any command")
+
+            return_home = execute
+        recorder = Recorder()
+        recorder.home = getattr(supervisor, "_measured_home", None)
+        result = supervisor.dispatch(replace(refused, transition="CONTINUE"), recorder)
+        assert result.status == "ZONE_REFUSED" and not executed
+    finally:
+        store.close()
+        link.close()
 
 
 def test_an_unsegmented_three_look_checkpoint_is_refused_at_90_percent(tmp_path):

@@ -654,7 +654,7 @@ class SafetySupervisor:
         return result("CONTINUE", "ADMITTED")
 
     def prepare(self, *, snapshot_version, checkpoint=None, provider_wait_s=0, fallback=None,
-                remaining_commands=None, remaining_of=None, expected_fix=None, replan=None):
+                remaining_commands=None, remaining_of=None, expected_fix=None, replan=None, zone_admission=False):
         """Effectful telemetry refresh and stream/clock observation before admission.
 
         ``remaining_of`` names the checkpoint the ``remaining_commands`` belong
@@ -713,7 +713,11 @@ class SafetySupervisor:
             outcome = self.assess(SupervisorRequest(snapshot_version, checkpoint, provider_wait_s, pose, sample), self.site)
             if missed and outcome.transition == "RECOVER":
                 outcome = replace(outcome, reason="EXPECTED_REANCHOR_MISSING")
-            if remaining_commands is None and not missed:
+            # Only the controller's own first admission of a zone may refuse
+            # it. Dispatch re-checks an admitted checkpoint with this same
+            # method; a REFUSE there fell through and executed the plan's
+            # first command, then re-dispatched, in a loop (live 17:21).
+            if zone_admission and remaining_commands is None and not missed:
                 outcome = self._zone_refusal(outcome, checkpoint, pose)
             if outcome.transition == "CONTINUE":
                 if getattr(self.recovery, "resume_required", False):
@@ -1327,7 +1331,13 @@ class SafetySupervisor:
                 # but cannot erase an already selected return obligation.
                 self._audit(outcome)
             current = self.prepare(snapshot_version=self.store.session_version(self.session_id),
-                checkpoint=outcome.request.checkpoint, provider_wait_s=outcome.request.provider_wait_s, fallback=outcome)
+                checkpoint=outcome.request.checkpoint, provider_wait_s=outcome.request.provider_wait_s, fallback=outcome,
+                zone_admission=outcome.transition == "CONTINUE")
+            if current.transition == "REFUSE":
+                # Admitted a moment ago at the edge of the budget, refused on
+                # this fresh re-check: nothing has been executed, so report it
+                # as the zone's refusal instead of recovering a fresh fix.
+                return CheckpointOutcome("ZONE_REFUSED", (), (), None, current.request.pose.position, True)
             if outcome.transition == "RETURN_NOW" and current.transition == "CONTINUE":
                 current = replace(current, transition="RETURN_NOW", reason=outcome.reason, invalidates_snapshot=True)
             elif outcome.reason == "SUPERVISION_FAILED":

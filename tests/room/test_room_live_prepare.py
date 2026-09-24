@@ -44,6 +44,14 @@ class _Recorder:
         self.calls = []
 
 
+@pytest.fixture(autouse=True)
+def _free_command_port(monkeypatch):
+    # The real UDP 8889 may be held by an operator's Live server on this machine.
+    from sentinel.ui import room_agent
+    monkeypatch.setattr(room_agent.RoomAgentService, "_command_port_status",
+                        lambda self, local_ip: dict(status="FREE"))
+
+
 @pytest.fixture
 def hardware(monkeypatch):
     """Every real constructor/probe the live path could reach, replaced by recorders."""

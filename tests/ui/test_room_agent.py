@@ -27,6 +27,14 @@ REQUEST = "count the phones and computers in the room"
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture(autouse=True)
+def _free_command_port(monkeypatch):
+    # The real UDP 8889 may be held by an operator's Live server on this
+    # machine; the Live gates under test must not depend on it.
+    monkeypatch.setattr(room_agent.RoomAgentService, "_command_port_status",
+                        lambda self, local_ip: dict(status="FREE"))
+
+
 @pytest.fixture
 def fast(monkeypatch):
     # No real waiting: SETTLE/capture windows collapse on the fake stack.
@@ -60,7 +68,8 @@ def test_the_catalogue_offers_the_room_agent_next_to_the_survey(tmp_path):
     assert ids == ["survey", "room_agent"]
     assert body["catalogue"]["architectures"][1]["label"] == "Room agent (Jev adaptive)"
     modes = {row["id"]: row["available"] for row in body["catalogue"]["modes"]}
-    assert modes == {"REHEARSAL": True, "JEV_REHEARSAL": True, "LIVE": False}
+    # Jev modes need paid calls authorised, and Live needs a flight pack.
+    assert modes == {"REHEARSAL": True, "JEV_REHEARSAL": False, "LIVE": False}
     assert [row["id"] for row in body["catalogue"]["scenarios"]] == ["a", "b"]
     assert body["run"] is None
 
@@ -222,7 +231,8 @@ def _live_pack(tmp_path):
     pack = dict(manifest=str(manifest), authorization_digest="d" * 64, grant_registry=str(tmp_path / "reg.json"),
                 consent_db=str(tmp_path / "consent.sqlite3"), location="CanningSt", date="2026-09-24",
                 assurances=[str(tmp_path / "nav.json"), str(tmp_path / "energy.json")],
-                clock_domain_id="operator-l3-test", run_root=str(tmp_path / "runs"), local_ip="192.168.10.2")
+                clock_domain_id="operator-l3-test", run_root=str(tmp_path / "runs"), local_ip="192.168.10.2",
+                assurances_expire_at="2099-01-01T00:00:00+00:00", run_id="l3-test")
     path = tmp_path / "pack.json"
     path.write_text(json.dumps(pack), encoding="utf-8")
     return path
@@ -251,7 +261,7 @@ def test_in_live_nothing_is_constructed_before_approval(tmp_path, monkeypatch):
         assert catalogue["local_ip"] == "192.168.10.2"
         proposed = client.post("/api/v1/room-agent/proposals",
                                json=dict(mode="LIVE", scenario="a", request_text=REQUEST)).json()
-        assert proposed["status"] == "ACKNOWLEDGED"
+        assert proposed["status"] == "ACKNOWLEDGED", proposed
         assert proposed["run"]["proposal"]["flies"] is True
         time.sleep(0.3)
         assert calls == []  # nothing real before APPROVE
