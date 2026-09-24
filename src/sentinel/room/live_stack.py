@@ -82,6 +82,9 @@ REFRESH_BURST_S = 1.5
 #: not the declared pad mark: the flight envelope (validated on the home)
 #: bounds it. The first live run measured home 43 cm from the mark.
 HOME_TOLERANCE_CM = 150.0
+#: A height reading further than this from the dead-reckoned height is
+#: ignored (the Tello altimeter drifts); it bounds any climb chasing a drift.
+HEIGHT_TRUST_CM = 40
 #: A drone that never answers ``sdk?`` (DJITelloPy's own timeout text) is not
 #: proof of a live SDK link; SENTINEL prefers to say so plainly.
 SDK_ABORT_PREFIX = "aborting command"
@@ -423,6 +426,8 @@ class _TelloStack:
         self._climb_applied = False
         self._looking_away = False
         self._last_battery: int | None = None
+        self._last_height: int | None = None
+        self._site = site
         self.executor: StepExecutor | None = None
         #: Set when the session's supervisor gets a recovery adapter (mapped
         #: tag headings exist): refresh then leaves RECOVERY_REQUIRED to it.
@@ -430,10 +435,47 @@ class _TelloStack:
 
     # -- measurements -------------------------------------------------------
     def _height_cm(self) -> int:
-        """Altimeter height (relative to the takeoff pad) in the site frame."""
-        return self.runner._require_height(self.runner._call(self.client.height_cm)) + self._pad_z_cm
+        """Altimeter height (``height?``) in the site frame, sanity-checked (``_trusted_height``)."""
+        return self._trusted_height(
+            lambda: self.runner._require_height(self.runner._call(self.client.height_cm)) + self._pad_z_cm)
 
     def _passive_height_cm(self) -> int:
+        """State-stream height in the site frame, sanity-checked; issues no SDK command."""
+        return self._trusted_height(self._read_passive_height_cm)
+
+    def _trusted_height(self, read) -> int:
+        """A height the flight can act on, never a reason to abort it.
+
+        The Tello altimeter reads 30-40 cm low, drifts and sometimes fails.
+        Once the tracker has a height, a reading more than HEIGHT_TRUST_CM
+        from the height dead-reckoned from commanded moves is ignored:
+        otherwise every checkpoint would climb to chase a drifting reading.
+        A failed read falls back to the last trusted height, then to the
+        home hover height. The result is clamped to the flight envelope.
+        """
+        try:
+            raw = read()
+        except Exception:
+            raw = None
+        # Only an airborne, climb-propagated tracker height is a reference:
+        # on the pad (or before the takeoff climb is applied) it is not.
+        expected = (round(self.tracker.health.position.z_cm)
+                    if self._climb_applied and getattr(self.tracker, "initialized", False) else None)
+        if type(raw) is int and (expected is None or abs(raw - expected) <= HEIGHT_TRUST_CM):
+            height = raw
+        elif expected is not None:
+            height = expected
+        elif self._last_height is not None:
+            height = self._last_height
+        else:
+            route = next((r for r in self._site.routes if r.route_id == self._site.home.route_id), None)
+            height = round(route.checkpoints[-1].z_cm) if route is not None else self._pad_z_cm
+        envelope = self.runner.envelope
+        height = min(max(height, envelope.min_z_cm), envelope.max_z_cm)
+        self._last_height = height
+        return height
+
+    def _read_passive_height_cm(self) -> int:
         """Airborne altitude from the live state stream, issuing no SDK command.
 
         StepExecutor's documented ``measure_home`` contract is that it "must
@@ -541,8 +583,9 @@ class _TelloStack:
             self.tracker.note_camera(self.clock(), estimator_failed=True,
                                      intentional_look_away=self._looking_away)
         else:
-            z_cm = self._height_cm()
+            # Climb first, so the height check compares against the airborne home.
             self._propagate_takeoff_climb()
+            z_cm = self._height_cm()
             self.tracker.accept_fix(fix.pose_fix(z_cm))
         return self.tracker.health, EnergySample(self._battery(), self.clock())
 

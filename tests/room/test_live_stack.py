@@ -367,6 +367,16 @@ def test_an_unusable_battery_read_keeps_the_last_reading_instead_of_aborting(tmp
     assert stack.refresh()[1].battery_pct == 87
 
 
+def test_a_drifting_or_failed_height_reading_keeps_the_dead_reckoned_height(tmp_path):
+    stack, tello, tracker, *_ = build_stack(tmp_path, bursts=Bursts(reports(101, 99, 91.0)))
+    first = stack.refresh()[0].position.z_cm
+    _inner(stack)._climb_applied = True  # airborne: the tracker height is now the reference
+    tello.height_dm = 20  # a 2 m jump: never chased
+    assert stack.refresh()[0].position.z_cm == first
+    tello.height_dm = -1  # an invalid read: never aborts the refresh
+    assert stack.refresh()[0].position.z_cm == first
+
+
 def test_refresh_without_a_reliable_burst_never_invents_a_pose(tmp_path):
     stack, _, tracker, *_ = build_stack(tmp_path, bursts=Bursts(reports(n=3)))
     pose, _ = stack.refresh()
