@@ -15,6 +15,7 @@ function createRoomClient(base='/api/v1',fetchImpl=fetch){
  return {
   session:()=>json(`${base}/session`),
   state:()=>json(`${base}/room-agent`),
+  prepare:command=>post(`${base}/room-agent/preparations`,command),
   propose:command=>post(`${base}/room-agent/proposals`,command),
   decide:(proposal_id,decision)=>post(`${base}/room-agent/decisions`,{proposal_id,decision}),
   land:(runId,identity)=>post(`${base}/runs/${encodeURIComponent(runId)}/land`,identity),
@@ -66,7 +67,7 @@ function reanchorList(steps){
 }
 
 export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
- let catalogue=null,state=null,session=null,architecture=SURVEY,message='',timer=null,landAttempt=null,emergencyAttempt=null;
+ let catalogue=null,state=null,session=null,architecture=SURVEY,message='',timer=null,landAttempt=null,emergencyAttempt=null,prepBusy=false;
  const form={mode:'REHEARSAL',scenario:'a',requestText:'',localIp:''};
  const archSelect=el('select',{id:'architecture-select','data-testid':'architecture-select','aria-label':'Mission architecture'});
  const archHelp=el('p',{class:'meta',id:'architecture-help'});
@@ -106,6 +107,17 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
   await refresh();
  }
 
+ async function prepare(){
+  if(prepBusy)return;
+  prepBusy=true;message='Creating the next flight pack…';render();
+  try{
+   const r=await client.prepare({local_ip:form.localIp.trim()||null});
+   message=r.ok?`New flight pack ${r.body.run_id} prepared.`:
+    `Preparation refused: ${r.body.detail??r.body.reason_code??r.status}`;
+  }catch{message='Preparation failed: room-agent service unavailable.';}
+  finally{prepBusy=false;await refresh();}
+ }
+
  async function decide(decision){
   const proposal=state?.run?.proposal;if(!proposal)return;
   message=decision==='APPROVE'?'Approved: dispatching…':'Rejecting…';render();
@@ -142,6 +154,16 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
  const ip=el('input',{id:'room-local-ip','data-testid':'room-local-ip',type:'text',inputmode:'decimal',placeholder:'auto (192.168.10.x)'});
  ip.addEventListener('input',()=>{form.localIp=ip.value;});
  const submit=button('Propose run',()=>void propose(),{id:'room-propose','data-testid':'room-propose'});
+ const prepButton=button('Prepare next flight',()=>void prepare(),{id:'room-prepare','data-testid':'room-prepare'});
+ const prepPack=el('p',{class:'room-prep-pack','data-testid':'room-prep-pack',role:'status'});
+ const prepPort=el('p',{class:'room-prep-port','data-testid':'room-prep-port'});
+ const prepHint=el('p',{class:'room-prep-hint'});
+ const prepPanel=el('section',{class:'room-preparation','aria-label':'Next flight preparation'},[
+  el('p',{class:'room-prep-eyebrow'},['NEXT FLIGHT']),
+  el('h3',{},['Prepare a fresh pack']),
+  el('p',{class:'room-prep-copy'},['Creates a new run, grant and site assurances. No drone commands are sent.']),
+  prepPack,prepPort,prepButton,prepHint,
+ ]);
  const setup=el('div',{class:'room-setup'},[
   el('label',{for:'room-mode'},['Run mode']),modeSelect,modeHelp,
   el('label',{for:'room-local-ip'},['Tello local IP (Live)']),ip,
@@ -159,7 +181,7 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
  panel.append(
   el('header',{class:'room-header'},[el('p',{class:'section-label'},['ROOM AGENT · JEV ADAPTIVE']),el('div',{class:'room-safety'},[landButton,emergencyButton])]),
   messageLine,
-  el('div',{class:'room-grid'},[el('div',{class:'room-col room-setup-col'},[setup,approvalHost]),cameraHost,dynamic,logs,lists]),
+  el('div',{class:'room-grid'},[el('div',{class:'room-col room-setup-col'},[setup,prepPanel,approvalHost]),cameraHost,dynamic,logs,lists]),
  );
  let lastModes='';
 
@@ -182,7 +204,31 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
   modeSelect.disabled=!view.canPropose;
   request.disabled=!view.canPropose;
   ip.disabled=!view.canPropose||form.mode!=='LIVE';
-  submit.disabled=!view.canPropose;
+  const prep=state?.preparation;
+  const port=prep?.command_port;
+  submit.disabled=!view.canPropose||(form.mode==='LIVE'&&(
+   port?.status==='BUSY'||!prep?.pack_run_id||prep.pack_expired||prep.pack_used));
+  prepPanel.hidden=form.mode!=='LIVE'&&state?.run?.mode!=='LIVE';
+  prepButton.disabled=prepBusy||!prep?.can_prepare;
+  prepButton.textContent=prepBusy?'Preparing…':'Prepare next flight';
+  prepButton.title=prep?.reason_code??'';
+  const expiry=prep?.assurances_expire_at?Date.parse(prep.assurances_expire_at):NaN;
+  const expiryLabel=Number.isFinite(expiry)?new Date(expiry).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'unknown';
+  const expired=Number.isFinite(expiry)&&expiry<=Date.now();
+  const packLabel=prep?.pack_run_id?`${prep.pack_used?'Pack used':!Number.isFinite(expiry)?'Pack status unknown':expired?'Pack expired':'Pack staged'} · ${prep.pack_run_id} · assurances until ${expiryLabel}`:'No flight pack staged.';
+  if(prepPack.textContent!==packLabel)prepPack.textContent=packLabel;
+  prepPack.classList.toggle('is-expired',expired||Boolean(prep?.pack_used));
+  prepPort.textContent=view.running?'Tello command port is in use by the active flight.':
+   port?.owner_is_this_server?'This Mission Control server still owns Tello port 8889. Restart it before another Live run.':
+   port?.status==='BUSY'?`Another process${port.owner_pid?` (${port.owner_pid})`:''} owns Tello port 8889. Close that session before a Live run.`:
+   port?.status==='FREE'?'Tello command port 8889 is free.':'Tello command port status unavailable.';
+  prepPort.classList.toggle('is-busy',port?.status==='BUSY');
+  prepHint.textContent=prepBusy?'Creating a new grant, manifest and assurances…':{
+   ROOM_RUN_ACTIVE:'Available after the current run or proposal ends.',
+   MISSION_ACTIVE:'Available when the other Mission Control run ends.',
+   SESSION_EMERGENCY_LATCHED:'Restart Mission Control after Emergency Stop.',
+   ROOM_LIVE_CONFIG_REQUIRED:'Start Mission Control with a room Live pack.',
+  }[prep?.reason_code]??'';
   landButton.disabled=!view.running;
   emergencyButton.disabled=!view.running;
   messageLine.textContent=message;

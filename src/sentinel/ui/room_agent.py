@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 import io
 import ipaddress
 import json
+import os
 from pathlib import Path
 import sys
 import threading
@@ -198,6 +199,9 @@ class RoomAgentService:
         self.run: RoomAgentRun | None = None
         self._lock = threading.RLock()
         self._closed = False
+        self._preparing = False
+        self._port_checked_at = 0.0
+        self._port_snapshot = None
 
     # -- catalogue ------------------------------------------------------------
     def modes(self):
@@ -231,7 +235,107 @@ class RoomAgentService:
     def state(self):
         with self._lock:
             run = self.run
-        return dict(catalogue=self.catalogue(), run=run.public() if run else None)
+        return dict(catalogue=self.catalogue(), run=run.public() if run else None,
+                    preparation=self.preparation_state())
+
+    def _prepare_blocker(self):
+        if self.live_config_path is None:
+            return "ROOM_LIVE_CONFIG_REQUIRED"
+        if self._closed:
+            return "CLOSED"
+        if self._preparing:
+            return "PREPARATION_ACTIVE"
+        run = self.run
+        if run is not None and (run.status in ("RUNNING", "AWAITING_APPROVAL") or
+                                (run.thread is not None and not run.done.is_set())):
+            return "ROOM_RUN_ACTIVE"
+        return self._mission_busy()
+
+    def _command_port_status(self, local_ip):
+        now = time.monotonic()
+        with self._lock:
+            if self._port_snapshot is not None and now - self._port_checked_at < 3:
+                return self._port_snapshot
+        try:
+            import psutil
+            occupants = [connection for connection in psutil.net_connections(kind="udp")
+                         if connection.laddr and connection.laddr.port == 8889
+                         and (local_ip is None or connection.laddr.ip in (local_ip, "0.0.0.0", "::"))]
+            status = (dict(status="BUSY", owner_pid=occupants[0].pid,
+                           owner_is_this_server=occupants[0].pid == os.getpid())
+                      if occupants else dict(status="FREE"))
+        except Exception:
+            status = dict(status="UNKNOWN")
+        with self._lock:
+            self._port_snapshot = status
+            self._port_checked_at = now
+        return status
+
+    def preparation_state(self):
+        pack = self._live_pack(optional=True) or {}
+        expiry = pack.get("assurances_expire_at")
+        try:
+            expires_at = datetime.fromisoformat(expiry)
+            pack_expired = expires_at.tzinfo is None or expires_at <= datetime.now(expires_at.tzinfo)
+        except (TypeError, ValueError):
+            pack_expired = bool(pack)
+        try:
+            pack_used = (Path(pack["run_root"]) / pack["run_id"] / "terminal.json").exists()
+        except (KeyError, TypeError, ValueError):
+            pack_used = False
+        with self._lock:
+            blocker = self._prepare_blocker()
+            preparing = self._preparing
+        return dict(can_prepare=blocker is None, reason_code=blocker, preparing=preparing,
+                    pack_run_id=pack.get("run_id"), assurances_expire_at=expiry,
+                    pack_expired=pack_expired, pack_used=pack_used,
+                    command_port=self._command_port_status(pack.get("local_ip") or self._default_local_ip()))
+
+    def prepare(self, command):
+        if not isinstance(command, dict):
+            return dict(status="INVALID", reason_code="INVALID_REQUEST")
+        local_ip = command.get("local_ip") or self._default_local_ip()
+        if local_ip is not None:
+            try:
+                address = ipaddress.ip_address(local_ip)
+                subnet = ipaddress.ip_network("192.168.10.0/24")
+                if (address.version != 4 or address not in subnet or
+                        address in (subnet.network_address, subnet.broadcast_address,
+                                    ipaddress.ip_address("192.168.10.1"))):
+                    raise ValueError
+            except ValueError:
+                return dict(status="INVALID", reason_code="INVALID_LOCAL_IP")
+        with self._lock:
+            blocker = self._prepare_blocker()
+            if blocker:
+                return dict(status="CONFLICT", reason_code=blocker)
+            self._preparing = True
+        try:
+            try:
+                from scripts import room_live_prepare
+            except ImportError:
+                sys.path.insert(0, str(room_rehearsal.REPO_ROOT))
+                from scripts import room_live_prepare
+
+            pack = self._live_pack(optional=True) or {}
+            pack_path = Path(self.live_config_path).resolve()
+            run_root = pack_path.parent
+            if pack.get("run_root") and Path(pack["run_root"]).resolve() != run_root:
+                return dict(status="UNAVAILABLE", reason_code="ROOM_PACK_ROOT_MISMATCH",
+                            detail="The configured Live pack must be inside its run root.")
+            result = room_live_prepare.prepare(run_root=run_root, local_ip=local_ip,
+                                               consent_confirmed=False, new_run=True)
+            with self._lock:
+                self.live_config_path = result["current_pack"]
+                self._port_checked_at = 0.0
+            new_pack = result["pack"]
+            return dict(status="ACKNOWLEDGED", run_id=new_pack["run_id"],
+                        assurances_expire_at=new_pack["assurances_expire_at"])
+        except (OSError, ValueError, KeyError, RuntimeError) as exc:
+            return dict(status="UNAVAILABLE", reason_code="ROOM_PREPARATION_FAILED", detail=str(exc))
+        finally:
+            with self._lock:
+                self._preparing = False
 
     def _default_local_ip(self):
         pack = self._live_pack(optional=True) or {}
@@ -262,9 +366,21 @@ class RoomAgentService:
                 return dict(status="INVALID", reason_code="INVALID_LOCAL_IP")
         if mode in ("JEV_REHEARSAL", "LIVE") and not getattr(self.mission.config, "authorise_paid_calls", False):
             return dict(status="UNAVAILABLE", reason_code="PAID_CALLS_NOT_AUTHORISED")
+        if mode == "LIVE":
+            preparation = self.preparation_state()
+            if not preparation["pack_run_id"]:
+                return dict(status="UNAVAILABLE", reason_code="ROOM_LIVE_CONFIG_REQUIRED")
+            if preparation["pack_used"]:
+                return dict(status="UNAVAILABLE", reason_code="ROOM_PACK_ALREADY_USED")
+            if preparation["pack_expired"]:
+                return dict(status="UNAVAILABLE", reason_code="ROOM_PACK_EXPIRED")
+            if preparation["command_port"]["status"] == "BUSY":
+                return dict(status="UNAVAILABLE", reason_code="TELLO_COMMAND_PORT_IN_USE")
         with self._lock:
             if self._closed:
                 return dict(status="UNAVAILABLE", reason_code="CLOSED")
+            if self._preparing:
+                return dict(status="CONFLICT", reason_code="PREPARATION_ACTIVE")
             if self.run is not None and self.run.status == "RUNNING":
                 return dict(status="CONFLICT", reason_code="ROOM_RUN_ACTIVE")
             busy = self._mission_busy()
@@ -693,6 +809,10 @@ def build_room_agent_router(room: RoomAgentService):
     @router.post("/proposals")
     async def propose(request: Request):
         return result(await run_in_threadpool(room.propose, await body_of(request)))
+
+    @router.post("/preparations")
+    async def prepare(request: Request):
+        return result(await run_in_threadpool(room.prepare, await body_of(request)))
 
     @router.post("/decisions")
     async def decide(request: Request):

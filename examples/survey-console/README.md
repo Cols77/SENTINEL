@@ -23,6 +23,8 @@ uv run python -m sentinel.ui --mode rehearsal --data-dir artifacts/room-ui-previ
 
 Preparation reuses today's recorded CanningSt filming consent and refuses if it is absent. The pack and its run artifacts stay in this checkout. Selecting and approving Live Tello can dispatch a real flight, even though the host's survey mode is rehearsal; follow the room Live flight checklist before approval. Re-run preparation when its site assurances expire.
 
+In the room-agent Live setup, **Prepare next flight** runs the same offline preparation from the browser. It creates a fresh run, grant, manifest and assurances using the configured pack's run root and existing consent; it sends no drone command. The panel also shows whether local Tello UDP port 8889 is occupied. If this server retains that port after a landed flight, restart Mission Control before proposing the next Live run. Pack preparation alone does not release DJITelloPy's process-wide receiver socket.
+
 The clean scenario yields one confirmed synthetic computer. Pass `--scenario fixtures/mission-control/uncertain-followup.json` for a separately approved follow-up, or `--scenario fixtures/mission-control/missing-analysis.json` for a provider gap. Missing analysis is visibly incomplete, never interpreted as a zero count. Rehearsal localization runs the real AprilTag estimator over scripted image inputs, including no-tag intervals that age and recover the last measured fix.
 
 Land interrupts normal sequencing and requests controlled landing. Hold Emergency for 1.2 seconds to latch the session and all active runners, then use the independent transport. Both are simulated in Rehearsal. Acknowledgement is not proof of physical landing or motor stop.
