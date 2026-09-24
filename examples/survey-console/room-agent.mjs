@@ -245,6 +245,11 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
    ])]:[]);
   }
   replace(dynamic,[
+   ...(view.preflightBlock?[el('div',{class:'room-preflight-block','data-testid':'room-preflight-block',role:'status'},[
+    el('strong',{},[view.preflightBlock.title]),
+    el('p',{},[view.preflightBlock.detail]),
+    el('code',{},[view.preflightBlock.code]),
+   ])]:[]),
    el('dl',{class:'room-facts'},[
     el('dt',{},['Status']),el('dd',{'data-testid':'room-status'},[view.status]),
     el('dt',{},['Localization']),el('dd',{'data-testid':'room-localization-state',class:`loc-${view.localization.toLowerCase()}`},[view.localization]),

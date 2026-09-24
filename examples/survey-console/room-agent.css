@@ -191,6 +191,14 @@
   display:grid; grid-template-columns:minmax(78px,max-content) minmax(0,1fr);
   gap:7px 12px; margin:0;
 }
+.room-preflight-block {
+  margin-bottom:18px; padding:14px 16px;
+  border:1px solid var(--status-warning); border-left:4px solid var(--status-warning);
+  background:color-mix(in srgb,var(--surface-panel) 90%,var(--status-warning));
+}
+.room-preflight-block strong { color:var(--status-warning); font:700 16px/1.3 Mission Plex,var(--font-body); }
+.room-preflight-block p { margin:7px 0; line-height:1.45; }
+.room-preflight-block code { color:var(--text-secondary); font:12px Mission Mono,var(--font-mono); }
 .room-facts dt { align-self:start; color:var(--text-secondary); font-size:14px; }
 .room-facts dd {
   min-width:0; margin:0; overflow-wrap:anywhere;

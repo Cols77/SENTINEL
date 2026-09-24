@@ -70,6 +70,7 @@ class RoomAgentProjection:
             battery_percent=None,
             airborne=False,
             goal=None,
+            goal_rejection=None,
             regions={},
             captures=0,
             detections=[],
@@ -183,6 +184,13 @@ class RoomAgentProjection:
             f"{o.get('kind')} {', '.join(o.get('target_classes') or ())} in {str(o.get('spatial_scope', '')).lower()}"
             f" then {str(o.get('terminal_condition', '')).lower().replace('_', ' ')}"
             for o in objectives) or None
+
+    def _on_goal_compile_rejected(self, payload):
+        # This is the preflight reason recorded in the ledger. The terminal
+        # reason only says GOAL_LEDGER_NOT_PENDING and loses this detail.
+        self.state["goal_rejection"] = dict(
+            status=payload.get("status"), code=payload.get("reason"),
+        )
 
     def _on_drone_state_recorded(self, payload):
         state = payload.get("state") or {}

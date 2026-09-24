@@ -54,6 +54,7 @@ export function poseText(run){
 
 export function answerText(run){
  const answer=run?.answer;
+ if(run?.goal_rejection&&!run?.took_off)return 'No answer: request stopped before flight.';
  if(!answer)return TERMINAL_STATUSES.has(run?.status)?'No answer recorded.':'Awaiting answer…';
  if(answer.summary)return answer.summary;
  // Search answers have no count summary: headline the first finding, not the "Objective …:" header.
@@ -64,12 +65,14 @@ export function answerText(run){
 
 export function returnedHomeText(run){
  if(!run)return '';
+ if(run.goal_rejection&&!run.took_off)return 'No flight started';
  if(run.returned_home)return 'Returned home';
  if(run.returning)return 'Returning home…';
  return TERMINAL_STATUSES.has(run.status)?'Not returned home':'Not yet returning';
 }
 
 export function landingText(run){
+ if(run?.goal_rejection&&!run?.took_off)return 'No flight started';
  if(!run?.landing)return run?.land_status==='REQUESTED'?'Landing requested…':'Not landed';
  return `Landing: ${run.landing.state}${run.landing.reason?` (${run.landing.reason})`:''}`;
 }
@@ -78,6 +81,18 @@ export function statusText(run){
  if(!run)return 'No room-agent run yet.';
  const phase=run.phase&&run.phase!==run.status?` · ${run.phase}`:'';
  return `${run.mode_label??run.mode} · ${run.status}${phase}${run.error?` · ${run.error}`:''}`;
+}
+
+export function preflightBlock(run){
+ const rejection=run?.goal_rejection;
+ if(!rejection||run?.took_off)return null;
+ const code=rejection.code??'UNKNOWN';
+ const explanations={
+  AMBIGUOUS_ENTITY_REFERENCE:'The request refers to a target or position the planner cannot identify unambiguously. Name the area and target explicitly.',
+  LOW_CONFIDENCE:'Jev could not choose a safe interpretation of the request with enough confidence.',
+  UNSUPPORTED:'The requested goal cannot be represented by the current room agent.',
+ };
+ return {title:'No takeoff attempted',detail:explanations[code]??'The room agent could not turn this request into an approved flight goal.',code};
 }
 
 const known=value=>value!==null&&value!==undefined;
@@ -119,6 +134,7 @@ export function roomViewModel(state){
  const run=state?.run??null;
  return {
   status:statusText(run),
+  preflightBlock:preflightBlock(run),
   localization:localizationText(run),
   fixAge:fixAgeText(run),
   pose:poseText(run),
