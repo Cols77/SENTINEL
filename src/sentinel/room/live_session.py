@@ -302,6 +302,39 @@ def _pose_profile(profiles):
     return usable[0]
 
 
+def placement_advice(site: RoomSite, error: str) -> str | None:
+    """Operator advice for a takeoff measured outside the flight area.
+
+    Live 2026-09-24 17:37-18:13: three takeoffs 2.8-3.0 m from the tag wall
+    were measured behind the flight area and landed at once with only
+    ``EnvelopeViolation: position is outside the flight envelope``. The tag
+    wall is the far side of the site's measured ``cube``; the flight area is
+    its ``flight`` volume; the pad is the site's declared home."""
+    import re
+
+    found = re.search(r"outside the flight envelope: \((-?\d+), (-?\d+), (-?\d+)\)", error)
+    volumes = {v.volume_id: v for v in site.free_space_volumes}
+    if found is None or "flight" not in volumes or "cube" not in volumes:
+        return None
+    x, y = int(found.group(1)), int(found.group(2))
+    wall = max(p[1] for p in volumes["cube"].polygon_xy_cm)
+    xs = [p[0] for p in volumes["flight"].polygon_xy_cm]
+    ys = [p[1] for p in volumes["flight"].polygon_xy_cm]
+    pad = site.home.nominal_pose
+    parts = [f"The drone took off {wall - y} cm from the tag wall (x {x} cm)."]
+    if y < min(ys):
+        parts.append(f"The flight area starts {wall - min(ys)} cm from the wall: move it at least "
+                     f"{min(ys) - y} cm towards the tags.")
+    elif y > max(ys):
+        parts.append(f"The flight area ends {wall - max(ys)} cm from the wall: move it at least "
+                     f"{y - max(ys)} cm away from the tags.")
+    if x < min(xs) or x > max(xs):
+        parts.append(f"It is {min(xs) - x if x < min(xs) else x - max(xs)} cm to the "
+                     f"{'left' if x < min(xs) else 'right'} of the flight area.")
+    parts.append(f"Best spot: {wall - pad.y_cm} cm from the tag wall, centred between the tags.")
+    return " ".join(parts)
+
+
 def run_count_return(
     *, store: RoomStore, manifest, site: RoomSite, drift_profile: DriftProfile,
     energy_profile: EnergyProfile, limits: CommandLimits, calibration_profiles,
@@ -344,7 +377,9 @@ def run_count_return(
     try:
         supervisor.start(stack.executor)
     except Exception as exc:
-        print(f"Live start failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        advice = placement_advice(site, str(exc))
+        print(f"Live start failed: {advice + ' ' if advice else ''}({type(exc).__name__}: {exc})",
+              file=sys.stderr, flush=True)
         landing = supervisor.last_terminal_outcome
         attempted_takeoff = bool(getattr(stack.executor, "takeoff_attempted", False))
         if landing is None and attempted_takeoff:

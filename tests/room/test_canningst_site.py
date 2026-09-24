@@ -477,3 +477,14 @@ def test_the_expected_reanchor_does_not_relieve_an_absurd_drift(tmp_path):
     assert all(d.transition != "CONTINUE" and d.expected_reanchor is None
                for d in decisions.values())
 
+
+
+def test_a_takeoff_behind_the_flight_area_gets_placement_advice():
+    """Live 2026-09-24 18:12: measured at (250, 126), 274 cm from the tags."""
+    from sentinel.room.live_session import placement_advice
+
+    advice = placement_advice(canningst_site(), "position is outside the flight envelope: (250, 126, 40) cm")
+    assert advice.startswith("The drone took off 274 cm from the tag wall")
+    assert "move it at least 14 cm towards the tags" in advice
+    assert "Best spot: 210 cm from the tag wall" in advice
+    assert placement_advice(canningst_site(), "some other failure") is None
