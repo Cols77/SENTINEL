@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import sys
 from threading import Event, RLock, Thread
 import time
 from typing import Callable, Literal
@@ -996,6 +997,8 @@ class SafetySupervisor:
             self._record_completion(result, terminal, event, executor)
             return result
 
+        print(f"Recovery for {current.reason} (voluntary={voluntary}) at {current.request.pose.position}, "
+              f"state {current.request.pose.state.value}", file=sys.stderr, flush=True)
         if getattr(recovery, "episode_succeeded", False) and not self._begin_recovery_episode(
                 current, environment):
             return stop("RECOVERY_EPISODE_NOT_ADMITTED")
@@ -1071,6 +1074,8 @@ class SafetySupervisor:
         except Exception:
             self.tracker.mark_lost()
             return stop("REANCHOR_SYNC_FAILED")
+        if not accepted.accepted:
+            print(f"Recovery burst rejected: {accepted.reason}", file=sys.stderr, flush=True)
         result = CheckpointOutcome("COMPLETED" if accepted.accepted else "RECOVERY_PENDING", (), (), None,
                                    self.tracker.health.position, True)
         self._record_completion(result, current, event, executor)
