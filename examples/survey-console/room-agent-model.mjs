@@ -106,6 +106,18 @@ export function statusText(run){
  return `${run.mode_label??run.mode} · ${run.status}${phase}${run.error?` · ${run.error}`:''}`;
 }
 
+const STATUS_TONES={
+ RUNNING:'live',AWAITING_APPROVAL:'pending',
+ COMPLETED:'success',LANDED_AT_CERTIFIED_ZONE:'success',SAFE_LANDED:'success',
+ INCOMPLETE_RETURNED:'partial',BLOCKED:'partial',ESCALATED:'partial',REJECTED:'partial',
+ ABORTED:'alert',RECOVERY_FAILURE:'alert',PROVIDER_FAILURE:'alert',FAILED:'alert',REFUSED:'alert',
+};
+
+/** The Status badge colour: live, pending, success, partial, alert, or idle (no run). */
+export function statusTone(run){
+ return run?STATUS_TONES[run.status]??'partial':'idle';
+}
+
 export function preflightBlock(run){
  const rejection=run?.goal_rejection;
  if(!rejection||run?.took_off)return null;
@@ -164,6 +176,7 @@ export function roomViewModel(state){
  const run=state?.run??null;
  return {
   status:statusText(run),
+  statusTone:statusTone(run),
   preflightBlock:preflightBlock(run),
   localization:localizationText(run),
   fixAge:fixAgeText(run),

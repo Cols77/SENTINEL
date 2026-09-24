@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {ROOM_AGENT,SURVEY,architectureOptions,selectArchitecture,modeOptions,scenarioOptions,proposalCommand,roomViewModel,safetyIdentity,answerText,returnedHomeText,landingText,reviewOptions,flightControlMessages} from '../../examples/survey-console/room-agent-model.mjs';
+import {ROOM_AGENT,SURVEY,architectureOptions,selectArchitecture,modeOptions,scenarioOptions,proposalCommand,roomViewModel,safetyIdentity,answerText,returnedHomeText,landingText,reviewOptions,flightControlMessages,statusTone} from '../../examples/survey-console/room-agent-model.mjs';
 
 const catalogue={
  architectures:[{id:'survey',label:'Survey (rules proposer)',description:'s'},{id:'room_agent',label:'Room agent (Jev adaptive)',description:'r'}],
@@ -118,4 +118,15 @@ test('a refused turn shows the real choice, its probability and the refusal code
 
 test('safety identities are one id used three ways',()=>{
  assert.deepEqual(safetyIdentity(()=>'x'),{command_id:'x',correlation_id:'x',idempotency_key:'x'});
+});
+
+test('the status badge colours the run by what the operator should notice',()=>{
+ assert.equal(statusTone(null),'idle');
+ assert.equal(statusTone({status:'RUNNING'}),'live');
+ assert.equal(statusTone({status:'AWAITING_APPROVAL'}),'pending');
+ assert.equal(statusTone({status:'COMPLETED'}),'success');
+ assert.equal(statusTone({status:'INCOMPLETE_RETURNED'}),'partial');
+ assert.equal(statusTone({status:'ABORTED'}),'alert');
+ assert.equal(statusTone({status:'SOMETHING_NEW'}),'partial');
+ assert.equal(roomViewModel({run:{status:'RUNNING',mode:'LIVE'}}).statusTone,'live');
 });

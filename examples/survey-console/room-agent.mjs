@@ -294,7 +294,7 @@ export function mountRoomAgent({root,surveyLayout,client=createRoomClient()}){
     el('code',{},[view.preflightBlock.code]),
    ])]:[]),
    el('dl',{class:'room-facts'},[
-    el('dt',{},['Status']),el('dd',{'data-testid':'room-status'},[view.status]),
+    el('dt',{},['Status']),el('dd',{'data-testid':'room-status',class:`room-status is-${view.statusTone}`},[view.status]),
     el('dt',{},['Localization']),el('dd',{'data-testid':'room-localization-state',class:`loc-${view.localization.toLowerCase()}`},[view.localization]),
     el('dt',{},['Fix age']),el('dd',{'data-testid':'room-fix-age'},[view.fixAge]),
     el('dt',{},['Pose']),el('dd',{'data-testid':'room-pose'},[`${view.pose} · ${view.battery}`]),

@@ -216,8 +216,32 @@
   min-width:0; margin:0; overflow-wrap:anywhere;
   font:14px/1.45 Mission Mono,var(--font-mono);
 }
+/* Status is the one line the audience should read first: a filled badge in
+   the run's colour, with a glowing dot that pulses while the drone flies. */
 .room-facts dd[data-testid='room-status'] {
-  color:var(--text-primary); font:700 16px/1.35 Mission Plex,var(--font-body);
+  --tone:var(--text-secondary);
+  justify-self:start; display:inline-flex; align-items:center; gap:10px;
+  padding:7px 14px 7px 12px; border:2px solid var(--tone); border-radius:12px;
+  background:color-mix(in srgb,var(--surface-panel) 72%,var(--tone));
+  box-shadow:0 0 18px color-mix(in srgb,transparent 55%,var(--tone));
+  color:var(--text-primary); font:700 17px/1.3 Mission Plex,var(--font-body);
+}
+.room-facts dd[data-testid='room-status']::before {
+  content:''; flex:none; width:12px; height:12px; border-radius:50%;
+  background:var(--tone); box-shadow:0 0 10px var(--tone);
+}
+.room-facts .room-status.is-live { --tone:var(--accent-primary); }
+.room-facts .room-status.is-pending,.room-facts .room-status.is-partial { --tone:var(--status-warning); }
+.room-facts .room-status.is-success { --tone:#62D98A; }
+.room-facts .room-status.is-alert { --tone:var(--status-emergency); }
+.room-facts .room-status.is-live::before { animation:room-status-pulse 1.4s ease-in-out infinite; }
+.room-facts .room-status.is-pending::before { animation:room-status-pulse 2.2s ease-in-out infinite; }
+@keyframes room-status-pulse {
+  0%,100% { transform:scale(1); opacity:1; }
+  50% { transform:scale(1.45); opacity:.55; }
+}
+@media (prefers-reduced-motion:reduce) {
+  .room-facts .room-status.is-live::before,.room-facts .room-status.is-pending::before { animation:none; }
 }
 .room-facts dd[data-testid='room-localization-state'] {
   justify-self:start; padding:4px 10px;
