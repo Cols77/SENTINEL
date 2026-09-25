@@ -1,0 +1,1 @@
+{"completed_at":null,"finalized_at":"2026-09-25T05:32:06.309600+00:00","landing_reason":null,"landing_state":null,"ledger_status":"PENDING","reason":"CONTROLLER_TERMINAL","resolved_identities":{"detector":"gemini-openrouter:google/gemini-2.5-flash","jev":"jev:typesafe/jev-1.13-20260917"},"run_id":"l3-20260925-152742","state":"ESCALATED","took_off":true}
