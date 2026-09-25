@@ -64,5 +64,19 @@ for expected re-anchor credit. The `center-middle-middle-left` and
 `center-middle-middle-right` poses look sideways and declare no tag view.
 
 `FLOOR` at z 0 has no classes; `demo-surface` at z 50 supports `computer`,
-`phone`, and `pen`. The surface footprint and supported class list remain
+`phone`, and `mug`. The surface footprint and supported class list remain
 operator declarations from the earlier room site, not a new measurement.
+
+## 2026-09-25: objects on the ground, not a table
+
+There is no table at CanningSt: phones, computers and mugs lie on the brick
+ground (operator, 2026-09-25). The `demo-surface` plane at z 50 is removed.
+Site heights are Tello readings, which read 30–40 cm below true height, so the
+ground is declared as the support plane `ground` at reported z −35 (`FLOOR`
+must stay at z 0 and supports no class). `scripts/room_site_coverage.py` now
+grids x 130–370, y 150–390 on that plane. From reported z 70 (about 105 cm
+true) the 8.6° pitched camera first sees the ground about 1.75 m ahead, so
+only the ten cells within about 90 cm of the tag doors (y 310–390) are
+visible from any pose. The two side looks (`center-middle-middle-left/right`)
+see no ground cell and are no longer declared zones. Objects placed further
+from the doors are not seen at this height.

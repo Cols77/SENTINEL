@@ -1,4 +1,4 @@
-"""Generate CanningSt table cells and pose visibility from the Tello camera.
+"""Generate CanningSt ground cells and pose visibility from the Tello camera.
 
 Each cell centre must project into a 960x720 TELLO_MEASURED frame from at
 least one declared pose and sweep yaw, within 250 cm of the lens. Occlusion
@@ -19,7 +19,11 @@ from sentinel.room.spatial import semantic_heading_to_compass_deg
 
 
 SITE_PATH = Path(__file__).resolve().parents[1] / "fixtures/room_agent/v1/canningst-site.json"
-SURFACE_BOUNDS_CM = (190, 310, 190, 270)
+#: The courtyard ground in front of the tag doors: objects sit on the floor.
+SURFACE_BOUNDS_CM = (130, 370, 150, 390)
+#: Objects rest on this support plane (see the site's provenance note).
+SURFACE_PLANE_ID = "ground"
+REQUIRED_CLASSES = ["computer", "phone", "mug"]
 CELL_SIZE_CM = 40
 SWEEP_OFFSETS_DEG = (-30, 0, 30)
 DETECTION_RANGE_CM = 250
@@ -62,7 +66,7 @@ def generate_coverage(
     # without it, then produce both dependent fields together.
     geometry_document = {**document, "pose_visibility": [], "pose_tag_visibility": []}
     site = parse_room_site(geometry_document)
-    plane = next(plane for plane in site.support_planes if plane.plane_id == "demo-surface")
+    plane = next(plane for plane in site.support_planes if plane.plane_id == SURFACE_PLANE_ID)
     pose_ids = sorted({pose_id for pose_id, _ in document["pose_visibility"]})
     if not pose_ids:
         raise ValueError("site must declare observation pose IDs")
@@ -82,7 +86,7 @@ def generate_coverage(
     dropped = []
     for y in range(y_min, y_max, CELL_SIZE_CM):
         for x in range(x_min, x_max, CELL_SIZE_CM):
-            cell_id = f"demo-x{x}-y{y}"
+            cell_id = f"floor-x{x}-y{y}"
             center = (x + CELL_SIZE_CM / 2, y + CELL_SIZE_CM / 2)
             viewers = []
             for pose_id, pose in poses.items():
@@ -99,17 +103,22 @@ def generate_coverage(
                 "polygon_xy_cm": [[x, y], [x + CELL_SIZE_CM, y],
                                   [x + CELL_SIZE_CM, y + CELL_SIZE_CM], [x, y + CELL_SIZE_CM]],
                 "z_band_cm": [plane.z_cm, plane.z_cm + 30],
-                "required_classes": ["computer", "phone"],
+                "required_classes": list(REQUIRED_CLASSES),
             })
             for pose_id in viewers:
                 visible[pose_id].append(cell_id)
+    # A pose that sees no cell (the side looks: the ground enters the frame
+    # beyond the room) is left out, so it is never offered as a zone.
     empty = [pose_id for pose_id, cell_ids in visible.items() if not cell_ids]
-    if empty:
-        raise ValueError(f"observation poses have no camera-visible cells: {empty}")
+    kept = [pose_id for pose_id in pose_ids if visible[pose_id]]
+    if not kept:
+        raise ValueError("no observation pose sees any cell")
     generated = {**document, "coverage_cells": cells,
-                 "pose_visibility": [[pose_id, visible[pose_id]] for pose_id in pose_ids]}
+                 "pose_visibility": [[pose_id, visible[pose_id]] for pose_id in kept],
+                 "pose_tag_visibility": [entry for entry in document.get("pose_tag_visibility", [])
+                                         if entry[0] in kept]}
     parse_room_site(generated)
-    return generated, tuple(dropped)
+    return generated, tuple(dropped) + tuple(f"pose {pose_id}" for pose_id in empty)
 
 
 def main() -> int:
@@ -117,7 +126,7 @@ def main() -> int:
     parser.add_argument("--site", type=Path, default=SITE_PATH)
     parser.add_argument("--check", action="store_true", help="check committed output without writing")
     parser.add_argument("--surface", type=int, nargs=4, metavar=("X_MIN", "X_MAX", "Y_MIN", "Y_MAX"),
-                        default=SURFACE_BOUNDS_CM, help="demo-surface footprint to grid (cm, multiples of 40)")
+                        default=SURFACE_BOUNDS_CM, help="support footprint to grid (cm, multiples of 40)")
     parser.add_argument("--range-cm", type=float, default=DETECTION_RANGE_CM,
                         help="farthest lens-to-cell distance counted as a view")
     args = parser.parse_args()
@@ -125,7 +134,7 @@ def main() -> int:
     generated, dropped = generate_coverage(document, surface_bounds_cm=tuple(args.surface),
                                            max_range_cm=args.range_cm)
     for cell_id in dropped:
-        print(f"dropped uncovered cell: {cell_id}", file=sys.stderr)
+        print(f"dropped (no view): {cell_id}", file=sys.stderr)
     if args.check:
         if generated != document:
             print("coverage output differs from committed site", file=sys.stderr)

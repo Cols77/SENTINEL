@@ -213,177 +213,303 @@
   },
   "coverage_cells": [
     {
-      "cell_id": "demo-x190-y190",
+      "cell_id": "floor-x130-y310",
       "polygon_xy_cm": [
         [
-          190,
-          190
+          130,
+          310
         ],
         [
-          230,
-          190
+          170,
+          310
         ],
         [
-          230,
-          230
+          170,
+          350
         ],
         [
-          190,
-          230
+          130,
+          350
         ]
       ],
       "z_band_cm": [
-        50,
-        80
+        -35,
+        -5
       ],
       "required_classes": [
         "computer",
-        "phone"
+        "phone",
+        "mug"
       ]
     },
     {
-      "cell_id": "demo-x230-y190",
+      "cell_id": "floor-x170-y310",
       "polygon_xy_cm": [
         [
-          230,
-          190
+          170,
+          310
         ],
         [
-          270,
-          190
+          210,
+          310
         ],
         [
-          270,
-          230
+          210,
+          350
         ],
         [
-          230,
-          230
+          170,
+          350
         ]
       ],
       "z_band_cm": [
-        50,
-        80
+        -35,
+        -5
       ],
       "required_classes": [
         "computer",
-        "phone"
+        "phone",
+        "mug"
       ]
     },
     {
-      "cell_id": "demo-x270-y190",
+      "cell_id": "floor-x290-y310",
       "polygon_xy_cm": [
         [
-          270,
-          190
+          290,
+          310
         ],
         [
-          310,
-          190
+          330,
+          310
         ],
         [
-          310,
-          230
+          330,
+          350
         ],
         [
-          270,
-          230
+          290,
+          350
         ]
       ],
       "z_band_cm": [
-        50,
-        80
+        -35,
+        -5
       ],
       "required_classes": [
         "computer",
-        "phone"
+        "phone",
+        "mug"
       ]
     },
     {
-      "cell_id": "demo-x190-y230",
+      "cell_id": "floor-x330-y310",
       "polygon_xy_cm": [
         [
-          190,
-          230
+          330,
+          310
         ],
         [
-          230,
-          230
+          370,
+          310
         ],
         [
-          230,
-          270
+          370,
+          350
         ],
         [
-          190,
-          270
+          330,
+          350
         ]
       ],
       "z_band_cm": [
-        50,
-        80
+        -35,
+        -5
       ],
       "required_classes": [
         "computer",
-        "phone"
+        "phone",
+        "mug"
       ]
     },
     {
-      "cell_id": "demo-x230-y230",
+      "cell_id": "floor-x130-y350",
       "polygon_xy_cm": [
         [
-          230,
-          230
+          130,
+          350
         ],
         [
-          270,
-          230
+          170,
+          350
         ],
         [
-          270,
-          270
+          170,
+          390
         ],
         [
-          230,
-          270
+          130,
+          390
         ]
       ],
       "z_band_cm": [
-        50,
-        80
+        -35,
+        -5
       ],
       "required_classes": [
         "computer",
-        "phone"
+        "phone",
+        "mug"
       ]
     },
     {
-      "cell_id": "demo-x270-y230",
+      "cell_id": "floor-x170-y350",
       "polygon_xy_cm": [
         [
-          270,
-          230
+          170,
+          350
         ],
         [
-          310,
-          230
+          210,
+          350
         ],
         [
-          310,
-          270
+          210,
+          390
         ],
         [
-          270,
-          270
+          170,
+          390
         ]
       ],
       "z_band_cm": [
-        50,
-        80
+        -35,
+        -5
       ],
       "required_classes": [
         "computer",
-        "phone"
+        "phone",
+        "mug"
+      ]
+    },
+    {
+      "cell_id": "floor-x210-y350",
+      "polygon_xy_cm": [
+        [
+          210,
+          350
+        ],
+        [
+          250,
+          350
+        ],
+        [
+          250,
+          390
+        ],
+        [
+          210,
+          390
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    },
+    {
+      "cell_id": "floor-x250-y350",
+      "polygon_xy_cm": [
+        [
+          250,
+          350
+        ],
+        [
+          290,
+          350
+        ],
+        [
+          290,
+          390
+        ],
+        [
+          250,
+          390
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    },
+    {
+      "cell_id": "floor-x290-y350",
+      "polygon_xy_cm": [
+        [
+          290,
+          350
+        ],
+        [
+          330,
+          350
+        ],
+        [
+          330,
+          390
+        ],
+        [
+          290,
+          390
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    },
+    {
+      "cell_id": "floor-x330-y350",
+      "polygon_xy_cm": [
+        [
+          330,
+          350
+        ],
+        [
+          370,
+          350
+        ],
+        [
+          370,
+          390
+        ],
+        [
+          330,
+          390
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
       ]
     }
   ],
@@ -391,68 +517,59 @@
     [
       "center-front-middle-toward_targets",
       [
-        "demo-x190-y230",
-        "demo-x230-y230",
-        "demo-x270-y230"
-      ]
-    ],
-    [
-      "center-middle-middle-left",
-      [
-        "demo-x190-y190",
-        "demo-x190-y230"
-      ]
-    ],
-    [
-      "center-middle-middle-right",
-      [
-        "demo-x270-y190",
-        "demo-x270-y230"
+        "floor-x130-y350",
+        "floor-x330-y350"
       ]
     ],
     [
       "center-rear-middle-toward_targets",
       [
-        "demo-x190-y190",
-        "demo-x230-y190",
-        "demo-x270-y190",
-        "demo-x190-y230",
-        "demo-x230-y230",
-        "demo-x270-y230"
+        "floor-x130-y310",
+        "floor-x330-y310",
+        "floor-x130-y350",
+        "floor-x170-y350",
+        "floor-x210-y350",
+        "floor-x250-y350",
+        "floor-x290-y350",
+        "floor-x330-y350"
       ]
     ],
     [
       "left-front-middle-toward_targets",
       [
-        "demo-x190-y230",
-        "demo-x230-y230"
+        "floor-x290-y350",
+        "floor-x330-y350"
       ]
     ],
     [
       "left-rear-middle-toward_targets",
       [
-        "demo-x190-y190",
-        "demo-x230-y190",
-        "demo-x190-y230",
-        "demo-x230-y230",
-        "demo-x270-y230"
+        "floor-x290-y310",
+        "floor-x330-y310",
+        "floor-x130-y350",
+        "floor-x170-y350",
+        "floor-x210-y350",
+        "floor-x250-y350",
+        "floor-x290-y350"
       ]
     ],
     [
       "right-front-middle-toward_targets",
       [
-        "demo-x230-y230",
-        "demo-x270-y230"
+        "floor-x130-y350",
+        "floor-x170-y350"
       ]
     ],
     [
       "right-rear-middle-toward_targets",
       [
-        "demo-x230-y190",
-        "demo-x270-y190",
-        "demo-x190-y230",
-        "demo-x230-y230",
-        "demo-x270-y230"
+        "floor-x130-y310",
+        "floor-x170-y310",
+        "floor-x170-y350",
+        "floor-x210-y350",
+        "floor-x250-y350",
+        "floor-x290-y350",
+        "floor-x330-y350"
       ]
     ]
   ],
@@ -507,12 +624,12 @@
       "classes": []
     },
     {
-      "plane_id": "demo-surface",
-      "z_cm": 50,
+      "plane_id": "ground",
+      "z_cm": -35,
       "classes": [
         "computer",
         "phone",
-        "pen"
+        "mug"
       ]
     }
   ]
