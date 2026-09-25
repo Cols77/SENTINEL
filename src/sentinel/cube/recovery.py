@@ -399,7 +399,22 @@ class RecoveryController:
                                   upper_bound_s=profile.recovery_action_upper_bound_s,
                                   pose_revision=pose.pose_revision, measured_at=pose.measured_at)
 
-        if self._attempts == 0 or superseded:
+        # Live 2026-09-25 11:50: recovery began at heading 63 (a sweep look),
+        # where only one tag is in view; the stationary burst there could
+        # never give a joint fix, and the aircraft landed 15 cm from where it
+        # thought it was with both tags 30 deg to its left. When no joint
+        # heading is within the fix-jump tolerance of the current heading,
+        # the first action is the yaw back to the nearest one.
+        nearest_joint = min((heading for heading, tags in environment.mapped_heading_tag_ids
+                             if len(set(tags)) >= 2 and heading not in self._tried),
+                            key=lambda heading: heading_distance(heading, pose.heading_deg), default=None)
+        facing_away = (nearest_joint is not None
+                       and heading_distance(nearest_joint, pose.heading_deg) > profile.max_fix_heading_jump_deg)
+        if (self._attempts == 0 or superseded) and facing_away:
+            action = make_action("YAW_BURST", nearest_joint)
+            if not self._can_recover(pose, environment, action):
+                return self._terminal(environment, "stationary_recovery_unavailable")
+        elif self._attempts == 0 or superseded:
             action = make_action("STATIONARY_BURST", pose.heading_deg)
             if not self._can_recover(pose, environment, action):
                 return self._terminal(environment, "stationary_recovery_unavailable")
@@ -488,7 +503,6 @@ class RecoveryController:
             return reject("expired")
         current = self.tracker.health
         if (action.pose_revision != current.pose_revision or action.measured_at != current.measured_at):
-            self._finished = True
             # Live 2026-09-25 11:39: the tags came into view during the yaw and
             # the ordinary tag stream re-anchored the aircraft (joint tags,
             # 2 cm) before the burst was judged. Counting that as a failed
@@ -501,8 +515,14 @@ class RecoveryController:
                     and current.pose_revision > action.pose_revision and profile is not None
                     and current.xy_uncertainty_cm <= profile.max_burst_spread_cm
                     and current.heading_uncertainty_deg <= profile.max_burst_heading_spread_deg):
+                self._finished = True
                 self._successful_revision = current.pose_revision
                 return reject("superseded_by_fresh_fix")
+            # Live 2026-09-25 11:50: the refresh loop re-anchored on a single
+            # tag (15 cm) during the burst; ending the episode here made the
+            # very next recovery "exhausted" and landed the aircraft with the
+            # tags 30 deg to its left. The action is spent; the episode's
+            # attempts and deadline still bound it.
             return reject("superseded_pose")
         if pose.state == LocalizationState.LOST or current.state == LocalizationState.LOST:
             return reject("lost")
@@ -520,8 +540,11 @@ class RecoveryController:
             return reject("duplicate_reports")
         search = action.heading_deg in self._search_headings
         # A search burst looks off the mapped headings: any mapped tag it sees counts.
+        # A stationary burst looks wherever the aircraft happens to face:
+        # any mapped tag it sees counts, as for a search burst.
+        stationary = action.kind == "STATIONARY_BURST"
         mapped = set().union(*(set(tags) for heading, tags in environment.mapped_heading_tag_ids
-                                  if search or heading_distance(heading, action.heading_deg)
+                                  if search or stationary or heading_distance(heading, action.heading_deg)
                                   <= profile.max_fix_heading_jump_deg))
         for report in reports:
             fix = report.fix

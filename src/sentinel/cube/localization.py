@@ -252,8 +252,18 @@ class LocalizationTracker:
                 or abs(fix.position.z_cm - health.position.z_cm) > profile.max_height_error_cm
                 or heading_distance(health.heading_deg, fix.heading_deg) > max_heading_deg):
             return False
-        widened = replace(fix, xy_uncertainty_cm=max(fix.xy_uncertainty_cm, min_xy_uncertainty_cm),
-                          heading_uncertainty_deg=max(fix.heading_uncertainty_deg, min_heading_uncertainty_deg))
+        # Live 2026-09-25: every 30-deg sweep look sees one tag; the floor of
+        # 15 cm replaced a 5 cm joint estimate, the return-home forecast then
+        # crossed the 30 cm limit and recovery landed the aircraft. A single
+        # tag that agrees confirms the estimate: it holds the uncertainty
+        # where it is (drift stops growing) and never widens a tighter one;
+        # only a joint fix can tighten below the single-tag floor.
+        widened = replace(fix,
+                          xy_uncertainty_cm=max(fix.xy_uncertainty_cm,
+                                                min(min_xy_uncertainty_cm, health.xy_uncertainty_cm)),
+                          heading_uncertainty_deg=max(fix.heading_uncertainty_deg,
+                                                      min(min_heading_uncertainty_deg,
+                                                          health.heading_uncertainty_deg)))
         self._health = self._anchored(widened, now, invalidate=True)
         return True
 
