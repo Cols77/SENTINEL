@@ -466,7 +466,10 @@ def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, ca
             site=site, profile=pose_profile, pose_source=lambda: supervisor.tracker.health, limits=limits)
         resolve_sweep_checkpoints = wiring.make_chained_sweep(
             site=site, profile=pose_profile, pose_source=lambda: supervisor.tracker.health,
-            limits=limits, sweep_offsets_deg=(-30, 0, 30))
+            # Face the tags first (live 2026-09-25): a zone whose first look ends
+            # 30 deg off the tags is never credited the fix it will get there, so
+            # every rear zone's fixless out-and-back was refused on drift.
+            limits=limits, sweep_offsets_deg=(0, -30, 30))
     except wiring.WiringError as exc:
         raise LiveSessionError(str(exc)) from exc
     perception_capture = wiring.make_perception_capture(

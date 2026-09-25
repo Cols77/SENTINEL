@@ -837,6 +837,18 @@ def build_room_agent_router(room: RoomAgentService):
             "x-apriltags": json.dumps(frame["tags"], separators=(",", ":")),
         })
 
+    @router.get("/camera/captures/{run_id}")
+    def camera_capture_list(run_id: str):
+        from .room_camera import capture_index
+        run = current_run(run_id)
+        if run is None:
+            return Response(status_code=404)
+        try:
+            entries = capture_index(run)
+        except Exception:
+            return Response(status_code=503, headers={"cache-control": "no-store"})
+        return JSONResponse({"captures": entries}, headers={"cache-control": "no-store"})
+
     @router.get("/camera/captures/{run_id}/latest")
     def camera_capture_latest(run_id: str):
         from .room_camera import capture_record
@@ -849,6 +861,19 @@ def build_room_agent_router(room: RoomAgentService):
             return Response(status_code=503, headers={"cache-control": "no-store"})
         if record is None:
             return Response(status_code=204, headers={"cache-control": "no-store"})
+        return JSONResponse({key: value for key, value in record.items() if key not in ("path", "sha256")},
+                            headers={"cache-control": "no-store"})
+
+    @router.get("/camera/captures/{run_id}/{observation_id}/record")
+    def camera_capture_meta(run_id: str, observation_id: str):
+        from .room_camera import capture_record
+        run = current_run(run_id)
+        try:
+            record = capture_record(run, observation_id) if run is not None else None
+        except Exception:
+            return Response(status_code=503, headers={"cache-control": "no-store"})
+        if record is None:
+            return Response(status_code=404)
         return JSONResponse({key: value for key, value in record.items() if key not in ("path", "sha256")},
                             headers={"cache-control": "no-store"})
 

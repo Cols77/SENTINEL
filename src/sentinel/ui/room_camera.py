@@ -91,9 +91,54 @@ def capture_record(run, observation_id=None):
                 width=width, height=height, detections=boxes, verified=True)
 
 
+def capture_index(run):
+    """Every saved capture of the run, oldest first: the analysed ones (with
+    their box count) and the frames no verified result exists for -- a zone
+    that failed on its last look never sends its frames to the detector."""
+    root = run.frame_root
+    if root is None:
+        return []
+    root = Path(root).resolve()
+    entries, seen = [], set()
+    database = run.store_path
+    if database is not None and Path(database).is_file():
+        with closing(sqlite3.connect(str(database), timeout=1.0)) as connection:
+            rows = connection.execute(
+                "SELECT o.observation_id, o.frame_path, o.captured_at, "
+                "(SELECT COUNT(*) FROM room_detection_evidence d WHERE d.session_id = o.session_id "
+                "AND d.observation_id = o.observation_id) FROM room_observations o "
+                "JOIN room_perception_results r ON r.session_id = o.session_id "
+                "AND r.observation_id = o.observation_id "
+                "WHERE o.session_id = ? AND r.status = 'SUCCEEDED' "
+                "AND r.identity_status = 'VERIFIED' AND r.authorizes_current_state = 1", (run.id,),
+            ).fetchall()
+        for observation_id, frame_path, captured_at, count in rows:
+            seen.add(Path(frame_path).resolve())
+            entries.append(dict(observation_id=observation_id, captured_at=captured_at,
+                                verified=True, detections=count))
+    for observation_id, record in dict(getattr(run, "capture_records", {}) or {}).items():
+        path = Path(record[0]).resolve()
+        if path not in seen:
+            seen.add(path)
+            entries.append(dict(observation_id=observation_id, captured_at=record[1],
+                                verified=False, detections=0))
+    # A past run's frames outlive the flight's in-memory capture records.
+    for path in sorted((root / "captures").glob("*.png")):
+        if path.resolve() not in seen:
+            captured_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+            entries.append(dict(observation_id=f"file:{path.name}", captured_at=captured_at,
+                                verified=False, detections=0))
+    return sorted(entries, key=lambda entry: (entry["captured_at"], entry["observation_id"]))
+
+
 def _saved_capture(run, observation_id=None):
     """Show the flight's saved frame when analysis never produced verified boxes."""
     records = dict(getattr(run, "capture_records", {}) or {})
+    if observation_id is not None and observation_id.startswith("file:"):
+        path = Path(run.frame_root).resolve() / "captures" / observation_id[len("file:"):]
+        if path.parent != Path(run.frame_root).resolve() / "captures" or not path.is_file():
+            return None
+        records[observation_id] = (path, datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat())
     if observation_id is None:
         if not records:
             return None

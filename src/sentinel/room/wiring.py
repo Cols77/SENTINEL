@@ -155,7 +155,7 @@ def make_resolve_checkpoint(
 
 
 def make_chained_sweep(*, site: RoomSite, profile, pose_source: Callable, limits: CommandLimits,
-                       sweep_offsets_deg: tuple[int, ...] = (-30, 0, 30)) -> tuple[Callable, ...]:
+                       sweep_offsets_deg: tuple[int, ...] = (0, -30, 30)) -> tuple[Callable, ...]:
     """One resolver per look of a zone's sweep, chained: the first look flies
     to the zone and photographs; each following look only turns on from where
     the previous one stopped, settles and photographs; the last turns back to

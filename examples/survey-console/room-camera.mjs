@@ -32,7 +32,7 @@ function drawObjects(svg,detections,width,height){
 export function createRoomCamera(host,fetchImpl=fetch){
  const source=el('span',{class:'room-camera-source'},['AWAITING CAMERA']);
  const liveButton=button('Live camera',()=>select('live'),{class:'room-camera-tab','aria-pressed':'true'});
- const captureButton=button('Gemini capture',()=>select('capture'),{class:'room-camera-tab','aria-pressed':'false'});
+ const captureButton=button('Captures',()=>select('capture'),{class:'room-camera-tab','aria-pressed':'false'});
  const reviewButton=button('Recorded review',()=>select('review'),{class:'room-camera-tab','aria-pressed':'false'});
  const liveImage=el('img',{alt:'Drone camera frame',hidden:true});
  const liveOverlay=svgNode('svg',{'aria-hidden':'true',class:'room-camera-overlay'});
@@ -44,15 +44,21 @@ export function createRoomCamera(host,fetchImpl=fetch){
  const captureEmpty=el('p',{class:'room-camera-empty'},['No saved capture yet.']);
  const captureStage=el('div',{class:'room-camera-stage','data-testid':'room-camera-capture',hidden:true},[captureImage,captureOverlay,captureEmpty]);
  const captureNote=el('p',{class:'room-camera-note',hidden:true},['Detection boxes belong to this captured frame.']);
+ const capturePrev=button('‹ Previous',()=>step(-1),{class:'room-camera-tab',disabled:true});
+ const captureNext=button('Next ›',()=>step(1),{class:'room-camera-tab',disabled:true});
+ const capturePosition=el('span',{class:'room-camera-position','aria-live':'polite'},['0 / 0']);
+ const captureNav=el('div',{class:'room-camera-nav',role:'group','aria-label':'Saved captures',hidden:true},[capturePrev,capturePosition,captureNext]);
  host.append(
   el('div',{class:'room-camera-heading'},[el('div',{},[el('p',{class:'section-label'},['VISUAL FEED']),el('h3',{},['Drone camera'])]),source]),
   el('div',{class:'room-camera-tabs',role:'group','aria-label':'Camera view'},[liveButton,captureButton,reviewButton]),
-  liveStage,captureStage,liveNote,captureNote,
+  liveStage,captureStage,captureNav,liveNote,captureNote,
  );
 
  let runId=null,mode=null,running=false,view='live',liveUrl=null,captureUrl=null,reviewPanel=null,reviewState=null;
  let liveAt=null,liveTags=[],captureId=null,captureData=null,liveTimer=null,captureTimer=null;
  let liveBusy=false,captureBusy=false,epoch=0,disposed=false,terminalCaptureAttempts=0;
+ // capturePick null follows the newest capture; a number pins that one.
+ let captureList=[],capturePick=null,captureAgain=false;
 
  function select(next){
   view=next;
@@ -60,7 +66,7 @@ export function createRoomCamera(host,fetchImpl=fetch){
   captureButton.setAttribute('aria-pressed',String(view==='capture'));
   reviewButton.setAttribute('aria-pressed',String(view==='review'));
   liveStage.hidden=view!=='live';captureStage.hidden=view!=='capture';
-  liveNote.hidden=view!=='live';captureNote.hidden=view!=='capture';
+  liveNote.hidden=view!=='live';captureNote.hidden=view!=='capture';captureNav.hidden=view!=='capture';
   if(reviewPanel)reviewPanel.hidden=view!=='review';
   if(view==='capture'&&runId&&!captureData)void loadCapture(epoch);
   if(view==='live'&&running)void loadLive(epoch);
@@ -77,7 +83,24 @@ export function createRoomCamera(host,fetchImpl=fetch){
   liveImage.removeAttribute('src');captureImage.removeAttribute('src');
   replace(liveOverlay,[]);replace(captureOverlay,[]);
   liveEmpty.hidden=false;captureEmpty.hidden=false;
-  terminalCaptureAttempts=0;
+  terminalCaptureAttempts=0;captureList=[];capturePick=null;captureAgain=false;updateNav();
+ }
+
+ function shownIndex(){return captureList.length?(capturePick===null?captureList.length-1:Math.min(capturePick,captureList.length-1)):-1;}
+
+ function updateNav(){
+  const index=shownIndex();
+  capturePosition.textContent=index<0?'0 / 0':`${index+1} / ${captureList.length}${capturePick===null?' · newest':''}`;
+  capturePrev.disabled=index<=0;captureNext.disabled=index<0||index>=captureList.length-1;
+ }
+
+ function step(delta){
+  const index=shownIndex();
+  if(index<0)return;
+  const next=Math.max(0,Math.min(captureList.length-1,index+delta));
+  capturePick=next===captureList.length-1?null:next;
+  updateNav();
+  void loadCapture(epoch);
  }
 
  function updateSource(){
@@ -128,16 +151,23 @@ export function createRoomCamera(host,fetchImpl=fetch){
  }
 
  async function loadCapture(token){
-  if(captureBusy||disposed||!runId)return;
-  captureBusy=true;
+  if(disposed||!runId)return;
+  if(captureBusy){captureAgain=true;return;}
+  captureBusy=true;captureAgain=false;
   try{
-   const response=await fetchImpl(`/api/v1/room-agent/camera/captures/${encodeURIComponent(runId)}/latest`,{cache:'no-store'});
+   const listResponse=await fetchImpl(`/api/v1/room-agent/camera/captures/${encodeURIComponent(runId)}`,{cache:'no-store'});
    if(token!==epoch||disposed)return;
-   if(response.status===204)return;
+   if(!listResponse.ok)throw Error('capture list unavailable');
+   captureList=(await listResponse.json()).captures??[];
+   updateNav();
+   const entry=captureList[shownIndex()];
+   if(!entry)return;
+   if(captureId===entry.observation_id&&captureData?.verified===entry.verified)return;
+   const response=await fetchImpl(`/api/v1/room-agent/camera/captures/${encodeURIComponent(runId)}/${encodeURIComponent(entry.observation_id)}/record`,{cache:'no-store'});
+   if(token!==epoch||disposed)return;
    if(!response.ok)throw Error('capture unavailable');
    const data=await response.json();
    if(token!==epoch||disposed||!data.observation_id)return;
-   if(captureId===data.observation_id)return;
    const imageResponse=await fetchImpl(`/api/v1/room-agent/camera/captures/${encodeURIComponent(runId)}/${encodeURIComponent(data.observation_id)}`,{cache:'no-store'});
    if(!imageResponse.ok)throw Error('capture image unavailable');
    const nextUrl=URL.createObjectURL(await imageResponse.blob());
@@ -153,15 +183,16 @@ export function createRoomCamera(host,fetchImpl=fetch){
    drawObjects(captureOverlay,data.detections,data.width,data.height);
    captureNote.textContent=data.verified
     ?`${data.detections.length} ${detector} ${data.detections.length===1?'object':'objects'} · ${data.provider} · ${new Date(data.captured_at).toLocaleTimeString()}. ${data.detections.map(d=>`${d.label} (${d.confidence})`).join(', ')}`
-    :'Saved camera frame. No verified VLM result is available for this frame.';
-   captureButton.textContent=data.verified?`Gemini capture · ${data.detections.length}`:'Saved PNG capture';
+    :'Saved camera frame, not analysed: the detector only receives a zone’s frames once all its looks are captured.';
+   captureButton.textContent=`Captures · ${captureList.length}`;
    if(!running&&view==='live'&&!liveAt)select('capture');
    updateSource();
   }catch{
    if(token===epoch)captureEmpty.textContent='Analyzed capture unavailable.';
   }finally{
    captureBusy=false;
-   if(token===epoch&&running&&!disposed)captureTimer=setTimeout(()=>{captureTimer=null;void loadCapture(token);},1800);
+   if(captureAgain&&token===epoch&&!disposed){captureAgain=false;void loadCapture(token);return;}
+   if(token===epoch&&running&&!disposed&&!captureTimer)captureTimer=setTimeout(()=>{captureTimer=null;void loadCapture(token);},1800);
   }
  }
 
@@ -169,7 +200,7 @@ export function createRoomCamera(host,fetchImpl=fetch){
   attachReview(panel){reviewPanel=panel;host.append(panel);panel.hidden=view!=='review';},
   render(run){
    const nextId=run?.id??null;
-   if(nextId!==runId){clear();runId=nextId;mode=run?.mode??null;captureButton.textContent='Gemini capture';}
+   if(nextId!==runId){clear();runId=nextId;mode=run?.mode??null;captureButton.textContent='Captures';}
    reviewState=run?.review??null;
    running=run?.status==='RUNNING';
    if(!runId)liveEmpty.textContent='Camera starts after dispatch.';
