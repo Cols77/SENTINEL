@@ -59,6 +59,12 @@ _POSE_HEADING_TOLERANCE_DEG = 5.0
 _ARRIVAL_XY_TOLERANCE_CM = 30.0
 _ARRIVAL_Z_TOLERANCE_CM = 40.0
 _ARRIVAL_HEADING_TOLERANCE_DEG = 10.0
+#: The arrival retry's corrective turn is offered up to the sweep's own look
+#: offset (the aircraft turns 30 deg either way to photograph anyway). It
+#: bounds the correction only; the credit gate above is unchanged.
+_ARRIVAL_REALIGN_MAX_DEG = 30.0
+#: Fix-stop routing: at most this many declared tag-visible stops are tried.
+_MAX_TRANSIT_CANDIDATES = 2
 
 #: Task 4b item 4: reply-shape refusals re-asked once, like a provider error.
 _MALFORMED_OUTCOMES = ("MALFORMED_ANSWER", "ILLEGAL_OR_MALFORMED", "MISSING_OR_NON_MAX_SELECTION")
@@ -352,7 +358,7 @@ class RoomController:
                  executor: Callable[[RoomCandidate, ReadSnapshot], tuple[ReadFact, ...]] | None = None,
                  ingest_pending: Callable[[str], object] | None = None,
                  supervisor=None, flight_executor=None, provider_wait_s: float = 10.0,
-                 resolve_checkpoint=None, resolve_sweep_checkpoints=None,
+                 resolve_checkpoint=None, resolve_sweep_checkpoints=None, resolve_transit_checkpoint=None,
                  perception_capture=None, perception_provider=None,
                  count_geometry: CountGeometry | None = None, acceptance: AcceptancePolicy | None = None):
         for value in (act_at, min_margin):
@@ -393,6 +399,11 @@ class RoomController:
         self.resolve_sweep_checkpoints = tuple(resolve_sweep_checkpoints or ())
         if self.resolve_sweep_checkpoints and resolve_checkpoint is None:
             raise ValueError("sweep checkpoints require resolve_checkpoint")
+        # Fix-stop routing (optional): ``pose_id -> CheckpointPlan`` flying to
+        # a declared tag-visible pose with no capture (see
+        # ``wiring.make_transit_checkpoint``). Without it a zone still refused
+        # after the align retry is ZONE_REFUSED, as before.
+        self.resolve_transit_checkpoint = resolve_transit_checkpoint
         self.perception_provider = perception_provider
         # Residual F2: the camera model and per-class support declarations
         # grounded counting places static detections with. Optional: without
@@ -722,13 +733,15 @@ class RoomController:
         return (RoomCandidate("REANCHOR", CandidateKind.REANCHOR, snapshot.state_version, digest, description,
                               description, (), (), PhysicalCost(requires_airborne=True)),)
 
-    def _align_heading(self, session_id):
+    def _align_heading(self, session_id, max_error_deg=None):
         """Turn to face the tags before retrying a zone refused for drift.
 
         True once the turn completed; False when there is nothing to turn or
         it did not complete (the refusal then stands); a failure payload or
-        the TurnOutcome of a mandatory transition that preempted it."""
-        plan = self.supervisor.heading_alignment()
+        the TurnOutcome of a mandatory transition that preempted it.
+        ``max_error_deg`` widens the largest error corrected (arrival retry)."""
+        plan = (self.supervisor.heading_alignment() if max_error_deg is None
+                else self.supervisor.heading_alignment(max_error_deg=max_error_deg))
         if plan is None:
             return False
         try:
@@ -746,6 +759,58 @@ class RoomController:
             return self._preempted(session_id, admission,
                                    terminal_outcome=result if isinstance(result, TerminalOutcome) else None)
         return result.status == "COMPLETED" and result.completion_known
+
+    def _transit_stops(self, resolved) -> tuple[str, ...]:
+        """Fix-stop candidates for a zone refused on drift: the site's declared
+        tag-visible poses other than the zone itself, nearest (Manhattan) to
+        the zone first, at most ``_MAX_TRANSIT_CANDIDATES``."""
+        site = self.supervisor.site
+        stops = []
+        for stop_id, _ in site.pose_tag_visibility:
+            stop = resolve_pose_id(site, stop_id) if stop_id != resolved.pose_id else None
+            if stop is not None:
+                stops.append((abs(stop.x_cm - resolved.x_cm) + abs(stop.y_cm - resolved.y_cm)
+                              + abs(stop.z_cm - resolved.z_cm), stop_id))
+        stops.sort(key=lambda item: item[0])
+        return tuple(stop_id for _, stop_id in stops[:_MAX_TRANSIT_CANDIDATES])
+
+    def _transit_via_fix_stop(self, session_id, resolved, expected_version, route):
+        """Fly one no-capture transit leg to the first admitted fix stop.
+
+        The stop's pose_id when the leg completed (its arrival faces the tags,
+        so the next ``prepare`` refresh takes the fix); None when no stop was
+        admitted or the leg did not complete (the zone refusal then stands);
+        a failure payload, or the TurnOutcome of a mandatory transition that
+        preempted it. Only a CONTINUE admission is ever dispatched: a
+        transit is optional flying and never runs a recovery or return."""
+        for stop_id in self._transit_stops(resolved):
+            try:
+                plan = self.resolve_transit_checkpoint(stop_id)
+            except Exception:
+                continue
+            try:
+                admission = self.supervisor.prepare(
+                    snapshot_version=self.store.session_version(session_id), checkpoint=plan, provider_wait_s=0,
+                    replan=lambda stop_id=stop_id: self.resolve_transit_checkpoint(stop_id), zone_admission=True)
+            except Exception:
+                return self._preempted(session_id, None, self.supervisor.refresh_failure(self.flight_executor))
+            if admission.transition != "CONTINUE":
+                continue
+            try:
+                result = self.supervisor.dispatch(admission, self.flight_executor)
+            except VersionConflict:
+                if self._checkpoint_completed_since(session_id, expected_version):
+                    return _failure("CHECKPOINT_FAILED", f"the fix stop at {stop_id} was interrupted mid-flight")
+                return {"code": "STALE_DECISION", "refusal": "STALE_DECISION"}
+            except Exception:
+                return _failure("CHECKPOINT_FAILED", f"the fix stop at {stop_id} failed to execute")
+            if isinstance(result, TerminalOutcome):
+                return self._preempted(session_id, admission, terminal_outcome=result)
+            if result.status == "COMPLETED" and result.completion_known:
+                return stop_id
+            route.append(f"the fix stop at {stop_id} ended {result.status}")
+            return None
+        return None
 
     def _refusal_cause(self, admission) -> str:
         """Which drift limit tripped, and how far the aircraft faces from the
@@ -1332,9 +1397,16 @@ class RoomController:
         check and ``_ground_observation`` (which the caller also feeds this
         same snapshot) always agree on which pose sample the checkpoint
         actually reached."""
+        return not self._arrival_misses(resolved, result, health)
+
+    def _arrival_misses(self, resolved, result, health) -> frozenset[str]:
+        """Which arrival gates the measured pose misses: any of ``"position"``
+        (x/y, or an unknown pose), ``"height"`` and ``"heading"``; empty when
+        coverage may be credited (``_measured_pose_matches_declared_pose``)."""
         pose = result.pose
         if pose is None:
-            return False
+            return frozenset({"position"})
+        misses = set()
         # Task B2: the checkpoint planner deliberately leaves an offset within
         # its dead band uncorrected (e.g. the CanningSt pad at y 190 and the
         # rear poses at y 183: no 7 cm move is ever commanded), so a correct
@@ -1349,9 +1421,13 @@ class RoomController:
         tolerance_cm = max(_ARRIVAL_XY_TOLERANCE_CM,
                            _POSE_POSITION_TOLERANCE_CM + float(getattr(limits, "dead_band_cm", 0) or 0))
         distance_cm = math.hypot(pose.x_cm - resolved.x_cm, pose.y_cm - resolved.y_cm)
-        if distance_cm > tolerance_cm or abs(pose.z_cm - resolved.z_cm) > _ARRIVAL_Z_TOLERANCE_CM:
-            return False
-        return _heading_within_tolerance(health.heading_deg, resolved.yaw_deg, _ARRIVAL_HEADING_TOLERANCE_DEG)
+        if distance_cm > tolerance_cm:
+            misses.add("position")
+        if abs(pose.z_cm - resolved.z_cm) > _ARRIVAL_Z_TOLERANCE_CM:
+            misses.add("height")
+        if not _heading_within_tolerance(health.heading_deg, resolved.yaw_deg, _ARRIVAL_HEADING_TOLERANCE_DEG):
+            misses.add("heading")
+        return frozenset(misses)
 
     def _capture_completed(self, plan, result) -> bool:
         """Fix round 2 (Q5): a dispatched ``CheckpointOutcome`` can report
@@ -1416,6 +1492,17 @@ class RoomController:
             pass
 
     def _execute_observation(self, session_id, candidate, snapshot, expected_version, correlation):
+        """``_observe_zone``, with any extra flying it did to get there (a
+        fix-stop transit, a retaken sweep) named in the outcome's detail, so
+        Jev and the operator see why the extra leg flew."""
+        route = []
+        outcome = self._observe_zone(session_id, candidate, snapshot, expected_version, correlation, route)
+        if route and isinstance(outcome, dict):
+            note = "; ".join(route)
+            outcome = {**outcome, "detail": f"{outcome['detail']}; {note}" if outcome.get("detail") else note}
+        return outcome
+
+    def _observe_zone(self, session_id, candidate, snapshot, expected_version, correlation, route):
         """Resolve, admit and dispatch exactly one checkpoint for ``candidate``,
         then wait for and ingest every correlated perception result.
 
@@ -1440,87 +1527,133 @@ class RoomController:
         resolvers = self.resolve_sweep_checkpoints or (self.resolve_checkpoint,)
         started_at = self.supervisor.clock()
         completed_legs = []
-        aligned = False
+        # One of each retry per zone attempt: the align-to-tags turn, the
+        # fix-stop transit and the arrival heading correction.
+        aligned = transited = heading_retried = False
         index = 0
-        while index < len(resolvers):
-            resolver = resolvers[index]
-            try:
-                leg = resolver(candidate, snapshot) if self.resolve_sweep_checkpoints else plan
-                # A chained sweep's earlier looks end facing their own look;
-                # only the last must end at the pose's declared heading.
-                last_leg = index == len(resolvers) - 1
-                if not (self._checkpoint_targets_declared_pose(resolved, leg) if last_leg
-                        else leg.target == Position(resolved.x_cm, resolved.y_cm, resolved.z_cm)):
-                    return _failure("TOOL_FAILURE", f"look {index + 1} could not be planned from the "
-                                    "current position")
-                admission = self.supervisor.prepare(
-                    snapshot_version=(expected_version if index == 0 and not aligned
-                                      else self.store.session_version(session_id)),
-                    checkpoint=leg, provider_wait_s=self.provider_wait_s if index == len(resolvers) - 1 else 0,
-                    replan=lambda resolver=resolver: resolver(candidate, snapshot), zone_admission=True)
-            except Exception:
-                terminal = self.supervisor.refresh_failure(self.flight_executor)
-                return self._preempted(session_id, None, terminal)
-            if admission.transition == "REFUSE":
-                if index == 0 and not aligned and admission.reason == "LOCALIZATION_RECOVERY_REQUIRED":
-                    # Live 2026-09-25: facing 95 deg, the turns back to the tags
-                    # tipped the fixless out-and-back over the drift limit. Face
-                    # the tags, take that fix, then ask for this zone once more.
-                    aligned = True
-                    turned = self._align_heading(session_id)
-                    if isinstance(turned, (TurnOutcome, dict)):
-                        return turned
-                    if turned:
+        while True:
+            while index < len(resolvers):
+                resolver = resolvers[index]
+                try:
+                    leg = resolver(candidate, snapshot) if self.resolve_sweep_checkpoints else plan
+                    # A chained sweep's earlier looks end facing their own look;
+                    # only the last must end at the pose's declared heading.
+                    last_leg = index == len(resolvers) - 1
+                    if not (self._checkpoint_targets_declared_pose(resolved, leg) if last_leg
+                            else leg.target == Position(resolved.x_cm, resolved.y_cm, resolved.z_cm)):
+                        return _failure("TOOL_FAILURE", f"look {index + 1} could not be planned from the "
+                                        "current position")
+                    first_attempt = index == 0 and not (aligned or transited or heading_retried)
+                    admission = self.supervisor.prepare(
+                        snapshot_version=(expected_version if first_attempt
+                                          else self.store.session_version(session_id)),
+                        checkpoint=leg, provider_wait_s=self.provider_wait_s if index == len(resolvers) - 1 else 0,
+                        replan=lambda resolver=resolver: resolver(candidate, snapshot), zone_admission=True)
+                except Exception:
+                    terminal = self.supervisor.refresh_failure(self.flight_executor)
+                    return self._preempted(session_id, None, terminal)
+                if admission.transition == "REFUSE":
+                    drift = index == 0 and admission.reason == "LOCALIZATION_RECOVERY_REQUIRED"
+                    rerouted = False
+                    if drift and not aligned:
+                        # Live 2026-09-25: facing 95 deg, the turns back to the tags
+                        # tipped the fixless out-and-back over the drift limit. Face
+                        # the tags, take that fix, then ask for this zone once more.
+                        aligned = True
+                        turned = self._align_heading(session_id)
+                        if isinstance(turned, (TurnOutcome, dict)):
+                            return turned
+                        rerouted = bool(turned)
+                    if (not rerouted and drift and not transited and self.resolve_transit_checkpoint is not None
+                            and self.supervisor.tracker.health.state in (LocalizationState.ANCHORED,
+                                                                         LocalizationState.COASTING)):
+                        # Still out of reach after facing the tags: fly to a
+                        # nearer declared tag-visible pose, take its fix there,
+                        # then ask for this zone once more from it.
+                        transited = True
+                        stop = self._transit_via_fix_stop(session_id, resolved, expected_version, route)
+                        if isinstance(stop, (TurnOutcome, dict)):
+                            return stop
+                        if stop is not None:
+                            route.append(f"re-anchored via {stop} on the way")
+                            rerouted = True
+                    if rerouted:
                         if not self.resolve_sweep_checkpoints:
                             try:
                                 plan = self.resolve_checkpoint(candidate, snapshot)
                             except Exception:
-                                return _failure("TOOL_FAILURE", "no flight plan to this pose after facing the tags")
+                                return _failure("TOOL_FAILURE", "no flight plan to this pose from where "
+                                                "the drone re-anchored")
                         continue
-                # Only this zone is out of reach; the aircraft hovers where it is.
-                return _failure("ZONE_REFUSED", _ZONE_REFUSAL_DETAIL.get(
-                    admission.reason, "the supervisor refused this zone") + f" (look {index + 1})"
-                    + self._refusal_cause(admission))
-            try:
-                leg_result = self.supervisor.dispatch(admission, self.flight_executor)
-            except VersionConflict:
-                if self._checkpoint_completed_since(session_id, expected_version):
-                    return _failure("CHECKPOINT_FAILED", f"look {index + 1} was interrupted mid-flight")
-                return {"code": "STALE_DECISION", "refusal": "STALE_DECISION"}
-            except Exception:
-                return _failure("CHECKPOINT_FAILED", f"look {index + 1} failed to execute")
-            if admission.transition != "CONTINUE" or isinstance(leg_result, TerminalOutcome):
-                terminal_outcome = leg_result if isinstance(leg_result, TerminalOutcome) else None
-                return self._preempted(session_id, admission, terminal_outcome=terminal_outcome)
-            if leg_result.status == "ZONE_REFUSED":
-                return _failure("ZONE_REFUSED", _ZONE_REFUSAL_DETAIL["LOCALIZATION_RECOVERY_REQUIRED"]
-                                + f" (look {index + 1})")
-            if (leg_result.status != "COMPLETED" or not leg_result.completion_known
-                    or not self._capture_completed(leg, leg_result)):
-                reason = ("positioning was lost and the tag search had not re-anchored yet"
-                          if leg_result.status == "RECOVERY_PENDING"
-                          else f"the flight step ended {leg_result.status}")
-                return _failure("TOOL_FAILURE", f"look {index + 1} of {len(resolvers)} did not capture: {reason}")
-            completed_legs.append(leg_result)
-            index += 1
-        result = replace(completed_legs[-1],
-                         command_states=tuple(state for leg in completed_legs for state in leg.command_states),
-                         observation_ids=tuple(frame for leg in completed_legs for frame in leg.observation_ids))
-        if len(result.observation_ids) != sum(command.kind == "CAPTURE" for command in plan.commands):
-            return _failure("TOOL_FAILURE", "not every look captured a frame")
-        # Fix round 4 (Q2): capture the tracker's health exactly once, here,
-        # right after dispatch -- the same sample the measured-pose check
-        # below uses -- and thread it through to grounding. Previously
-        # ``_ground_observation`` re-read ``self.supervisor.tracker.health``
-        # after the perception wait (which can last up to
-        # ``provider_wait_s``), so a heading update or re-anchor during that
-        # wait could place every persisted estimate at a different heading
-        # than the one this checkpoint was actually verified against, and
-        # could even change the reported provenance for a position that
-        # never moved.
-        health = self.supervisor.tracker.health
-        result = _with_tag_position(result, health, started_at)
-        if not self._measured_pose_matches_declared_pose(resolved, result, health):
+                    # Only this zone is out of reach; the aircraft hovers where it is.
+                    return _failure("ZONE_REFUSED", _ZONE_REFUSAL_DETAIL.get(
+                        admission.reason, "the supervisor refused this zone") + f" (look {index + 1})"
+                        + self._refusal_cause(admission))
+                try:
+                    leg_result = self.supervisor.dispatch(admission, self.flight_executor)
+                except VersionConflict:
+                    if self._checkpoint_completed_since(session_id, expected_version):
+                        return _failure("CHECKPOINT_FAILED", f"look {index + 1} was interrupted mid-flight")
+                    return {"code": "STALE_DECISION", "refusal": "STALE_DECISION"}
+                except Exception:
+                    return _failure("CHECKPOINT_FAILED", f"look {index + 1} failed to execute")
+                if admission.transition != "CONTINUE" or isinstance(leg_result, TerminalOutcome):
+                    terminal_outcome = leg_result if isinstance(leg_result, TerminalOutcome) else None
+                    return self._preempted(session_id, admission, terminal_outcome=terminal_outcome)
+                if leg_result.status == "ZONE_REFUSED":
+                    return _failure("ZONE_REFUSED", _ZONE_REFUSAL_DETAIL["LOCALIZATION_RECOVERY_REQUIRED"]
+                                    + f" (look {index + 1})")
+                if (leg_result.status != "COMPLETED" or not leg_result.completion_known
+                        or not self._capture_completed(leg, leg_result)):
+                    reason = ("positioning was lost and the tag search had not re-anchored yet"
+                              if leg_result.status == "RECOVERY_PENDING"
+                              else f"the flight step ended {leg_result.status}")
+                    return _failure("TOOL_FAILURE", f"look {index + 1} of {len(resolvers)} did not capture: {reason}")
+                completed_legs.append(leg_result)
+                index += 1
+            result = replace(completed_legs[-1],
+                             command_states=tuple(state for leg in completed_legs for state in leg.command_states),
+                             observation_ids=tuple(frame for leg in completed_legs for frame in leg.observation_ids))
+            if len(result.observation_ids) != sum(command.kind == "CAPTURE" for command in plan.commands):
+                return _failure("TOOL_FAILURE", "not every look captured a frame")
+            # Fix round 4 (Q2): capture the tracker's health exactly once, here,
+            # right after dispatch -- the same sample the measured-pose check
+            # below uses -- and thread it through to grounding. Previously
+            # ``_ground_observation`` re-read ``self.supervisor.tracker.health``
+            # after the perception wait (which can last up to
+            # ``provider_wait_s``), so a heading update or re-anchor during that
+            # wait could place every persisted estimate at a different heading
+            # than the one this checkpoint was actually verified against, and
+            # could even change the reported provenance for a position that
+            # never moved.
+            health = self.supervisor.tracker.health
+            result = _with_tag_position(result, health, started_at)
+            misses = self._arrival_misses(resolved, result, health)
+            if not misses:
+                break
+            if misses == {"heading"} and not heading_retried:
+                # Live l3-20260925-125752: "12 cm, heading 10 deg" lost a
+                # zone's credit on the vehicle's stochastic turn error alone.
+                # Turn back to the pose's heading (every declared pose faces
+                # the tags) and retake every look once: frames taken at the
+                # wrong heading are never credited.
+                heading_retried = True
+                first_miss = _arrival_miss(resolved, result.pose, health)
+                started_at = self.supervisor.clock()
+                turned = self._align_heading(session_id, max_error_deg=_ARRIVAL_REALIGN_MAX_DEG)
+                if isinstance(turned, (TurnOutcome, dict)):
+                    return turned
+                if turned:
+                    if not self.resolve_sweep_checkpoints:
+                        try:
+                            plan = self.resolve_checkpoint(candidate, snapshot)
+                        except Exception:
+                            return _failure("TOOL_FAILURE", "no flight plan to this pose after correcting "
+                                            "the heading")
+                    route.append("looks retaken after the first arrival missed the heading ("
+                                 + first_miss.removeprefix("the drone ") + ")")
+                    completed_legs, index = [], 0
+                    continue
             # Fix round 3 (F3): the plan declared the right target/heading,
             # but the aircraft's own measured post-dispatch pose does not
             # actually match it -- never credit coverage off a checkpoint

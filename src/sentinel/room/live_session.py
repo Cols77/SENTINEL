@@ -470,6 +470,10 @@ def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, ca
             # 30 deg off the tags is never credited the fix it will get there, so
             # every rear zone's fixless out-and-back was refused on drift.
             limits=limits, sweep_offsets_deg=(0, -30, 30))
+        # Fix-stop routing: a zone refused on drift is retried via one
+        # no-capture leg to a nearer tag-visible pose, where a fix is taken.
+        resolve_transit_checkpoint = wiring.make_transit_checkpoint(
+            site=site, profile=pose_profile, pose_source=lambda: supervisor.tracker.health, limits=limits)
     except wiring.WiringError as exc:
         raise LiveSessionError(str(exc)) from exc
     perception_capture = wiring.make_perception_capture(
@@ -491,6 +495,7 @@ def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, ca
         return LiveSessionOutcome(terminal, False, ledger.status.value, None, "GOAL_LEDGER_NOT_PENDING")
     collaborators = {"resolve_checkpoint": resolve_checkpoint,
                      "resolve_sweep_checkpoints": resolve_sweep_checkpoints,
+                     "resolve_transit_checkpoint": resolve_transit_checkpoint,
                      "perception_capture": perception_capture,
                      "perception_provider": perception_provider,
                      # Task B item 3: the calibrated Tello camera and the

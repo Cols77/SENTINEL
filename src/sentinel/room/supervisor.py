@@ -824,7 +824,7 @@ class SafetySupervisor:
                 raise
             return home
 
-    def heading_alignment(self) -> CheckpointPlan | None:
+    def heading_alignment(self, max_error_deg: float | None = None) -> CheckpointPlan | None:
         """A stationary turn to the tag-facing (canonical) heading, or None.
 
         Offered only for an error of at least the SDK's 1 degree and within
@@ -838,7 +838,11 @@ class SafetySupervisor:
         if profile is None or health.state not in {LocalizationState.ANCHORED, LocalizationState.COASTING}:
             return None
         delta = (self.limits.canonical_heading_deg - health.heading_deg + 180) % 360 - 180
-        if round(abs(delta)) < 1 or abs(delta) > profile.canonical_heading_tolerance_deg:
+        # ``max_error_deg`` (the controller's arrival retry) replaces the
+        # canonical tolerance as the largest error corrected: an arrival just
+        # past the 10 deg credit gate is by definition past a 10 deg tolerance.
+        largest = profile.canonical_heading_tolerance_deg if max_error_deg is None else max_error_deg
+        if round(abs(delta)) < 1 or abs(delta) > largest:
             return None
         rotate = PlannedCommand.from_mapping(
             "ROTATE", {"degrees": abs(delta), "direction": "ccw" if delta > 0 else "cw"},

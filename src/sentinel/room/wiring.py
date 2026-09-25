@@ -23,6 +23,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
+from types import SimpleNamespace
 from typing import Callable, Mapping
 import uuid
 
@@ -209,6 +210,56 @@ def make_chained_sweep(*, site: RoomSite, profile, pose_source: Callable, limits
         return resolve
 
     return tuple(leg(index, offset) for index, offset in enumerate(sweep_offsets_deg))
+
+
+#: Checkpoint-id prefix of a fix-stop transit leg (see ``make_transit_checkpoint``).
+TRANSIT_PREFIX = "TRANSIT"
+
+
+def make_transit_checkpoint(*, site: RoomSite, profile: calibration.CalibrationProfile,
+                            pose_source: Callable[[], object], limits: CommandLimits) -> Callable[[str], CheckpointPlan]:
+    """Fix-stop routing: a resolver that, given a declared ``pose_id``, flies
+    there and ends facing that pose's declared yaw -- with no CAPTURE.
+
+    A zone refused on drift from where the aircraft is can often be reached
+    from a nearer tag-visible pose: arriving there facing the tags lets the
+    next refresh take a real fix, and the zone is retried from it.
+
+    The translation is ``make_resolve_checkpoint``'s own planning (one
+    zero-offset look), with that look's rotate/settle/CAPTURE (and any
+    per-capture LOCALISE) stripped: the plan keeps the flight, its settles,
+    the trim allowance and any arrival LOCALISE, then turns once to the
+    pose's yaw and reads telemetry. The checkpoint id is
+    ``TRANSIT:<pose_id>``: never mistaken for an ``OBSERVE:`` zone, and its
+    last colon segment is the pose id ``SafetySupervisor._reanchor_destination``
+    parses for the expected re-anchor credit."""
+    from sentinel.cube.checkpoint import _command, _rotation
+
+    resolve_full = make_resolve_checkpoint(site=site, profile=profile, pose_source=pose_source, limits=limits,
+                                           sweep_offsets_deg=(0,))
+    canonical = limits.canonical_heading_deg
+
+    def resolve_transit(pose_id: str) -> CheckpointPlan:
+        checkpoint_id = f"{TRANSIT_PREFIX}:{pose_id}"
+        full = resolve_full(SimpleNamespace(candidate_id=checkpoint_id), None)
+        trim = next(i for i, command in enumerate(full.commands) if command.kind == "TRIM_ALLOWANCE")
+        arrival = [*full.commands[:trim + 1],
+                   *(command for command in full.commands[trim + 1:]
+                     if command.kind == "LOCALISE" and dict(command.arguments).get("phase") == "arrival")]
+        if limits.localise and not any(command.kind == "LOCALISE" for command in arrival):
+            # The per-capture localisation went with the capture; the stop
+            # still localises once on arrival (its own hover included).
+            arrival.append(_command("LOCALISE", limits.localise_s, True, phase="arrival",
+                                    settle_s=limits.look_settle_s))
+        # Every translation above ends at the canonical heading.
+        rotation, _ = _rotation(canonical, full.terminal_heading_deg, limits, "restore")
+        commands = (*arrival, *rotation, _command("READ_TELEMETRY", limits.telemetry_s, True, phase="final"))
+        return CheckpointPlan(checkpoint_id=checkpoint_id, start=full.start, target=full.target,
+                              start_heading_deg=full.start_heading_deg,
+                              terminal_heading_deg=full.terminal_heading_deg,
+                              commands=commands, worst_case_s=sum(c.upper_bound_s for c in commands))
+
+    return resolve_transit
 
 
 # ---------------------------------------------------------------------------
