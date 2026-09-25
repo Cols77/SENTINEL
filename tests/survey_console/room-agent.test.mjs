@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {ROOM_AGENT,SURVEY,architectureOptions,selectArchitecture,modeOptions,scenarioOptions,proposalCommand,roomViewModel,safetyIdentity,answerText,returnedHomeText,landingText,reviewOptions,flightControlMessages,statusTone} from '../../examples/survey-console/room-agent-model.mjs';
+import {ROOM_AGENT,SURVEY,architectureOptions,selectArchitecture,modeOptions,scenarioOptions,proposalCommand,roomViewModel,safetyIdentity,answerText,returnedHomeText,landingText,reviewOptions,flightControlMessages,statusTone,batteryLevel} from '../../examples/survey-console/room-agent-model.mjs';
 
 const catalogue={
  architectures:[{id:'survey',label:'Survey (rules proposer)',description:'s'},{id:'room_agent',label:'Room agent (Jev adaptive)',description:'r'}],
@@ -79,6 +79,17 @@ test('the new fields are projected for the panels',()=>{
  assert.equal(view.detections[0],'phone (low) at (286, 278) cm · Right region');
  assert.equal(view.yawRotations,1);assert.equal(view.reanchorsAccepted,1);
  assert.equal(view.running,false);assert.equal(view.canPropose,true);assert.equal(view.proposal,null);
+ assert.equal(view.batteryPercent,88);assert.equal(view.batteryLevel,'ok');
+});
+
+test('battery level follows a green/yellow/red code: >50 ok, 21-50 warn, <=20 critical, unknown with no reading',()=>{
+ assert.equal(batteryLevel(null),'unknown');
+ assert.equal(batteryLevel(undefined),'unknown');
+ assert.equal(batteryLevel(20),'critical');
+ assert.equal(batteryLevel(21),'warn');
+ assert.equal(batteryLevel(50),'warn');
+ assert.equal(batteryLevel(51),'ok');
+ assert.equal(roomViewModel({run:null}).batteryLevel,'unknown');
 });
 
 test('a pending proposal and a running run gate the controls',()=>{

@@ -16,7 +16,8 @@ def test_scene_detector_uses_each_saved_sweep_frames_heading(tmp_path):
         world.heading_deg = heading
         paths.append(recorder.save(video.read(timeout=0)))
     scenario = Scenario("sweep", "sweep", "sweep", (
-        SceneObject("phone", "phone", 310, 350, 8, 4),
+        # On the ground plane, far enough ahead to be in frame from 1 m up.
+        SceneObject("phone", "phone", 290, 450, 8, 4),
     ))
     detector = SceneDetector(scenario, video, world)
     batches = [detector.detect(str(path), ("phone",)) for path in paths]

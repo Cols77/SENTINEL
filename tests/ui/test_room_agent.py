@@ -4,7 +4,10 @@ Rehearsal runs the production room composition over the fake CanningSt
 aircraft (``sentinel.ui.room_rehearsal``); nothing reaches hardware, the
 network or a provider. Live is exercised only up to (and just past) the
 approval boundary, with ``room_session.main`` and every real constructor
-replaced by recorders.
+replaced by recorders -- except the Prepare panel's read-only battery
+status probe, a deliberate, narrow exception documented on
+``RoomAgentService._live_battery_percent`` that is allowed to run before
+APPROVE and is exercised (not just recorded away) below.
 """
 from __future__ import annotations
 
@@ -33,6 +36,17 @@ def _free_command_port(monkeypatch):
     # machine; the Live gates under test must not depend on it.
     monkeypatch.setattr(room_agent.RoomAgentService, "_command_port_status",
                         lambda self, local_ip: dict(status="FREE"))
+
+
+_REAL_BATTERY_PROBE = room_agent.RoomAgentService._live_battery_percent
+
+
+@pytest.fixture(autouse=True)
+def _stub_battery_probe(monkeypatch):
+    # The Prepare panel's battery reading opens a real drone link; stub the
+    # probe itself (not live_stack.TelloLink, which rehearsal also builds).
+    monkeypatch.setattr(room_agent.RoomAgentService, "_live_battery_percent",
+                        lambda self, local_ip: None)
 
 
 @pytest.fixture
@@ -122,10 +136,10 @@ def test_a_rehearsal_run_reaches_an_answer_and_returns_home(tmp_path, fast):
         run = _run(client, room)
     assert run["status"] == "COMPLETED", run["error"]
     assert run["answer"]["code"] == "ANSWERED_COUNT"
-    # Three overlapping frames from one declared pose are one corroborating
-    # view, so each unique object remains uncertain until another pose sees it.
+    # Every rear pose sees the ground row the objects lie in, so each is
+    # corroborated across poses and counted once; the low-band phone stays uncertain.
     assert run["answer"]["summary"] == (
-        "phones: 0 confirmed, 2 uncertain; computers: 0 confirmed, 2 uncertain"), run["answer"]
+        "phones: 1 confirmed, 1 uncertain; computers: 2 confirmed"), run["answer"]
     assert run["returned_home"] is True
     assert run["landing"] == {"state": "LANDED", "reason": "REQUESTED"}
     assert any(region["status"] == "OBSERVED" for region in run["regions"])
@@ -151,7 +165,7 @@ def test_a_rehearsal_run_reaches_an_answer_and_returns_home(tmp_path, fast):
     assert service.registry.get(service.config.run_id) is None
 
 
-@pytest.mark.parametrize("battery,succeeds", [(70, False), (71, True)])
+@pytest.mark.parametrize("battery,succeeds", [(69, False), (70, True)])
 def test_rehearsal_sweep_battery_admission(tmp_path, fast, monkeypatch, battery, succeeds):
     original_build = room_rehearsal.build_world
 
@@ -164,7 +178,7 @@ def test_rehearsal_sweep_battery_admission(tmp_path, fast, monkeypatch, battery,
     service, room, client = _client(tmp_path)
     with client:
         run = _run(client, room)
-    assert run["captures"] == (3 if succeeds else 0)
+    assert run["captures"] == (18 if succeeds else 0)
     assert run["status"] == ("COMPLETED" if succeeds else "SAFE_LANDED")
     assert run["returned_home"] and run["landing"]["state"] == "LANDED"
 
@@ -280,9 +294,35 @@ def _live_pack(tmp_path):
     return path
 
 
-def test_in_live_nothing_is_constructed_before_approval(tmp_path, monkeypatch):
+def test_in_live_nothing_but_the_battery_status_read_happens_before_approval(tmp_path, monkeypatch):
     calls = []
-    monkeypatch.setattr(live_stack, "TelloLink", lambda *a, **k: calls.append("TelloLink"))
+
+    class FakeBatteryClient:
+        def battery(self):
+            calls.append("battery_read")
+            return 61
+
+    class FakeLink:
+        """Stands in for the drone link the prepare-time battery probe opens.
+
+        Deliberately narrower than a no-op: it must still support
+        ``.client().battery()`` and ``.close()`` so the probe (a real,
+        documented exception to "nothing real before APPROVE" -- see
+        ``RoomAgentService._live_battery_percent``) exercises its actual
+        path instead of failing silently into "unknown".
+        """
+
+        def __init__(self, *, local_ip=None, **_):
+            calls.append(("TelloLink", local_ip))
+
+        def client(self):
+            return FakeBatteryClient()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(room_agent.RoomAgentService, "_live_battery_percent", _REAL_BATTERY_PROBE)
+    monkeypatch.setattr(live_stack, "TelloLink", FakeLink)
     monkeypatch.setattr(live_stack, "default_jev", lambda *a, **k: calls.append("default_jev"))
     monkeypatch.setattr(live_stack, "default_detector", lambda *a, **k: calls.append("default_detector"))
     monkeypatch.setattr(live_stack, "openrouter_provider_probe", lambda *a, **k: calls.append("provider_probe"))
@@ -298,20 +338,26 @@ def test_in_live_nothing_is_constructed_before_approval(tmp_path, monkeypatch):
     monkeypatch.setattr(room_session, "main", fake_main)
     service, room, client = _client(tmp_path, room_live_config=_live_pack(tmp_path), authorise_paid_calls=True)
     with client:
-        catalogue = client.get("/api/v1/room-agent").json()["catalogue"]
+        state = client.get("/api/v1/room-agent").json()
+        catalogue = state["catalogue"]
         assert {m["id"]: m["available"] for m in catalogue["modes"]}["LIVE"] is True
         assert catalogue["local_ip"] == "192.168.10.2"
+        # The Prepare panel's battery reading is live, from a link this cycle opened and closed itself.
+        assert state["preparation"]["battery_percent"] == 61
+        assert ("TelloLink", "192.168.10.2") in calls and "battery_read" in calls
         proposed = client.post("/api/v1/room-agent/proposals",
                                json=dict(mode="LIVE", scenario="a", request_text=REQUEST)).json()
         assert proposed["status"] == "ACKNOWLEDGED", proposed
         assert proposed["run"]["proposal"]["flies"] is True
         time.sleep(0.3)
-        assert calls == []  # nothing real before APPROVE
+        # Nothing that flies, calls a paid provider or runs the real session exists before APPROVE.
+        assert [c for c in calls if c not in ("battery_read",) and
+                (not isinstance(c, tuple) or c[0] != "TelloLink")] == []
         client.post("/api/v1/room-agent/decisions",
                     json=dict(proposal_id=proposed["run"]["proposal"]["id"], decision="APPROVE"))
         assert released.wait(10) and room.wait(10)
         run = client.get("/api/v1/room-agent").json()["run"]
-    (name, argv, request_text), = calls
+    (name, argv, request_text), = (c for c in calls if isinstance(c, tuple) and c[0] == "room_session.main")
     assert name == "room_session.main" and request_text == REQUEST
     assert argv[:2] == ("live", "--execute") and "--i-authorise-paid-calls" in argv
     assert argv[argv.index("--capability") + 1] == "count_return"

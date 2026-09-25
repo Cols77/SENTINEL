@@ -71,13 +71,16 @@ class Scenario:
     gust_heading_deg: float = 75.0
 
 
-#: Objects rest on the site's ``demo-surface`` support plane (z 50 cm), about
-#: 90 cm ahead of the rear observation poses (x 230 / 250 / 270, y 190).
+#: The site's ``ground`` support plane (reported z; the Tello reads 30-40 cm low).
+GROUND_PLANE_Z_CM = -35.0
+
+#: Objects rest on the ground plane in the y 350-390 cell row, which every rear
+#: observation pose sees, so each object is corroborated from several poses.
 _OBJECTS = (
-    SceneObject("computer-center", "computer", 250.0, 280.0, 30.0, 20.0),
-    SceneObject("phone-left", "phone", 226.0, 282.0, 8.0, 4.0),
-    SceneObject("phone-right-low", "phone", 286.0, 278.0, 8.0, 4.0, band="low"),
-    SceneObject("computer-right", "computer", 274.0, 290.0, 30.0, 20.0),
+    SceneObject("computer-center", "computer", 250.0, 370.0, 30.0, 20.0),
+    SceneObject("phone-left", "phone", 225.0, 365.0, 8.0, 4.0),
+    SceneObject("phone-right-low", "phone", 285.0, 368.0, 8.0, 4.0, band="low"),
+    SceneObject("computer-right", "computer", 310.0, 372.0, 30.0, 20.0),
 )
 
 SCENARIOS = {
@@ -288,7 +291,7 @@ class FakeEmergencySocket:
 # ---------------------------------------------------------------------------
 
 
-def project_object(obj: SceneObject, pose, *, plane_z_cm=50.0, camera=TELLO_MEASURED):
+def project_object(obj: SceneObject, pose, *, plane_z_cm=GROUND_PLANE_Z_CM, camera=TELLO_MEASURED):
     """The pixel box of *obj* seen from ``pose = (x, y, z, heading)``, or None.
 
     The exact inverse of ``survey.geometry.ground_point`` for the box's
