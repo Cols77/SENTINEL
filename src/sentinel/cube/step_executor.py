@@ -205,6 +205,12 @@ class StepExecutor:
         with self._state_lock:
             return self._pose_revision
 
+    @property
+    def position(self) -> Position:
+        """The runner's dead-reckoned position, the start ``return_home`` checks."""
+        with self._state_lock:
+            return self.runner.envelope.position
+
     def _transition_locked(self, state: ExecutorState, *, invalidate: bool = False) -> None:
         """Change lifecycle and invalidate pending publications under _state_lock."""
         if self._state is not state or invalidate:

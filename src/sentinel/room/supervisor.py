@@ -1428,7 +1428,21 @@ class SafetySupervisor:
                               else self.emergency(executor))
                 else:
                     part = self._plan(current.request.pose, batch, plan.checkpoint_id)
-                    result = executor.return_home(part) if current.transition == "RETURN_NOW" else executor.execute(part)
+                    if current.transition == "RETURN_NOW":
+                        # Live 2026-09-25 12:01: the return's commands come from the
+                        # tag-tracked pose, but return_home's staleness check compares
+                        # the plan start with the runner's dead-reckoned position,
+                        # which tag fixes never move. The two differed by a few cm,
+                        # every return part came back REPLAN_REQUIRED, and the
+                        # aircraft hovered two minutes (battery 11% -> 7%) until the
+                        # contingency landed it. The part is re-admitted from the
+                        # tracker right here; it starts where the runner stands.
+                        start = getattr(executor, "position", None)
+                        if isinstance(start, Position):
+                            part = replace(part, start=start)
+                        result = executor.return_home(part)
+                    else:
+                        result = executor.execute(part)
                 self._record_completion(result, current, event, executor)
                 if isinstance(result, TerminalOutcome):
                     return result
