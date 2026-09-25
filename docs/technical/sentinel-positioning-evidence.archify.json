@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "From camera image to count evidence",
+    "quality_profile": "showcase",
+    "viewBox": [1080, 500]
+  },
+  "stages": [
+    {"label":"Camera"},
+    {"label":"Read image"},
+    {"label":"Place in room"},
+    {"label":"Match sightings"},
+    {"label":"Answer"}
+  ],
+  "nodes": [
+    {"id":"tag_frames","type":"frontend","label":"Wall markers","sublabel":"known room locations","stage":0,"row":0},
+    {"id":"tag_solver","type":"backend","label":"Find tag corners","sublabel":"OpenCV image geometry","stage":1,"row":0},
+    {"id":"camera_pose","type":"database","label":"Camera location","sublabel":"room x/y + heading","stage":2,"row":0},
+    {"id":"saved_frames","type":"frontend","label":"Selected PNGs","sublabel":"three planned looks","stage":0,"row":2},
+    {"id":"gemini_boxes","type":"cloud","label":"Gemini vision model","sublabel":"object labels + boxes","stage":1,"row":2},
+    {"id":"grounding","type":"backend","label":"Place detections","sublabel":"pixels to floor/table","stage":2,"row":2},
+    {"id":"association","type":"backend","label":"Match same object","sublabel":"class + distance","stage":3,"row":2},
+    {"id":"counts","type":"database","label":"Count evidence","sublabel":"confirmed + uncertain","stage":4,"row":2}
+  ],
+  "flows": [
+    {"id":"tag_pixels","from":"tag_frames","to":"tag_solver","label":"tag corners"},
+    {"id":"position","from":"tag_solver","to":"camera_pose","label":"estimated position"},
+    {"id":"selected_pixels","from":"saved_frames","to":"gemini_boxes","label":"saved image"},
+    {"id":"detections","from":"gemini_boxes","to":"grounding","label":"checked boxes"},
+    {"id":"camera_location","from":"camera_pose","to":"grounding","label":"camera location","variant":"emphasis","labelAt":[530,200]},
+    {"id":"spatial_estimates","from":"grounding","to":"association","label":"point + uncertainty"},
+    {"id":"objects","from":"association","to":"counts","label":"object hypotheses"}
+  ]
+}

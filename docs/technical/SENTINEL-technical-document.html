@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>SENTINEL | Technical implementation</title>
+<style>
+@page{size:A4 portrait;margin:0}
+*{box-sizing:border-box}
+body{margin:0;background:#fff;color:#172538;font:9.2pt/1.29 Arial,Helvetica,sans-serif}
+.page{width:210mm;height:297mm;padding:12mm 14mm 13mm;page-break-after:always;overflow:hidden;position:relative}
+.page:last-child{page-break-after:auto}
+.eyebrow{color:#087a83;font-size:7.4pt;letter-spacing:1pt;text-transform:uppercase;font-weight:700}
+h1{font-size:19.5pt;line-height:1.1;margin:1.5mm 0 2mm}
+h2{font-size:12.5pt;line-height:1.15;margin:4mm 0 1.8mm;color:#075f68;break-after:avoid}
+h3{font-size:9.6pt;line-height:1.15;margin:2.6mm 0 1mm;color:#075f68;break-after:avoid}
+p{margin:0 0 2.3mm}
+.lead{font-size:9.7pt;color:#405267;margin-bottom:3mm}
+.figure{position:relative;width:182mm;overflow:hidden;border:.2mm solid #cfdee6;border-radius:1.3mm;background:#fbfdff;margin:2mm 0 0}
+.figure img{position:absolute;max-width:none;width:190mm;left:-4mm}
+.architecture{height:63mm}.architecture img{width:180mm;left:1mm;top:-15.5mm}
+.loop{height:62mm}.loop img{top:-12mm}
+.pipeline{height:60mm}.pipeline img{width:180mm;left:1mm;top:-12mm}
+section.page:nth-of-type(3) h2{margin-top:3.2mm}
+.caption{font-size:7.3pt;line-height:1.2;color:#51677b;margin:1mm 0 2.8mm}
+.small{font-size:8.5pt}.source{font-size:7.4pt;color:#53697d}
+.term{font-weight:700;padding:0 .35mm;border-radius:.6mm;box-decoration-break:clone;-webkit-box-decoration-break:clone}
+.term.data{color:#5139a4;background:#eeeaff}.term.control{color:#006469;background:#e2f4f2}
+.term.ai{color:#925100;background:#fff0cf}.term.caution{color:#a33247;background:#ffe8ec}
+.pose-states{display:grid;grid-template-columns:repeat(4,1fr);gap:1.5mm;margin:1mm 0 2mm}
+.pose-state{border-left:.8mm solid #14968e;background:#f0f8f7;padding:1.1mm 1.3mm;font-size:7.55pt;line-height:1.16}
+.pose-state b{display:block;color:#075f68;font-size:7.4pt;letter-spacing:.2pt;margin-bottom:.4mm}
+.pose-state.coasting{border-color:#d58b15;background:#fff7e8}.pose-state.coasting b{color:#925100}
+.pose-state.recovery{border-color:#dd665b;background:#fff0ec}.pose-state.recovery b{color:#a13c34}
+.pose-state.lost{border-color:#a33247;background:#ffeef1}.pose-state.lost b{color:#9b2a40}
+.steps{padding-left:5.5mm;margin:0 0 1.8mm}.steps li{padding-left:1mm;margin:0 0 1.2mm}
+.note{border-left:.65mm solid #0a8f96;background:#eef7f7;padding:2mm 2.5mm;margin:2.5mm 0}
+.rule{border-top:.25mm solid #d2e2e8;margin:2.8mm 0}
+.footer{position:absolute;left:14mm;right:14mm;bottom:5mm;border-top:.2mm solid #dce8ec;padding-top:1.2mm;display:flex;justify-content:space-between;color:#688093;font-size:7pt}
+table{border-collapse:collapse;width:100%;font-size:8.25pt;line-height:1.2;margin:1.8mm 0 2mm}
+th,td{border-bottom:.2mm solid #dce8ec;padding:1.4mm 1.5mm;text-align:left;vertical-align:top}
+th{background:#eef7f7;color:#075f68}
+td:first-child{width:42%}
+a{color:#075f68;text-decoration:none}
+code{font:8.2pt Consolas,monospace}
+</style></head><body>
+
+<section class="page">
+<div class="eyebrow">SENTINEL · technical implementation · September 2026</div>
+<h1>1. Architecture and technology choices</h1>
+<p class="lead">SENTINEL is a supervised drone-inspection prototype for mountain trails, designed to flag potential hazards for human follow-up. For the Producathon demo, we exercise its agent, flight-safety and perception loop indoors with a DJI Tello drone, using room-search tasks suited to the venue.</p>
+
+<h2>Architecture</h2>
+<div class="figure architecture"><img src="sentinel-architecture.visual-check.1440x900.light.png" alt="Archify diagram linking Mission Control, Room Controller, Jev, Safety Supervisor, Tello, Pose and Object Detection, and RoomStore"></div>
+<p class="caption">Figure 1. Component connections. <a href="sentinel-architecture.html">Full Archify diagram</a>.</p>
+<p>Mission Control is a FastAPI-served browser for requests and approvals. The runner validates the run manifest, calibration, consent and links before opening live clients. <span class="term data">RoomStore</span> keeps a versioned, append-only event history in SQLite alongside requests, results and detections. Each turn, the <span class="term control">room controller</span> rebuilds state from these records, constructs legal action IDs and asks Jev to select one. A separate <span class="term control">safety supervisor</span> checks pose, flight bounds, command limits, time and return-energy reserve before DJITelloPy sends a typed Tello command. The camera stream feeds localization and selected object-detection frames; their results are written back to RoomStore.</p>
+<p class="small"><b>Implemented stack:</b> Python 3.11+, FastAPI, DJITelloPy 2.5.0, PyAV, OpenCV, SQLite/WAL, Jev and Gemini through OpenRouter. Gemini receives selected frames after consent; Jev receives state and legal choices.</p>
+
+<h2>Why Tello, and what its sensors provide</h2>
+<p>Tello is a small indoor drone with SDK flight commands, battery and height telemetry, and a forward H.264 camera. DJITelloPy and PyAV connect these interfaces to the runner. Its downward vision and infrared ranging assist hovering; its IMU and barometer contribute to onboard flight control. SENTINEL uses the forward camera for mapped AprilTags and objects, and reads height and battery through the SDK. Tello does not expose a precise room coordinate, so the software must estimate horizontal position and heading. SDK moves can drift, and the drone's Wi-Fi link requires a separate internet connection for cloud model calls.</p>
+
+<p class="source">Hardware references: <a href="https://dl-cdn.ryzerobotics.com/downloads/Tello/20180404/Tello_User_Manual_V1.2_EN.pdf">Ryze Tello manual</a> · <a href="https://dl-cdn.ryzerobotics.com/downloads/Tello/Tello%20SDK%202.0%20User%20Guide.pdf">Tello SDK 2.0</a>.</p>
+
+<h2>Why Jev was selected over GLM-5.3-Flash</h2>
+<p>We compared the services on <b>21 written mountain trail-observation cases</b>, with three calls per case for each model. Each call answered five fixed questions. The scored measures were whether a hazard needed action and whether a human review was needed; six unclear hazard cases were excluded. This was a model-service comparison, not a room-viewpoint or flight test.</p>
+<table><thead><tr><th>Measure</th><th>Jev</th><th>GLM-5.3-Flash</th></tr></thead><tbody>
+<tr><td>Mean response time, 63 calls each</td><td>0.40 s</td><td>18.16 s</td></tr>
+<tr><td>Correct hazard classification, 15 scored cases</td><td>12/15</td><td>12/15</td></tr>
+<tr><td>Required human reviews found</td><td>11/11</td><td>11/11</td></tr>
+<tr><td>Unnecessary human reviews</td><td>10</td><td>5</td></tr>
+<tr><td>Listed API price, per million tokens</td><td>$0.042 input; output free</td><td>$0.075 input; $0.25 output</td></tr>
+</tbody></table>
+<p>Jev's mean reply was about <span class="term ai">45 times faster</span> and its listed token price was lower, with the same 12/15 hazard score. It missed one actionable hazard (GLM missed none), raised two false alarms (GLM three), and requested five more unnecessary reviews. Prices are from the <a href="https://openrouter.ai/typesafe/jev-1.13/api">Jev 1.13</a> and <a href="https://openrouter.ai/z-ai/glm-5.3-flash">GLM</a> listings on 24 September 2026, not billed totals. The tested Jev endpoint resolved to “jev-latest,” so its revision was not pinned.</p>
+<div class="footer"><span>Source: claude/demo-baseline · artifacts/jev/v2-live-{jev,llm}.jsonl</span><span>1 / 3</span></div>
+</section>
+
+<section class="page">
+<div class="eyebrow">Control and localization</div>
+<h1>2. Agent loop and flight checks</h1>
+<p class="lead">Jev selects code-supplied actions; code checks flight, observations and persistence.</p>
+<div class="figure loop"><img src="sentinel-agent-loop.visual-check.1440x900.light.png" alt="Archify diagram of one room-agent turn from state projection through Jev, safety, execution and persistence"></div>
+<p class="caption">Figure 2. One bounded agent turn; persistence feeds the next state projection. <a href="sentinel-agent-loop.html">Full Archify diagram</a>.</p>
+
+<h2>From state to an admitted action</h2>
+<ol class="steps">
+<li><b>Read state.</b> The controller rebuilds goals, prior outcomes, coverage, camera-position health and session version from RoomStore.</li>
+<li><b>Offer legal choices.</b> Code creates IDs for reads, declared viewpoints, re-anchoring, answering and escalation, then removes unsupported or previously refused actions.</li>
+<li><b>Check Jev's choice.</b> <code>JevJudge</code> submits the choices and criteria to OpenRouter. <code>assess_choice</code> checks the returned ID and probabilities, confidence and margin; the controller also checks version and evidence freshness. A malformed or weak reply gets one re-ask, then escalation.</li>
+<li><b>Admit movement.</b> The supervisor separately checks position, corridor, command bounds, time and return reserve. It can require recovery or landing. Jev cannot send coordinates or write evidence directly.</li>
+</ol>
+
+<h2>Drone positioning</h2>
+<p>The room has a calibrated coordinate frame and mapped <span class="term control">AprilTag 36h11</span> wall markers. OpenCV's open-source ArUco module finds their image corners; its camera-position solver compares those pixels with the markers' known room locations. It combines two or more visible markers when possible. During a stationary burst, at least eight readings are required. Their median horizontal coordinates and heading become the drone's position estimate only if 95% lie within 10 cm of that centre. A single-marker estimate is less trusted and must agree with the current track.</p>
+<p>After a completed move, the tracker predicts displacement and increases uncertainty. A reliable marker view <b>re-anchors</b> the estimate; without one, it eventually becomes stale. Tello supplies height. The resulting camera location is used to place observed objects in the room.</p>
+<div class="pose-states" aria-label="Drone positioning states">
+  <div class="pose-state"><b>ANCHORED</b>Fresh marker-based position after re-anchoring.</div>
+  <div class="pose-state coasting"><b>COASTING</b>No new reliable marker position; prediction continues and uncertainty grows.</div>
+  <div class="pose-state recovery"><b>RECOVERY_REQUIRED</b>Age, drift or conflicting readings exceed a limit; seek a fresh marker view.</div>
+  <div class="pose-state lost"><b>LOST</b>Position cannot be trusted; normal movement stops.</div>
+</div>
+
+<h2>Execute, observe and persist</h2>
+<p>An <code>OBSERVE</code> ID resolves to a declared viewpoint. The planner starts from the current measured pose and calibrated speed. At the zone, it plans three looks at −30°, 0° and +30°; each yaw and capture is independently safety-admitted. Success requires completed commands, every expected PNG and a measured arrival compatible with the declared pose. The three detector calls then run concurrently during one bounded wait, and their results are restored to capture order. The supervisor continues checking position, return reserve and operator intervention during that wait.</p>
+<p>Timeouts and provider failures become typed outcomes without coverage credit. Only correlated, successful, current-version frame results can produce <code>OBSERVE_SUCCEEDED</code>. The next turn reprojects SQLite rather than trusting an informal model memory. A terminal answer requests safe return and confirmed landing.</p>
+<p><code>ingest_result</code> atomically stores each request, provider payload, result identity and status, detection boxes and initial hypotheses in SQLite. Identical replay returns the prior result; conflicting replay is refused. Failures and old snapshots remain auditable but cannot authorize current state. After all expected frames correlate and pass their checks, the controller appends a separate <code>OBSERVE_SUCCEEDED</code> room event for the next state projection.</p>
+<div class="footer"><span>Implementation: room/controller.py · cube/localization.py · room/store.py</span><span>2 / 3</span></div>
+</section>
+
+<section class="page">
+<div class="eyebrow">Perception and evidence</div>
+<h1>3. From camera frames to a count</h1>
+<p class="lead">During flight, selected images support live decisions. After landing, a separate pipeline can analyse the recorded video. Both start from the Tello camera but select and interpret frames differently.</p>
+<div class="figure pipeline"><img src="sentinel-positioning-evidence.visual-check.1440x900.light.png" alt="Archify diagram of tag pose, Gemini boxes, geometric grounding, object merge and count evidence"></div>
+<p class="caption">Figure 3. Top: wall markers locate the camera. Bottom: the vision model marks objects in selected images. Camera location places those marks in the room, then repeat sightings are matched before counting. <a href="sentinel-positioning-evidence.html">Full Archify diagram</a>.</p>
+
+<h2>During travel: select PNGs for live inference</h2>
+<p>Live selection follows the planned <code>OBSERVE</code> action, not a quality-ranked video search. The chosen viewpoint defines three looks at −30°, 0° and +30°. After each admitted turn and settle, <code>CAPTURE</code> saves one decoded H.264 frame as a PNG. Only those three images go to <span class="term ai">Gemini</span>, a vision-language model (VLM) that reads image and text instructions and returns object classes, bounding boxes and confidence bands. The controller checks all captures and the measured arrival; each PNG carries time, heading, pose revision, session version and SHA-256. The adapter rejects mismatched image, provider or model identities. The bands are provider outputs: <span class="term caution">bounding-box precision</span>—the fraction of reported boxes that match real objects—has not been measured on labelled real demo frames.</p>
+
+<h2>After flight: analyse recorded video</h2>
+<p>A separate <code>sentinel_perception</code> pipeline reads recorded Tello H.264. Optical flow separates turns from stationary viewing periods. Its selection pass rejects frames with excessive motion or clipped exposure and chooses a high-texture keyframe, with optional alternates, for each view. <span class="term ai">Grounding DINO</span>, an open-vocabulary object detector, analyses sampled stationary frames; the pipeline removes invalid or duplicate boxes, tracks objects within each view and checks whether a full yaw scan returns to its starting direction. Outputs are a scene summary, annotated video and event log. A bridge can export detections for survey replay. Model weights must be staged before this path runs.</p>
+
+<h2>Ground image boxes in the room</h2>
+<p>For a static detection, the box's bottom-centre pixel defines a ray through the calibrated camera. The current pose transforms that ray into the room frame, where it intersects a declared floor or support plane. Invalid intersections, stale poses and undeclared supports leave a detection <i>unplaced</i>. A valid room point receives a covariance that grows with range; dead-reckoned pose adds uncertainty. Thus two visually similar boxes can be compared in metres without pretending that an uncertain estimate is exact.</p>
+
+<h2>Merge observations and derive counts</h2>
+<p>Static sightings can merge only when they have the same object class and floor or support surface, come from different captures, and their room positions are close relative to their uncertainty. The closest compatible pairs are tried first. Two existing object identities cannot collapse into one; replayed estimates are ignored. Every combined object keeps links to its source images. It is <span class="term control">confirmed</span> only after sightings from distinct planned viewpoints; otherwise it stays <span class="term caution">uncertain</span>. These rules limit duplicate counts and mistaken merges, but cannot guarantee correct identity if a box label or camera location is wrong.</p>
+<p>People are treated differently because they can move: the maximum simultaneous count in one frame is a lower bound, with no cross-frame identity tracking. Coverage is credited only to completed, authorized looks. Unplaced targets or missing viewpoint coverage prevent a confident full-room count.</p>
+
+<h2>Limits of the current prototype</h2>
+<p>Tag occlusion, poor lighting and Tello drift can make localization too uncertain to continue. Geometric grounding depends on camera calibration and the chosen support plane; unsupported boxes remain unplaced. Declared-viewpoint coverage is only a proxy for complete visual coverage. Replay and simulated-controller tests check software contracts, not detection recall, wireless reliability or safe flight in an unfamiliar room. The real Tello backend allows only one live instance per process.</p>
+<div class="footer"><span>Implementation basis: claude/demo-baseline · c6f698c</span><span>3 / 3</span></div>
+</section>
+</body></html>

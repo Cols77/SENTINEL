@@ -1,0 +1,37 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "One bounded room-agent turn",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {"id":"state","label":"Session state"},
+    {"id":"agent","label":"Controller + Jev"},
+    {"id":"guard","label":"Independent safety","variant":"exception"},
+    {"id":"world","label":"Aircraft + evidence"}
+  ],
+  "mainPath": ["snapshot","legal","jev","check","supervise","execute","ingest"],
+  "nodes": [
+    {"id":"snapshot","lane":"state","col":0,"type":"database","label":"Project state","sublabel":"ledger + coverage","width":138},
+    {"id":"legal","lane":"agent","col":1,"type":"backend","label":"Build legal set","sublabel":"candidate IDs","width":138},
+    {"id":"jev","lane":"agent","col":2,"type":"cloud","label":"Jev chooses","sublabel":"one fixed choice","width":138},
+    {"id":"check","lane":"agent","col":3,"type":"security","label":"Accept choice","sublabel":"confidence + version","width":138},
+    {"id":"supervise","lane":"guard","col":4,"type":"security","label":"Safety admit","sublabel":"pose + battery + path","width":138},
+    {"id":"execute","lane":"world","col":4,"type":"backend","label":"Execute / observe","sublabel":"checkpoint + capture","width":138},
+    {"id":"ingest","lane":"world","col":5,"type":"database","label":"Persist result","sublabel":"detection + event","width":138}
+  ],
+  "edges": [
+    {"id":"e1","from":"snapshot","to":"legal","label":"fresh snapshot","variant":"emphasis"},
+    {"id":"e2","from":"legal","to":"jev","label":"IDs + context","variant":"emphasis"},
+    {"id":"e3","from":"jev","to":"check","label":"choice + scores","variant":"emphasis"},
+    {"id":"e4","from":"check","to":"supervise","label":"accepted ID","variant":"security"},
+    {"id":"e5","from":"supervise","to":"execute","label":"admitted","variant":"security"},
+    {"id":"e6","from":"execute","to":"ingest","label":"observations","variant":"emphasis"},
+    {"id":"e7","from":"ingest","to":"snapshot","label":"next turn","variant":"dashed","role":"return"}
+  ],
+  "cards": [
+    {"dot":"violet","title":"Choice contract","items":["Jev receives only legal candidate IDs, never free coordinates.","Low confidence or malformed choices get at most one re-ask."]},
+    {"dot":"rose","title":"Fail closed","items":["Supervisor can preempt the turn before Jev is called.","Terminal answers trigger safe return; failed landing cannot count as success."]}
+  ]
+}

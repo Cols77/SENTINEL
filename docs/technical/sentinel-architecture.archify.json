@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "SENTINEL room inspection architecture",
+    "quality_profile": "showcase",
+    "viewBox": [1140, 580]
+  },
+  "components": [
+    {"id":"mission_control","type":"frontend","label":"Operator + Mission Control","sublabel":"request and approval · FastAPI","pos":[25,245],"size":[210,78]},
+    {"id":"controller","type":"backend","label":"Room Controller","sublabel":"goals · legal actions · turns","pos":[325,245],"size":[200,78]},
+    {"id":"safety","type":"security","label":"Safety Supervisor","sublabel":"pose · route · return reserve","pos":[615,245],"size":[200,78]},
+    {"id":"tello","type":"external","label":"DJI Tello drone","sublabel":"SDK commands · H.264 video","pos":[905,245],"size":[200,78]},
+    {"id":"jev","type":"cloud","label":"Jev / OpenRouter","sublabel":"returns a legal action ID","pos":[325,65],"size":[200,78]},
+    {"id":"store","type":"database","label":"RoomStore","sublabel":"SQLite events · results · counts","pos":[325,425],"size":[200,78]},
+    {"id":"perception","type":"backend","label":"Pose + Object Detection","sublabel":"AprilTags · Gemini vision model","pos":[905,425],"size":[200,78]}
+  ],
+  "connections": [
+    {"id":"request","from":"mission_control","to":"controller","label":"request","variant":"emphasis"},
+    {"id":"plan","from":"controller","to":"safety","label":"flight plan","variant":"emphasis"},
+    {"id":"command","from":"safety","to":"tello","label":"SDK command","variant":"security"},
+    {"id":"choose","from":"controller","to":"jev","label":"legal action IDs"},
+    {"id":"video","from":"tello","to":"perception","label":"video + telemetry","labelAt":[1005,372]},
+    {"id":"observations","from":"perception","to":"store","label":"pose + detections"},
+    {"id":"state","from":"store","to":"controller","label":"goals + coverage","variant":"dashed"}
+  ],
+  "cards": [
+    {"dot":"rose","title":"Flight authority","items":["The controller proposes; the supervisor can refuse or preempt each move.","Only admitted typed commands reach the Tello drone."]},
+    {"dot":"violet","title":"Evidence authority","items":["RoomStore records versioned actions and vision results in SQLite.","The next turn rebuilds goals and counts from stored evidence."]}
+  ]
+}
