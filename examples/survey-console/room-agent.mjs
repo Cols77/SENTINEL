@@ -32,6 +32,10 @@ const regionParts=line=>{
 };
 const list=(testid,lines,empty,parts=line=>[line])=>el('ol',{'data-testid':testid,class:'room-log'},lines.length?lines.map(line=>typeof line==='string'?el('li',{},parts(line)):el('li',{'data-kind':line.kind},[line.text])):[el('li',{class:'meta'},[empty])]);
 
+// The panel is rebuilt on every poll; a <details> rebuilt closed snapped
+// shut about a second after it was opened. Remember which ones are open.
+const openReasons=new Set();
+
 function decisionList(decisions){
  const rows=decisions?.length?decisions.map(d=>{
   const action=d.action?.startsWith('OBSERVE:')?'observe':d.action?.startsWith('REANCHOR')?'reanchor':d.action?.startsWith('ANSWER')?'answer':'other';
@@ -47,13 +51,20 @@ function decisionList(decisions){
     el('span',{class:'room-decision-result'},[result.replaceAll('_',' ')]),
    ]),
    el('p',{class:'room-decision-meta'},[d.refused?`Refused · ${d.refused}`:'Jev selected this action',odds?` · ${odds}${mass}`:'']),
-   el('details',{class:'room-decision-detail'},[
-    el('summary',{},['Why this step']),
-    el('p',{class:'room-decision-reason'},[d.reason||'No reason recorded.']),
-   ]),
+   reasonDetail(d),
   ]);
  }):[el('li',{class:'meta'},['No Jev turn yet.'])];
  return el('ol',{'data-testid':'room-decision-log',class:'room-log room-decision-list','aria-label':'Jev decisions'},rows);
+}
+
+function reasonDetail(d){
+ const key=`${d.turn}:${d.label??''}`;
+ const detail=el('details',{class:'room-decision-detail',open:openReasons.has(key)},[
+  el('summary',{},['Why this step']),
+  el('p',{class:'room-decision-reason'},[d.reason||'No reason recorded.']),
+ ]);
+ detail.addEventListener('toggle',()=>{if(detail.open)openReasons.add(key);else openReasons.delete(key);});
+ return detail;
 }
 
 function reanchorList(steps){

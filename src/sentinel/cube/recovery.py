@@ -489,6 +489,20 @@ class RecoveryController:
         current = self.tracker.health
         if (action.pose_revision != current.pose_revision or action.measured_at != current.measured_at):
             self._finished = True
+            # Live 2026-09-25 11:39: the tags came into view during the yaw and
+            # the ordinary tag stream re-anchored the aircraft (joint tags,
+            # 2 cm) before the burst was judged. Counting that as a failed
+            # episode left recovery "exhausted" for the rest of the session,
+            # and the next zone landed the aircraft at 4 cm. A fresh fix as
+            # tight as an accepted burst is this episode's success; it must
+            # still be resumed (fresh route and energy validation) before
+            # another episode may begin.
+            if (current.state == LocalizationState.ANCHORED and current.measured_at > action.measured_at
+                    and current.pose_revision > action.pose_revision and profile is not None
+                    and current.xy_uncertainty_cm <= profile.max_burst_spread_cm
+                    and current.heading_uncertainty_deg <= profile.max_burst_heading_spread_deg):
+                self._successful_revision = current.pose_revision
+                return reject("superseded_by_fresh_fix")
             return reject("superseded_pose")
         if pose.state == LocalizationState.LOST or current.state == LocalizationState.LOST:
             return reject("lost")
