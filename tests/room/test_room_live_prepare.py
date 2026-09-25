@@ -167,10 +167,12 @@ def test_the_wide_scenario_pack_binds_its_site_and_drift_and_passes_every_gate(t
     assert "connectivity preflight not ready" in run["error"], run["error"]
     assert ("drone_probe",) in hardware.calls
 
-    # The default stays the compact CanningSt scenario.
+    # The default (Mission Control's no-argument prepare) is the demo
+    # scenario: the compact site under the 60 cm error limit (2026-09-25).
     assert _prepare(run_root, "--new-run", capsys=capsys)[0] == 0
-    assert _pack(run_root)["scenario"] == "canningst"
+    assert _pack(run_root)["scenario"] == "demo"
     assert Path(_pack(run_root)["site"]).name == "canningst-site.json"
+    assert Path(_pack(run_root)["drift_profile"]).name == "canningst-demo-drift.json"
 
 
 def test_rerunning_reuses_the_registry_the_run_and_its_grant(tmp_path, capsys):

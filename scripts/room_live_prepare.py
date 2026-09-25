@@ -305,7 +305,7 @@ def ensure_manifest(run_root: Path, run_id: str, grant, registry_path: Path, *, 
 # -- main -----------------------------------------------------------------------
 def prepare(*, run_root: Path, local_ip: str | None, consent_confirmed: bool, run_id: str | None = None,
             new_run: bool = False, request: str = DEFAULT_REQUEST, today: str | None = None,
-            now: datetime | None = None, scenario: str = "canningst") -> dict:
+            now: datetime | None = None, scenario: str = "demo") -> dict:
     global _scenario
     if scenario not in SCENARIOS:
         raise PrepareError(f"unknown scenario {scenario!r}; choose one of {', '.join(SCENARIOS)}")
@@ -397,8 +397,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", default=None, help="use this run id (default: reuse the unflown current run "
                                                        "or make a fresh l3-<time>)")
     parser.add_argument("--new-run", action="store_true", help="always prepare a fresh run")
-    parser.add_argument("--scenario", choices=sorted(SCENARIOS), default="canningst",
-                        help="flight scenario: canningst (compact, near the pad) or wide (3x3 zones over the room)")
+    parser.add_argument("--scenario", choices=sorted(SCENARIOS), default="demo",
+                        help="flight scenario: demo (compact site, 60 cm error limit; the default, also what "
+                             "Mission Control's prepare uses), canningst (compact, 30 cm) or wide (3x3 zones)")
     parser.add_argument("--request", default=DEFAULT_REQUEST,
                         help="label only: the manifest does not bind the request text")
     return parser
