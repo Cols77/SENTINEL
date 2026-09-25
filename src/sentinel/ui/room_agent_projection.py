@@ -79,6 +79,7 @@ class RoomAgentProjection:
             reanchor_log=[],
             decisions=[],
             answer=None,
+            operator_answer=None,
             returning=False,
             returned_home=False,
             landing=None,
@@ -142,6 +143,15 @@ class RoomAgentProjection:
             s["phase"] = "LANDED" if landing_state == "LANDED" else terminal_state
             s["terminal_state"] = terminal_state
             s["terminal_reason"] = reason
+
+    def set_operator_answer(self, document) -> None:
+        """The mission-end answer (``operator_answer.json``), shown after finish."""
+        if not isinstance(document, dict) or not document.get("operator_answer"):
+            return
+        with self._lock:
+            self.state["operator_answer"] = dict(text=document["operator_answer"],
+                                                 source=document.get("source"), model=document.get("model"))
+            self._log("OPERATOR_ANSWER", document["operator_answer"], source=document.get("source"))
 
     # -- the ledger -----------------------------------------------------------
     def fold(self, events) -> None:

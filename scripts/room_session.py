@@ -661,6 +661,13 @@ def _cmd_live(
             print(f"error: session ended {outcome.terminal_state.value} but terminal.json could not be "
                   f"finalized: {exc}", file=sys.stderr)
             return 1
+        # Past the durable terminal record: one (paid, authorised-only) GLM
+        # call phrases the findings for the operator. It never raises and
+        # never touches terminal.json/summary.json; see sentinel.room.operator_answer.
+        # Paid only with the flag AND the real Jev: an injected (test/fake)
+        # judge means an offline run, which gets the deterministic answer.
+        _write_operator_answer(run, manifest.run_id, request_text=request_text,
+                               authorised=bool(args.i_authorise_paid_calls) and jev_factory is _default_jev)
         print(json.dumps({"run_id": manifest.run_id, "terminal_state": outcome.terminal_state.value}))
         return 0
     finally:
@@ -673,6 +680,23 @@ def _cmd_live(
             except OSError as exc:
                 print(f"recording status unavailable: {exc}", file=sys.stderr)
         run.close()
+
+
+def _write_operator_answer(run, run_id: str, *, request_text: str, authorised: bool) -> None:
+    """Best effort, after terminal.json: never changes the CLI's outcome."""
+    try:
+        from sentinel.room import operator_answer
+
+        terminal = json.loads((run.root / "terminal.json").read_text(encoding="utf-8"))
+        if authorised:
+            live_stack.provider_environ()  # fill OPENROUTER_API_KEY from .env, as Jev does
+        document = operator_answer.finalize_operator_answer(
+            run.root, request_text=request_text, events=run.store.events(run_id), terminal=terminal,
+            authorised=authorised)
+        if document is not None:
+            print(f"operator answer ({document['source']}): {document['operator_answer']}", file=sys.stderr)
+    except Exception as exc:  # the answer is a courtesy; the run is already recorded
+        print(f"operator answer unavailable: {exc}", file=sys.stderr)
 
 
 def _cmd_replay(args: argparse.Namespace) -> int:
