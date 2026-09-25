@@ -2,9 +2,12 @@
 
 The operator selects **Room agent (Jev adaptive)** next to the survey
 architecture, picks a run mode, types a request, approves it and watches it
-run. Approval is dispatch, exactly as for the survey: nothing that can fly,
-call a paid provider or open a drone link is constructed before the
-operator's APPROVE.
+run. Approval is dispatch, exactly as for the survey: nothing that can fly
+or call a paid provider is constructed before the operator's APPROVE. The
+one deliberate exception is ``_live_battery_percent``: a motors-off,
+read-only battery status read for the Prepare panel, opened and closed on
+its own short-lived link before APPROVE, never registered as the active
+runner.
 
 Run modes:
 
@@ -30,6 +33,7 @@ runner's direct motor stop.
 
 import contextlib
 from dataclasses import replace
+import inspect
 from datetime import datetime, timezone
 import io
 import ipaddress
@@ -231,6 +235,8 @@ class RoomAgentService:
         self._preparing = False
         self._port_checked_at = 0.0
         self._port_snapshot = None
+        self._battery_checked_at = 0.0
+        self._battery_value = None
         self._live_link_used = False
 
     # -- catalogue ------------------------------------------------------------
@@ -257,6 +263,7 @@ class RoomAgentService:
             perception_reviews=list(PERCEPTION_REVIEWS),
             scenarios=[dict(id=s.scenario_id, label=s.label, description=s.description)
                        for s in room_rehearsal.SCENARIOS.values()],
+            flight_scenarios=self._flight_scenarios(),
             default_request=DEFAULT_REQUEST,
             site="CanningSt",
             local_ip=self._default_local_ip(),
@@ -267,7 +274,7 @@ class RoomAgentService:
         with self._lock:
             run = self.run
         return dict(catalogue=self.catalogue(), run=run.public() if run else None,
-                    preparation=self.preparation_state())
+                    preparation=self.preparation_state(read_battery=True))
 
     def _prepare_blocker(self):
         if self.live_config_path is None:
@@ -302,7 +309,7 @@ class RoomAgentService:
             self._port_checked_at = now
         return status
 
-    def preparation_state(self):
+    def preparation_state(self, *, read_battery=False):
         pack = self._live_pack(optional=True) or {}
         expiry = pack.get("assurances_expire_at")
         try:
@@ -317,10 +324,75 @@ class RoomAgentService:
         with self._lock:
             blocker = self._prepare_blocker()
             preparing = self._preparing
+        local_ip = pack.get("local_ip") or self._default_local_ip()
         return dict(can_prepare=blocker is None, reason_code=blocker, preparing=preparing,
                     pack_run_id=pack.get("run_id"), assurances_expire_at=expiry,
                     pack_expired=pack_expired, pack_used=pack_used,
-                    command_port=self._command_port_status(pack.get("local_ip") or self._default_local_ip()))
+                    battery_percent=self._live_battery_percent(local_ip) if read_battery else None,
+                    command_port=self._command_port_status(local_ip))
+
+    @staticmethod
+    def _room_live_prepare():
+        try:
+            from scripts import room_live_prepare
+        except ImportError:
+            sys.path.insert(0, str(room_rehearsal.REPO_ROOT))
+            from scripts import room_live_prepare
+        return room_live_prepare
+
+    def _flight_scenarios(self):
+        """The Live flight scenarios (site + drift-profile pairs) the prepare
+        script offers, for the Prepare panel's drop-down. Purely descriptive:
+        the pack a prepare produces still names the files it bound."""
+        prepare_module = self._room_live_prepare()
+        default = inspect.signature(prepare_module.prepare).parameters["scenario"].default
+        return dict(
+            default=default,
+            options=[dict(id=name, site=site.name, drift_profile=drift.name)
+                     for name, (site, drift) in sorted(prepare_module.SCENARIOS.items())])
+
+    def _live_battery_percent(self, local_ip):
+        """Read-only battery status for the Prepare panel.
+
+        A deliberate, narrow exception to this module's "nothing that can
+        fly, call a paid provider or open a drone link is constructed
+        before the operator's APPROVE" rule: this opens a motors-off
+        command link purely to read the battery percentage for display,
+        then closes it immediately. It never arms, moves or registers as
+        the active runner, and any failure (drone off, out of range, wrong
+        IP, port already in use) degrades to ``None`` ("unknown") rather
+        than blocking preparation. Cached for a few seconds so continuous
+        UI polling doesn't hammer the drone with reconnects.
+        """
+        # Disabled 2026-09-25 pre-demo: DJITelloPy's receivers are
+        # process-global (see _SessionClient), so this probe leaves UDP 8889
+        # bound in the server process forever, which the console's propose
+        # gate reads as "another session owns the drone". Re-enable only with
+        # a probe that runs in a subprocess or after the gate distinguishes
+        # owner_is_this_server.
+        if True:
+            return None
+        now = time.monotonic()
+        with self._lock:
+            if now - self._battery_checked_at < 4:
+                return self._battery_value
+        value = None
+        if (self.live_config_path is not None and local_ip is not None
+                and self._command_port_status(local_ip).get("status") == "FREE"):
+            from sentinel.room import live_stack
+            link = live_stack.TelloLink(local_ip=local_ip)
+            try:
+                battery = link.client().battery()
+                value = battery if isinstance(battery, int) and 0 <= battery <= 100 else None
+            except Exception:
+                value = None
+            finally:
+                with contextlib.suppress(Exception):
+                    link.close()
+        with self._lock:
+            self._battery_value = value
+            self._battery_checked_at = now
+        return value
 
     def prepare(self, command):
         if not isinstance(command, dict):
@@ -342,11 +414,10 @@ class RoomAgentService:
                 return dict(status="CONFLICT", reason_code=blocker)
             self._preparing = True
         try:
-            try:
-                from scripts import room_live_prepare
-            except ImportError:
-                sys.path.insert(0, str(room_rehearsal.REPO_ROOT))
-                from scripts import room_live_prepare
+            room_live_prepare = self._room_live_prepare()
+            scenario = command.get("flight_scenario")
+            if scenario is not None and scenario not in room_live_prepare.SCENARIOS:
+                return dict(status="INVALID", reason_code="INVALID_FLIGHT_SCENARIO")
 
             pack = self._live_pack(optional=True) or {}
             pack_path = Path(self.live_config_path).resolve()
@@ -355,7 +426,8 @@ class RoomAgentService:
                 return dict(status="UNAVAILABLE", reason_code="ROOM_PACK_ROOT_MISMATCH",
                             detail="The configured Live pack must be inside its run root.")
             result = room_live_prepare.prepare(run_root=run_root, local_ip=local_ip,
-                                               consent_confirmed=False, new_run=True)
+                                               consent_confirmed=False, new_run=True,
+                                               **({} if scenario is None else dict(scenario=scenario)))
             with self._lock:
                 self.live_config_path = result["current_pack"]
                 self._port_checked_at = 0.0
@@ -617,6 +689,16 @@ class RoomAgentService:
                               landing_state=landing.state if landing else None,
                               landing_reason=landing.reason if landing else None,
                               landing_pose=pose, took_off=outcome.took_off, reason=outcome.reason)
+        # Rehearsals (fake detector) get the deterministic answer: no paid call.
+        from sentinel.room.operator_answer import finalize_operator_answer
+        try:
+            events = store.events(run.id)
+        except Exception:
+            events = ()
+        run.projection.set_operator_answer(finalize_operator_answer(
+            run_dir, request_text=run.request_text, events=events, authorised=False,
+            terminal={"state": outcome.terminal_state.value, "took_off": outcome.took_off,
+                      "reason": outcome.reason, "landing_state": landing.state if landing else None}))
         run.status = outcome.terminal_state.value
 
     # -- live -----------------------------------------------------------------
@@ -736,6 +818,9 @@ class RoomAgentService:
         run.projection.finish(terminal_state=state, landing_state=terminal.get("landing_state"),
                               landing_reason=terminal.get("landing_reason"), landing_pose=landing_pose,
                               took_off=terminal.get("took_off"), reason=terminal.get("reason"))
+        # room_session wrote it after terminal.json (GLM if authorised, else deterministic)
+        from sentinel.room.operator_answer import read_operator_answer
+        run.projection.set_operator_answer(read_operator_answer(run_dir))
         if code == 0:
             run.status = state
 

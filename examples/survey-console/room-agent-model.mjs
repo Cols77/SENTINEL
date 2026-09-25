@@ -20,6 +20,13 @@ export function reviewOptions(catalogue){
  return (catalogue?.perception_reviews??[]).map(row=>({value:row.id,label:row.label}));
 }
 
+export function batteryLevel(percent){
+ if(percent===null||percent===undefined)return 'unknown';
+ if(percent<=20)return 'critical';
+ if(percent<=50)return 'warn';
+ return 'ok';
+}
+
 export function flightControlMessages(preparation,canPropose,liveReason=''){
  const blocker=preparation?.reason_code;
  const prepare={
@@ -182,6 +189,8 @@ export function roomViewModel(state){
   fixAge:fixAgeText(run),
   pose:poseText(run),
   battery:run?.battery_percent===null||run?.battery_percent===undefined?'battery --':`battery ${run.battery_percent}%`,
+  batteryPercent:run?.battery_percent??null,
+  batteryLevel:batteryLevel(run?.battery_percent??null),
   goal:run?.goal??'',
   reanchor:reanchorLines(run),
   decisions:decisionLines(run),
@@ -190,6 +199,8 @@ export function roomViewModel(state){
   captures:run?.captures??0,
   answer:answerText(run),
   answerDetail:run?.answer?.text??'',
+  operatorAnswer:run?.operator_answer?.text??'',
+  operatorAnswerSource:run?.operator_answer?.source??'',
   returnedHome:returnedHomeText(run),
   landing:landingText(run),
   proposal:isAwaitingApproval(run)?run.proposal:null,

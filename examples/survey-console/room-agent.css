@@ -122,8 +122,16 @@
   border:1px solid var(--accent-primary); color:var(--accent-primary); font-weight:700;
 }
 .room-preparation button:disabled { opacity:.55; }
+.room-preparation button.room-battery-ok { border-color:#4CAF50; color:#4CAF50; }
+.room-preparation button.room-battery-warn { border-color:var(--status-warning); color:var(--status-warning); }
+.room-preparation button.room-battery-critical { border-color:var(--status-emergency); color:var(--status-emergency); }
 .room-prep-hint { grid-column:1/-1;margin:4px 0 0;padding:7px 10px;border-left:3px solid var(--status-warning);background:var(--surface-canvas);color:var(--text-primary);font-size:13px;line-height:1.4; }
 .room-prep-hint:empty { display:none; }
+.room-preparation label[for='room-flight-scenario'] {
+  grid-column:1;grid-row:3;margin:0;color:var(--text-secondary);
+  font:700 11px/1.2 Mission Mono,var(--font-mono); letter-spacing:.08em; text-transform:uppercase;
+}
+#room-flight-scenario { grid-column:2 / span 2;grid-row:3;min-width:0;margin:2px 0; }
 
 .room-camera {
   display:grid; grid-template-columns:minmax(0,1fr);
@@ -290,6 +298,19 @@
   font:14px/1.5 Mission Mono,var(--font-mono); color:var(--text-secondary);
 }
 .room-answer pre:empty { display:none; }
+.room-operator-answer {
+  margin-top:12px; padding:16px; border-left:4px solid var(--accent-primary);
+  background:var(--surface-raised);
+}
+.room-operator-answer.is-empty { display:none; }
+.room-operator-answer h3 {
+  margin:0 0 8px; color:var(--text-secondary);
+  font:14px Mission Mono,var(--font-mono);
+  letter-spacing:.08em; text-transform:uppercase;
+}
+.room-operator-answer p {
+  margin:0; font-size:16px; line-height:1.45; overflow-wrap:anywhere;
+}
 
 .room-log {
   max-height:21rem; margin:0; padding:0; overflow:auto;
