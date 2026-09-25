@@ -403,6 +403,40 @@ def _second_view_candidates(objective: GoalObjective, site: RoomSite, coverage: 
     return [candidate for _, candidate in scored]
 
 
+def _extra_look_candidates(objective: GoalObjective, site: RoomSite, coverage: CoverageProjection,
+                           outcomes: tuple[ToolOutcome, ...], snapshot_version: int,
+                           origin=None) -> list[RoomCandidate]:
+    """Every declared pose not yet flown, offered as an optional extra look
+    once declared coverage is complete.
+
+    Declared visibility is camera geometry, not proof: live 2026-09-25 10:32
+    one centre-rear sweep "covered" every cell, all three frames were empty,
+    and with only ANSWER left Jev would not report zero (0.47 against 0.6)
+    and the session escalated. Jev decides whether the count looks doubtful
+    enough to look again; ANSWER:COUNTS stays offered."""
+    frames = tuple(frame for o in outcomes if o.kind == CandidateKind.OBSERVE.value and o.code == "OBSERVE_SUCCEEDED"
+                   for frame in (o.count_evidences or ((o.count_evidence,) if o.count_evidence else ())))
+    classes = tuple(c for c in objective.target_classes if c != "person")
+    placed = sum(1 for frame in frames for estimate in frame.estimates
+                 if not classes or estimate.class_name in classes)
+    found = (f"{len(frames)} frame(s) so far placed {placed} {'/'.join(classes) or 'object'} detection(s)"
+             if frames else "no frame analysed yet")
+    visited = {pose for o in outcomes if (pose := _observed_pose_id(o)) is not None}
+    candidates = []
+    for pose_id, _ in sorted(site.pose_visibility):
+        if pose_id in visited:
+            continue
+        description = (f"Observe declared pose {pose_id} for objective {objective.objective_id}: an optional "
+                       f"extra look. Declared coverage is complete, but it is a camera-geometry estimate and "
+                       f"{found}; this view may find objects the earlier views missed.")
+        candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version,
+                                       origin)
+        if candidate is not None:
+            candidates.append(candidate)
+    candidates.sort(key=lambda c: (c.physical_cost.distance_cm, c.candidate_id))
+    return candidates
+
+
 def _incomplete_answer_candidate(objective: GoalObjective, coverage: CoverageProjection,
                                  outcomes: tuple[ToolOutcome, ...], snapshot_version: int, *,
                                  region_pose_id: str | None = None) -> RoomCandidate | None:
@@ -628,6 +662,11 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
         offered = {candidate.candidate_id for candidate in objective_candidates}
         objective_candidates.extend(candidate for candidate in _second_view_candidates(
             objective, site, coverage, outcomes, snapshot_version, origin) if candidate.candidate_id not in offered)
+        if coverage.complete:
+            offered = {candidate.candidate_id for candidate in objective_candidates}
+            objective_candidates.extend(candidate for candidate in _extra_look_candidates(
+                objective, site, coverage, outcomes, snapshot_version, origin)
+                if candidate.candidate_id not in offered)
         room_candidates.extend(objective_candidates)
 
     # Task B item 2b: one-checkpoint OBSERVE candidates over the declared

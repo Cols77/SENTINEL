@@ -110,8 +110,10 @@ class AcceptancePolicy:
     recovery and return bypass Jev). Those kinds accept at a lower
     confidence; a final ANSWER slightly higher; anything else -- CLARIFY and
     ESCALATE end the session, and any other kind -- keeps the strict bar.
-    A choice below its bar is re-asked once with the refusal as feedback
-    (``reask_once``) before the turn counts as refused; never more.
+    A choice below its bar is re-asked with the refusal as feedback
+    (``reask_once`` enables it, up to ``max_reasks`` times per turn) before
+    the turn counts as refused. Live 2026-09-25 10:33: one re-ask per turn
+    let two turns of a 0.47-0.48 ANSWER escalate the session in 17 s.
     """
 
     strict_act_at: float = .8
@@ -121,6 +123,7 @@ class AcceptancePolicy:
     answer_act_at: float = .6
     min_margin: float = .15
     reask_once: bool = True
+    max_reasks: int = 2
 
     def __post_init__(self):
         for name in ("strict_act_at", "observe_act_at", "reanchor_act_at", "read_act_at", "answer_act_at",
@@ -130,6 +133,8 @@ class AcceptancePolicy:
                 raise ValueError(f"acceptance threshold {name} must be a finite probability")
         if type(self.reask_once) is not bool:
             raise ValueError("reask_once must be a boolean")
+        if type(self.max_reasks) is not int or not 1 <= self.max_reasks <= 5:
+            raise ValueError("max_reasks must be an integer from 1 to 5")
 
     @classmethod
     def strict(cls, act_at: float = .8, min_margin: float = .15) -> "AcceptancePolicy":
@@ -1004,23 +1009,31 @@ class RoomController:
             return self._preempted(session_id, self.supervisor.last_preemption)
         assessment, provider_error, act_at = asked
         reask = None
-        malformed = provider_error is not None or assessment.outcome in _MALFORMED_OUTCOMES
-        if policy.reask_once and (malformed or assessment.outcome in ("LOW_CONFIDENCE", "THIN_MARGIN")):
-            # Task V2: one re-ask with the refusal as feedback, never a loop.
+        reasks = 0
+        while policy.reask_once and reasks < policy.max_reasks:
+            malformed = provider_error is not None or assessment.outcome in _MALFORMED_OUTCOMES
+            if not (malformed or assessment.outcome in ("LOW_CONFIDENCE", "THIN_MARGIN")):
+                break
+            # Task V2: bounded re-asks with the refusal as feedback, never a loop.
             # Task 4b item 4: a malformed/illegal reply or a provider error is
-            # re-asked once too, with feedback on the reply's shape.
+            # re-asked too, with feedback on the reply's shape.
+            reasks += 1
+            last = ("this is the last ask this turn." if reasks == policy.max_reasks
+                    else f"you will be asked at most {policy.max_reasks - reasks} more time(s) this turn.")
             refusal = "PROVIDER_ERROR" if provider_error else assessment.outcome
             note = ("Your previous reply could not be used (" + refusal + "). Reply with one legal action "
                     "label as value, a probability for every legal label (the chosen one the highest) and a "
-                    "confidence; this is the last ask this turn.") if malformed else (
+                    "confidence; " + last) if malformed else (
                     "Your previous choice was refused: below the acceptance threshold for its "
                     "kind. Choose once more from the same legal actions. Repeat it only if you "
-                    "are confident it is the right next action; this is the last ask this turn.")
+                    "are confident it is the right next action; " + last)
             feedback = {"refused_choice": assessment.selected_label, "refusal": refusal,
                         "confidence": assessment.confidence, "required_confidence": act_at,
                         "margin": assessment.margin, "required_margin": policy.min_margin,
                         "acceptance_thresholds": policy.as_config(), "note": note}
-            reask = {"first_assessment": audit(assessment), "first_act_at": act_at, "feedback": feedback}
+            if reask is None:
+                reask = {"first_assessment": audit(assessment), "first_act_at": act_at, "feedback": feedback}
+            reask["count"] = reasks
             asked = ask({**state, "previous_refusal": feedback})
             if asked is None:
                 return self._preempted(session_id, self.supervisor.last_preemption)
