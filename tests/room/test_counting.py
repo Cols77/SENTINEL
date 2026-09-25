@@ -256,11 +256,11 @@ def test_only_corroborating_views_can_confirm_an_object():
 
 def test_unplaced_detections_get_a_line_even_without_objects_or_cells():
     coverage = project_coverage((), ())
-    counts = project_counts((), (), coverage, unplaced_by_class={"pen": 2})
-    pen = next(c for c in counts if c.class_name == "pen")
-    assert (pen.confirmed, pen.uncertain, pen.unplaced, pen.method) == (0, 0, 2, "GROUNDED_STATIC")
+    counts = project_counts((), (), coverage, unplaced_by_class={"mug": 2})
+    mug = next(c for c in counts if c.class_name == "mug")
+    assert (mug.confirmed, mug.uncertain, mug.unplaced, mug.method) == (0, 0, 2, "GROUNDED_STATIC")
     text = render_count_answer(counts, coverage, scope="ROOM")
-    assert "pen: 0 confirmed; 0 uncertain; 2 detections could not be placed in room coordinates " \
+    assert "mug: 0 confirmed; 0 uncertain; 2 detections could not be placed in room coordinates " \
            "and are not counted" in text
 
 
@@ -352,13 +352,13 @@ def test_class_with_no_declared_coverage_carries_an_explicit_caveat():
     set and the rendered line says so, distinct from a class that *does*
     have declared cells but they turned out NOT_RESOLVABLE."""
     coverage = project_coverage((_PHONE_CELL,), (CellObservation("cell-1", "phone", "p1", "OBSERVED", "t0", ("e",)),))
-    counts = project_counts((), (), coverage, requested_classes=("phone", "pen"))
+    counts = project_counts((), (), coverage, requested_classes=("phone", "mug"))
     phone = next(c for c in counts if c.class_name == "phone")
-    pen = next(c for c in counts if c.class_name == "pen")
+    mug = next(c for c in counts if c.class_name == "mug")
     assert phone.no_declared_coverage is False
-    assert pen.no_declared_coverage is True
+    assert mug.no_declared_coverage is True
     text = render_count_answer(counts, coverage, scope="ROOM")
-    pen_line = next(line for line in text.splitlines() if line.startswith("pen:"))
+    pen_line = next(line for line in text.splitlines() if line.startswith("mug:"))
     assert "no declared coverage for this class" in pen_line
     phone_line = next(line for line in text.splitlines() if line.startswith("phone:"))
     assert "no declared coverage" not in phone_line

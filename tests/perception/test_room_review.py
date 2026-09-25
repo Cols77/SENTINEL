@@ -99,5 +99,5 @@ def test_model_review_uses_dzivha_detector_and_filters_for_room_classes(tmp_path
     assert calls[0][0:2] == ("dino-test", "abc")
     assert calls[0][2]["revision"] == "abc"
     assert calls[0][2]["local_files_only"] is True
-    assert {row[0] for row in calls[1:]} == {("computer", "person", "phone"), ("pen",)}
+    assert {row[0] for row in calls[1:]} == {("computer", "person", "phone"), ("mug",)}
     assert result["detections"][0]["label"] == "phone"

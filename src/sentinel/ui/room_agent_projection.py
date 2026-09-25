@@ -22,7 +22,7 @@ _REGION_LABELS = {"center": "Center", "left": "Left", "right": "Right"}
 #: Mirrors ``sentinel.room.candidates.CONFIDENCE_GATE_REFUSALS``.
 _CHOICE_GATE_REFUSALS = frozenset({"LOW_CONFIDENCE", "THIN_MARGIN", "MALFORMED_ANSWER", "ILLEGAL_OR_MALFORMED",
                                    "MISSING_OR_NON_MAX_SELECTION", "PROVIDER_ERROR", "STALE_DECISION"})
-_PLURAL = {"computer": "computers", "phone": "phones", "person": "people", "pen": "pens"}
+_PLURAL = {"computer": "computers", "phone": "phones", "person": "people", "mug": "mugs"}
 
 
 def region_label(pose_id: str) -> str:

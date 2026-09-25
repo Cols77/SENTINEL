@@ -66,16 +66,16 @@ function counts() {
     uncertain: null,
     lower_bound: null,
     captured_at: null,
-    observability: class_name === "pen" ? "NOT_OBSERVABLE" : "UNKNOWN",
-    projected_px: class_name === "pen" ? 3 : null,
-    min_px: class_name === "pen" ? 12 : null,
+    observability: class_name === "mug" ? "NOT_OBSERVABLE" : "UNKNOWN",
+    projected_px: class_name === "mug" ? 18.2 : null,
+    min_px: class_name === "mug" ? 20 : null,
     reason:
-      class_name === "pen"
+      class_name === "mug"
         ? "Planned observability: below illustrative detection threshold"
         : "No analysed estimate supplied",
     arithmetic:
-      class_name === "pen"
-        ? "0.006 m × 1000 px / 2 m = 3 px < 12 px (illustrative optics)"
+      class_name === "mug"
+        ? "8 cm * 683 px / 300 cm = 18.2 px < 20 px (illustrative optics)"
         : null,
     sighting_ids: [],
     distinct_stops: null,
@@ -107,7 +107,7 @@ function base(id) {
     status: "ACTIVE",
     step: "REVIEW",
     request_text:
-      "Sweep the lecture room. Count computers and people; assess whether phones and pens are observable.",
+      "Sweep the lecture room. Count computers and people; assess whether phones and mugs are observable.",
     proposer: clone(proposer),
     flights: { used: 1, max: 2 },
     sweep: {

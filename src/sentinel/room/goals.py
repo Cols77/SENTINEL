@@ -22,7 +22,7 @@ from .store import RoomStore, VersionConflict
 
 
 SCHEMA_VERSION = "room.goal-compile.v1"
-SUPPORTED_CLASSES = ("computer", "person", "phone", "pen")
+SUPPORTED_CLASSES = ("computer", "person", "phone", "mug")
 _SAFE = {
     "CLARIFICATION_REQUIRED": "The request cannot be represented unambiguously; ask for clarification.",
     "UNSUPPORTED": "The requested goal, class, relationship or condition is unsupported.",
@@ -129,7 +129,7 @@ class _Rejected(Exception):
 _CLASS_NOUNS = {
     "computer": r"computers?|laptops?|pcs?|desktops?",
     "phone": r"phones?|smartphones?|mobiles?|cellphones?",
-    "pen": r"pens?",
+    "mug": r"mugs?",
     "person": r"persons?|people|men|man|women|woman|humans?",
 }
 
@@ -544,7 +544,7 @@ class _Compilation:
                 all_references[goal.target_ref.ref_id] = (goal.target_ref, goal, ("phone",))
         if pronouns:
             # Grammatical compatibility is assessed before the model-selected
-            # class. Choosing phone cannot erase a pen that is also a possible
+            # class. Choosing phone cannot erase a mug that is also a possible
             # antecedent for "it". Preserve distinct hypotheses of one class too.
             if len(set(pronouns)) != 1 or "you" in pronouns:
                 raise _Rejected("AMBIGUOUS_ENTITY_REFERENCE")

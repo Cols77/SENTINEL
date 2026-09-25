@@ -54,7 +54,7 @@ CLASS_MAP = {
     "computer monitor": "computer",
     "person": "person", "people": "person", "man": "person", "woman": "person",
     "cell phone": "phone", "phone": "phone", "mobile phone": "phone", "smartphone": "phone",
-    "pen": "pen", "pencil": "pen",
+    "mug": "mug", "coffee mug": "mug",
 }
 
 _BANDS = {"high", "medium", "low"}

@@ -40,7 +40,7 @@ ENERGY_PATH = PROFILES / "canningst-energy.json"
 LIMITS_PATH = PROFILES / "canningst-command-limits.json"
 FLIGHT_PROFILE_PATH = PROFILES / "canningst-flight-profile.json"
 REHEARSAL_DETECTOR_ID = "rehearsal-detector:canningst-scene"
-SUPPORTED = ("computer", "person", "phone", "pen")
+SUPPORTED = ("computer", "person", "phone", "mug")
 SAFE_LABELS = ("CLARIFICATION_REQUIRED", "UNSUPPORTED", "ESCALATE", "CLARIFY")
 #: The takeoff pad (site home) and the canonical heading (room convention,
 #: degrees CCW from +x: 90 faces the tag stands along +y).
@@ -364,7 +364,7 @@ class SceneDetector:
 def requested_classes(request_text: str) -> tuple[str, ...]:
     text = request_text.lower()
     aliases = {"computer": r"\b(computers?|laptops?)\b", "phone": r"\b(phones?|smartphones?|mobiles?)\b",
-               "person": r"\b(people|persons?|humans?)\b", "pen": r"\bpens?\b"}
+               "person": r"\b(people|persons?|humans?)\b", "mug": r"\bmugs?\b"}
     found = [(match.start(), name) for name, pattern in aliases.items()
              for match in [re.search(pattern, text)] if match]
     return tuple(name for _, name in sorted(found))

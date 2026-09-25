@@ -260,7 +260,7 @@ class LiveFlight:
 
 def report_writer(results):
     rows=[]
-    plurals={'computer':'computers','person':'people','phone':'phones','pen':'pens'}
+    plurals={'computer':'computers','person':'people','phone':'phones','mug':'mugs'}
     for c in results['class_counts']:
         label=plurals[c['class']]
         if c['method']=='NOT_OBSERVABLE':rows.append(f'{label}: not observable.')

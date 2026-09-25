@@ -12,7 +12,7 @@ from sentinel.room.store import RoomStore, VersionConflict
 
 SAFE = ("CLARIFICATION_REQUIRED", "UNSUPPORTED")
 FAMILIES = tuple(kind.value for kind in GoalKind)
-CLASSES = ("CLASS:computer", "CLASS:person", "CLASS:phone", "CLASS:pen", "CLASS_GROUP")
+CLASSES = ("CLASS:computer", "CLASS:person", "CLASS:phone", "CLASS:mug", "CLASS_GROUP")
 
 
 class ScriptedJudge:
@@ -135,8 +135,8 @@ def test_room_count_and_return_preserves_terminal_condition_and_immutable_contra
 
 def test_four_corners_keep_request_order_and_all_axis_regions_accessible(tmp_path):
     request = ("Count computers at the front left bottom; count people at the front right top; "
-               "count phones at the rear right bottom; count pens at the rear left top.")
-    classes = ("computer", "person", "phone", "pen")
+               "count phones at the rear right bottom; count mugs at the rear left top.")
+    classes = ("computer", "person", "phone", "mug")
     regions = (("LEFT", "FRONT", "BOTTOM"), ("RIGHT", "FRONT", "TOP"),
                ("RIGHT", "REAR", "BOTTOM"), ("LEFT", "REAR", "TOP"))
     script = []
@@ -284,7 +284,7 @@ def test_devices_require_explicit_jev_selected_supported_subset(tmp_path):
     ledger = compiler.compile("session-1", request, snapshot())
     assert ledger.objectives[0].target_classes == ("computer", "phone")
     group_calls = [call for call in judge.calls if call[0] == "class_group"]
-    assert tuple(group_calls[0][2]) == ("INCLUDE:computer", "INCLUDE:person", "INCLUDE:phone", "INCLUDE:pen", "GROUP_DONE", *SAFE)
+    assert tuple(group_calls[0][2]) == ("INCLUDE:computer", "INCLUDE:person", "INCLUDE:phone", "INCLUDE:mug", "GROUP_DONE", *SAFE)
     assert "INCLUDE:computer" not in group_calls[1][2]
     assert "INCLUDE:phone" not in group_calls[2][2]
     assert_audit(store, judge, ledger)
@@ -403,9 +403,9 @@ def test_snapshot_identity_and_version_must_match_session_before_judge(tmp_path)
 
 
 def test_pronoun_ambiguity_cannot_be_hidden_by_judge_class_selection(tmp_path):
-    request = "Find the phone; find the pen; land near it"
+    request = "Find the phone; find the mug; land near it"
     script = objective("c1", "FIND_OBSERVE", "phone", terminal="OBSERVED")
-    script += objective("c2", "FIND_OBSERVE", "pen", terminal="OBSERVED")
+    script += objective("c2", "FIND_OBSERVE", "mug", terminal="OBSERVED")
     # c3's bind_target raises AMBIGUOUS_ENTITY_REFERENCE before any entity_reference
     # ask; only next_objective..spatial_scope are reached (drop terminal_condition).
     script += objective("c3", "LAND_NEAR", "phone", terminal="LANDED_AT_CERTIFIED_ZONE")[:-1]
@@ -608,10 +608,10 @@ def test_landing_it_next_to_you_preserves_phone_identity_and_pose_dependency(tmp
 
 def test_successive_compilations_use_distinct_persisted_goal_revisions(tmp_path):
     first_script = objective("c1", "COUNT", "phone") + FINISH
-    second_script = objective("c1", "COUNT", "pen") + FINISH
+    second_script = objective("c1", "COUNT", "mug") + FINISH
     compiler, judge, store = setup(tmp_path, "Count phones", first_script + second_script)
     first = compiler.compile("session-1", "Count phones", snapshot())
-    second = compiler.compile("session-1", "Count pens", snapshot(
+    second = compiler.compile("session-1", "Count mugs", snapshot(
         state_version=store.session_version("session-1"), goal_revision=1,
     ))
     assert first.objectives[0].objective_id == "g1:c1"
@@ -633,7 +633,7 @@ def test_current_state_version_cannot_hide_stale_or_invented_goal_revision(tmp_p
     reopened = RoomStore.open(tmp_path / "goals.sqlite3")
     compiler = GoalCompiler(judge, reopened, input_limit_bytes=4096, prompt_revision="goals-test.v1")
     with pytest.raises(VersionConflict, match="goal revision"):
-        compiler.compile("session-1", "Count pens", snapshot(
+        compiler.compile("session-1", "Count mugs", snapshot(
             state_version=current_version, goal_revision=stale_revision,
         ))
     assert len(judge.calls) == len(script)
@@ -724,7 +724,7 @@ def test_high_confidence_none_cannot_drop_explicit_holding_even_with_consistent_
     assert tuple(judge.calls[-1][2]) == ("NONE", "HOLDS_PHONE", "NEXT_TO_DRONE", *SAFE)
 
 
-@pytest.mark.parametrize("target", ["phone", "computer", "pen"])
+@pytest.mark.parametrize("target", ["phone", "computer", "mug"])
 @pytest.mark.parametrize("qualifier,noun", [("MAN", "a man"), ("DESIGNATED", "the designated actor")])
 def test_person_qualifiers_cannot_attach_to_another_supported_class(tmp_path, target, qualifier, noun):
     request = f"Follow {noun}"

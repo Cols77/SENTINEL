@@ -31,7 +31,7 @@ CLASS_PHRASES = {
     "computer": ("laptop", "computer monitor"),
     "person": ("person",),
     "phone": ("mobile phone",),
-    "pen": ("pen",),
+    "mug": ("mug",),
 }
 
 #: phrase -> class, built from CLASS_PHRASES; used only for a sanity assert

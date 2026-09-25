@@ -40,7 +40,7 @@ own label for a detection, so ``detect()`` supplies the requested class
 name itself as each item's label before handing it to ``normalise``. Every
 class this adapter is ever called with is one of
 ``survey.observability.resolvable_classes``'s keys (``"computer"``,
-``"person"``, ``"phone"``, ``"pen"``), and ``CLASS_MAP`` self-maps all four
+``"person"``, ``"phone"``, ``"mug"``), and ``CLASS_MAP`` self-maps all four
 -- so ``normalise``'s drop-unmapped-label path is structurally unreachable
 for a real Moondream call. ``dropped`` is always ``()`` for a Moondream-only
 run; this is a real consequence of the real API, not an oversight.

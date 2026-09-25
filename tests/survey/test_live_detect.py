@@ -100,7 +100,7 @@ def test_the_follower_detects_each_frame_once_prints_a_line_and_keeps_a_row(tmp_
                    detector, done=lambda: True, print_fn=printed.append, sleep_fn=lambda s: None)
 
     assert count == 2 and [call[0] for call in detector.calls] == ["NEAR.png", "FAR.png"]
-    assert printed[0] == "[detect] NEAR: 1 computer (high), 0 pen, 0 person, 0 phone"
+    assert printed[0] == "[detect] NEAR: 1 computer (high), 0 mug, 0 person, 0 phone"
     rows = [json.loads(l) for l in (tmp_path / "detections.jsonl").read_text().splitlines()]
     assert rows[0]["detections"][0]["band"] == "high" and rows[0]["raw"] == {"r": 1}
     assert rows[1]["status"] == "OK" and rows[1]["detections"] == []
@@ -139,7 +139,7 @@ def test_a_detector_that_raises_is_a_row_not_a_stopped_follower(tmp_path):
 
 def test_summary_names_a_look_offset_and_a_failed_frame():
     assert summarise("WIDE", -45, "OK", []) == \
-        "[detect] WIDE look -45: 0 computer, 0 pen, 0 person, 0 phone"
+        "[detect] WIDE look -45: 0 computer, 0 mug, 0 person, 0 phone"
     assert "PROVIDER_ERROR" in summarise("WIDE", 0, "PROVIDER_ERROR", [])
     assert detect_frame(FakeDetector(), {"stop": "S", "path": "p"})["status"] == "OK"
 

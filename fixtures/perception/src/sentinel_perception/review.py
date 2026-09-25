@@ -93,7 +93,7 @@ def run_model_review(source: str | Path, outdir: str | Path, *, stride: int = 5)
     from .detection import GroundingDinoDetector, clean, deduplicate
     from .models import load_manifest
 
-    classes = ("computer", "person", "phone", "pen")
+    classes = ("computer", "person", "phone", "mug")
     spec = load_manifest()["detector_openvocab"]
     detector = GroundingDinoDetector(spec["id"], spec["sha"],
                                      box_threshold=0.15, text_threshold=0.25,

@@ -27,6 +27,6 @@ class SurveyDecisionSession:
             if reply.kind=='PROPOSE' and (not reply.request_text or snapshot['run']['status']!='ACTIVE'):
                 return DecisionReply('REFUSE','No new mission is available in this run.')
             return reply
-        if words & {'count','many'} and words & {'computer','computers','laptop','laptops'} and not words & {'not','except','without','person','people','phone','phones','pen','pens'}:
+        if words & {'count','many'} and words & {'computer','computers','laptop','laptops'} and not words & {'not','except','without','person','people','phone','phones','mug','mugs'}:
             return DecisionReply('PROPOSE','Preparing a legal survey proposal for your review.',text)
         return DecisionReply('CLARIFY','This console supports counting computers. Ask “count the computers”, or ask for status.')

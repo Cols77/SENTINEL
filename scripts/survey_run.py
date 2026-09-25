@@ -96,7 +96,7 @@ DEFAULT_ENVELOPE = SweepEnvelope(-150, 150, 0, 100, 80, 180, 300)
 #: carries no standoff (it is a survey concept, not a WP5 one).
 DEFAULT_STANDOFF_CM = 300
 
-_PLURAL = {"computer": "computers", "person": "people", "phone": "phones", "pen": "pens"}
+_PLURAL = {"computer": "computers", "person": "people", "phone": "phones", "mug": "mugs"}
 
 
 class _DefaultJudge:

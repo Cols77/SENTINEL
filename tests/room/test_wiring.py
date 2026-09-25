@@ -394,7 +394,7 @@ def _site_with_planes():
     from dataclasses import replace
     from sentinel.room.site import SupportPlane
     return replace(room_site(coverage=True), support_planes=(
-        SupportPlane("FLOOR", 0, ("pen",)), SupportPlane("demo-surface", 50, ("computer", "phone"))))
+        SupportPlane("FLOOR", 0, ("mug",)), SupportPlane("demo-surface", 50, ("computer", "phone"))))
 
 
 def test_count_geometry_uses_the_calibrated_tello_camera_and_the_sites_support_planes():
@@ -403,7 +403,7 @@ def test_count_geometry_uses_the_calibrated_tello_camera_and_the_sites_support_p
     geometry = wiring.make_count_geometry(_site_with_planes())
     assert geometry.camera is TELLO_MEASURED
     assert geometry.camera.pitch_down_deg == 8.6 and round(geometry.camera.fx) == 893
-    assert geometry.support_for("pen").support == SupportKind.FLOOR
+    assert geometry.support_for("mug").support == SupportKind.FLOOR
     table = geometry.support_for("computer")
     assert table.support == SupportKind.DECLARED_HORIZONTAL_PLANE
     assert (table.support_plane_id, table.plane_height_cm) == ("demo-surface", 50.0)
@@ -448,8 +448,8 @@ def test_site_support_planes_round_trip_and_refuse_a_class_on_two_planes():
     assert parse_room_site(room_site_document(site)) == site
     # A site without planes keeps its pre-existing document (and digest).
     assert "support_planes" not in room_site_document(room_site(coverage=True))
-    clash = replace(site, support_planes=site.support_planes + (SupportPlane("shelf", 90, ("pen",)),))
+    clash = replace(site, support_planes=site.support_planes + (SupportPlane("shelf", 90, ("mug",)),))
     with pytest.raises(ValueError, match="only one declared support plane"):
         clash.validate()
     with pytest.raises(ValueError, match="FLOOR"):
-        SupportPlane("FLOOR", 10, ("pen",))
+        SupportPlane("FLOOR", 10, ("mug",))

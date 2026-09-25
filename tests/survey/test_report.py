@@ -14,13 +14,13 @@ from sentinel.survey.store import SurveyStore
 COUNTS = [
     {"class": "computer", "confirmed": 6, "uncertain": 1, "method": "MERGED_MULTI_VIEW"},
     {"class": "person", "confirmed": 2, "uncertain": 0, "method": "SINGLE_VIEW_LOWER_BOUND"},
-    {"class": "pen", "confirmed": 0, "uncertain": 0, "method": "NOT_OBSERVABLE"},
+    {"class": "mug", "confirmed": 0, "uncertain": 0, "method": "NOT_OBSERVABLE"},
 ]
 
 
 def test_a_report_matching_the_store_is_accepted():
     check_report("At least 6 computers, possibly 7. At least 2 people. "
-                 "Pens are not observable at this range.", COUNTS)
+                 "Mugs are not observable at this range.", COUNTS)
 
 
 def test_a_number_the_store_does_not_hold_is_rejected():
@@ -30,12 +30,12 @@ def test_a_number_the_store_does_not_hold_is_rejected():
 
 
 def test_claiming_certainty_about_a_not_observable_class_is_rejected():
-    """rev 4 V5: the original test's "3 pens" already failed the (now
-    removed) blanket-digit check and so never reached the pen-specific
-    rule it names. "2 pens" is otherwise a permitted-looking count, so this
+    """rev 4 V5: the original test's "3 mugs" already failed the (now
+    removed) blanket-digit check and so never reached the mug-specific
+    rule it names. "2 mugs" is otherwise a permitted-looking count, so this
     only passes if the NOT_OBSERVABLE class rule itself fires."""
     with pytest.raises(ReportMismatch):
-        check_report("6 computers, 2 people and 2 pens.", COUNTS)
+        check_report("6 computers, 2 people and 2 mugs.", COUNTS)
 
 
 def test_a_lower_bound_class_may_not_be_stated_as_exact():
@@ -53,7 +53,7 @@ def test_a_number_not_adjacent_to_a_class_noun_is_never_checked():
     permitted set, which rejects the spec's own prescribed wording. Only
     numbers adjacent to a class noun are checked now."""
     check_report("At least 6 computers, possibly 7. At least 2 people. "
-                 "6 of 8 frames analysed. Pens are not observable at this range.", COUNTS)
+                 "6 of 8 frames analysed. Mugs are not observable at this range.", COUNTS)
 
 
 def test_the_plural_people_is_recognised_as_a_person_count_not_only_person_itself():

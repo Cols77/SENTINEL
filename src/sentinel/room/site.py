@@ -202,7 +202,7 @@ class SemanticFrame:
 
 
 #: The static classes a support plane may declare (``person`` is never placed).
-_PLACEABLE_CLASSES = ("computer", "phone", "pen")
+_PLACEABLE_CLASSES = ("computer", "phone", "mug")
 
 
 @dataclass(frozen=True)

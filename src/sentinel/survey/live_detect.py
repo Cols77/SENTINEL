@@ -40,7 +40,7 @@ _DETECTION_FIELDS = frozenset({
     "class", "matched_prompt", "raw_score", "score_kind", "bbox",
     "bbox_coordinate_space", "description", "provider_item_id",
 })
-_DETECTION_CLASSES = frozenset({"computer", "person", "phone", "pen"})
+_DETECTION_CLASSES = frozenset({"computer", "person", "phone", "mug"})
 _SCORE_KINDS = frozenset({"DETECTOR_RAW", "VLM_CONFIDENCE_BAND", "NONE"})
 _BANDS = frozenset({"high", "medium", "low"})
 _RESULT_STATUSES = frozenset({"OK", "PROVIDER_ERROR", "CLASS_MAP_MISS", "DETECTOR_ERROR"})
@@ -422,7 +422,7 @@ def check_gates(*, consent_db: Path | None, location: str | None, date: str | No
 
 def summarise(stop: str, look_deg, status: str, detections: list[dict],
               classes: tuple[str, ...] = LIVE_CLASSES) -> str:
-    """``[detect] FAR_L_HI: 1 computer (high), 0 pen, 0 person, 0 phone``."""
+    """``[detect] FAR_L_HI: 1 computer (high), 0 mug, 0 person, 0 phone``."""
     where = stop if not look_deg else f"{stop} look {look_deg:+d}"
     if status != "OK":
         return f"[detect] {where}: {status} (nothing counted from this frame)"

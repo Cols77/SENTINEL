@@ -47,7 +47,7 @@ def test_to_response_with_no_detections_is_an_empty_objects_list():
 def test_to_response_echoes_the_raw_score_unmodified():
     """score_kind DETECTOR_RAW means normalise() bands this score itself --
     to_response must never round, clamp or otherwise alter it."""
-    detections = [{"query": "pen", "score": 0.123456, "box_xyxy": (10.0, 10.0, 20.0, 20.0)}]
+    detections = [{"query": "mug", "score": 0.123456, "box_xyxy": (10.0, 10.0, 20.0, 20.0)}]
     obj = to_response(detections, 960, 720, "org/model", "sha")["objects"][0]
     assert obj["score"] == 0.123456
 

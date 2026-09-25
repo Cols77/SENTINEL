@@ -35,7 +35,7 @@ import json
 import math
 from typing import Literal
 
-SUPPORTED_CLASSES = ("computer", "person", "phone", "pen")
+SUPPORTED_CLASSES = ("computer", "person", "phone", "mug")
 
 
 class CoverageStatus(StrEnum):

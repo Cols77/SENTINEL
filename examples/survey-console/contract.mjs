@@ -1,5 +1,5 @@
 /**
- * @typedef {'computer'|'person'|'phone'|'pen'} ClassName
+ * @typedef {'computer'|'person'|'phone'|'mug'} ClassName
  * @typedef {'REQUEST'|'PROPOSAL'|'APPROVAL'|'FLIGHT'|'ANALYSIS'|'REVIEW'|'REPORT'} Step
  * @typedef {{x_m:number,y_m:number,z_m:number,yaw_deg:number}} Pose
  * @typedef {{id:string,status:'PLANNED'|'ACTIVE'|'COMPLETED'|'FAILED'|'ABORTED'|'UNKNOWN',
@@ -56,7 +56,7 @@ export const STEPS = Object.freeze([
   "REVIEW",
   "REPORT",
 ]);
-export const CLASSES = Object.freeze(["computer", "person", "phone", "pen"]);
+export const CLASSES = Object.freeze(["computer", "person", "phone", "mug"]);
 function requireFact(ok, path) {
   if (!ok)
     throw Object.assign(new Error(`Invalid projection: ${path}`), {
@@ -179,7 +179,7 @@ const sighting = record({
 });
 const object = record({
   id: str,
-  class_name: member(["computer", "phone", "pen"]),
+  class_name: member(["computer", "phone", "mug"]),
   state: member(["UNCERTAIN", "CONFIRMED"]),
   sighting_ids: strings,
   reason: str,

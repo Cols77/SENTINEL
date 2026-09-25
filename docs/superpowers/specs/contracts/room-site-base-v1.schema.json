@@ -115,7 +115,7 @@
         "z_band_cm": {"$ref": "#/$defs/band"},
         "required_classes": {
           "type": "array", "minItems": 1, "uniqueItems": true,
-          "items": {"enum": ["computer", "person", "phone", "pen"]}
+          "items": {"enum": ["computer", "person", "phone", "mug"]}
         }
       }
     },

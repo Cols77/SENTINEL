@@ -41,7 +41,7 @@ _CLASS_FORMS = {
     "computer": ("computer", "computers"),
     "person": ("person", "persons", "people"),
     "phone": ("phone", "phones"),
-    "pen": ("pen", "pens"),
+    "mug": ("mug", "mugs"),
 }
 
 _FORM_TO_CLASS = {form: class_name for class_name, forms in _CLASS_FORMS.items() for form in forms}
@@ -79,7 +79,7 @@ def class_counts(store, run_id: str, options) -> list[dict]:
     resolvable = set(min(flown, key=lambda option: option.range_cm).resolvable_classes)
     stored = store.counts(run_id)
     out = []
-    for name in ("computer", "person", "phone", "pen"):
+    for name in ("computer", "person", "phone", "mug"):
         if name not in resolvable:
             out.append({"class": name, "confirmed": 0, "uncertain": 0, "method": "NOT_OBSERVABLE"})
             continue

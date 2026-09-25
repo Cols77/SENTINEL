@@ -121,7 +121,7 @@ def test_the_measured_camera_resolves_more_at_range():
     assert pixels_at("phone", 300.0, TELLO_MEASURED) == pytest.approx(44.6, abs=0.1)
     assert "phone" in resolvable_classes(600.0, TELLO_MEASURED)
     assert "phone" not in resolvable_classes(600.0, SYNTHETIC_LEVEL)
-    assert "pen" not in resolvable_classes(300.0, TELLO_MEASURED)
+    assert "mug" in resolvable_classes(300.0, TELLO_MEASURED)
 
 
 def test_generated_options_follow_the_camera_they_are_generated_for():

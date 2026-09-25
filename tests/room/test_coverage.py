@@ -232,11 +232,11 @@ def test_missing_frame_or_rejected_detection_leaves_the_pair_unvisited():
 
 
 def test_by_cell_and_class_is_sorted_by_cell_id_then_class_name():
-    cells = (_cell("cell-b", ("phone", "computer")), _cell("cell-a", ("pen",)))
+    cells = (_cell("cell-b", ("phone", "computer")), _cell("cell-a", ("mug",)))
     projection = project_coverage(cells, ())
     pairs = [(c, k) for c, k, _ in projection.by_cell_and_class]
     assert pairs == sorted(pairs)
-    assert pairs == [("cell-a", "pen"), ("cell-b", "computer"), ("cell-b", "phone")]
+    assert pairs == [("cell-a", "mug"), ("cell-b", "computer"), ("cell-b", "phone")]
 
 
 def test_mutating_source_containers_after_projection_cannot_change_it_or_its_digest():
@@ -419,7 +419,7 @@ def test_room_scope_orders_by_descending_benefit_before_cost():
     # POSE_B sees both cells (benefit 2) while POSE_A sees only one
     # (benefit 1) and is otherwise no farther from home -- benefit must
     # dominate the ordering, not merely break ties within equal benefit.
-    two_cell = CoverageCell("room-floor-2", RECT, (60, 140), ("pen",))
+    two_cell = CoverageCell("room-floor-2", RECT, (60, 140), ("mug",))
     site = _site(coverage_cells=(ROOM_CELL, two_cell),
                  pose_visibility=((POSE_A, ("room-floor",)), (POSE_B, ("room-floor", "room-floor-2"))))
     coverage = project_coverage((ROOM_CELL, two_cell), ())

@@ -36,7 +36,6 @@ def test_options_are_deterministic_and_uniquely_identified():
 def test_each_option_states_which_classes_it_can_resolve():
     for option in generate_options(ENVELOPE):
         assert "computer" in option.resolvable_classes
-        assert "pen" not in option.resolvable_classes
 
 
 def test_a_close_look_option_exists_and_resolves_more_than_the_main_rail():
@@ -45,3 +44,5 @@ def test_a_close_look_option_exists_and_resolves_more_than_the_main_rail():
     rail = options["RAIL_MID_HEIGHT"]
     assert close.range_cm < rail.range_cm
     assert set(rail.resolvable_classes) <= set(close.resolvable_classes)
+    assert "mug" in close.resolvable_classes
+    assert "mug" not in rail.resolvable_classes

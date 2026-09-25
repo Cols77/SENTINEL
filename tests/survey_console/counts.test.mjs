@@ -21,7 +21,7 @@ test("people remain a timestamped single-view lower bound", () => {
   assert.equal(countText(c), "at least 3, as of 2026-09-21T00:00:04Z");
   assert.equal(countText({ ...c, captured_at: null }), "Unknown");
 });
-test("non-observable phone and pen are not zeros", () => {
+test("non-observable phone and mug are not zeros", () => {
   const s = makeScenario("phone-closer");
   assert.equal(countText(s.snapshots[0].counts[2]), "NOT_OBSERVABLE");
   assert.equal(

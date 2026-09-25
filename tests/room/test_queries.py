@@ -58,7 +58,7 @@ def survey(tmp_path):
     counts = [
         {"class": "computer", "confirmed": 2, "uncertain": 1, "method": "MERGED_MULTI_VIEW"},
         {"class": "person", "confirmed": 0, "uncertain": 3, "method": "SINGLE_VIEW_LOWER_BOUND"},
-        {"class": "pen", "confirmed": 0, "uncertain": 0, "method": "NOT_OBSERVABLE"},
+        {"class": "mug", "confirmed": 0, "uncertain": 0, "method": "NOT_OBSERVABLE"},
     ]
     report = store.add_report("run1", "Untrusted free text: exactly 999 computers", counts)
     return store, frame, report
@@ -147,7 +147,7 @@ def test_legacy_reports_keep_lower_bound_uncertain_and_unobservable_semantics(ro
         text = render_answer(facts)
         assert "2 confirmed" in text and "1 uncertain" in text
         assert "3" in text and "single-view lower bound" in text
-        assert "pen: not observable" in text
+        assert "mug: not observable" in text
         assert "exactly 999 computers" not in text
         assert "NOT_OBSERVABLE" in facts[2].uncertainty
     finally:

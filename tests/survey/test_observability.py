@@ -4,15 +4,21 @@ from sentinel.survey.observability import MIN_DETECTABLE_PX, pixels_at, resolvab
 
 
 @pytest.mark.parametrize("class_name, expected_px", [
-    ("person", 113.8), ("computer", 79.7), ("phone", 34.2), ("pen", 2.3),
+    ("person", 113.8), ("computer", 79.7), ("phone", 34.2), ("mug", 18.2),
 ])
 def test_apparent_size_at_three_metres_matches_the_spec(class_name, expected_px):
     assert pixels_at(class_name, 300.0) == pytest.approx(expected_px, abs=0.2)
 
 
-def test_a_pen_is_never_resolvable_at_demo_range():
-    assert "pen" not in resolvable_classes(300.0)
-    assert pixels_at("pen", 300.0) < MIN_DETECTABLE_PX
+def test_a_mug_is_not_resolvable_at_three_metres():
+    assert "mug" not in resolvable_classes(300.0)
+    assert pixels_at("mug", 300.0) < MIN_DETECTABLE_PX
+
+
+def test_mug_is_resolvable_nearby_but_not_at_three_metres():
+    assert pixels_at("mug", 150.0) == pytest.approx(36.4, abs=0.2)
+    assert "mug" in resolvable_classes(150.0)
+    assert "mug" not in resolvable_classes(300.0)
 
 
 def test_moving_closer_can_make_a_phone_resolvable():

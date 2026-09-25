@@ -8,7 +8,7 @@
       "required": ["class", "matched_prompt", "raw_score", "score_kind", "bbox",
                    "bbox_coordinate_space", "description", "provider_item_id"],
       "properties": {
-        "class": {"enum": ["computer", "person", "phone", "pen"]},
+        "class": {"enum": ["computer", "person", "phone", "mug"]},
         "matched_prompt": {"type": ["string", "null"]},
         "raw_score": {"type": ["number", "null"]},
         "score_kind": {"enum": ["DETECTOR_RAW", "VLM_CONFIDENCE_BAND", "NONE"]},
@@ -94,7 +94,7 @@
       "properties": {
         "object_id": {"type": "string"},
         "run_id": {"type": "string"},
-        "class": {"enum": ["computer", "person", "phone", "pen"]},
+        "class": {"enum": ["computer", "person", "phone", "mug"]},
         "x_cm": {"type": ["number", "null"]},
         "y_cm": {"type": ["number", "null"]},
         "distinct_stops": {"type": "integer", "minimum": 0},
@@ -109,7 +109,7 @@
       "additionalProperties": false,
       "required": ["class", "confirmed", "uncertain", "method"],
       "properties": {
-        "class": {"enum": ["computer", "person", "phone", "pen"]},
+        "class": {"enum": ["computer", "person", "phone", "mug"]},
         "confirmed": {"type": "integer", "minimum": 0},
         "uncertain": {"type": "integer", "minimum": 0},
         "method": {"enum": ["MERGED_MULTI_VIEW", "SINGLE_VIEW_LOWER_BOUND", "NOT_OBSERVABLE"]}

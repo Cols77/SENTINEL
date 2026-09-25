@@ -194,12 +194,22 @@ def test_a_frame_where_most_labels_miss_the_class_map_is_flagged_loudly(tmp_path
         {"label": "macbook", "x": 0.1, "y": 0.1, "width": 0.1, "height": 0.1},
         {"label": "macbook", "x": 0.3, "y": 0.1, "width": 0.1, "height": 0.1},
         {"label": "macbook", "x": 0.5, "y": 0.1, "width": 0.1, "height": 0.1},
-        {"label": "pen", "x": 0.7, "y": 0.1, "width": 0.02, "height": 0.02},
+        {"label": "mug", "x": 0.7, "y": 0.1, "width": 0.02, "height": 0.02},
     ]}), encoding="utf-8")
-    batch = ReplayDetector(tmp_path).detect("frames/f0.png", ("computer", "pen"))
+    batch = ReplayDetector(tmp_path).detect("frames/f0.png", ("computer", "mug"))
     assert batch.status == "CLASS_MAP_MISS"
     assert len(batch.detections) == 1
     assert batch.dropped == ("macbook", "macbook", "macbook")
+
+
+def test_mug_is_mapped_and_pen_is_no_longer_supported(tmp_path):
+    (tmp_path / "f0.json").write_text(json.dumps({"objects": [
+        {"label": "mug", "x": 0.1, "y": 0.1, "width": 0.1, "height": 0.1},
+        {"label": "pen", "x": 0.3, "y": 0.1, "width": 0.1, "height": 0.1},
+    ]}), encoding="utf-8")
+    batch = ReplayDetector(tmp_path).detect("frames/f0.png", ("mug",))
+    assert [item["class"] for item in batch.detections] == ["mug"]
+    assert batch.dropped == ("pen",)
 
 
 def test_a_frame_where_the_class_map_miss_is_a_minority_stays_ok(tmp_path):
