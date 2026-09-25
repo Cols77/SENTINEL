@@ -104,5 +104,11 @@ def build_decision_instruction(snapshot: ReadSnapshot, coverage: CoverageProject
         "views are unreachable, answer explicitly incomplete with what was observed. A detector failure is not "
         "a positioning problem; that pose may be retried. Escalate only when "
         "nothing else can make progress (no admissible observation, read, re-anchor, or answer).",
+        "If several legal actions are equally good, pick any one of them and spread your probabilities as you "
+        "see fit: acceptance is judged on the kind of action (exploring, answering, stopping), not on the single "
+        "label, and among zones rated alike the one that resolves the most cells is flown. Exploring (an "
+        "OBSERVE, a re-anchor or a read) is always preferred to ESCALATE or CLARIFY, which end the session. "
+        "After a positioning loss, prefer a pose already reached with a tag fix (listed as succeeded above), "
+        "arriving facing the tags, over an untried far pose; do not repeat the pose that failed.",
         "Reads are historical. Never compose factual values.",
     ))

@@ -345,7 +345,8 @@ def _observe_candidate(objective: GoalObjective, pose_id: str, description: str,
         description += (f" Tried {len(failures)} time(s) before; last attempt failed ({last.code}"
                         + (f": {last.detail}" if last.detail else "") + ").")
     return RoomCandidate(candidate_id, CandidateKind.OBSERVE, snapshot_version, digest, description, description,
-                         coverage.evidence_refs, (), PhysicalCost(distance_cm=distance_cm, requires_airborne=True))
+                         coverage.evidence_refs, (), PhysicalCost(distance_cm=distance_cm, requires_airborne=True),
+                         coverage_gain=_benefit(set(dict(site.pose_visibility).get(pose_id, ())), coverage))
 
 
 def _cells_containing(site: RoomSite, x_cm: float, y_cm: float) -> tuple[str, ...]:

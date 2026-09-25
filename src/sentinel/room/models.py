@@ -56,6 +56,11 @@ class RoomCandidate:
     evidence_refs: tuple[str, ...] = ()
     prerequisites: tuple[str, ...] = ()
     physical_cost: PhysicalCost = PhysicalCost()
+    #: Unresolved cell/class pairs an OBSERVE would newly resolve (0 for
+    #: every other kind): the controller's tie-break between zones Jev
+    #: rates alike (live 2026-09-25: a 7-cell zone and a 2-cell zone at
+    #: 0.47 each, and the 2-cell one flew because it was listed first).
+    coverage_gain: int = 0
 
 
 class TerminalState(StrEnum):

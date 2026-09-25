@@ -156,30 +156,114 @@ class AcceptancePolicy:
         return asdict(self)
 
 
-def observe_kind_gate(assessment, candidates, act_at: float, min_margin: float):
-    """Accept Jev's top OBSERVE when observing, as a kind, is the confident choice.
+#: Kinds that end the session without a count.
+_STOP_KINDS = frozenset({CandidateKind.CLARIFY, CandidateKind.ESCALATE})
+
+
+def _kind_masses(assessment, candidates) -> dict:
+    """Jev's probability summed into three groups: exploring (every kind
+    that keeps the mission going: observe, re-anchor, reads and the rest),
+    answering, and stopping (CLARIFY/ESCALATE, plus any illegal label)."""
+    masses = {"explore": 0.0, "answer": 0.0, "stop": 0.0, "reads": 0.0}
+    for label, probability in assessment.probabilities:
+        candidate = candidates.get(label)
+        if candidate is None or candidate.kind in _STOP_KINDS:
+            masses["stop"] += probability
+        elif candidate.kind == CandidateKind.ANSWER:
+            masses["answer"] += probability
+        else:
+            masses["explore"] += probability
+            if candidate.kind in READ_KINDS:
+                masses["reads"] += probability
+    return masses
+
+
+def _best_of_tied(assessment, candidates, min_margin: float):
+    """Among the OBSERVE labels Jev rates within the margin of its top one,
+    the zone that resolves the most unresolved cell/class pairs, then the
+    nearer, then the lower ID -- Jev's own pick when it already wins."""
+    top = assessment.selected_probability or 0.0
+    tied = [(candidates[label], probability) for label, probability in assessment.probabilities
+            if label in candidates and candidates[label].kind == CandidateKind.OBSERVE
+            and probability >= top - min_margin]
+    if not tied:
+        return assessment.selected_label
+    tied.sort(key=lambda item: (-item[0].coverage_gain, item[0].physical_cost.distance_cm, item[0].candidate_id))
+    return tied[0][0].candidate_id
+
+
+def kind_gate(assessment, candidates, act_at: float, min_margin: float):
+    """Accept Jev's choice when its *kind* of action is the confident one,
+    and settle near-ties between zones on coverage.
 
     Equivalent regions split Jev's probability (live 2026-09-24: center 0.44,
     right 0.21, left 0.20 -- 0.85 on observing), so the per-label gate refused
-    a decision Jev was confident in. The kind's summed probability must clear
-    the observe bar and lead every other kind's sum by the margin; Jev's own
-    top label (always the argmax, see ``assess_choice``) is the one flown.
-    """
+    a decision Jev was confident in. Probability is summed per group
+    (``_kind_masses``); exploring must clear the chosen kind's bar and lead
+    stopping (CLARIFY + ESCALATE together, not each apart) by the margin --
+    an ANSWER close behind is no objection, exploring is preferred to
+    finishing. Answering counts the harmless reads with it and must lead
+    both stopping and exploring. Among zones Jev rates alike the one that
+    resolves the most cells is flown (live 2026-09-25: a 7-cell and a
+    2-cell zone at 0.47 each, and the 2-cell one flew for being listed
+    first). Returns the assessment and an audit note (None when untouched);
+    the note keeps Jev's own stated confidence, which the kind's mass
+    replaces in the assessment."""
     if assessment.outcome not in ("LOW_CONFIDENCE", "THIN_MARGIN"):
-        return assessment
+        return assessment, None
     chosen = candidates.get(assessment.selected_label)
-    if chosen is None or chosen.kind != CandidateKind.OBSERVE:
-        return assessment
-    mass: dict = {}
-    for label, probability in assessment.probabilities:
-        candidate = candidates.get(label)
-        kind = candidate.kind if candidate is not None else label
-        mass[kind] = mass.get(kind, 0.0) + probability
-    observe = mass.pop(CandidateKind.OBSERVE, 0.0)
-    if observe < act_at or observe - max(mass.values(), default=0.0) < min_margin:
-        return assessment
+    if chosen is None or chosen.kind in _STOP_KINDS:
+        return assessment, None
+    masses = _kind_masses(assessment, candidates)
+    note = {"jev_label": assessment.selected_label, "jev_confidence": assessment.confidence,
+            "masses": masses, "act_at": act_at, "min_margin": min_margin}
+    if chosen.kind == CandidateKind.ANSWER:
+        mass = masses["answer"] + masses["reads"]
+        exploring = masses["explore"] - masses["reads"]
+        if mass < act_at or mass - masses["stop"] < min_margin or mass - exploring < min_margin:
+            return assessment, None
+        flown = assessment.selected_label
+    else:
+        mass = masses["explore"]
+        if mass < act_at or mass - masses["stop"] < min_margin:
+            return assessment, None
+        flown = (_best_of_tied(assessment, candidates, min_margin) if chosen.kind == CandidateKind.OBSERVE
+                 else assessment.selected_label)
+    note.update(rule="KIND_MASS" if flown == assessment.selected_label else "KIND_MASS_TIE_BREAK",
+                flown_label=flown, mass=mass)
+    return replace(assessment, selected_label=flown, final_label=flown, outcome="ACCEPTED",
+                   confidence=mass, confidence_source="KIND_MASS"), note
+
+
+def observe_kind_gate(assessment, candidates, act_at: float, min_margin: float):
+    """The pre-2026-09-25 name: ``kind_gate`` without its audit note."""
+    return kind_gate(assessment, candidates, act_at, min_margin)[0]
+
+
+def stable_reask_gate(assessment, previous, candidates, min_margin: float):
+    """Accept a choice Jev repeats when asked to reconsider.
+
+    Live 2026-09-25 10:33: ANSWER came back at 0.58, 0.47, 0.50, 0.48 with
+    the rest on harmless reads; every ask was refused and the session
+    escalated with no count. A repeated label (same as the previous ask,
+    not a stopping kind) whose own probability leads stopping by the
+    margin is accepted; a repeated label that does not is reported as
+    stable-but-refused so the caller stops re-asking."""
+    if assessment.outcome not in ("LOW_CONFIDENCE", "THIN_MARGIN") or previous is None:
+        return assessment, None
+    if assessment.selected_label != previous.selected_label:
+        return assessment, None
+    chosen = candidates.get(assessment.selected_label)
+    if chosen is None or chosen.kind in _STOP_KINDS:
+        return assessment, None
+    masses = _kind_masses(assessment, candidates)
+    own = assessment.selected_probability or 0.0
+    note = {"rule": "STABLE_REASK", "jev_label": assessment.selected_label,
+            "jev_confidence": assessment.confidence, "masses": masses, "min_margin": min_margin}
+    if own - masses["stop"] < min_margin:
+        return assessment, {**note, "rule": "STABLE_REFUSED"}
     return replace(assessment, final_label=assessment.selected_label, outcome="ACCEPTED",
-                   confidence=observe, confidence_source="KIND_MASS")
+                   confidence=own, confidence_source="STABLE_REASK"), note
 
 
 @dataclass(frozen=True)
@@ -996,7 +1080,8 @@ class RoomController:
             act_at = policy.act_at_for(chosen.kind if chosen is not None else None)
             assessment = assess_choice(answer, criteria, escalation_label="ESCALATE",
                                        act_at=act_at, min_margin=policy.min_margin)
-            return observe_kind_gate(assessment, candidates, act_at, policy.min_margin), error, act_at
+            gated, note = kind_gate(assessment, candidates, act_at, policy.min_margin)
+            return gated, error, act_at, note
 
         def audit(assessment):
             audited = asdict(assessment)
@@ -1007,13 +1092,15 @@ class RoomController:
         asked = ask(state)
         if asked is None:
             return self._preempted(session_id, self.supervisor.last_preemption)
-        assessment, provider_error, act_at = asked
+        assessment, provider_error, act_at, gate_note = asked
         reask = None
         reasks = 0
         while policy.reask_once and reasks < policy.max_reasks:
             malformed = provider_error is not None or assessment.outcome in _MALFORMED_OUTCOMES
             if not (malformed or assessment.outcome in ("LOW_CONFIDENCE", "THIN_MARGIN")):
                 break
+            if gate_note is not None and gate_note.get("rule") == "STABLE_REFUSED":
+                break  # the same refused choice again: another ask changes nothing
             # Task V2: bounded re-asks with the refusal as feedback, never a loop.
             # Task 4b item 4: a malformed/illegal reply or a provider error is
             # re-asked too, with feedback on the reply's shape.
@@ -1025,8 +1112,10 @@ class RoomController:
                     "label as value, a probability for every legal label (the chosen one the highest) and a "
                     "confidence; " + last) if malformed else (
                     "Your previous choice was refused: below the acceptance threshold for its "
-                    "kind. Choose once more from the same legal actions. Repeat it only if you "
-                    "are confident it is the right next action; " + last)
+                    "kind. Choose once more from the same legal actions. Exploring (observe, re-anchor, "
+                    "read) is preferred to answering, and both to escalating or clarifying; a choice you "
+                    "repeat is accepted when it clearly leads ESCALATE and CLARIFY together. Repeat it "
+                    "only if you are confident it is the right next action; " + last)
             feedback = {"refused_choice": assessment.selected_label, "refusal": refusal,
                         "confidence": assessment.confidence, "required_confidence": act_at,
                         "margin": assessment.margin, "required_margin": policy.min_margin,
@@ -1034,10 +1123,13 @@ class RoomController:
             if reask is None:
                 reask = {"first_assessment": audit(assessment), "first_act_at": act_at, "feedback": feedback}
             reask["count"] = reasks
+            previous = assessment
             asked = ask({**state, "previous_refusal": feedback})
             if asked is None:
                 return self._preempted(session_id, self.supervisor.last_preemption)
-            assessment, provider_error, act_at = asked
+            assessment, provider_error, act_at, gate_note = asked
+            if gate_note is None and not provider_error:
+                assessment, gate_note = stable_reask_gate(assessment, previous, candidates, policy.min_margin)
         audited = audit(assessment)
         attempt = {"snapshot_version": snapshot.state_version, "state": state,
                    "candidates": [asdict(c) for c in candidates.values()], "assessment": audited,
@@ -1046,6 +1138,8 @@ class RoomController:
                    "latency_ms": (time.monotonic_ns() - started) // 1_000_000}
         if reask is not None:
             attempt["reask"] = reask
+        if gate_note is not None:
+            attempt["gate"] = gate_note
         selected = candidates.get(assessment.selected_label)
         # Illegal provider labels are one failed decision operation. Retain the
         # actual proposed label in the assessment, but do not let arbitrary new
