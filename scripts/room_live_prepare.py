@@ -64,9 +64,13 @@ TAG_MAP_PATH = REPO_ROOT / "docs" / "wp5-flight3-map.json"
 #: a 3x3 tag-facing viewpoint grid over most of the flight volume, declares
 #: home where the operator places the drone (~180 cm from the tag wall) and
 #: allows the aircraft further from a tag fix (see the wide site PROVENANCE).
+#: ``demo`` is the compact site with the operator-declared 60 cm predicted
+#: position error limit (2026-09-25: 30 cm refused the left/right rear zones
+#: at look 2 -- single-tag fixes hold, never tighten, the xy budget).
 SCENARIOS = {
     "canningst": (SITE_PATH, DRIFT_PATH),
     "wide": (FIXTURES / "canningst-wide-site.json", PROFILES / "canningst-wide-drift.json"),
+    "demo": (SITE_PATH, PROFILES / "canningst-demo-drift.json"),
 }
 _scenario = "canningst"
 
