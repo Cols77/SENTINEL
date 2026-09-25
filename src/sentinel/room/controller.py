@@ -1553,18 +1553,24 @@ class RoomController:
                     terminal = self.supervisor.refresh_failure(self.flight_executor)
                     return self._preempted(session_id, None, terminal)
                 if admission.transition == "REFUSE":
-                    drift = index == 0 and admission.reason == "LOCALIZATION_RECOVERY_REQUIRED"
+                    drift = admission.reason == "LOCALIZATION_RECOVERY_REQUIRED"
                     rerouted = False
                     if drift and not aligned:
                         # Live 2026-09-25: facing 95 deg, the turns back to the tags
                         # tipped the fixless out-and-back over the drift limit. Face
                         # the tags, take that fix, then ask for this zone once more.
+                        # The 14:24 flight refused two zones at look 3: off-wall
+                        # looks lose the joint-tag fix, so the budget never resets
+                        # mid-sweep. The same turn-and-fix resumes the same look.
                         aligned = True
                         turned = self._align_heading(session_id)
                         if isinstance(turned, (TurnOutcome, dict)):
                             return turned
                         rerouted = bool(turned)
-                    if (not rerouted and drift and not transited and self.resolve_transit_checkpoint is not None
+                    # The transit relocates the aircraft, so it only relieves the
+                    # first look, before the sweep has flown to the zone.
+                    if (not rerouted and drift and index == 0 and not transited
+                            and self.resolve_transit_checkpoint is not None
                             and self.supervisor.tracker.health.state in (LocalizationState.ANCHORED,
                                                                          LocalizationState.COASTING)):
                         # Still out of reach after facing the tags: fly to a

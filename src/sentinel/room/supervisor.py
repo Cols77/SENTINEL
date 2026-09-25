@@ -1373,6 +1373,16 @@ class SafetySupervisor:
             elif outcome.reason == "SUPERVISION_FAILED":
                 current = replace(current, transition="LAND_CONTINGENCY", reason=outcome.reason,
                                   invalidates_snapshot=True, contingency_id=None)
+            if (outcome.transition != "CONTINUE" and current.transition == "CONTINUE"
+                    and current.request.checkpoint is None):
+                # Live 2026-09-25 14:27: a telemetry blip during a provider wait
+                # raised LAND_CONTINGENCY, then cleared on this fresh re-check.
+                # There is no checkpoint to fly and nothing was executed; report
+                # the cleared preemption instead of raising through the session
+                # loop and landing a healthy aircraft. (RETURN_NOW and
+                # SUPERVISION_FAILED were re-escalated above and never get here.)
+                return CheckpointOutcome("PREEMPTION_CLEARED", (), (), None,
+                                         current.request.pose.position, True)
             states, observations = [], []
             if current.transition == "LAND_CONTINGENCY":
                 event = self._audit(current)
