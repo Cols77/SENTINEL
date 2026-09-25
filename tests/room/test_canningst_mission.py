@@ -408,7 +408,7 @@ def test_an_off_mark_takeoff_still_observes_and_answers(tmp_path, monkeypatch):
                         lambda **kwargs: original(x_cm=256.0, y_cm=225.0, **kwargs))
     outcome, tello, events, detector = run_mission(tmp_path, monkeypatch)
     assert outcome.landing is not None and outcome.landing.state == "LANDED", outcome
-    assert succeeded_observations(events) == [CENTER], refusals(events)
+    assert succeeded_observations(events)[0] == CENTER, refusals(events)
     assert ("ANSWER:COUNTS", "ANSWERED_COUNT") in tool_outcomes(events)
 
 
@@ -471,3 +471,62 @@ def test_the_detector_is_checked_against_its_pinned_model_not_its_detector_name(
     outcome, tello, events, detector = run_mission(tmp_path, monkeypatch)
     assert succeeded_observations(events) == [CENTER], tool_outcomes(events)
     assert ("ANSWER:COUNTS", "ANSWERED_COUNT") in tool_outcomes(events)
+
+
+def test_detections_are_placed_from_where_the_tags_saw_the_drone_not_its_dead_reckoning(tmp_path, monkeypatch):
+    """Live 2026-09-25 09:35: the Tello drifted 14 cm while hovering, then
+    flew "back 34"; the tags saw it at y 185 but the runner's summed commands
+    said y 170, and every phone was placed from y 170. A step that ends on a
+    fresh tag fix grounds its frames at that fix."""
+    original = FlyingTello.send_command_with_return
+
+    def short_back(self, command, timeout=None):
+        verb, _, value = command.partition(" ")
+        if verb == "back":
+            self.y_cm += 15  # the drone ends 15 cm from where the runner sums it
+        return original(self, command, timeout)
+
+    monkeypatch.setattr(FlyingTello, "send_command_with_return", short_back)
+    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch)
+    assert succeeded_observations(events) == [CENTER], tool_outcomes(events)
+    observed = [e.payload for e in events if e.event_type == "ROOM_TOOL_OUTCOME"
+                and e.payload.get("code") == "OBSERVE_SUCCEEDED"][0]
+    poses = {round(frame["pose"]["y_cm"]) for frame in observed["count_evidences"]}
+    assert poses == {185}, poses
+
+
+def _answer(events):
+    return next(e.payload["answer"] for e in events if e.event_type == "ROOM_TOOL_OUTCOME"
+                and e.payload.get("code") == "ANSWERED_COUNT")
+
+
+def test_an_uncertain_object_is_given_a_second_view_and_the_merge_confirms_it(tmp_path, monkeypatch):
+    """Live 2026-09-25 09:35: centre-rear declares all six cells, so its one
+    sweep completed coverage, nothing else was offered and the phone stayed
+    "1 uncertain". A pose that sees the object's cell is now offered for its
+    second view; the new frames fuse with the first ones and confirm it.
+
+    The fake detector reports one fixed box, so only a pose straight ahead of
+    the first (centre-front, from this off-mark takeoff) places it at the
+    same point."""
+    original = FlyingTello
+    monkeypatch.setattr(sys.modules[__name__], "FlyingTello",
+                        lambda **kwargs: original(x_cm=256.0, y_cm=225.0, **kwargs))
+    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch)
+    assert succeeded_observations(events) == [CENTER, "center-front-middle-toward_targets"], tool_outcomes(events)
+    assert detector.calls == 6
+    assert "computer: 1 confirmed; 0 uncertain" in _answer(events), _answer(events)
+    assert outcome.landing is not None and outcome.landing.state == "LANDED", outcome
+
+
+def test_second_views_are_offered_after_coverage_is_complete(tmp_path, monkeypatch):
+    """With every cell covered by the first sweep, the uncertain computer's
+    cell is still worth a second view: the poses that see it (and were not
+    flown) are offered; here the drift budget refuses them, so the answer
+    stays honest: uncertain."""
+    outcome, tello, events, detector = run_mission(tmp_path, monkeypatch)
+    offered = {candidate for candidate, code in tool_outcomes(events) if code == "ZONE_REFUSED"}
+    assert offered == {"OBSERVE:g1:c1:left-rear-middle-toward_targets",
+                       "OBSERVE:g1:c1:right-rear-middle-toward_targets"}, tool_outcomes(events)
+    assert "computer: 0 confirmed; 1 uncertain" in _answer(events), _answer(events)
+    assert landed_over_the_pad(outcome, tello), outcome

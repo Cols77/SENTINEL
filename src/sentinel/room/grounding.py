@@ -39,7 +39,7 @@ from typing import Literal
 from sentinel.camera import CameraModel
 
 from .association import associate_static
-from .counting import ClassCount, FramePeople, project_counts, render_count_answer
+from .counting import ClassCount, FramePeople, _view_count, project_counts, render_count_answer
 from .coverage import SUPPORTED_CLASSES, CoverageProjection, render_coverage_note
 from .spatial import PoseEvidence, SpatialEstimate, SupportDeclaration, SupportKind, estimate_detection
 
@@ -220,17 +220,7 @@ def project_objective_count(objective, frames, coverage: CoverageProjection, *,
         raise ValueError("count scope must be ROOM or VIEWPOINT")
     frames = tuple(frames)
     estimates = tuple(estimate for frame in frames for estimate in frame.estimates)
-    low = {estimate_id for frame in frames for estimate_id in frame.low_confidence_estimate_ids}
-    # Fix round 4 (Q1): the corroborating-view identity is the *declared*
-    # pose the frame was taken from (FrameCountEvidence.pose_id), never the
-    # measured-pose view_id spatial.py derives -- two visits to one declared
-    # pose (the same objective revisiting it, or a different objective
-    # re-offered the same region) can measure a few centimetres of hover
-    # drift apart, which would otherwise mint two distinct view_ids for what
-    # is honestly one view and wrongly confirm an object seen only once.
-    corroborating = {estimate.estimate_id: frame.pose_id
-                     for frame in frames for estimate in frame.estimates
-                     if estimate.estimate_id not in low}
+    corroborating = _corroborating_views(frames)
     people = tuple(FramePeople(frame.frame_id, frame.pose_id, frame.captured_at,
                                frame.people_confirmed, frame.people_uncertain)
                    for frame in frames if frame.people_confirmed or frame.people_uncertain)
@@ -242,6 +232,52 @@ def project_objective_count(objective, frames, coverage: CoverageProjection, *,
         counts = tuple(count for count in counts if count.class_name in classes)
     return ObjectiveCount(objective.objective_id, scope, pose_id, classes,
                           tuple(frame.frame_id for frame in frames), counts, coverage)
+
+
+def _corroborating_views(frames) -> dict[str, str]:
+    """estimate_id -> the view that may confirm it."""
+    low = {estimate_id for frame in frames for estimate_id in frame.low_confidence_estimate_ids}
+    # Fix round 4 (Q1): the corroborating-view identity is the *declared*
+    # pose the frame was taken from (FrameCountEvidence.pose_id), never the
+    # measured-pose view_id spatial.py derives -- two visits to one declared
+    # pose (the same objective revisiting it, or a different objective
+    # re-offered the same region) can measure a few centimetres of hover
+    # drift apart, which would otherwise mint two distinct view_ids for what
+    # is honestly one view and wrongly confirm an object seen only once.
+    return {estimate.estimate_id: frame.pose_id
+            for frame in frames for estimate in frame.estimates
+            if estimate.estimate_id not in low}
+
+
+@dataclass(frozen=True)
+class UncertainObject:
+    """A fused static object the count reports as uncertain: no second
+    distinct declared view has confirmed it yet."""
+    class_name: str
+    x_cm: float
+    y_cm: float
+    #: The declared poses whose frames placed it (any confidence).
+    seen_from: tuple[str, ...]
+
+
+def uncertain_objects(frames, classes: tuple[str, ...] = ()) -> tuple[UncertainObject, ...]:
+    """The objects ``project_objective_count`` would count as uncertain,
+    with where they were fused and which declared poses placed them -- what
+    a second view has to look at to confirm or drop each one."""
+    frames = tuple(frames)
+    estimates = tuple(estimate for frame in frames for estimate in frame.estimates)
+    pose_of = {estimate.estimate_id: frame.pose_id for frame in frames for estimate in frame.estimates}
+    corroborating = _corroborating_views(frames)
+    wanted = {name for name in classes if name != "person"}
+    found = []
+    for obj in associate_static((), estimates):
+        if wanted and obj.class_name not in wanted:
+            continue
+        if _view_count(obj, corroborating) > 1:
+            continue
+        seen_from = tuple(sorted({pose_of[e] for e in obj.member_estimate_ids if e in pose_of}))
+        found.append(UncertainObject(obj.class_name, obj.x_cm, obj.y_cm, seen_from))
+    return tuple(found)
 
 
 def render_objective_count(count: ObjectiveCount) -> str:

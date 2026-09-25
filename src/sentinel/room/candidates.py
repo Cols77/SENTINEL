@@ -17,6 +17,7 @@ import math
 
 from .coverage import CoverageProjection
 from .goals import GoalObjective
+from .grounding import uncertain_objects
 from .models import CandidateKind, GoalKind, GoalStatus, PhysicalCost, RoomCandidate
 from .queries import READ_KINDS, ReadSnapshot, ToolOutcome, relevant_hash
 from .semantic import SemanticPose, resolve_pose_id
@@ -347,6 +348,61 @@ def _observe_candidate(objective: GoalObjective, pose_id: str, description: str,
                          coverage.evidence_refs, (), PhysicalCost(distance_cm=distance_cm, requires_airborne=True))
 
 
+def _cells_containing(site: RoomSite, x_cm: float, y_cm: float) -> tuple[str, ...]:
+    def inside(polygon) -> bool:
+        hit = False
+        for (ax, ay), (bx, by) in zip(polygon, polygon[1:] + polygon[:1]):
+            if (ay > y_cm) != (by > y_cm) and x_cm < ax + (y_cm - ay) * (bx - ax) / (by - ay):
+                hit = not hit
+        return hit
+    return tuple(cell.cell_id for cell in site.coverage_cells if inside(tuple(cell.polygon_xy_cm)))
+
+
+def _second_view_candidates(objective: GoalObjective, site: RoomSite, coverage: CoverageProjection,
+                            outcomes: tuple[ToolOutcome, ...], snapshot_version: int,
+                            origin=None) -> list[RoomCandidate]:
+    """OBSERVE candidates that give an uncertain object its second view.
+
+    A room count confirms an object only once two distinct declared poses
+    have placed it (``counting``); one sweep's three looks are one view. Live
+    2026-09-25: centre-rear declares all six cells, so its one sweep made
+    coverage complete, no pose was offered again and the phone it saw stayed
+    "1 uncertain". Every declared pose not yet observed that sees the cell
+    an uncertain object was fused in is offered, most objects first; the
+    next frames go through the same fusion. ANSWER:COUNTS stays offered."""
+    frames = tuple(frame for o in outcomes if o.kind == CandidateKind.OBSERVE.value and o.code == "OBSERVE_SUCCEEDED"
+                   for frame in (o.count_evidences or ((o.count_evidence,) if o.count_evidence else ())))
+    pending = [(obj, _cells_containing(site, obj.x_cm, obj.y_cm))
+               for obj in uncertain_objects(frames, tuple(objective.target_classes))]
+    pending = [(obj, cells) for obj, cells in pending if cells]
+    if not pending:
+        return []
+    visited = {pose for o in outcomes if (pose := _observed_pose_id(o)) is not None}
+    scored = []
+    for pose_id, cell_ids in sorted(site.pose_visibility):
+        if pose_id in visited:
+            continue
+        targets = [(obj, cells) for obj, cells in pending if set(cells) & set(cell_ids)]
+        if not targets:
+            continue
+        by_class: dict[str, int] = {}
+        for obj, _ in targets:
+            by_class[obj.class_name] = by_class.get(obj.class_name, 0) + 1
+        what = ", ".join(f"{n} uncertain {name}" for name, n in sorted(by_class.items()))
+        cells = sorted({cell for _, cells in targets for cell in cells if cell in cell_ids})
+        seen = sorted({pose for obj, _ in targets for pose in obj.seen_from})
+        description = (f"Observe declared pose {pose_id} for objective {objective.objective_id}: a second view of "
+                       f"{what} in {', '.join(cells)} (so far seen only from {', '.join(seen) or 'one view'}); "
+                       "a second distinct view is what lets the count confirm it, and its detections are merged "
+                       "with the earlier ones.")
+        candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version,
+                                       origin)
+        if candidate is not None:
+            scored.append((len(targets), candidate))
+    scored.sort(key=lambda item: (-item[0], item[1].physical_cost.distance_cm, item[1].candidate_id))
+    return [candidate for _, candidate in scored]
+
+
 def _incomplete_answer_candidate(objective: GoalObjective, coverage: CoverageProjection,
                                  outcomes: tuple[ToolOutcome, ...], snapshot_version: int, *,
                                  region_pose_id: str | None = None) -> RoomCandidate | None:
@@ -569,6 +625,9 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
             fallback = _incomplete_answer_candidate(objective, coverage, outcomes, snapshot_version)
             if fallback is not None:
                 objective_candidates = [fallback]
+        offered = {candidate.candidate_id for candidate in objective_candidates}
+        objective_candidates.extend(candidate for candidate in _second_view_candidates(
+            objective, site, coverage, outcomes, snapshot_version, origin) if candidate.candidate_id not in offered)
         room_candidates.extend(objective_candidates)
 
     # Task B item 2b: one-checkpoint OBSERVE candidates over the declared

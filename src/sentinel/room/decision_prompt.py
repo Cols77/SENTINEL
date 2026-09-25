@@ -91,9 +91,11 @@ def build_decision_instruction(snapshot: ReadSnapshot, coverage: CoverageProject
         "Recent observation attempts (oldest first): " + ("; ".join(attempts) or "none"),
         "Admissible OBSERVE candidate IDs: " + (observation_ids or "none"),
         "Prefer observing unexplored zones for counts: choose an admissible OBSERVE that adds coverage before "
-        "ANSWER or ESCALATE. An unvisited declared search viewpoint is progress even when count coverage is "
-        "complete. Answer only when no admissible observation adds coverage for a count, or no unvisited "
-        "search viewpoint can advance a search; use an explicit incomplete answer when that is the legal route. "
+        "ANSWER or ESCALATE. An OBSERVE that gives an uncertain object its second view is progress too, even "
+        "when count coverage is complete: a count confirms an object only from two distinct poses. An unvisited "
+        "declared search viewpoint is progress even when count coverage is complete. Answer only when no "
+        "admissible observation adds coverage or a second view for a count, or no unvisited search viewpoint "
+        "can advance a search; use an explicit incomplete answer when that is the legal route. "
         "Re-anchor when the position is stale. When an observation failed because positioning was lost or "
         "the drone arrived off the pose, do not simply repeat it: prefer a different admissible pose (ideally "
         "one closer to the tags or home), or re-anchor first. If positioning keeps failing and the remaining "

@@ -222,6 +222,24 @@ def _failure(code: str, detail: str) -> dict:
     return {"code": code, "refusal": code, "detail": detail}
 
 
+def _with_tag_position(result, health, started_at: float):
+    """The outcome with its x/y taken from a tag fix made during this step.
+
+    ``CheckpointOutcome.pose`` is the flight runner's dead-reckoned position:
+    commanded moves summed from the home, never corrected by a tag fix. Live
+    2026-09-25: measured home y 204, a hover drift to y 218 it never saw, then
+    "back 34": it said y 170 while the tags saw y 185, so the arrival check
+    passed and every phone was placed from y 170. A fix measured after the step began is where the
+    aircraft actually is; heights stay the runner's reported z, the
+    convention the site's heights and support planes are declared in."""
+    tracked = getattr(health, "position", None)
+    measured_at = getattr(health, "measured_at", None)
+    if (result.pose is None or tracked is None or measured_at is None or measured_at <= started_at
+            or health.state != LocalizationState.ANCHORED):
+        return result
+    return replace(result, pose=Position(tracked.x_cm, tracked.y_cm, result.pose.z_cm))
+
+
 def _arrival_miss(resolved, pose, health) -> str:
     if pose is None:
         return "the drone's position after the move is unknown"
@@ -1306,6 +1324,7 @@ class RoomController:
         # one leg exceeds the calibrated drift envelope even though each
         # individually supervised leg is safe.
         resolvers = self.resolve_sweep_checkpoints or (self.resolve_checkpoint,)
+        started_at = self.supervisor.clock()
         completed_legs = []
         aligned = False
         index = 0
@@ -1386,6 +1405,7 @@ class RoomController:
         # could even change the reported provenance for a position that
         # never moved.
         health = self.supervisor.tracker.health
+        result = _with_tag_position(result, health, started_at)
         if not self._measured_pose_matches_declared_pose(resolved, result, health):
             # Fix round 3 (F3): the plan declared the right target/heading,
             # but the aircraft's own measured post-dispatch pose does not
