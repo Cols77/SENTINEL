@@ -50,6 +50,9 @@ def _free_command_port(monkeypatch):
     from sentinel.ui import room_agent
     monkeypatch.setattr(room_agent.RoomAgentService, "_command_port_status",
                         lambda self, local_ip: dict(status="FREE"))
+    # The Prepare panel's battery probe would otherwise add its own TelloLink to the recorder.
+    monkeypatch.setattr(room_agent.RoomAgentService, "_live_battery_percent",
+                        lambda self, local_ip: None)
 
 
 @pytest.fixture
@@ -167,11 +170,12 @@ def test_the_wide_scenario_pack_binds_its_site_and_drift_and_passes_every_gate(t
     assert "connectivity preflight not ready" in run["error"], run["error"]
     assert ("drone_probe",) in hardware.calls
 
-    # The default (Mission Control's no-argument prepare) is the demo
-    # scenario: the compact site under the 60 cm error limit (2026-09-25).
+    # The default (Mission Control's no-argument prepare) is the demo360
+    # scenario: the compact site plus the left/backward/right looks from the
+    # pad, under the 60 cm error limit (2026-09-25).
     assert _prepare(run_root, "--new-run", capsys=capsys)[0] == 0
-    assert _pack(run_root)["scenario"] == "demo"
-    assert Path(_pack(run_root)["site"]).name == "canningst-site.json"
+    assert _pack(run_root)["scenario"] == "demo360"
+    assert Path(_pack(run_root)["site"]).name == "canningst-demo360-site.json"
     assert Path(_pack(run_root)["drift_profile"]).name == "canningst-demo-drift.json"
 
 
@@ -239,11 +243,10 @@ def test_mission_control_refuses_a_pack_whose_run_already_flew(tmp_path, capsys,
                                           authorise_paid_calls=True))
     room = attach_room_agent(service, pace=False)
     with TestClient(build_app(service, repository_root=ROOT)) as client:
-        proposed = client.post("/api/v1/room-agent/proposals",
-                               json=dict(mode="LIVE", scenario="a", request_text="find the phone")).json()
-        client.post("/api/v1/room-agent/decisions",
-                    json=dict(proposal_id=proposed["run"]["proposal"]["id"], decision="APPROVE"))
-        assert room.wait(30)
-        run = client.get("/api/v1/room-agent").json()["run"]
-    assert run["status"] == "FAILED" and "room_live_prepare" in run["error"], run
+        refused = client.post("/api/v1/room-agent/proposals",
+                              json=dict(mode="LIVE", scenario="a", request_text="find the phone"))
+        assert refused.status_code == 503
+        assert refused.json()["reason_code"] == "ROOM_PACK_ALREADY_USED"
+        assert client.get("/api/v1/room-agent").json()["run"] is None
+    assert room.run is None
     assert hardware.calls == []

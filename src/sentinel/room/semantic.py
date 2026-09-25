@@ -29,7 +29,7 @@ from sentinel.room.site import RoomSite, SemanticFrame, Volume3D, volume_contain
 HORIZONTAL_VALUES: tuple[str, ...] = ("left", "center", "right")
 DEPTH_VALUES: tuple[str, ...] = ("rear", "middle", "front")
 HEIGHT_VALUES: tuple[str, ...] = ("bottom", "middle", "top")
-LOOK_VALUES: tuple[str, ...] = ("toward_targets", "left", "right")
+LOOK_VALUES: tuple[str, ...] = ("toward_targets", "left", "right", "backward")
 
 # Fractional position along an axis extent for each of its three named
 # regions. These are the deterministic "insets": each region sits at the
@@ -51,7 +51,7 @@ class SemanticPose:
     horizontal: Literal["left", "center", "right"]
     depth: Literal["rear", "middle", "front"]
     height: Literal["bottom", "middle", "top"]
-    look: Literal["toward_targets", "left", "right"] = "toward_targets"
+    look: Literal["toward_targets", "left", "right", "backward"] = "toward_targets"
 
     def __post_init__(self):
         if self.horizontal not in HORIZONTAL_VALUES:
@@ -117,6 +117,8 @@ def _yaw_for_look(frame: SemanticFrame, look: str) -> int:
         vector = frame.left_to_right_axis_xy
     elif look == "left":
         vector = (-frame.left_to_right_axis_xy[0], -frame.left_to_right_axis_xy[1])
+    elif look == "backward":
+        vector = (-frame.rear_to_front_axis_xy[0], -frame.rear_to_front_axis_xy[1])
     else:
         raise ValueError(f"unknown look direction: {look}")
     angle_deg = math.degrees(math.atan2(vector[1], vector[0]))

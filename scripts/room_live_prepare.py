@@ -67,10 +67,16 @@ TAG_MAP_PATH = REPO_ROOT / "docs" / "wp5-flight3-map.json"
 #: ``demo`` is the compact site with the operator-declared 60 cm predicted
 #: position error limit (2026-09-25: 30 cm refused the left/right rear zones
 #: at look 2 -- single-tag fixes hold, never tighten, the xy budget).
+#: ``demo360`` is ``demo`` plus one wall cell each on the left, rear and right
+#: walls, observed by three pure rotations over the pad
+#: (center-middle-middle-{left,backward,right}); those looks face away from
+#: the tags, so losing the fix and recovering (or refusing) is an accepted
+#: outcome of this scenario.
 SCENARIOS = {
     "canningst": (SITE_PATH, DRIFT_PATH),
     "wide": (FIXTURES / "canningst-wide-site.json", PROFILES / "canningst-wide-drift.json"),
     "demo": (SITE_PATH, PROFILES / "canningst-demo-drift.json"),
+    "demo360": (FIXTURES / "canningst-demo360-site.json", PROFILES / "canningst-demo-drift.json"),
 }
 _scenario = "canningst"
 
@@ -305,7 +311,7 @@ def ensure_manifest(run_root: Path, run_id: str, grant, registry_path: Path, *, 
 # -- main -----------------------------------------------------------------------
 def prepare(*, run_root: Path, local_ip: str | None, consent_confirmed: bool, run_id: str | None = None,
             new_run: bool = False, request: str = DEFAULT_REQUEST, today: str | None = None,
-            now: datetime | None = None, scenario: str = "demo") -> dict:
+            now: datetime | None = None, scenario: str = "demo360") -> dict:
     global _scenario
     if scenario not in SCENARIOS:
         raise PrepareError(f"unknown scenario {scenario!r}; choose one of {', '.join(SCENARIOS)}")
@@ -397,9 +403,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", default=None, help="use this run id (default: reuse the unflown current run "
                                                        "or make a fresh l3-<time>)")
     parser.add_argument("--new-run", action="store_true", help="always prepare a fresh run")
-    parser.add_argument("--scenario", choices=sorted(SCENARIOS), default="demo",
-                        help="flight scenario: demo (compact site, 60 cm error limit; the default, also what "
-                             "Mission Control's prepare uses), canningst (compact, 30 cm) or wide (3x3 zones)")
+    parser.add_argument("--scenario", choices=sorted(SCENARIOS), default="demo360",
+                        help="flight scenario: demo360 (compact site + left/backward/right looks from the pad, "
+                             "60 cm error limit; the default, also what Mission Control's prepare uses), "
+                             "demo (compact, 60 cm), canningst (compact, 30 cm) or wide (3x3 zones)")
     parser.add_argument("--request", default=DEFAULT_REQUEST,
                         help="label only: the manifest does not bind the request text")
     return parser

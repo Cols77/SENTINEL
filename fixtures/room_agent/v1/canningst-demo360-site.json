@@ -1,0 +1,744 @@
+{
+  "schema_version": "room-site-base-v1",
+  "site_id": "canningst",
+  "cube_site_sha256": "0770fca67cdbf6d94ec8e65b6586196d260f962a7dee2f3f126d9935662d83b2",
+  "tag_map_sha256": "b78f12620ee0e6df80c3b3e740c7d22b4d4c9ed1c65df78ec9c42558c885f80a",
+  "free_space_volumes": [
+    {
+      "volume_id": "cube",
+      "polygon_xy_cm": [
+        [
+          90,
+          109
+        ],
+        [
+          410,
+          109
+        ],
+        [
+          410,
+          400
+        ],
+        [
+          90,
+          400
+        ]
+      ],
+      "z_interval_cm": [
+        -20,
+        250
+      ]
+    },
+    {
+      "volume_id": "flight",
+      "polygon_xy_cm": [
+        [
+          120,
+          140
+        ],
+        [
+          380,
+          140
+        ],
+        [
+          380,
+          360
+        ],
+        [
+          120,
+          360
+        ]
+      ],
+      "z_interval_cm": [
+        0,
+        250
+      ]
+    },
+    {
+      "volume_id": "observation",
+      "polygon_xy_cm": [
+        [
+          190,
+          160
+        ],
+        [
+          310,
+          160
+        ],
+        [
+          310,
+          220
+        ],
+        [
+          190,
+          220
+        ]
+      ],
+      "z_interval_cm": [
+        0,
+        140
+      ]
+    }
+  ],
+  "forbidden_volumes": [],
+  "corridors": [
+    {
+      "volume_id": "home-corridor",
+      "polygon_xy_cm": [
+        [
+          90,
+          109
+        ],
+        [
+          410,
+          109
+        ],
+        [
+          410,
+          400
+        ],
+        [
+          90,
+          400
+        ]
+      ],
+      "z_interval_cm": [
+        -20,
+        250
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "route_id": "home-route",
+      "checkpoints": [
+        {
+          "x_cm": 250,
+          "y_cm": 190,
+          "z_cm": 80
+        }
+      ],
+      "corridor_volume_ids": [
+        "home-corridor"
+      ]
+    }
+  ],
+  "home": {
+    "pad_id": "canningst-start",
+    "nominal_pose": {
+      "x_cm": 250,
+      "y_cm": 190,
+      "z_cm": 0
+    },
+    "heading_deg": 90,
+    "route_id": "home-route"
+  },
+  "terminal_contingencies": [
+    {
+      "contingency_id": "canningst-land-in-place-navigation",
+      "trigger": "NAVIGATION_UNAVAILABLE",
+      "kind": "LAND_IN_PLACE",
+      "landing_polygon_xy_cm": [
+        [
+          90,
+          109
+        ],
+        [
+          410,
+          109
+        ],
+        [
+          410,
+          400
+        ],
+        [
+          90,
+          400
+        ]
+      ],
+      "z_band_cm": [
+        0,
+        250
+      ],
+      "required_pose_state": "COASTING",
+      "clearance_source": "operator-checked-clear-cube",
+      "assurance_policy_id": "operator-clear-floor-check",
+      "max_assurance_age_ms": 1800000
+    },
+    {
+      "contingency_id": "canningst-land-in-place-energy",
+      "trigger": "RETURN_ENERGY_UNAVAILABLE",
+      "kind": "LAND_IN_PLACE",
+      "landing_polygon_xy_cm": [
+        [
+          90,
+          109
+        ],
+        [
+          410,
+          109
+        ],
+        [
+          410,
+          400
+        ],
+        [
+          90,
+          400
+        ]
+      ],
+      "z_band_cm": [
+        0,
+        250
+      ],
+      "required_pose_state": "COASTING",
+      "clearance_source": "operator-checked-clear-cube",
+      "assurance_policy_id": "operator-clear-floor-check",
+      "max_assurance_age_ms": 1800000
+    }
+  ],
+  "clearance_provenance": "CanningSt operator-measured free space 2026-09-24; docs/wp5-flight1-site.json and docs/wp5-flight3-map.json bindings",
+  "semantic_frame": {
+    "envelope_volume_id": "observation",
+    "left_to_right_axis_xy": [
+      1.0,
+      0.0
+    ],
+    "rear_to_front_axis_xy": [
+      0.0,
+      1.0
+    ],
+    "target_side": "FRONT",
+    "landmarks": []
+  },
+  "coverage_cells": [
+    {
+      "cell_id": "floor-x130-y310",
+      "polygon_xy_cm": [
+        [
+          130,
+          310
+        ],
+        [
+          170,
+          310
+        ],
+        [
+          170,
+          350
+        ],
+        [
+          130,
+          350
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    },
+    {
+      "cell_id": "floor-x170-y310",
+      "polygon_xy_cm": [
+        [
+          170,
+          310
+        ],
+        [
+          210,
+          310
+        ],
+        [
+          210,
+          350
+        ],
+        [
+          170,
+          350
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    },
+    {
+      "cell_id": "floor-x290-y310",
+      "polygon_xy_cm": [
+        [
+          290,
+          310
+        ],
+        [
+          330,
+          310
+        ],
+        [
+          330,
+          350
+        ],
+        [
+          290,
+          350
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    },
+    {
+      "cell_id": "floor-x330-y310",
+      "polygon_xy_cm": [
+        [
+          330,
+          310
+        ],
+        [
+          370,
+          310
+        ],
+        [
+          370,
+          350
+        ],
+        [
+          330,
+          350
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    },
+    {
+      "cell_id": "floor-x130-y350",
+      "polygon_xy_cm": [
+        [
+          130,
+          350
+        ],
+        [
+          170,
+          350
+        ],
+        [
+          170,
+          390
+        ],
+        [
+          130,
+          390
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    },
+    {
+      "cell_id": "floor-x170-y350",
+      "polygon_xy_cm": [
+        [
+          170,
+          350
+        ],
+        [
+          210,
+          350
+        ],
+        [
+          210,
+          390
+        ],
+        [
+          170,
+          390
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    },
+    {
+      "cell_id": "floor-x210-y350",
+      "polygon_xy_cm": [
+        [
+          210,
+          350
+        ],
+        [
+          250,
+          350
+        ],
+        [
+          250,
+          390
+        ],
+        [
+          210,
+          390
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    },
+    {
+      "cell_id": "floor-x250-y350",
+      "polygon_xy_cm": [
+        [
+          250,
+          350
+        ],
+        [
+          290,
+          350
+        ],
+        [
+          290,
+          390
+        ],
+        [
+          250,
+          390
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    },
+    {
+      "cell_id": "floor-x290-y350",
+      "polygon_xy_cm": [
+        [
+          290,
+          350
+        ],
+        [
+          330,
+          350
+        ],
+        [
+          330,
+          390
+        ],
+        [
+          290,
+          390
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    },
+    {
+      "cell_id": "floor-x330-y350",
+      "polygon_xy_cm": [
+        [
+          330,
+          350
+        ],
+        [
+          370,
+          350
+        ],
+        [
+          370,
+          390
+        ],
+        [
+          330,
+          390
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    },
+    {
+      "cell_id": "floor-x90-y160",
+      "polygon_xy_cm": [
+        [
+          90,
+          160
+        ],
+        [
+          130,
+          160
+        ],
+        [
+          130,
+          200
+        ],
+        [
+          90,
+          200
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    },
+    {
+      "cell_id": "floor-x210-y110",
+      "polygon_xy_cm": [
+        [
+          210,
+          110
+        ],
+        [
+          250,
+          110
+        ],
+        [
+          250,
+          150
+        ],
+        [
+          210,
+          150
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    },
+    {
+      "cell_id": "floor-x370-y160",
+      "polygon_xy_cm": [
+        [
+          370,
+          160
+        ],
+        [
+          410,
+          160
+        ],
+        [
+          410,
+          200
+        ],
+        [
+          370,
+          200
+        ]
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    }
+  ],
+  "pose_visibility": [
+    [
+      "center-front-middle-toward_targets",
+      [
+        "floor-x130-y350",
+        "floor-x330-y350"
+      ]
+    ],
+    [
+      "center-rear-middle-toward_targets",
+      [
+        "floor-x130-y310",
+        "floor-x330-y310",
+        "floor-x130-y350",
+        "floor-x170-y350",
+        "floor-x210-y350",
+        "floor-x250-y350",
+        "floor-x290-y350",
+        "floor-x330-y350"
+      ]
+    ],
+    [
+      "left-front-middle-toward_targets",
+      [
+        "floor-x290-y350",
+        "floor-x330-y350"
+      ]
+    ],
+    [
+      "left-rear-middle-toward_targets",
+      [
+        "floor-x290-y310",
+        "floor-x330-y310",
+        "floor-x130-y350",
+        "floor-x170-y350",
+        "floor-x210-y350",
+        "floor-x250-y350",
+        "floor-x290-y350"
+      ]
+    ],
+    [
+      "right-front-middle-toward_targets",
+      [
+        "floor-x130-y350",
+        "floor-x170-y350"
+      ]
+    ],
+    [
+      "right-rear-middle-toward_targets",
+      [
+        "floor-x130-y310",
+        "floor-x170-y310",
+        "floor-x170-y350",
+        "floor-x210-y350",
+        "floor-x250-y350",
+        "floor-x290-y350",
+        "floor-x330-y350"
+      ]
+    ],
+    [
+      "center-middle-middle-left",
+      [
+        "floor-x90-y160"
+      ]
+    ],
+    [
+      "center-middle-middle-backward",
+      [
+        "floor-x210-y110"
+      ]
+    ],
+    [
+      "center-middle-middle-right",
+      [
+        "floor-x370-y160"
+      ]
+    ]
+  ],
+  "pose_tag_visibility": [
+    [
+      "center-rear-middle-toward_targets",
+      [
+        0,
+        2
+      ]
+    ],
+    [
+      "center-front-middle-toward_targets",
+      [
+        0,
+        2
+      ]
+    ],
+    [
+      "left-rear-middle-toward_targets",
+      [
+        0,
+        2
+      ]
+    ],
+    [
+      "left-front-middle-toward_targets",
+      [
+        0,
+        2
+      ]
+    ],
+    [
+      "right-rear-middle-toward_targets",
+      [
+        0,
+        2
+      ]
+    ],
+    [
+      "right-front-middle-toward_targets",
+      [
+        0,
+        2
+      ]
+    ]
+  ],
+  "support_planes": [
+    {
+      "plane_id": "FLOOR",
+      "z_cm": 0,
+      "classes": []
+    },
+    {
+      "plane_id": "ground",
+      "z_cm": -35,
+      "classes": [
+        "computer",
+        "phone",
+        "mug"
+      ]
+    }
+  ]
+}
