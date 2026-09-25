@@ -46,6 +46,23 @@ def move_reply_upper_bound_s(*, distance_cm: int | float, speed_cm_s: int | floa
     return math.ceil(max(base_timeout_s, distance_cm / (0.5 * speed_cm_s) + MOTION_REPLY_SLACK_S))
 
 
+#: A climb or descent gets at least this long before a missing reply is lost.
+#: This unit's vertical channel is slow and its height sensor unreliable
+#: (its identity string reports height=0cm): live 2026-09-25, ``up 30`` failed
+#: outright at 11:33 and ``up 40`` outlived its ~10 s bound at 14:10 while the
+#: aircraft was otherwise healthy, and each cost the whole flight.
+VERTICAL_MOVE_MIN_BOUND_S = 15.0
+
+
+def vertical_move_reply_upper_bound_s(*, distance_cm: int | float, speed_cm_s: int | float,
+                                      base_timeout_s: int | float) -> int:
+    """Bound one climb or descent; never below ``VERTICAL_MOVE_MIN_BOUND_S``."""
+
+    return max(math.ceil(VERTICAL_MOVE_MIN_BOUND_S),
+               move_reply_upper_bound_s(distance_cm=distance_cm, speed_cm_s=speed_cm_s,
+                                        base_timeout_s=base_timeout_s))
+
+
 def rotate_reply_upper_bound_s(*, degrees: int | float, base_timeout_s: int | float) -> int:
     """Bound one yaw command using the calibrated slow rotation rate."""
 

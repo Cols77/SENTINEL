@@ -43,6 +43,26 @@ def test_checkpoint_plans_canonical_axis_moves_and_bounds():
     assert dict(next(command for command in plan.commands if command.kind == "LOCALISE").arguments)["settle_s"] == 1.5
 
 
+def test_a_vertical_move_is_bounded_by_the_slow_climb_floor_and_horizontal_moves_are_not():
+    # Live 2026-09-25 14:10: ``up 40`` at speed 20 (bound 10 s) exceeded its
+    # deadline mid-climb and the flight landed for it; this unit's vertical
+    # channel is slow and its height sensor unreliable.
+    plan = plan_checkpoint(
+        checkpoint_id="WP-Z",
+        start=Position(0, 0, 30),
+        target=Position(60, 0, 70),
+        start_heading_deg=90,
+        terminal_heading_deg=90,
+        speed_cm_s=20,
+        looks_deg=(0,),
+        capture_count=1,
+        limits=CommandLimits(),
+    )
+    moves = {dict(c.arguments)["axis"]: c for c in plan.commands if c.kind == "MOVE"}
+    assert moves["z"].upper_bound_s == 15
+    assert moves["x"].upper_bound_s == 12  # 60/(0.5*20) + 6, unchanged by the floor
+
+
 def test_legacy_checkpoint_policy_keeps_localisation_before_observation_groups():
     plan = plan_checkpoint(
         checkpoint_id="legacy", start=Position(0, 0, 100), target=Position(0, 20, 100),

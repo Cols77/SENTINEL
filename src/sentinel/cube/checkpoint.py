@@ -15,6 +15,7 @@ from sentinel.motion_bounds import (
     move_reply_upper_bound_s,
     rotate_reply_upper_bound_s,
     set_speed_upper_bound_s,
+    vertical_move_reply_upper_bound_s,
 )
 
 
@@ -197,8 +198,9 @@ def plan_checkpoint(*, checkpoint_id: str, start: Position, target: Position,
         if abs(delta) <= limits.dead_band_cm:
             continue
         distance = max(limits.min_move_cm, round(abs(delta)))
+        bound = vertical_move_reply_upper_bound_s if axis == "z" else move_reply_upper_bound_s
         moves.append(_command(
-            "MOVE", move_reply_upper_bound_s(
+            "MOVE", bound(
                 distance_cm=distance, speed_cm_s=speed_cm_s,
                 base_timeout_s=limits.transport_limits.reply_timeout_s,
             ), False, axis=axis,
