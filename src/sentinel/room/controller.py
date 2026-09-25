@@ -251,7 +251,9 @@ def stable_reask_gate(assessment, previous, candidates, min_margin: float):
     stable-but-refused so the caller stops re-asking."""
     if assessment.outcome not in ("LOW_CONFIDENCE", "THIN_MARGIN") or previous is None:
         return assessment, None
-    if assessment.selected_label != previous.selected_label:
+    # A label named in a malformed first reply was never a refused choice.
+    if (previous.outcome not in ("LOW_CONFIDENCE", "THIN_MARGIN")
+            or assessment.selected_label != previous.selected_label):
         return assessment, None
     chosen = candidates.get(assessment.selected_label)
     if chosen is None or chosen.kind in _STOP_KINDS:
@@ -261,6 +263,11 @@ def stable_reask_gate(assessment, previous, candidates, min_margin: float):
     note = {"rule": "STABLE_REASK", "jev_label": assessment.selected_label,
             "jev_confidence": assessment.confidence, "masses": masses, "min_margin": min_margin}
     if own - masses["stop"] < min_margin:
+        return assessment, {**note, "rule": "STABLE_REFUSED"}
+    # Exploring is preferred to finishing: a repeated ANSWER (with the
+    # harmless reads) must also lead the mass Jev left on observing.
+    if (chosen.kind == CandidateKind.ANSWER
+            and own + masses["reads"] - (masses["explore"] - masses["reads"]) < min_margin):
         return assessment, {**note, "rule": "STABLE_REFUSED"}
     return replace(assessment, final_label=assessment.selected_label, outcome="ACCEPTED",
                    confidence=own, confidence_source="STABLE_REASK"), note
