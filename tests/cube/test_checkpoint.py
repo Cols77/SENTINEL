@@ -173,6 +173,17 @@ def test_command_limits_rejects_non_exact_trim_speeds(speed_cm_s):
         CommandLimits(trim_speed_cm_s=speed_cm_s)
 
 
+@pytest.mark.parametrize("speed_cm_s", [True, 40.0, 0, -20])
+def test_command_limits_rejects_a_non_exact_translation_speed(speed_cm_s):
+    with pytest.raises(ValueError, match="translation_speed_cm_s must be a positive integer"):
+        CommandLimits(translation_speed_cm_s=speed_cm_s)
+
+
+def test_command_limits_translation_speed_defaults_to_the_profile_speed():
+    assert CommandLimits().translation_speed_cm_s is None
+    assert CommandLimits(translation_speed_cm_s=40).translation_speed_cm_s == 40
+
+
 def test_checkpoint_enforces_dead_band_settle_speed_and_canonical_terminal_heading():
     slow = plan_checkpoint(
         checkpoint_id="slow", start=Position(0, 0, 100), target=Position(10, 11, 100),

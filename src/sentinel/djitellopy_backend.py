@@ -398,6 +398,15 @@ class DjitellopyClient:
     def battery(self) -> int:
         return int(self._telemetry(("get_battery",), "bat"))
 
+    def battery_query(self) -> int:
+        """An explicit ``battery?`` read, unlike ``battery``'s passive state field.
+
+        The Tello lands itself after ~15 s without receiving any command
+        (live 2026-09-25 17:40: 41 s of VLM verification and decision hover
+        sent nothing, and the next rotate got ``error Motor stop``). A caller
+        polling this at checkpoint cadence keeps the aircraft airborne."""
+        return int(self._telemetry(("query_battery", "get_battery"), "bat"))
+
     def height_cm(self) -> int:
         # SDK 1.3 defines height? as a 0-3000 cm read command.  The
         # asynchronous state field h can transiently report -10 while the

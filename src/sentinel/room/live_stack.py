@@ -80,6 +80,13 @@ HEIGHT_READ_SLACK_S = 1.0
 #: (BURST_MAX_S) that measure_home and LOCALISE use, where thoroughness matters
 #: more than latency.
 REFRESH_BURST_S = 1.5
+#: A refresh whose tracker is ANCHORED on a fix younger than this, with no
+#: dead-reckoned motion since it, skips the tag burst: the burst could not
+#: improve the estimate, and live 2026-09-25 timing showed it cost ~1.5-2 s
+#: at every checkpoint's admission, dispatch re-admission and completion.
+#: Bounded so a long hover still takes a real burst (camera/fix ages keep
+#: feeding the supervisor's forecasts); the battery keepalive always runs.
+REFRESH_FRESH_FIX_S = 2.5
 #: The airborne home is wherever the tags place the aircraft after takeoff,
 #: not the declared pad mark: the flight envelope (validated on the home)
 #: bounds it. The first live run measured home 43 cm from the mark.
@@ -332,6 +339,36 @@ def default_jev(*, environ: Mapping[str, str] | None = None) -> IdentifiedJudge:
     judge = JevJudge(api_key_env=PROVIDER_KEY_ENV, base_url=JEV_BASE_URL, timeout_s=JEV_TIMEOUT_S,
                      model=JEV_PROPOSER_MODEL)
     return IdentifiedJudge(judge, f"jev:{judge._model}")
+
+
+#: A per-decision latency at or past this is worth a warning before takeoff:
+#: live 2026-09-25, room choices ran 3.5-5 s all day and 8-9 s from 17:35 --
+#: against JEV_TIMEOUT_S = 9.0 -- with no code change (provider-side).
+JEV_LATENCY_WARN_S = 6.0
+
+
+def jev_latency_probe(judge, *, clock: Callable[[], float] = time.monotonic) -> tuple[float | None, str | None]:
+    """Time one minimal Jev decision (a paid call) so the operator sees the
+    provider's current per-decision latency before anything flies.
+
+    Returns ``(latency_s, warning)``. Informational only: a slow or failed
+    probe warns and never raises -- takeoff gating stays with the operator.
+    The caller decides whether the judge is real; a scripted or fixture
+    judge must never receive this extra call.
+    """
+    started = clock()
+    try:
+        judge.choice(
+            {"probe": "jev-latency"},
+            "Select READY. This is a pre-flight latency probe; there is nothing to assess.",
+            criteria={"READY": "The decisions endpoint answered this probe."}, name="latency_probe")
+    except Exception as exc:  # a dead provider is the finding, never a crash here
+        return None, f"jev latency probe failed: {type(exc).__name__} (decisions may be unavailable)"
+    latency_s = clock() - started
+    if latency_s >= JEV_LATENCY_WARN_S:
+        return latency_s, (f"jev answered in {latency_s:.1f} s (warn at {JEV_LATENCY_WARN_S:.0f} s, "
+                           f"timeout at {JEV_TIMEOUT_S:.0f} s): decisions may crawl or time out this session")
+    return latency_s, None
 
 
 def default_detector(*, environ: Mapping[str, str] | None = None):
@@ -650,6 +687,20 @@ class _TelloStack:
         recorded as an intentional look, so it never counts as an estimator
         failure.
         """
+        # A fresh, unmoved ANCHORED fix cannot be improved by another burst
+        # (an accepted fix zeroes translation/yaw; any dead-reckoned command
+        # or a tagless burst breaks this gate), so only the battery keepalive
+        # below runs. Never skipped for RECOVERY_REQUIRED/COASTING/LOST.
+        health = self.tracker.health
+        if (health.state is LocalizationState.ANCHORED
+                and health.fix_age_s < REFRESH_FRESH_FIX_S
+                and health.translation_cm == 0 and health.yaw_deg == 0
+                # The takeoff climb is motion the tracker never saw: a pad
+                # anchor right after takeoff is fresh and "unmoved" yet a
+                # metre below the aircraft, so it never satisfies this gate.
+                and (self._climb_applied or getattr(self.executor, "home", None) is None)):
+            query = getattr(self.client, "battery_query", None)
+            return health, EnergySample(self._battery(query), self.clock())
         # Non-blocking: while a recovery burst holds the video reader, the
         # watchdog's refresh must neither starve it nor count the skipped
         # burst as an estimator failure; the tracker keeps propagating.
@@ -688,17 +739,25 @@ class _TelloStack:
                 # the tracker coasts (it does not demand recovery).
                 self.tracker.note_camera(self.clock(), estimator_failed=False,
                                          intentional_look_away=self._looking_away)
-        return self.tracker.health, EnergySample(self._battery(), self.clock())
+        # The refresh is the keepalive: an explicit ``battery?`` here feeds
+        # the Tello's ~15 s no-command landing timer through long VLM and
+        # decision waits that otherwise send nothing (live 17:40: hover ended
+        # with "error Motor stop"). Only here -- the deadline-bound telemetry
+        # read must stay passive (live 18:09: an active read took 1.01 s and
+        # blew READ_TELEMETRY's 1.0 s admission bound, aborting the flight).
+        query = getattr(self.client, "battery_query", None)
+        return self.tracker.health, EnergySample(self._battery(query), self.clock())
 
-    def _battery(self) -> int:
+    def _battery(self, read=None) -> int:
         """The Tello's battery reading, never a reason to abort a flight.
 
         The reading is unstable (it drops, jumps back and sometimes fails);
         a failed or out-of-range read reuses the last good value (0 before
-        any). Battery is displayed and recorded, not gated on.
+        any). Battery is displayed and recorded, not gated on. ``read``
+        overrides the passive state-stream read.
         """
         try:
-            value = self.runner._call(self.client.battery)
+            value = self.runner._call(read or self.client.battery)
         except Exception:
             value = None
         if type(value) is int and 0 <= value <= 100:

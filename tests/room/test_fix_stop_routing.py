@@ -397,14 +397,17 @@ def test_a_second_heading_miss_is_a_tool_failure_with_the_arrival_miss(tmp_path)
 
 @pytest.mark.parametrize("heading", [90.0, 102.0])
 def test_a_position_miss_is_an_immediate_tool_failure(tmp_path, heading):
+    # 70 cm: past even the demo's operator-declared 60 cm credit gate
+    # (live 2026-09-26: 31 cm misses under the old 30 cm gate cost three
+    # flown sweeps their credit, so the gate was widened for the demo).
     sup = ScriptedSupervisor(canningst_site(), admit=lambda plan, sup: ("CONTINUE", "ADMITTED"),
-                             after_dispatch=_arrives(heading_after_last_look=lambda n: heading, off_cm=50.0))
+                             after_dispatch=_arrives(heading_after_last_look=lambda n: heading, off_cm=70.0))
     controller, store, captured = _rig(tmp_path, sup)
 
     outcome = _observe(controller, store, CENTER_FRONT)
 
     assert outcome["code"] == "TOOL_FAILURE"
-    assert outcome["detail"].startswith("the drone arrived 50 cm")
+    assert outcome["detail"].startswith("the drone arrived 70 cm")
     assert sup.alignments == [] and len(_looks(sup, CENTER_FRONT)) == 3 and captured == []
 
 

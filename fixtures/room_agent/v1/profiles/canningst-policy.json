@@ -8,7 +8,7 @@
   "battery_quantization_allowance_percent": 1.0,
   "battery_percentile": 90,
   "min_battery_window_s": 30,
-  "landing_floor_percent": 20,
+  "landing_floor_percent": 22,
   "telemetry_allowance_pct": 1,
   "sample_max_age_s": 5.0,
   "height_error_margin_cm": 10,
@@ -24,7 +24,9 @@
     }
   },
   "declared_notes": {
-    "xy_drift_cm_s": "Task B2 fix 1, operator judgment (not a measurement; the 0.1 it replaces was not one either): hover drift 0.05 cm/s. The history cannot measure it (the stop bursts last about 2 s, noise-dominated), and the robust per-leg statistic above already bounds every nominal leg's open-loop error, including the hover time inside that leg, without any hover term. The tracker charges this rate again over every command's worst-case bound (SET_SPEED 21 s, vertical telemetry 7 s, ...). At 0.1 cm/s no lateral CanningSt observation is admissible at the history drift; at 0.05 cm/s the left/right observations at x 226/274 are."
+    "xy_drift_cm_s": "Task B2 fix 1, operator judgment (not a measurement; the 0.1 it replaces was not one either): hover drift 0.05 cm/s. The history cannot measure it (the stop bursts last about 2 s, noise-dominated), and the robust per-leg statistic above already bounds every nominal leg's open-loop error, including the hover time inside that leg, without any hover term. The tracker charges this rate again over every command's worst-case bound (SET_SPEED 21 s, vertical telemetry 7 s, ...). At 0.1 cm/s no lateral CanningSt observation is admissible at the history drift; at 0.05 cm/s the left/right observations at x 226/274 are.",
+    "landing_floor_percent": "Operator decision 2026-09-26 (was 20): a mandatory supervisor return or landing once the projected landing battery would cross 22 %. Live l3-20260926-111405 and l3-20260926-114306 flew with the predictive guard disabled and drained to 9 % and 14 %, the first ending on a motor-stop error mid-turn; the excluded 2026-09-23 run above also collapsed nonlinearly below 30 % and auto-landed at 10 %. Not a measurement: a declared reserve above the reading's collapse.",
+    "translation_speed_cm_s": "Operator decision 2026-09-26 (was the slowest validated speed, 20 cm/s): checkpoint translations fly at 40 cm/s. The history flew 20 and 50 cm/s (speeds_cm_s), and 40 is the fastest leg the cube mission flies with the historical 30 cm inset (INSET_FREE_SPEED_CM_S); above it the post-land travel grows to 35 cm at 50 cm/s, which the room supervisor's landing checks do not model. Each MOVE's reply bound, and so the energy and drift forecasts, derive from it (distance / (0.5 x speed) + 6 s)."
   },
   "drift_limits": {
     "max_camera_age_s": 240,
@@ -51,5 +53,5 @@
     "recovery_action_upper_bound_s": 15,
     "canonical_heading_tolerance_deg": 10
   },
-  "command_limits": {"trim_rounds": 0, "localise": false}
+  "command_limits": {"trim_rounds": 0, "localise": false, "translation_speed_cm_s": 40}
 }

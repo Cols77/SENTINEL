@@ -1,4 +1,5 @@
 {
   "localise": false,
+  "translation_speed_cm_s": 40,
   "trim_rounds": 0
 }

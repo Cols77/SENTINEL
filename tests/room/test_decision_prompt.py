@@ -58,7 +58,53 @@ def test_instruction_reports_no_declared_coverage_and_no_localization():
     assert "What is the battery?" in instruction
     assert "Coverage cells: none declared" in instruction
     assert "Localization: unavailable" in instruction
+    assert "Battery: unavailable" in instruction
     assert "Admissible OBSERVE candidate IDs: none" in instruction
+
+
+def test_instruction_carries_the_battery_and_the_safe_landing_floor():
+    # With the reactive floor (2026-09-26), "answer now with what we have"
+    # versus "take one more look" is a judgment that depends on remaining
+    # charge -- Jev must see it.
+    snapshot = SimpleNamespace(request_text="count the mugs", ledger=None)
+    coverage = CoverageProjection((), False, (), ())
+    energy = {"battery_percent": 47, "landing_floor_pct": 22, "return_ordered": False}
+
+    instruction = build_decision_instruction(snapshot, coverage, None, (), energy=energy)
+
+    assert "Battery: 47%" in instruction
+    assert "safe-landing floor: 22%" in instruction
+
+
+def test_attempt_history_keeps_the_latest_outcome_per_pose_not_the_last_n_overall():
+    # Live 2026-09-26 (l3-20260926-111405): eight attempts at one zone
+    # would have scrolled every other pose's outcome off a last-N list,
+    # leaving "prefer a pose already reached ... (listed as succeeded
+    # above)" pointing at nothing. One entry per pose, latest outcome wins.
+    succeeded = SimpleNamespace(candidate_id="OBSERVE:g1:c1:poseA", kind=CandidateKind.OBSERVE.value,
+                                refusal_code=None, code="OBSERVE_SUCCEEDED", detail=None)
+    failed_then_failed_again = [
+        SimpleNamespace(candidate_id="OBSERVE:g1:c1:poseB", kind=CandidateKind.OBSERVE.value,
+                        refusal_code="TOOL_FAILURE", code="TOOL_FAILURE", detail="first miss"),
+        SimpleNamespace(candidate_id="OBSERVE:g1:c1:poseB", kind=CandidateKind.OBSERVE.value,
+                        refusal_code="TOOL_FAILURE", code="TOOL_FAILURE", detail="second miss"),
+    ]
+    filler = [SimpleNamespace(candidate_id="OBSERVE:g1:c1:poseB", kind=CandidateKind.OBSERVE.value,
+                              refusal_code="OBSERVE_PREEMPTED", code="OBSERVE_PREEMPTED", detail=f"cut {i}")
+              for i in range(8)]
+    snapshot = SimpleNamespace(request_text="count the mugs", ledger=None,
+                               outcomes=(succeeded, *failed_then_failed_again, *filler))
+    coverage = CoverageProjection((), False, (), ())
+
+    instruction = build_decision_instruction(snapshot, coverage, None, ())
+
+    attempts_line = next(line for line in instruction.splitlines()
+                         if line.startswith("Recent observation attempts"))
+    # poseA's success survives any number of later attempts elsewhere.
+    assert "poseA: succeeded" in attempts_line
+    # poseB appears once, with its latest outcome only.
+    assert attempts_line.count("poseB") == 1
+    assert "cut 7" in attempts_line and "first miss" not in attempts_line
 
 
 def test_controller_sends_mission_coverage_in_actual_jev_instruction(safety):

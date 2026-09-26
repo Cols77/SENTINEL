@@ -131,10 +131,18 @@ class CommandLimits:
     trim_distance_cm: int = 80
     trim_speed_cm_s: int = 20
     trim_yaw_limit_deg: int = 180
+    #: A site's declared translation speed. ``None`` keeps the room wiring's
+    #: default, the slowest speed the calibration profile validated; live
+    #: 2026-09-26 that was 20 cm/s and every leg was slow, so the CanningSt
+    #: limits declare 40 (checked against the validated range when wired).
+    translation_speed_cm_s: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.trim_speed_cm_s) is not int or self.trim_speed_cm_s <= 0:
             raise ValueError("trim_speed_cm_s must be a positive integer")
+        if self.translation_speed_cm_s is not None and (
+                type(self.translation_speed_cm_s) is not int or self.translation_speed_cm_s <= 0):
+            raise ValueError("translation_speed_cm_s must be a positive integer")
 
 
 def _arguments(**values: ArgumentValue) -> tuple[tuple[str, ArgumentValue], ...]:

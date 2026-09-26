@@ -498,6 +498,10 @@ def _prepare(*, store, manifest, site, drift_profile, energy_profile, limits, ca
                      "resolve_transit_checkpoint": resolve_transit_checkpoint,
                      "perception_capture": perception_capture,
                      "perception_provider": perception_provider,
+                     # The capture-records collaborator is per-leg safe (it
+                     # reads saved frames, never the stream), so each look's
+                     # detector call starts while the sweep still flies.
+                     "perception_prefetch": perception_capture,
                      # Task B item 3: the calibrated Tello camera and the
                      # site's declared support planes place detections.
                      "count_geometry": wiring.make_count_geometry(site)}

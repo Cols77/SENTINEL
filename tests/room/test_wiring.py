@@ -93,6 +93,49 @@ def test_resolve_checkpoint_uses_the_slowest_validated_calibration_speed():
     assert speeds == {20}
 
 
+def test_resolve_checkpoint_flies_the_limits_translation_speed_inside_the_validated_range():
+    # Live 2026-09-26: the slowest validated speed (20 cm/s) made every leg
+    # slow; the site's command limits may declare a faster one, but only
+    # one the calibration profile's flown speeds bracket.
+    from sentinel.motion_bounds import move_reply_upper_bound_s
+    site = room_site(coverage=True)
+    pose = SimpleNamespace(position=Position(0, 0, 100), heading_deg=90.0)
+    limits = _limits(translation_speed_cm_s=40)
+    plan = wiring.make_resolve_checkpoint(
+        site=site, profile=_profile(speeds=(20, 50)), pose_source=lambda: pose, limits=limits,
+    )(_candidate(), snapshot=None)
+    assert [dict(c.arguments)["speed_cm_s"] for c in plan.commands if c.kind == "SET_SPEED"] == [40]
+    moves = [c for c in plan.commands if c.kind == "MOVE" and dict(c.arguments)["axis"] != "z"]
+    assert moves
+    for move in moves:
+        assert move.upper_bound_s == move_reply_upper_bound_s(
+            distance_cm=dict(move.arguments)["distance_cm"], speed_cm_s=40,
+            base_timeout_s=limits.transport_limits.reply_timeout_s)
+    settles = {dict(c.arguments).get("after"): c.upper_bound_s for c in plan.commands if c.kind == "SETTLE"}
+    assert settles["move"] == limits.fast_settle_s  # 40 cm/s is above the fast-settle threshold
+
+
+@pytest.mark.parametrize("speed", [10, 60])
+def test_resolve_checkpoint_refuses_eagerly_a_translation_speed_outside_the_validated_range(speed):
+    site = room_site(coverage=True)
+    with pytest.raises(wiring.WiringError, match="translation_speed_cm_s"):
+        wiring.make_resolve_checkpoint(
+            site=site, profile=_profile(speeds=(20, 50)), pose_source=lambda: None,
+            limits=_limits(translation_speed_cm_s=speed),
+        )
+
+
+def test_resolve_checkpoint_refuses_a_translation_speed_above_the_inset_free_leg_speed():
+    # 50 is validated, but legs above 40 cm/s carry farther after a land
+    # than the room supervisor's landing checks model.
+    site = room_site(coverage=True)
+    with pytest.raises(wiring.WiringError, match="translation_speed_cm_s"):
+        wiring.make_resolve_checkpoint(
+            site=site, profile=_profile(speeds=(20, 50)), pose_source=lambda: None,
+            limits=_limits(translation_speed_cm_s=50),
+        )
+
+
 def test_resolve_checkpoint_reads_a_fresh_pose_on_every_call():
     site = room_site(coverage=True)
     poses = [SimpleNamespace(position=Position(0, 0, 100), heading_deg=90.0),

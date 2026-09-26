@@ -88,6 +88,35 @@ def _retarget_terminal_heading(plan: CheckpointPlan, target_heading_deg: float, 
     )
 
 
+def _translation_speed(profile: calibration.CalibrationProfile, limits: CommandLimits) -> int:
+    """The one speed every checkpoint translation is commanded at.
+
+    Without a declared ``limits.translation_speed_cm_s`` it is the slowest
+    speed the calibration profile validated. Live 2026-09-26 that was
+    20 cm/s and the legs dominated each zone, so the site's command limits
+    may declare a faster one -- only inside the range the profile's history
+    actually flew, and never above ``INSET_FREE_SPEED_CM_S`` (40): faster
+    legs carry farther after a ``land`` (``post_land_travel_cm``: about
+    27 cm at 40, 35 at 50) and this supervisor's landing checks do not
+    model that travel. The grant binds the declared speed through
+    ``calibration_hashes``; each MOVE's reply bound, and so the energy and
+    drift forecasts priced on the plan's worst case, derive from it.
+    """
+    from sentinel.cube.mission import INSET_FREE_SPEED_CM_S
+
+    declared = limits.translation_speed_cm_s
+    if declared is None:
+        return min(profile.speeds_cm_s)
+    low, high = min(profile.speeds_cm_s), max(profile.speeds_cm_s)
+    if not low <= declared <= high:
+        raise WiringError(f"translation_speed_cm_s {declared} is outside the calibration profile's "
+                          f"validated speeds {low}-{high} cm/s")
+    if declared > INSET_FREE_SPEED_CM_S:
+        raise WiringError(f"translation_speed_cm_s {declared} is above {INSET_FREE_SPEED_CM_S} cm/s, the fastest "
+                          f"leg the landing checks hold without a wider inset")
+    return declared
+
+
 def make_resolve_checkpoint(
     *, site: RoomSite, profile: calibration.CalibrationProfile,
     pose_source: Callable[[], object], limits: CommandLimits,
@@ -99,10 +128,11 @@ def make_resolve_checkpoint(
     with ``.position``/``.heading_deg``, e.g. ``supervisor.tracker.health``)
     each time it is called -- never cached, since it must reflect the
     aircraft's actual position at resolution time, not whatever it was when
-    this factory ran. ``profile`` supplies the only site speed this wiring
-    ever commands: the slowest one the calibration profile actually
-    validated (``profile.speeds_cm_s``), never a guessed or hardcoded
-    default. ``limits`` is the SafetySupervisor's own injected
+    this factory ran. ``profile`` bounds the only site speed this wiring
+    ever commands: ``limits.translation_speed_cm_s`` when the site declares
+    one inside the calibration profile's validated speeds, else the slowest
+    one it validated (``profile.speeds_cm_s``; see ``_translation_speed``),
+    never a guessed or hardcoded default. ``limits`` is the SafetySupervisor's own injected
     ``CommandLimits`` (fix round 1, Q3) -- the same calibrated constants
     ``calibration_hashes`` binds the grant to and ``SafetySupervisor._path_clear``
     assesses every plan against -- used here unchanged, never a fresh
@@ -131,7 +161,7 @@ def make_resolve_checkpoint(
         raise WiringError("resolve_checkpoint requires a calibration profile with a validated speed")
     if not sweep_offsets_deg:
         raise WiringError("resolve_checkpoint requires at least one look")
-    speed_cm_s = min(profile.speeds_cm_s)
+    speed_cm_s = _translation_speed(profile, limits)
     canonical_heading_deg = limits.canonical_heading_deg
 
     def resolve_checkpoint(candidate, snapshot) -> CheckpointPlan:

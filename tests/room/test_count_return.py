@@ -385,6 +385,105 @@ def test_one_sweep_persists_three_frames_and_merges_overlapping_detections(safet
     assert projection.coverage.analysed_frames == 3
 
 
+def test_perception_prefetch_dispatches_each_look_before_the_next_leg_flies(safety, tmp_path):
+    """Live 2026-09-25: all three detector calls started only after the last
+    look, so the aircraft hovered 15-22 s per OBSERVE. With the prefetch
+    collaborator, a completed leg's frame goes to the provider while the next
+    leg still flies -- and the durable results stay authorized, because
+    correlation and ingestion use only the requests ``perception_capture``
+    builds after the sweep, never the provisional prefetch requests."""
+    from concurrent.futures import Future
+    from sentinel.room.queries import ReadQueries
+
+    supervisor, store, clock, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    executor = Executor(store, clock)
+    pose_id = POSE_A
+    resolved = resolve_pose_id(supervisor.site, pose_id)
+    executor.reported_pose = Position(resolved.x_cm, resolved.y_cm, resolved.z_cm)
+    order = []
+
+    def make_plan(checkpoint_id, *commands):
+        health = supervisor.tracker.health
+        return CheckpointPlan(checkpoint_id, health.position, executor.reported_pose,
+                              health.heading_deg, resolved.yaw_deg,
+                              commands, sum(c.upper_bound_s for c in commands))
+
+    def full_plan(candidate, snapshot):  # proves the sweep shape: all three looks
+        return make_plan("sweep", *(command(seconds=0.01, index=i, look_deg=(-30, 0, 30)[i])
+                                    for i in range(3)))
+
+    def leg_resolver(index):
+        def resolve(candidate, snapshot):
+            return make_plan(f"leg-{index}", command(seconds=0.01, index=index,
+                                                     look_deg=(-30, 0, 30)[index]))
+        return resolve
+
+    original_execute = executor.execute
+
+    def execute(plan):
+        ids = tuple(f"capture-{dict(c.arguments)['index']}" for c in plan.commands if c.kind == "CAPTURE")
+        order.append(f"dispatch:{plan.checkpoint_id}")
+        return replace(original_execute(plan), observation_ids=ids)
+
+    executor.execute = execute
+    results = {}
+    for index, heading in enumerate((resolved.yaw_deg - 30, resolved.yaw_deg, resolved.yaw_deg + 30)):
+        result = grounded_result(tmp_path, supervisor.site, pose_id, (),
+                                 captured_at=f"2026-09-23T00:00:0{index}+00:00", heading_deg=heading)
+        frame_path = tmp_path / f"leg-{index}.png"
+        frame_path.write_bytes(f"leg-frame-{index}".encode())
+        digest = hashlib.sha256(frame_path.read_bytes()).hexdigest()
+        request = replace(result.request, observation_id=f"capture-{index}", frame_id=f"frame-{index}",
+                          frame_path=str(frame_path), frame_sha256=digest, request_digest=digest)
+        results[request.observation_id] = replace(
+            result, request=request, completed_at=f"2026-09-23T00:00:0{index + 1}+00:00")
+
+    def capture(candidate, outcome, snapshot):
+        version = store.session_version(SESSION)
+        return tuple(CapturedRequest(replace(results[oid].request, snapshot_version=version),
+                                     resolved.yaw_deg) for oid in outcome.observation_ids)
+
+    def provide(request):
+        order.append(f"provide:{request.observation_id}")
+        return replace(results[request.observation_id], request=request)
+
+    class InlinePool:
+        """Runs each submit on the caller's thread: the order log is exact."""
+
+        def submit(self, fn, *args):
+            future = Future()
+            try:
+                future.set_result(fn(*args))
+            except Exception as exc:  # noqa: BLE001 - mirrors a real future
+                future.set_exception(exc)
+            return future
+
+    controller = RoomController(store, Judge(f"OBSERVE:g1:{pose_id}"), supervisor=supervisor,
+                                flight_executor=executor, resolve_checkpoint=full_plan,
+                                resolve_sweep_checkpoints=[leg_resolver(i) for i in range(3)],
+                                perception_capture=capture, perception_provider=provide,
+                                perception_prefetch=capture, prefetch_pool=InlinePool(),
+                                count_geometry=COUNT_GEOMETRY, provider_wait_s=1)
+    outcome = controller.step(SESSION)
+    assert outcome.accepted, store.events(SESSION)[-1].payload
+    # Each completed look's frame reached the provider before the next leg flew.
+    assert order.index("provide:capture-0") < order.index("dispatch:leg-1")
+    assert order.index("provide:capture-1") < order.index("dispatch:leg-2")
+    # One provider call per frame: the perception wait reuses the prefetched results.
+    assert [entry for entry in order if entry.startswith("provide:")] == [
+        "provide:capture-0", "provide:capture-1", "provide:capture-2"]
+    # The durable results still authorize state: ingestion saw the final
+    # post-sweep requests, not the provisional prefetch versions.
+    rows = store.connection.execute(
+        "SELECT authorizes_current_state FROM room_perception_results").fetchall()
+    assert [row[0] for row in rows] == [1, 1, 1]
+    replayed = ReadQueries(store).project(SESSION)
+    assert len(replayed.outcomes[-1].count_evidences) == 3
+
+
 def test_partial_sweep_cannot_be_recorded_as_a_completed_observation(safety):
     _, store, _, *_ = safety
     controller = RoomController(store, Judge("ESCALATE"))
@@ -1287,6 +1386,76 @@ def test_perception_preempted_after_checkpoint_completes_is_recorded_not_dropped
     from sentinel.room.queries import ReadQueries
     snapshot = ReadQueries(store).project(SESSION)
     assert "cell1:computer" in controller._coverage(snapshot).uncovered
+
+
+# --- 23b. a look interrupted by mandatory recovery is visible to the chooser -
+
+def test_recovery_preempted_look_is_recorded_and_the_zone_offered_again_with_a_note(safety, tmp_path):
+    """Live l3-20260926-111405: Jev re-chose the same zone 8 times, six of
+    them interrupted by localization recovery mid-sweep, because a preempted
+    look recorded no outcome at all -- the chooser saw no history. A
+    non-terminal preemption between looks now leaves a durable, retryable
+    OBSERVE_PREEMPTED outcome; no coverage is credited, and the zone is
+    offered again carrying the interruption count."""
+    from sentinel.room.queries import ReadQueries
+
+    supervisor, store, clock, samples, *_ = safety
+    supervisor.site = room_site(coverage=True)
+    supervisor.validate_bindings = lambda site: None
+    supervisor.recovery = RecoveryController(supervisor.tracker, clock=clock,
+        burst_source=lambda action: tuple(PoseReport(str(i), fix(clock, position=Position(100, 100, 100)))
+                                         for i in range(3)),
+        energy_admits=lambda action: True)
+    supervisor.mapped_heading_tag_ids = ((90, (1, 2)),)
+    set_ledger(store, SESSION, (count_objective("g1", 1, "ROOM"),))
+    rig = PerceptionRig(store, SESSION)
+    rig.set(POSE_A, make_result(tmp_path, SESSION, POSE_A))
+    candidate_id = f"OBSERVE:g1:{POSE_A}"
+    controller, executor = make_controller(safety, Judge(candidate_id), rig)
+    plan_look = controller.resolve_checkpoint
+    flipped = []
+
+    def look(index):
+        def resolve(candidate, snapshot):
+            if index == 1 and not flipped:
+                # Positioning is lost after look 1 completed, before look 2
+                # is admitted: the supervisor must recover first.
+                flipped.append(True)
+                samples["pose"] = replace(samples["pose"], state=LocalizationState.RECOVERY_REQUIRED,
+                                          estimator_failures=3)
+            return plan_look(candidate, snapshot)
+        return resolve
+
+    controller.resolve_sweep_checkpoints = [look(0), look(1)]
+
+    outcome = controller.step(SESSION)
+    assert not outcome.accepted and outcome.candidate_id == "RECOVER"
+    assert outcome.terminal_state is None
+    assert executor.calls.count("CAPTURE") == 1  # look 1 flew, look 2 never did
+    assert rig.captures == []
+
+    outcomes = [e.payload for e in store.events(SESSION) if e.event_type == "ROOM_TOOL_OUTCOME"]
+    preempted = [p for p in outcomes if p.get("code") == "OBSERVE_PREEMPTED"]
+    assert len(preempted) == 1
+    assert preempted[0]["candidate_id"] == candidate_id
+    assert preempted[0]["refusal_code"] == "OBSERVE_PREEMPTED"
+    assert preempted[0]["terminal_state"] is None
+    # The transition and the supervisor's reason for it are named (this
+    # fixture's lost pose is assessed RETURN_REQUIRES_RECOVERY).
+    assert "look 2 of 2 interrupted by RECOVER (RETURN_REQUIRES_RECOVERY)" in preempted[0]["detail"]
+    # The preempted turn still reports the outcome among its own events.
+    assert any(e.event_id in outcome.event_ids for e in store.events(SESSION)
+               if e.event_type == "ROOM_TOOL_OUTCOME" and e.payload.get("code") == "OBSERVE_PREEMPTED")
+
+    snapshot = ReadQueries(store).project(SESSION)
+    assert snapshot.terminal_state is None
+    assert "cell1:computer" in controller._coverage(snapshot).uncovered
+    # Next turn: the zone is not burned, and Jev is told why it is back.
+    samples["pose"] = supervisor.tracker.health
+    offered = [c for c in controller._legal_candidates(snapshot) if c.candidate_id == candidate_id]
+    assert offered
+    assert all("1 earlier attempt(s) at this pose were interrupted by a mandatory safety action"
+               in c.description for c in offered)
 
 
 # --- 24. a stale decision caught after admission (not only at the Jev choice)

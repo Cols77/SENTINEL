@@ -291,7 +291,11 @@ def test_with_an_absurd_drift_the_count_mission_returns_without_observing(tmp_pa
     """
     outcome, tello, events, detector = run_mission(tmp_path, monkeypatch, xy_drift_per_cm=0.45)
     assert landed_over_the_pad(outcome, tello), outcome
-    assert not succeeded_observations(events) and detector.calls == 0
+    # Perception prefetch sends a completed look's frame to the detector while
+    # the sweep still flies, so an abort mid-sweep may already have consulted
+    # it for the flown looks -- but never for a full sweep, and an aborted
+    # sweep's frames are never credited as an observation.
+    assert not succeeded_observations(events) and detector.calls < 3
     assert any(e.event_type == "SAFETY_ASSESSED" and e.payload.get("transition") != "CONTINUE"
                for e in events)
 

@@ -56,7 +56,12 @@ _MAX_RETURN_ATTEMPTS = 5
 _POSE_POSITION_TOLERANCE_CM = 5.0
 _POSE_HEADING_TOLERANCE_DEG = 5.0
 #: A real checkpoint arrival counts as reaching its declared pose within these.
-_ARRIVAL_XY_TOLERANCE_CM = 30.0
+#: Live 2026-09-26 (l3-20260926-114306): all three centre looks arrived 31 cm
+#: out under the old 30 cm gate, so their flown, captured sweeps were never
+#: credited and the second mug (visible only from those views) went uncounted.
+#: Operator-declared 60 cm for the demo -- viewpoint framing barely moves at
+#: this scale, and grounding places detections from the measured pose anyway.
+_ARRIVAL_XY_TOLERANCE_CM = 60.0
 _ARRIVAL_Z_TOLERANCE_CM = 40.0
 _ARRIVAL_HEADING_TOLERANCE_DEG = 10.0
 #: The arrival retry's corrective turn is offered up to the sweep's own look
@@ -360,6 +365,7 @@ class RoomController:
                  supervisor=None, flight_executor=None, provider_wait_s: float = 10.0,
                  resolve_checkpoint=None, resolve_sweep_checkpoints=None, resolve_transit_checkpoint=None,
                  perception_capture=None, perception_provider=None,
+                 perception_prefetch=None, prefetch_pool=None,
                  count_geometry: CountGeometry | None = None, acceptance: AcceptancePolicy | None = None):
         for value in (act_at, min_margin):
             if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
@@ -405,6 +411,17 @@ class RoomController:
         # after the align retry is ZONE_REFUSED, as before.
         self.resolve_transit_checkpoint = resolve_transit_checkpoint
         self.perception_provider = perception_provider
+        # Perception prefetch (optional): a per-leg ``perception_capture``
+        # that is safe to call on a single completed leg's outcome (the live
+        # capture-records collaborator is; the legacy read-a-frame-now path is
+        # NOT and must never be passed here). Each completed look's frame goes
+        # to the provider while the sweep still flies; the perception wait
+        # then joins the already-running calls instead of starting them.
+        if perception_prefetch is not None and perception_capture is None:
+            raise ValueError("perception_prefetch requires the observation collaborators")
+        self.perception_prefetch = perception_prefetch
+        self._prefetch_pool = prefetch_pool
+        self._prefetched = {}
         # Residual F2: the camera model and per-class support declarations
         # grounded counting places static detections with. Optional: without
         # it every static detection is persisted -- and answered -- as
@@ -704,6 +721,21 @@ class RoomController:
             "recent_positioning_events": list(getattr(self.supervisor, "positioning_log", ()))[-5:],
         }
 
+    def energy_health(self) -> dict | None:
+        """The Jev-facing battery summary for this turn, or None without a
+        supervisor: the latest validated reading, the safe-landing floor and
+        whether the supervisor has already ordered the return. Judgment
+        input only -- the reactive floor itself stays supervisor-owned."""
+        if self.supervisor is None:
+            return None
+        reserve = self.supervisor.reserve
+        sample = getattr(reserve, "conservative_sample", None)
+        return {
+            "battery_percent": sample.battery_pct if sample is not None else None,
+            "landing_floor_pct": reserve.profile.landing_floor_pct,
+            "return_ordered": bool(getattr(reserve, "return_latched", False)),
+        }
+
     def _reanchor_candidates(self, snapshot: ReadSnapshot) -> tuple[RoomCandidate, ...]:
         """A Jev-selectable bounded re-anchor, offered while COASTING (or while
         ANCHORED on a fix older than half the calibrated limit), only when a
@@ -893,6 +925,31 @@ class RoomController:
             return self.supervisor.run_wait(operation, snapshot_version=self.store.session_version(session_id),
                                            timeout_s=timeout_s, executor=self.flight_executor)
         return SupervisedWait().run(operation, time.monotonic() + timeout_s, lambda: None)
+
+    def _prefetch_leg(self, candidate, leg_result, snapshot):
+        """Start the detector on a completed look's frames while the sweep
+        still flies (live 2026-09-25: all three provider calls only started
+        after the last look, hovering 15-22 s). The requests built here are
+        provisional -- correlation and durable ingestion use only the requests
+        ``perception_capture`` builds after the sweep, so ingest's
+        snapshot-version authorization is untouched. A failure here only
+        forfeits the head start: the perception wait calls the provider
+        itself for any look without a prefetched future."""
+        if self.perception_prefetch is None:
+            return
+        try:
+            captured = self.perception_prefetch(candidate, leg_result, snapshot)
+            captures = captured if isinstance(captured, tuple) else ()
+            if captures and self._prefetch_pool is None:
+                self._prefetch_pool = ThreadPoolExecutor(
+                    max_workers=4, thread_name_prefix="room-perception-prefetch")
+            for item in captures:
+                observation_id = item.request.observation_id
+                if observation_id not in self._prefetched:
+                    self._prefetched[observation_id] = self._prefetch_pool.submit(
+                        self.perception_provider, item.request)
+        except Exception as exc:
+            print(f"Perception prefetch skipped: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
 
     def _append(self, session_id, version, correlation, entries, causation=None):
         return self.store.append_events(session_id=session_id, expected_version=version, events=tuple(
@@ -1120,11 +1177,14 @@ class RoomController:
         state = asdict(snapshot)
         if self.supervisor is not None:
             # Task B item 2c: this turn's localization health, so Jev can
-            # choose an early bounded re-anchor (never coordinates).
+            # choose an early bounded re-anchor (never coordinates), and the
+            # battery summary, so answering with partial coverage can be
+            # weighed against the charge one more look would need.
             state["localization"] = self.localization_health()
+            state["energy"] = self.energy_health()
         coverage = self._coverage(snapshot) if self.supervisor is not None else project_coverage((), ())
         instruction = build_decision_instruction(snapshot, coverage, state.get("localization"),
-                                                 tuple(candidates.values()))
+                                                 tuple(candidates.values()), energy=state.get("energy"))
         started = time.monotonic_ns()
         policy = self.acceptance
 
@@ -1491,6 +1551,35 @@ class RoomController:
         except VersionConflict:
             pass
 
+    def _record_observe_preempted(self, session_id, candidate, snapshot, correlation, detail):
+        """Live l3-20260926-111405: Jev re-chose the same zone 8 times, six
+        of them interrupted by localization recovery between looks, because
+        a look preempted by a mandatory safety transition recorded no outcome
+        at all -- the chooser saw no history for that zone. Persist a
+        durable, retryable OBSERVE outcome naming the transition, so the
+        zone is offered again with the interruption counted in its
+        description. Never after a terminal preemption: the session is over.
+
+        The payload is built without ``_outcome``'s refusal argument: a
+        repeat of the same refusal on an unchanged coverage digest escalates
+        the session as NO_PROGRESS, and a zone interrupted twice by the
+        supervisor's own recovery is not Jev failing to make progress. Coverage
+        is never credited (only OBSERVE_SUCCEEDED resolves a cell).
+        Best-effort, like ``_record_perception_preempted``."""
+        try:
+            if getattr(self.supervisor, "_terminal", False) or self.queries.project(session_id).terminal_state:
+                return
+        except Exception:
+            return
+        payload = self._outcome(snapshot, candidate.candidate_id, candidate.kind,
+                                candidate.relevant_state_sha256, "OBSERVE_PREEMPTED", detail=detail)
+        payload["refusal_code"] = "OBSERVE_PREEMPTED"
+        try:
+            self._append(session_id, self.store.session_version(session_id),
+                        correlation + ":observe-preempted", (("ROOM_TOOL_OUTCOME", payload),))
+        except VersionConflict:
+            pass
+
     def _execute_observation(self, session_id, candidate, snapshot, expected_version, correlation):
         """``_observe_zone``, with any extra flying it did to get there (a
         fix-stop transit, a retaken sweep) named in the outcome's detail, so
@@ -1527,6 +1616,7 @@ class RoomController:
         resolvers = self.resolve_sweep_checkpoints or (self.resolve_checkpoint,)
         started_at = self.supervisor.clock()
         completed_legs = []
+        self._prefetched.clear()  # any previous turn's unclaimed prefetches are stale
         # One of each retry per zone attempt: the align-to-tags turn, the
         # fix-stop transit and the arrival heading correction.
         aligned = transited = heading_retried = False
@@ -1605,6 +1695,11 @@ class RoomController:
                     return _failure("CHECKPOINT_FAILED", f"look {index + 1} failed to execute")
                 if admission.transition != "CONTINUE" or isinstance(leg_result, TerminalOutcome):
                     terminal_outcome = leg_result if isinstance(leg_result, TerminalOutcome) else None
+                    if terminal_outcome is None:
+                        self._record_observe_preempted(
+                            session_id, candidate, snapshot, correlation,
+                            f"look {index + 1} of {len(resolvers)} interrupted by {admission.transition} "
+                            f"({admission.reason})")
                     return self._preempted(session_id, admission, terminal_outcome=terminal_outcome)
                 if leg_result.status == "ZONE_REFUSED":
                     return _failure("ZONE_REFUSED", _ZONE_REFUSAL_DETAIL["LOCALIZATION_RECOVERY_REQUIRED"]
@@ -1616,6 +1711,7 @@ class RoomController:
                               else f"the flight step ended {leg_result.status}")
                     return _failure("TOOL_FAILURE", f"look {index + 1} of {len(resolvers)} did not capture: {reason}")
                 completed_legs.append(leg_result)
+                self._prefetch_leg(candidate, leg_result, snapshot)
                 index += 1
             result = replace(completed_legs[-1],
                              command_states=tuple(state for leg in completed_legs for state in leg.command_states),
@@ -1674,6 +1770,18 @@ class RoomController:
         except Exception:
             return {"code": "TOOL_FAILURE", "refusal": "TOOL_FAILURE"}
 
+        def resolve_capture(item):
+            # A look prefetched while the sweep flew: join its already-running
+            # provider call and re-correlate the result to this turn's final
+            # request (same frame, digest and observation id -- only the
+            # snapshot version can differ, and ingestion authorizes against
+            # the final one). A prefetch that failed re-raises here, exactly
+            # as the direct call below would.
+            prefetched = self._prefetched.pop(item.request.observation_id, None)
+            if prefetched is None:
+                return self.perception_provider(item.request)
+            return replace(prefetched.result(), request=item.request)
+
         def perceive(cancel):
             results, errors = [], []
             # Each request is independent; run the three provider calls in
@@ -1682,7 +1790,7 @@ class RoomController:
             # capture order before correlation and durable ingestion.
             pool = ThreadPoolExecutor(max_workers=len(captures), thread_name_prefix="room-perception")
             try:
-                futures = tuple(pool.submit(self.perception_provider, item.request) for item in captures)
+                futures = tuple(pool.submit(resolve_capture, item) for item in captures)
                 for future in futures:
                     if cancel.is_set():
                         break

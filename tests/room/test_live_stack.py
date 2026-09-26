@@ -404,12 +404,17 @@ def test_a_drifting_or_failed_height_reading_keeps_the_dead_reckoned_height(tmp_
 
 
 def test_a_consistent_single_tag_burst_reanchors_instead_of_demanding_recovery(tmp_path):
+    # The clock steps past REFRESH_FRESH_FIX_S between refreshes so each one
+    # takes a real burst (a back-to-back refresh on a fresh fix skips it).
+    clock = FrozenClock()
     bursts = Bursts(reports(101, 99, 91.0), reports(108, 99, 92.0, tags=(1,)), reports(300, 99, 92.0, tags=(1,)))
-    stack, *_ = build_stack(tmp_path, bursts=bursts)
+    stack, *_ = build_stack(tmp_path, bursts=bursts, clock=clock)
     assert stack.refresh()[0].state is LocalizationState.ANCHORED
+    clock.now += live_stack.REFRESH_FRESH_FIX_S + .1
     pose = stack.refresh()[0]
     assert pose.state is LocalizationState.ANCHORED and pose.position.x_cm == 108
     assert pose.source == "mapped_single_tag"
+    clock.now += live_stack.REFRESH_FRESH_FIX_S + .1
     pose = stack.refresh()[0]  # a far single-tag view is ignored: the tracker coasts
     assert pose.state is LocalizationState.COASTING and pose.position.x_cm == 108
 
@@ -456,6 +461,49 @@ def test_refresh_bounds_its_tag_burst_well_under_the_full_wp5_burst_bound(tmp_pa
     assert live_stack.REFRESH_BURST_S < live_stack.BURST_MAX_S
 
 
+def test_refresh_skips_the_tag_burst_while_the_fix_is_fresh_and_unmoved(tmp_path):
+    # Live 2026-09-25 timing: every checkpoint paid the 1.5 s burst at
+    # admission, at dispatch re-admission and at completion, ~4 s of fixed
+    # overhead per command batch. A burst taken while the tracker is ANCHORED
+    # on a fix this fresh with no dead-reckoned motion since it cannot improve
+    # the estimate; the battery keepalive still runs.
+    clock = FrozenClock()
+    bursts = Bursts(reports(101, 99, 91.0))
+    stack, tello, tracker, *_ = build_stack(tmp_path, bursts=bursts, clock=clock)
+    stack.refresh()  # anchors on the burst's fix
+    assert len(bursts.durations) == 1
+    pose, sample = stack.refresh()  # immediately after: nothing to re-measure
+    assert len(bursts.durations) == 1  # no second burst
+    assert pose.state is LocalizationState.ANCHORED
+    assert isinstance(sample, EnergySample) and sample.battery_pct == 87
+
+
+def test_refresh_bursts_again_once_the_fresh_fix_ages_out(tmp_path):
+    clock = FrozenClock()
+    bursts = Bursts(reports(101, 99, 91.0))
+    stack, *_ = build_stack(tmp_path, bursts=bursts, clock=clock)
+    stack.refresh()
+    clock.now += live_stack.REFRESH_FRESH_FIX_S + .1
+    stack.refresh()
+    assert len(bursts.durations) == 2  # the fix aged out: a real burst again
+
+
+def test_refresh_bursts_after_any_dead_reckoned_motion_even_with_a_fresh_fix(tmp_path):
+    # A fresh fix taken before a command says nothing about the pose after
+    # it: dead-reckoned motion always demands a real burst.
+    bursts = Bursts(reports(101, 99, 91.0), reports(103, 99, 91.0))
+    stack, tello, tracker, site, _ = build_stack(tmp_path, bursts=bursts)
+    stack.refresh()
+    stack.executor.start(site.home)
+    turn = PlannedCommand.from_mapping("ROTATE", {"degrees": 90, "direction": "cw", "phase": "look"},
+                                       upper_bound_s=5.0, interruptible=False)
+    outcome = stack.executor.execute(_plan(turn))
+    assert outcome.status == "COMPLETED", outcome
+    before = len(bursts.durations)
+    stack.refresh()
+    assert len(bursts.durations) == before + 1  # moved since the fix: burst runs
+
+
 def test_refresh_during_an_intentional_look_does_not_count_as_an_estimator_failure(tmp_path):
     # Q4: a ROTATE(phase="look") makes the aircraft deliberately point away
     # from the tags; a tagless refresh while looking must not be counted as
@@ -472,6 +520,46 @@ def test_refresh_during_an_intentional_look_does_not_count_as_an_estimator_failu
     pose, _ = stack.refresh()
     assert pose.state is not LocalizationState.ANCHORED
     assert tracker.health.estimator_failures == before_failures  # never counted: an intentional look
+
+
+def test_jev_latency_probe_times_one_choice_and_warns_when_slow():
+    # Live 2026-09-25: room choices ran 3.5-5 s all day, then 8-9 s from
+    # 17:35 -- against JEV_TIMEOUT_S = 9.0 -- with no code change. The
+    # operator sees the provider's current latency before takeoff.
+    clock = FrozenClock()
+    names = []
+
+    class SlowJudge:
+        def choice(self, state, instruction, *, criteria, name):
+            names.append(name)
+            clock.now += 7.0
+            return {"probabilities": {"READY": 1.0}}
+
+    latency_s, warning = live_stack.jev_latency_probe(SlowJudge(), clock=clock)
+    assert names == ["latency_probe"]
+    assert latency_s == pytest.approx(7.0)
+    assert warning is not None and "7.0" in warning
+
+
+def test_jev_latency_probe_stays_quiet_when_fast_and_never_raises():
+    clock = FrozenClock()
+
+    class FastJudge:
+        def choice(self, state, instruction, *, criteria, name):
+            clock.now += 1.2
+            return {"probabilities": {"READY": 1.0}}
+
+    latency_s, warning = live_stack.jev_latency_probe(FastJudge(), clock=clock)
+    assert latency_s == pytest.approx(1.2)
+    assert warning is None
+
+    class BrokenJudge:
+        def choice(self, state, instruction, *, criteria, name):
+            raise RuntimeError("boom")
+
+    latency_s, warning = live_stack.jev_latency_probe(BrokenJudge(), clock=clock)
+    assert latency_s is None
+    assert warning is not None and "RuntimeError" in warning
 
 
 def test_start_takes_off_and_measures_home_from_tags_and_altimeter(tmp_path):

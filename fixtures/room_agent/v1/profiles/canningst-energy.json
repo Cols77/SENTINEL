@@ -1,7 +1,7 @@
 {
   "aircraft_id": "tello-canningst",
   "execution_scope": "CALIBRATION",
-  "landing_floor_pct": 20,
+  "landing_floor_pct": 22,
   "percent_per_second_upper": 0.287811,
   "profile_id": "canningst-history-20260923-energy",
   "sample_max_age_s": 5.0,
