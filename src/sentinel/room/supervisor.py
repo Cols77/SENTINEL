@@ -1181,7 +1181,14 @@ class SafetySupervisor:
         except Exception:
             self.tracker.mark_lost()
             return stop("REANCHOR_SYNC_FAILED")
-        if not accepted.accepted:
+        if not accepted.accepted and getattr(recovery, "episode_succeeded", False):
+            # Live l3-20260926-175126 07:57: the ordinary tag stream accepted
+            # a joint fix while the burst was being judged; assess_burst calls
+            # that this episode's success (superseded_by_fresh_fix), so the
+            # log must not read as a failure.
+            self._log_positioning(f"Tag search {look}: position re-anchored near "
+                                  f"{_where(self.tracker.health.position)} (fresh fix during the search)")
+        elif not accepted.accepted:
             print(f"Recovery burst rejected: {accepted.reason}", file=sys.stderr, flush=True)
             self._log_positioning(f"Tag search {look}: no usable fix ({accepted.reason})")
         else:
@@ -1281,8 +1288,15 @@ class SafetySupervisor:
                 # _recover itself dispatched a mandatory return/landing.
                 return "PREEMPTED", result
             health = self.tracker.health
-            if (result.status == "COMPLETED" and result.completion_known and health.pose_revision > revision
-                    and health.state == LocalizationState.ANCHORED):
+            if (health.pose_revision > revision and health.state == LocalizationState.ANCHORED
+                    and (result.status == "COMPLETED" and result.completion_known
+                         # A fresh joint fix from the ordinary tag stream during
+                         # the search is the episode's own success (assess_burst
+                         # rejects the burst as superseded_by_fresh_fix but marks
+                         # the episode finished); reporting it REANCHOR_REFUSED
+                         # told Jev its choice failed while the aircraft flew on
+                         # re-anchored (live l3-20260926-175126 07:57, 2.9 cm).
+                         or getattr(voluntary, "episode_succeeded", False))):
                 return "REANCHORED", result
             if result.status != "RECOVERY_PENDING":
                 print(f"voluntary reanchor refused: attempt ended {result.status}",

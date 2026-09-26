@@ -132,6 +132,40 @@ def test_a_refused_voluntary_reanchor_never_lands_and_is_not_offered_again(safet
     assert "REANCHOR" not in {c.candidate_id for c in controller._legal_candidates(snapshot)}
 
 
+def test_a_fresh_fix_during_the_search_is_reanchored_not_refused(safety):
+    """Live l3-20260926-175126 07:57: the ordinary tag stream re-anchored the
+    aircraft (joint tags, ~3 cm) while the voluntary search's burst was being
+    judged. assess_burst calls that this episode's success
+    (superseded_by_fresh_fix), yet the outcome said REANCHOR_REFUSED and the
+    positioning log said "no usable fix" although the tracker was ANCHORED at
+    2.9 cm; Jev was told its choice failed."""
+    supervisor, store, clock, *_ = safety
+    judge = Judge("REANCHOR", "ESCALATE")
+    controller, executor = count_session(safety, judge)
+    live_like(safety)
+
+    def stream_reanchors(action):
+        # The refresh loop's joint fix lands mid-search, strictly fresher than
+        # the search's own action; the burst itself is empty.
+        clock.now += 0.5
+        supervisor.tracker.accept_fix(fix(clock))
+        return ()
+
+    supervisor.recovery = RecoveryController(supervisor.tracker, clock=clock,
+                                             burst_source=stream_reanchors,
+                                             energy_admits=lambda action: True)
+    coast(safety)
+
+    outcome = controller.step(SESSION)
+    assert outcome.accepted and outcome.candidate_id == "REANCHOR"
+    assert store.events(SESSION)[-1].payload["code"] == "REANCHORED"
+    assert supervisor.tracker.health.state == LocalizationState.ANCHORED
+    assert "LAND" not in executor.calls
+    log = list(supervisor.positioning_log)
+    assert any("position re-anchored" in line for line in log)
+    assert not any("no usable fix" in line for line in log)
+
+
 def test_reanchor_is_not_offered_while_freshly_anchored_or_without_a_recovery_adapter(safety):
     supervisor, store, clock, *_ = safety
     controller, executor = count_session(safety, Judge())
