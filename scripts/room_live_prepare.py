@@ -72,11 +72,20 @@ TAG_MAP_PATH = REPO_ROOT / "docs" / "wp5-flight3-map.json"
 #: (center-middle-middle-{left,backward,right}); those looks face away from
 #: the tags, so losing the fix and recovering (or refusing) is an accepted
 #: outcome of this scenario.
+#: ``demo5`` flies fewer regions (2026-09-26 operator request): demo360's site
+#: and cells, observed from five top-height poses instead of nine -- tag-facing
+#: looks from the right and left, left and right wall looks, and a backward
+#: look, all from the pad's own row. Each pose declares the cells its demo360
+#: middle-height counterpart sees (hand-authored: the coverage generator
+#: currently finds no pose that sees any cell). The poses sat one row further
+#: back until live l3-20260926-142659, where 30 cm to the flight volume's edge
+#: refused every travelling zone on its fixless route home.
 SCENARIOS = {
     "canningst": (SITE_PATH, DRIFT_PATH),
     "wide": (FIXTURES / "canningst-wide-site.json", PROFILES / "canningst-wide-drift.json"),
     "demo": (SITE_PATH, PROFILES / "canningst-demo-drift.json"),
     "demo360": (FIXTURES / "canningst-demo360-site.json", PROFILES / "canningst-demo-drift.json"),
+    "demo5": (FIXTURES / "canningst-demo5-site.json", PROFILES / "canningst-demo-drift.json"),
 }
 _scenario = "canningst"
 
@@ -406,6 +415,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scenario", choices=sorted(SCENARIOS), default="demo360",
                         help="flight scenario: demo360 (compact site + left/backward/right looks from the pad, "
                              "60 cm error limit; the default, also what Mission Control's prepare uses), "
+                             "demo5 (demo360's site from five top-height poses), "
                              "demo (compact, 60 cm), canningst (compact, 30 cm) or wide (3x3 zones)")
     parser.add_argument("--request", default=DEFAULT_REQUEST,
                         help="label only: the manifest does not bind the request text")
