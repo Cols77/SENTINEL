@@ -25,9 +25,20 @@ _CHOICE_GATE_REFUSALS = frozenset({"LOW_CONFIDENCE", "THIN_MARGIN", "MALFORMED_A
 _PLURAL = {"computer": "computers", "phone": "phones", "person": "people", "mug": "mugs"}
 
 
+_LOOK_LABELS = {"left": "facing the left wall", "right": "facing the right wall",
+                "backward": "facing the rear wall", "toward_targets": "facing the tag wall"}
+
+
 def region_label(pose_id: str) -> str:
-    head = pose_id.split("-", 1)[0]
-    return f"{_REGION_LABELS.get(head, head.title())} region"
+    """Pose IDs read position-then-look (``center-middle-middle-left`` hovers
+    at the center and faces the left wall); poses that differ only in the
+    look, like demo360's, must not collapse into one label."""
+    parts = pose_id.split("-")
+    label = f"{_REGION_LABELS.get(parts[0], parts[0].title())} region"
+    look = "-".join(parts[3:])
+    if look in _LOOK_LABELS:
+        label += f", {_LOOK_LABELS[look]}"
+    return label
 
 
 def _candidate_label(candidate_id: str) -> str:
@@ -312,8 +323,12 @@ class RoomAgentProjection:
         chosen = candidates.get(label) or {}
         reason = chosen.get("predicted_benefit") or chosen.get("description") or ""
         reason = " ".join(str(reason).split())
-        if len(reason) > 160:
-            reason = reason[:157] + "..."
+        # Operator 2026-09-26: 160 chars cut "Why this step" right where the
+        # interruption notes and distances live; the panel scrolls, so keep
+        # the whole description. The bound below is defensive only (the
+        # candidate builders write a few hundred characters at most).
+        if len(reason) > 4000:
+            reason = reason[:3997] + "..."
         if payload.get("provider_error"):
             reason = f"provider error: {payload['provider_error']}"
         decisions = self.state["decisions"]
@@ -356,6 +371,11 @@ class RoomAgentProjection:
                     if region_row is not None:
                         region_row["detections"] += 1
                 s["unplaced"] = sum(len(frame.unplaced) for frame in self._count_frames)
+            elif code == "OBSERVE_PREEMPTED":
+                # Live l3-20260926-111405: a look interrupted by the
+                # supervisor's own recovery leaves the zone retryable.
+                if region["status"] != "OBSERVED":
+                    region["status"] = "OFFERED"
             elif region["status"] != "OBSERVED" and code not in _CHOICE_GATE_REFUSALS:
                 # A confidence-gate refusal leaves the region offered (Task
                 # 4b item 1); only a physical or tool refusal marks it.

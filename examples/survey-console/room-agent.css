@@ -348,7 +348,10 @@
 }
 .is-answer .room-decision-result,.is-observe .room-decision-result { border-color:var(--accent-primary); color:var(--accent-primary); }
 .is-refused .room-decision-result { border-color:var(--status-emergency); color:var(--status-emergency); }
-.room-decision-reason { margin:8px 0 0; color:var(--text-primary); font-size:14px; line-height:1.45; }
+/* "Why this step" grows with its text (operator 2026-09-26: long candidate
+   descriptions were unreadable); only past ~18rem does it scroll in place. */
+.room-decision-reason { margin:8px 0 0; color:var(--text-primary); font-size:14px; line-height:1.45;
+  overflow-wrap:anywhere; max-height:18rem; overflow-y:auto; }
 .room-decision-meta { margin:6px 0 0; color:var(--text-secondary); font:12px/1.4 Mission Mono,var(--font-mono); }
 .is-refused .room-decision-meta { color:var(--status-emergency); }
 .room-decision-detail { margin-top:7px; color:var(--text-secondary); font-size:13px; }
