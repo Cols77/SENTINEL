@@ -2,8 +2,8 @@
   "schema_version": "cube-site-v1",
   "line_y_m": 4.0,
   "stands": [
-    {"x_m": 2.153, "first_tag_id": 2, "heights_m": [0.495], "size_m": 0.192},
-    {"x_m": 2.847, "first_tag_id": 0, "heights_m": [0.495], "size_m": 0.192}
+    {"x_m": 2.153, "first_tag_id": 4, "heights_m": [0.495], "size_m": 0.192},
+    {"x_m": 2.847, "first_tag_id": 2, "heights_m": [0.495], "size_m": 0.192}
   ],
   "cube": {"min_x_m": 0.5, "max_x_m": 4.5, "min_y_m": 0.5, "max_y_m": 3.5, "max_z_m": 2.5},
   "commanded": {"inset_m": 0.3, "min_z_cm": 60, "max_z_cm": 180}

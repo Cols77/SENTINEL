@@ -614,7 +614,7 @@
       "z_cm": -35
     }
   ],
-  "tag_map_sha256": "095d5c69abcc923f0f28cd68d702433a81ab278a2175b3932e55f18c31755184",
+  "tag_map_sha256": "7716cfb59461a226411a49e482640dd1d88e74e34632e1b3b09f083bc23b508f",
   "terminal_contingencies": [
     {
       "assurance_policy_id": "operator-clear-floor-check",

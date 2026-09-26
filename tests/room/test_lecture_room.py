@@ -79,7 +79,13 @@ def test_the_tag_map_is_exactly_what_the_cube_site_describes():
     # Zero tolerance: this map is generated from the site file, not measured
     # separately, so the two can never disagree the way CanningSt's do.
     check_tag_map_matches_site(tag_map, cube, tolerance_cm=0.0)
-    assert {tag["tag_id"] for tag in tag_map.doc["tags"]} == {0, 2}
+    # The tags physically mounted here are printed images 00002 and 00004
+    # (live l3-20260926-171615 saw only tag 2: STAND_1's declared tag 0 never
+    # matched the mounted tag 4, so no burst gave a two-tag home fix). Seen
+    # from the pad facing the tags, 00004 is the left (smaller-x) tag — the
+    # operator confirmed the sides, and that run's single-tag solves against
+    # 00002 sat ~69 cm left of the pad until 00002 was mapped to the far stand.
+    assert {tag["tag_id"]: tag["x_units"] for tag in tag_map.doc["tags"]} == {4: 21.53, 2: 28.47}
     assert {tag["z_units"] for tag in tag_map.doc["tags"]} == {TAG_HEIGHT_M}
     # The camera is the same aircraft's: a real calibration, never nominal.
     assert tag_map.calibration_source == "chessboard"

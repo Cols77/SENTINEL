@@ -27,7 +27,7 @@
     {
       "mounting": "WALL",
       "size_m": 0.192,
-      "tag_id": 2,
+      "tag_id": 4,
       "x_units": 21.53,
       "y_units": 40.0,
       "yaw_deg": -90.0,
@@ -37,7 +37,7 @@
     {
       "mounting": "WALL",
       "size_m": 0.192,
-      "tag_id": 0,
+      "tag_id": 2,
       "x_units": 28.47,
       "y_units": 40.0,
       "yaw_deg": -90.0,
