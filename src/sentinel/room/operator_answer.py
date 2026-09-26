@@ -50,7 +50,11 @@ SYSTEM_INSTRUCTIONS = (
     "room was covered. Call uncertain detections uncertain. If the mission did not answer "
     "the request, say so plainly; when the flight ended early, explain what failed in plain "
     "words from the findings (each zone's reason and detail text, and how the flight ended), "
-    "without guessing beyond them. No markdown, no lists."
+    "without guessing beyond them. Zone names read position-then-look: in "
+    "'center-middle-middle-left' the first three words say where the drone hovered and the "
+    "last word says which way it faced; describe the viewpoint in those terms (for example "
+    "'facing the left wall from the centre of the room'), never by repeating the raw name. "
+    "No markdown, no lists."
 )
 
 
