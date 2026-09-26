@@ -80,3 +80,18 @@ floor about 175 cm ahead.
 The larger room is not yet covered by new cells. Adding them is a coverage
 generator run, not a hand edit, and it was deliberately left for after the
 first flight here.
+
+## `lecture4-site.json`
+
+The same venue with four viewpoints (2026-09-26 evening operator request,
+eve of the demo): one board look from the validated pad spot (250, 190),
+then the aircraft travels to the left, right and rear walls and faces each.
+Only the observation envelope and the declared poses differ from
+`lecture-room-site.json`: the envelope widens to x 150-350, y 150-230, so
+the semantic thirds place the wall looks at (183, 190), (317, 190) and
+(250, 163) -- ~67 cm of sideways travel, ~27 cm back, every endpoint at
+least 80 cm from the flight edges (l3-20260926-142659 refused zones at
+30 cm). The board look declares the union of demo5's two tag-facing cell
+sets; the wall looks keep their demo5 cells, now viewed from 40-27 cm
+closer. Tags, tag map, home, routes, support planes, contingencies, drift
+and profiles are `lecture`'s, unchanged.

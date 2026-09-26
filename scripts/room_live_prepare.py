@@ -105,6 +105,11 @@ class FlightScenario(NamedTuple):
 #: tags 69.4 cm apart at 49.5 cm, so it carries its own site and tag map
 #: (see fixtures/room_agent/v1/lecture-room-site.PROVENANCE.md). Every
 #: CanningSt scenario keeps the CanningSt map, unchanged.
+#: ``lecture4`` is the lecture room with four viewpoints (2026-09-26 evening
+#: operator request): one board look from the validated pad spot, then the
+#: aircraft travels to the left, right and rear walls and faces each --
+#: ~67 cm left/right and ~27 cm back, every endpoint at least 80 cm from the
+#: flight edges. Same venue, tags, drift and profiles as ``lecture``.
 DEMO_DRIFT_PATH = PROFILES / "canningst-demo-drift.json"
 LECTURE_TAG_MAP_PATH = REPO_ROOT / "docs" / "lecture-room-map.json"
 LOCATION = "CanningSt"
@@ -118,6 +123,8 @@ SCENARIOS = {
     "demo5": FlightScenario(FIXTURES / "canningst-demo5-site.json", DEMO_DRIFT_PATH, TAG_MAP_PATH, LOCATION),
     "lecture": FlightScenario(FIXTURES / "lecture-room-site.json", DEMO_DRIFT_PATH,
                               LECTURE_TAG_MAP_PATH, LECTURE_LOCATION),
+    "lecture4": FlightScenario(FIXTURES / "lecture4-site.json", DEMO_DRIFT_PATH,
+                               LECTURE_TAG_MAP_PATH, LECTURE_LOCATION),
 }
 _scenario = "canningst"
 

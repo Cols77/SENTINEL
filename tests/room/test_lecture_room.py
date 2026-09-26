@@ -164,6 +164,10 @@ def test_every_declared_cell_is_inside_the_room_and_seen_by_a_pose():
     assert seen == cell_ids
     assert [pose_id for pose_id, _ in doc["pose_visibility"]] == DEMO5_POSES
     assert [pose_id for pose_id, _ in doc["pose_tag_visibility"]] == DEMO5_POSES[:2]
+    # The mounted tags are images 00002 and 00004; the declared ids lagged the
+    # tag-map swap, which silently disabled the expected-reanchor gate
+    # (supervisor's declared-and-mapped intersection needs two shared ids).
+    assert all(tags == [2, 4] for _, tags in doc["pose_tag_visibility"])
 
 
 def test_the_prepare_script_offers_the_venue_with_its_own_tag_map():
