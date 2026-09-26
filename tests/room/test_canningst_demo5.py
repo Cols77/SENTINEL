@@ -41,9 +41,11 @@ def _doc(path):
 
 
 def test_the_prepare_script_offers_demo5_with_the_demo_drift_profile():
-    site, drift = room_live_prepare.SCENARIOS["demo5"]
-    assert site == DEMO5_SITE
-    assert drift == DEMO_DRIFT
+    scenario = room_live_prepare.SCENARIOS["demo5"]
+    assert scenario.site == DEMO5_SITE
+    assert scenario.drift == DEMO_DRIFT
+    # A CanningSt scenario keeps the CanningSt tags (53 cm), never a venue's.
+    assert scenario.tag_map == room_live_prepare.TAG_MAP_PATH
     # demo5 is added beside the existing scenarios, never in place of them.
     assert {"canningst", "wide", "demo", "demo360"} <= set(room_live_prepare.SCENARIOS)
 

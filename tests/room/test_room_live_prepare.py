@@ -93,7 +93,12 @@ def test_the_prepared_pack_passes_every_live_gate_up_to_the_drone_probe(tmp_path
     assert json.loads((run_root / f"{run_id}.pack.json").read_text(encoding="utf-8")) == pack
     assert "everyone" in out and "consent" in out.lower()
     assert f"--room-live-config {pack_path.as_posix()}" in out.replace("\\", "/")
-    assert "python -m sentinel.ui --mode live --site-profile CanningSt --data-dir artifacts/room-live" in out
+    # The launch line names the venue the pack was prepared for, not a fixed
+    # room: Mission Control validates that venue's cube site and tag map at
+    # startup, so a lecture-room pack must not tell the operator to start the
+    # server on the CanningSt profile.
+    assert (f"python -m sentinel.ui --mode live --site-profile {pack['location']} "
+            "--data-dir artifacts/room-live") in out
     assert "--i-authorise-paid-calls" in out and '$env:PYTHONPATH="src;."' in out
     assert "expire" in out.lower()
     assert pack["local_ip"] == "192.168.10.2" and len(pack["assurances"]) == 2
@@ -170,13 +175,18 @@ def test_the_wide_scenario_pack_binds_its_site_and_drift_and_passes_every_gate(t
     assert "connectivity preflight not ready" in run["error"], run["error"]
     assert ("drone_probe",) in hardware.calls
 
-    # The default (Mission Control's no-argument prepare) is the demo360
-    # scenario: the compact site plus the left/backward/right looks from the
-    # pad, under the 60 cm error limit (2026-09-25).
-    assert _prepare(run_root, "--new-run", capsys=capsys)[0] == 0
-    assert _pack(run_root)["scenario"] == "demo360"
-    assert Path(_pack(run_root)["site"]).name == "canningst-demo360-site.json"
-    assert Path(_pack(run_root)["drift_profile"]).name == "canningst-demo-drift.json"
+    # The default (Mission Control's no-argument prepare) is the lecture-room
+    # venue the demo is in (2026-09-26), so an untouched drop-down cannot
+    # prepare another room's geometry against this room's tags. Being another
+    # venue, it needs its own filming consent: the CanningSt record this test
+    # already made does not carry it.
+    assert _prepare(run_root, "--new-run", capsys=capsys)[0] == 2
+    assert _prepare(run_root, "--new-run", "--consent-confirmed", capsys=capsys)[0] == 0
+    default = _pack(run_root)
+    assert default["scenario"] == "lecture" and default["location"] == "LectureRoom"
+    assert Path(default["site"]).name == "lecture-room-site.json"
+    assert Path(default["tag_map"]).name == "lecture-room-map.json"
+    assert Path(default["drift_profile"]).name == "canningst-demo-drift.json"
 
 
 def test_rerunning_reuses_the_registry_the_run_and_its_grant(tmp_path, capsys):

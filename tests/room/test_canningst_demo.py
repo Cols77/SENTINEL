@@ -45,9 +45,10 @@ def test_the_demo_drift_profile_only_raises_the_declared_demo_limits():
 
 
 def test_the_prepare_script_offers_the_demo_scenario_on_the_compact_site():
-    site, drift = room_live_prepare.SCENARIOS["demo"]
-    assert site == room_live_prepare.SITE_PATH
-    assert drift == DEMO_DRIFT
+    scenario = room_live_prepare.SCENARIOS["demo"]
+    assert scenario.site == room_live_prepare.SITE_PATH
+    assert scenario.drift == DEMO_DRIFT
+    assert scenario.tag_map == room_live_prepare.TAG_MAP_PATH
 
 
 def test_with_the_demo_limit_the_rear_zones_are_observed_not_refused(tmp_path, monkeypatch):

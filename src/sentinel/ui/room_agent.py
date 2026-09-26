@@ -265,7 +265,10 @@ class RoomAgentService:
                        for s in room_rehearsal.SCENARIOS.values()],
             flight_scenarios=self._flight_scenarios(),
             default_request=DEFAULT_REQUEST,
-            site="CanningSt",
+            # The venue Mission Control was started for, not a fixed room: the
+            # site profile carries the cube site and tag map this server
+            # validated at startup (2026-09-26, the lecture room).
+            site=getattr(self.mission.config, "site_profile_id", None) or "CanningSt",
             local_ip=self._default_local_ip(),
             paid_calls_authorised=paid_calls_authorised,
         )
@@ -341,15 +344,20 @@ class RoomAgentService:
         return room_live_prepare
 
     def _flight_scenarios(self):
-        """The Live flight scenarios (site + drift-profile pairs) the prepare
-        script offers, for the Prepare panel's drop-down. Purely descriptive:
-        the pack a prepare produces still names the files it bound."""
+        """The Live flight scenarios (site, drift profile and tag map) the
+        prepare script offers, for the Prepare panel's drop-down. Purely
+        descriptive: the pack a prepare produces still names the files it
+        bound. The tag map is shown because it is what differs between
+        venues -- the lecture room's tags hang lower than CanningSt's, and
+        the selected scenario is what decides which the flight solves
+        against."""
         prepare_module = self._room_live_prepare()
         default = inspect.signature(prepare_module.prepare).parameters["scenario"].default
         return dict(
             default=default,
-            options=[dict(id=name, site=site.name, drift_profile=drift.name)
-                     for name, (site, drift) in sorted(prepare_module.SCENARIOS.items())])
+            options=[dict(id=name, site=scenario.site.name, drift_profile=scenario.drift.name,
+                          tag_map=scenario.tag_map.name)
+                     for name, scenario in sorted(prepare_module.SCENARIOS.items())])
 
     def _live_battery_percent(self, local_ip):
         """Read-only battery status for the Prepare panel.
@@ -504,7 +512,10 @@ class RoomAgentService:
             if mode == "LIVE":
                 pack = self._live_pack(optional=True) or {}
                 if pack.get("site"):
-                    self.run.site_line = (f"Site: CanningSt, {pack.get('scenario', 'canningst')} scenario "
+                    # The pack names the venue it was prepared for; a flight in
+                    # the lecture room must not read "CanningSt" on the panel.
+                    self.run.site_line = (f"Site: {pack.get('location', 'CanningSt')}, "
+                                          f"{pack.get('scenario', 'canningst')} scenario "
                                           f"({Path(pack['site']).name})")
             self.run.projection.note("PROPOSAL", f"Proposal ready: {MODES[mode]}")
             return dict(status="ACKNOWLEDGED", run=self.run.public())

@@ -1,0 +1,48 @@
+{
+  "camera_calibration": {
+    "calibration_source": "chessboard",
+    "cx": 467.751095959216,
+    "cy": 353.82596175261875,
+    "dist_coeffs": [
+      0.03678244109978872,
+      -0.7925616277215023,
+      -0.004624977830923742,
+      -0.001529887885873445,
+      2.8219232481195857
+    ],
+    "fx": 892.5791995747435,
+    "fy": 893.7413963575361,
+    "height": 720,
+    "width": 960
+  },
+  "room": {
+    "height_units": 100,
+    "origin": "LEFT_ALLEY_FRONT_CORNER",
+    "width_units": 100
+  },
+  "room_scale_m_per_unit": 0.1,
+  "schema_version": "tag-map-v1",
+  "tag_family": "36h11",
+  "tags": [
+    {
+      "mounting": "WALL",
+      "size_m": 0.192,
+      "tag_id": 2,
+      "x_units": 21.53,
+      "y_units": 40.0,
+      "yaw_deg": -90.0,
+      "z_units": 0.495,
+      "zone_id": "STAND_0"
+    },
+    {
+      "mounting": "WALL",
+      "size_m": 0.192,
+      "tag_id": 0,
+      "x_units": 28.47,
+      "y_units": 40.0,
+      "yaw_deg": -90.0,
+      "z_units": 0.495,
+      "zone_id": "STAND_1"
+    }
+  ]
+}

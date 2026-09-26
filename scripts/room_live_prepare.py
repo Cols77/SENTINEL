@@ -43,6 +43,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -60,7 +61,26 @@ ENERGY_PATH = PROFILES / "canningst-energy.json"
 LIMITS_PATH = PROFILES / "canningst-command-limits.json"
 FLIGHT_PROFILE_PATH = PROFILES / "canningst-flight-profile.json"
 TAG_MAP_PATH = REPO_ROOT / "docs" / "wp5-flight3-map.json"
-#: Flight scenarios in the same room: (site, drift profile). ``wide`` spreads
+class FlightScenario(NamedTuple):
+    """One selectable demo configuration: its geometry, its drift budget and
+    the tags it flies against.
+
+    The tag map belongs to the scenario, not to the installation: a venue's
+    AprilTags are at that venue's measured positions and height, so moving
+    the demo to another room is choosing another scenario here rather than
+    editing a shared map (2026-09-26 operator request -- the lecture room's
+    tags sit at 49.5 cm, CanningSt's at 53).
+    """
+    site: Path
+    drift: Path
+    tag_map: Path
+    #: The venue this scenario flies in, and so the location today's filming
+    #: consent must be recorded for. A flight in another room is another
+    #: scenario with its own consent, never CanningSt's record reused.
+    location: str
+
+
+#: Flight scenarios: geometry, drift profile and tag map. ``wide`` spreads
 #: a 3x3 tag-facing viewpoint grid over most of the flight volume, declares
 #: home where the operator places the drone (~180 cm from the tag wall) and
 #: allows the aircraft further from a tag fix (see the wide site PROVENANCE).
@@ -80,16 +100,27 @@ TAG_MAP_PATH = REPO_ROOT / "docs" / "wp5-flight3-map.json"
 #: currently finds no pose that sees any cell). The poses sat one row further
 #: back until live l3-20260926-142659, where 30 cm to the flight volume's edge
 #: refused every travelling zone on its fixless route home.
+#: ``lecture`` is the same five viewpoints in the lecture room the operator
+#: measured on 2026-09-26: 400 cm wide by 350 cm deep from the tag plane,
+#: tags 69.4 cm apart at 49.5 cm, so it carries its own site and tag map
+#: (see fixtures/room_agent/v1/lecture-room-site.PROVENANCE.md). Every
+#: CanningSt scenario keeps the CanningSt map, unchanged.
+DEMO_DRIFT_PATH = PROFILES / "canningst-demo-drift.json"
+LECTURE_TAG_MAP_PATH = REPO_ROOT / "docs" / "lecture-room-map.json"
+LOCATION = "CanningSt"
+LECTURE_LOCATION = "LectureRoom"
 SCENARIOS = {
-    "canningst": (SITE_PATH, DRIFT_PATH),
-    "wide": (FIXTURES / "canningst-wide-site.json", PROFILES / "canningst-wide-drift.json"),
-    "demo": (SITE_PATH, PROFILES / "canningst-demo-drift.json"),
-    "demo360": (FIXTURES / "canningst-demo360-site.json", PROFILES / "canningst-demo-drift.json"),
-    "demo5": (FIXTURES / "canningst-demo5-site.json", PROFILES / "canningst-demo-drift.json"),
+    "canningst": FlightScenario(SITE_PATH, DRIFT_PATH, TAG_MAP_PATH, LOCATION),
+    "wide": FlightScenario(FIXTURES / "canningst-wide-site.json",
+                           PROFILES / "canningst-wide-drift.json", TAG_MAP_PATH, LOCATION),
+    "demo": FlightScenario(SITE_PATH, DEMO_DRIFT_PATH, TAG_MAP_PATH, LOCATION),
+    "demo360": FlightScenario(FIXTURES / "canningst-demo360-site.json", DEMO_DRIFT_PATH, TAG_MAP_PATH, LOCATION),
+    "demo5": FlightScenario(FIXTURES / "canningst-demo5-site.json", DEMO_DRIFT_PATH, TAG_MAP_PATH, LOCATION),
+    "lecture": FlightScenario(FIXTURES / "lecture-room-site.json", DEMO_DRIFT_PATH,
+                              LECTURE_TAG_MAP_PATH, LECTURE_LOCATION),
 }
 _scenario = "canningst"
 
-LOCATION = "CanningSt"
 CAPABILITY = "count_return"
 TRIAL_PROTOCOL = "l3-canningst"
 AIRCRAFT_ID = "tello-canningst"
@@ -118,10 +149,15 @@ def _quiet(func, argv):
     return code, out.getvalue(), err.getvalue()
 
 
+def _location() -> str:
+    return SCENARIOS[_scenario].location
+
+
 def _flight_files() -> dict[str, str]:
-    site_path, drift_path = SCENARIOS[_scenario]
-    return dict(site=str(site_path), drift_profile=str(drift_path), energy_profile=str(ENERGY_PATH),
-                command_limits=str(LIMITS_PATH), profile_file=str(FLIGHT_PROFILE_PATH))
+    scenario = SCENARIOS[_scenario]
+    return dict(site=str(scenario.site), drift_profile=str(scenario.drift), energy_profile=str(ENERGY_PATH),
+                command_limits=str(LIMITS_PATH), profile_file=str(FLIGHT_PROFILE_PATH),
+                tag_map=str(scenario.tag_map))
 
 
 def _flight_file_argv() -> list[str]:
@@ -132,25 +168,25 @@ def _flight_file_argv() -> list[str]:
 
 
 # -- consent ------------------------------------------------------------------
-def ensure_consent(consent_db: Path, day: str, *, confirmed: bool) -> str:
+def ensure_consent(consent_db: Path, day: str, *, confirmed: bool, location: str = LOCATION) -> str:
     from sentinel.survey.consent import has_consent, record_consent
     from sentinel.survey.store import SurveyStore
 
     if not confirmed and not consent_db.exists():
         raise PrepareError(
-            f"no filming consent recorded for {LOCATION} on {day} ({consent_db} does not exist); re-run with "
+            f"no filming consent recorded for {location} on {day} ({consent_db} does not exist); re-run with "
             "--consent-confirmed only when everyone who may appear in frame today has agreed")
     store = SurveyStore.open(consent_db)
     try:
         if confirmed:
-            record_consent(store, LOCATION, day, "operator")
-            return (f"NOTICE: filming consent recorded for {LOCATION} on {day}. By passing --consent-confirmed "
+            record_consent(store, location, day, "operator")
+            return (f"NOTICE: filming consent recorded for {location} on {day}. By passing --consent-confirmed "
                     "you, the operator, confirm that everyone who may appear in frame today has agreed.")
-        if not has_consent(store, LOCATION, day):
+        if not has_consent(store, location, day):
             raise PrepareError(
-                f"no filming consent recorded for {LOCATION} on {day}; re-run with --consent-confirmed only "
+                f"no filming consent recorded for {location} on {day}; re-run with --consent-confirmed only "
                 "when everyone who may appear in frame today has agreed")
-        return f"consent: reusing today's recorded filming consent for {LOCATION} ({day})"
+        return f"consent: reusing today's recorded filming consent for {location} ({day})"
     finally:
         store.connection.close()
 
@@ -303,7 +339,7 @@ def ensure_manifest(run_root: Path, run_id: str, grant, registry_path: Path, *, 
             "--aircraft-id", AIRCRAFT_ID, "--firmware-version", "UNVERIFIED",
             "--requested-jev-identity", "jev", "--requested-detector-identity", "gemini-openrouter",
             "--max-duration-s", "600", "--max-distance-cm", "2000", "--max-recovery-attempts", "3",
-            "--consent-reference", f"{LOCATION}/{day}", "--manifest-out", str(manifest_out)])
+            "--consent-reference", f"{_location()}/{day}", "--manifest-out", str(manifest_out)])
         gates = [line for line in err.splitlines() if line.startswith(("missing gate:", "refused:"))]
         if code != 0 or gates:
             raise PrepareError("manifest preview failed: " + ("; ".join(gates) or f"exit {code}"))
@@ -320,7 +356,7 @@ def ensure_manifest(run_root: Path, run_id: str, grant, registry_path: Path, *, 
 # -- main -----------------------------------------------------------------------
 def prepare(*, run_root: Path, local_ip: str | None, consent_confirmed: bool, run_id: str | None = None,
             new_run: bool = False, request: str = DEFAULT_REQUEST, today: str | None = None,
-            now: datetime | None = None, scenario: str = "demo360") -> dict:
+            now: datetime | None = None, scenario: str = "lecture") -> dict:
     global _scenario
     if scenario not in SCENARIOS:
         raise PrepareError(f"unknown scenario {scenario!r}; choose one of {', '.join(SCENARIOS)}")
@@ -330,7 +366,8 @@ def prepare(*, run_root: Path, local_ip: str | None, consent_confirmed: bool, ru
     run_root = Path(run_root)
     if not local_ip:
         local_ip = _current_pack(run_root).get("local_ip")  # keep the address a previous run was given
-    notes = [ensure_consent(run_root / "consent.sqlite3", day, confirmed=consent_confirmed)]
+    notes = [ensure_consent(run_root / "consent.sqlite3", day, confirmed=consent_confirmed,
+                            location=_location())]
     binding = _binding()
     registry_path = run_root / "registry.json"
     run_root.mkdir(parents=True, exist_ok=True)
@@ -354,10 +391,10 @@ def prepare(*, run_root: Path, local_ip: str | None, consent_confirmed: bool, ru
     pack = dict(
         run_id=run, scenario=scenario, manifest=str(manifest_path.resolve()), authorization_digest=digest,
         grant_registry=str(registry_path.resolve()), grant_sha256=grant.grant_sha256,
-        consent_db=str((run_root / "consent.sqlite3").resolve()), location=LOCATION, date=day,
+        consent_db=str((run_root / "consent.sqlite3").resolve()), location=_location(), date=day,
         clock_domain_id=clock_domain_id, assurances=[str(Path(p).resolve()) for p in assurance_paths],
         assurances_expire_at=expires_local.isoformat(timespec="seconds"),
-        run_root=str(run_root.resolve()), site=files["site"], tag_map=str(TAG_MAP_PATH),
+        run_root=str(run_root.resolve()), site=files["site"], tag_map=files["tag_map"],
         drift_profile=files["drift_profile"], energy_profile=files["energy_profile"],
         command_limits=files["command_limits"], profile_files=[files["profile_file"]],
         previewed_request=request, prepared_at=now.isoformat(timespec="seconds"))
@@ -381,6 +418,7 @@ def _report(result, run_root: Path, local_ip: str | None) -> str:
              f"assurances: {', '.join(Path(p).name for p in pack['assurances'])}",
              "",
              f"run:  {pack['run_id']} (scenario {pack.get('scenario', 'canningst')})",
+             f"site: {Path(pack['site']).name}  tags: {Path(pack['tag_map']).name}",
              f"pack: {result['run_pack'].as_posix()}",
              f"      (also {current}; Mission Control re-reads it at each approval)",
              f"site assurances expire at {expires:%H:%M:%S} local time (UTC{expires:%z}); "
@@ -392,13 +430,17 @@ def _report(result, run_root: Path, local_ip: str | None) -> str:
              f"  python scripts/room_session.py live --execute --manifest {result['manifest'].as_posix()} "
              f"--authorization-digest {result['digest']} --capability {CAPABILITY} "
              f"--grant-registry {(run_root / 'registry.json').as_posix()} "
-             f"--consent-db {(run_root / 'consent.sqlite3').as_posix()} --location {LOCATION} "
+             f"--consent-db {(run_root / 'consent.sqlite3').as_posix()} --location {pack['location']} "
              f"--date {pack['date']} --i-authorise-paid-calls --run-root {run_root.as_posix()} "
              f"--connectivity-timeout-s 20 --connectivity-max-age-s 30 --check-connectivity-only{ip}",
              "",
              "Launch Mission Control Live:",
              '  $env:PYTHONPATH="src;."',
-             "  python -m sentinel.ui --mode live --site-profile CanningSt --data-dir artifacts/room-live "
+             # The site profile carries the venue's cube site and tag map for
+             # Mission Control's own startup validation, so it follows the
+             # scenario's venue rather than naming CanningSt for every room.
+             f"  python -m sentinel.ui --mode live --site-profile {pack['location']} "
+             "--data-dir artifacts/room-live "
              f"--room-live-config {current} --i-authorise-paid-calls"]
     return "\n".join(lines)
 
@@ -412,11 +454,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", default=None, help="use this run id (default: reuse the unflown current run "
                                                        "or make a fresh l3-<time>)")
     parser.add_argument("--new-run", action="store_true", help="always prepare a fresh run")
-    parser.add_argument("--scenario", choices=sorted(SCENARIOS), default="demo360",
-                        help="flight scenario: demo360 (compact site + left/backward/right looks from the pad, "
+    parser.add_argument("--scenario", choices=sorted(SCENARIOS), default="lecture",
+                        help="flight scenario: lecture (the measured lecture room, five top-height poses, its "
+                             "own tags at 49.5 cm; the default, and what Mission Control's prepare "
+                             "uses -- the venue the demo is in, so an untouched drop-down cannot "
+                             "prepare another room's geometry), "
+                             "demo360 (compact CanningSt site + left/backward/right looks from the pad, "
                              "60 cm error limit; the default, also what Mission Control's prepare uses), "
                              "demo5 (demo360's site from five top-height poses), "
-                             "demo (compact, 60 cm), canningst (compact, 30 cm) or wide (3x3 zones)")
+                             "lecture (demo5's five poses in the measured lecture room, its own "
+                             "tags at 49.5 cm), demo (compact, 60 cm), canningst (compact, 30 cm) "
+                             "or wide (3x3 zones)")
     parser.add_argument("--request", default=DEFAULT_REQUEST,
                         help="label only: the manifest does not bind the request text")
     return parser
