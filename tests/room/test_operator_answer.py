@@ -11,14 +11,15 @@ def _event(payload):
     return SimpleNamespace(event_type="ROOM_TOOL_OUTCOME", payload=payload)
 
 
-def _frame(*classes):
-    return {"estimates": [{"class_name": name} for name in classes], "people_confirmed": 0}
+def _frame(*classes, unplaced=()):
+    return {"estimates": [{"class_name": name} for name in classes], "people_confirmed": 0,
+            "unplaced": [{"class_name": name, "reason": "NOT_ON_SUPPORT_PLANE"} for name in unplaced]}
 
 
 EVENTS = (
     SimpleNamespace(event_type="SAFETY_ASSESSED", payload={}),
     _event({"candidate_id": "OBSERVE:g1:c1:center-rear", "code": "OBSERVE_SUCCEEDED",
-            "count_evidences": [_frame("mug"), _frame("mug", "phone")]}),
+            "count_evidences": [_frame("mug"), _frame("mug", "phone", unplaced=("phone", "computer"))]}),
     _event({"candidate_id": "OBSERVE:g1:c1:left-rear", "code": "ZONE_REFUSED"}),
     _event({"candidate_id": "ANSWER:COUNTS", "code": "ANSWERED_COUNT", "terminal_state": "COMPLETED",
             "answer": "Objective g1:c1 (room-wide count): mugs 1 confirmed",
@@ -34,6 +35,12 @@ def test_findings_and_prompt_carry_request_counts_and_missed_zones():
     assert findings["zones_observed"] == ["center-rear"]
     assert findings["zones_not_observed"] == [{"zone": "left-rear", "reason": "ZONE_REFUSED"}]
     assert findings["zones"][0]["detections"] == {"mug": 2, "phone": 1}
+    # Live l3-20260926-173741: Gemini saw a phone (high confidence) but it
+    # could not be placed on a support plane, so it reached neither the
+    # zone's detections nor the counts, and the mission-end answer claimed
+    # "no phones detected". A sighting that could not be grounded is still
+    # a sighting; the findings must carry it so the answer can say so.
+    assert findings["zones"][0]["unplaced_sightings"] == {"phone": 1, "computer": 1}
     assert findings["counts"] == [{"class_name": "mug", "confirmed": 1, "uncertain": 1, "unplaced": 0,
                                    "scope": "ROOM"}]
     assert findings["coverage"] == {"complete": False, "uncovered": ["left:mug"]}

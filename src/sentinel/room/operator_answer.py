@@ -47,7 +47,10 @@ SYSTEM_INSTRUCTIONS = (
     "numbers in the findings; never invent an object, a count or a place. Say which parts of "
     "the room were not observed and that objects there may have been missed: the findings' "
     "zones_not_observed lists them, and when it is non-empty you must never claim the whole "
-    "room was covered. Call uncertain detections uncertain. If the mission did not answer "
+    "room was covered. Call uncertain detections uncertain. A zone's unplaced_sightings are "
+    "detector sightings that could not be pinned to a place in the room: report them as seen "
+    "but not counted, and never claim an object with an unplaced sighting was absent. If the "
+    "mission did not answer "
     "the request, say so plainly; when the flight ended early, explain what failed in plain "
     "words from the findings (each zone's reason and detail text, and how the flight ended), "
     "without guessing beyond them. Zone names read position-then-look: in "
@@ -115,7 +118,7 @@ def collect_findings(events: Iterable, terminal: Mapping[str, object] | None = N
                 offered = str((candidate or {}).get("candidate_id") or "")
                 if offered.startswith("OBSERVE:"):
                     zones.setdefault(_zone(offered), {"zone": _zone(offered), "status": None,
-                                                      "detections": {}, "frames": 0})
+                                                      "detections": {}, "unplaced_sightings": {}, "frames": 0})
             continue
         if event_type != "ROOM_TOOL_OUTCOME":
             continue
@@ -123,15 +126,22 @@ def collect_findings(events: Iterable, terminal: Mapping[str, object] | None = N
         code = payload.get("code")
         if candidate_id.startswith("OBSERVE:"):
             zone = zones.setdefault(_zone(candidate_id), {"zone": _zone(candidate_id), "status": None,
-                                                          "detections": {}, "frames": 0})
+                                                          "detections": {}, "unplaced_sightings": {}, "frames": 0})
             if code == "OBSERVE_SUCCEEDED":
                 zone["status"] = "OBSERVED"
                 frames = payload.get("count_evidences") or (
                     [payload["count_evidence"]] if payload.get("count_evidence") else [])
                 seen: Counter = Counter()
+                sighted: Counter = Counter()
                 for frame in frames:
                     for estimate in (frame or {}).get("estimates") or ():
                         seen[estimate.get("class_name") or "unknown"] += 1
+                    # A detection the grounding could not place (live
+                    # l3-20260926-173741: a high-confidence phone off the
+                    # support plane) is still a sighting; without it the
+                    # answer claimed "no phones detected".
+                    for unplaced in (frame or {}).get("unplaced") or ():
+                        sighted[(unplaced or {}).get("class_name") or "unknown"] += 1
                     people = int((frame or {}).get("people_confirmed") or 0)
                     if people:
                         seen["person"] += people
@@ -140,6 +150,8 @@ def collect_findings(events: Iterable, terminal: Mapping[str, object] | None = N
                 # grounded counts below are the answer
                 for name, value in seen.items():
                     zone["detections"][name] = zone["detections"].get(name, 0) + value
+                for name, value in sighted.items():
+                    zone["unplaced_sightings"][name] = zone["unplaced_sightings"].get(name, 0) + value
             elif zone["status"] != "OBSERVED":
                 zone["status"] = code or "FAILED"
                 if payload.get("detail"):
@@ -210,11 +222,16 @@ def fallback_answer(request_text: str, findings: Mapping[str, object]) -> str:
     else:
         parts.append("The mission produced no grounded count answer.")
         raw: Counter = Counter()
+        unplaced: Counter = Counter()
         for zone in findings.get("zones") or ():
             raw.update(zone.get("detections") or {})
+            unplaced.update(zone.get("unplaced_sightings") or {})
         if raw:
             parts.append("Raw per-frame sightings (not de-duplicated): "
                          + ", ".join(f"{name} x{n}" for name, n in sorted(raw.items())) + ".")
+        if unplaced:
+            parts.append("Seen but not placeable in the room (not counted): "
+                         + ", ".join(f"{name} x{n}" for name, n in sorted(unplaced.items())) + ".")
     observed = findings.get("zones_observed") or []
     missed = findings.get("zones_not_observed") or []
     if observed:
