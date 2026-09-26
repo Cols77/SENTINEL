@@ -596,6 +596,17 @@ def _cmd_live(
         except (ArtifactError, OSError) as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 2
+        if jev_factory is _default_jev:
+            # One timed (paid) micro-decision: live 2026-09-25 the provider's
+            # per-choice latency doubled during the evening with no code
+            # change; the operator sees it here instead of mid-flight. Only
+            # the real judge is probed -- a scripted or fixture judge must
+            # never consume an extra call. Informational: never gates takeoff.
+            jev_latency_s, jev_warning = live_stack.jev_latency_probe(judge, clock=clock)
+            if jev_latency_s is not None:
+                print(f"jev_latency_s={jev_latency_s:.2f}", file=sys.stderr)
+            if jev_warning:
+                print(f"warning: {jev_warning}", file=sys.stderr)
 
         def before_takeoff() -> None:
             # Fix round 2/4 (Q2): the preflight was fresh when it ran; the
@@ -628,13 +639,20 @@ def _cmd_live(
         # stack construction until landing/close (stopped in the finally
         # below). See _ArmedFlightStackFactory.
         armed_factory = _ArmedFlightStackFactory(client_factory, on_stack=on_stack)
+        # One bounded (paid, authorised-only, real-Jev-only) GLM rewrite of
+        # the operator's words into the goal taxonomy's phrasing. Fail-open:
+        # any failure flies the original text. The operator answer below
+        # keeps the original words.
+        flight_request_text = _normalize_request_text(
+            run, request_text=request_text, wall_clock=wall_clock,
+            authorised=bool(args.i_authorise_paid_calls) and jev_factory is _default_jev)
         try:
             try:
                 outcome = live_session.run_count_return(
                     store=run.store, manifest=manifest, site=site, drift_profile=drift_profile,
                     energy_profile=energy_profile, limits=limits, calibration_profiles=calibration_profiles,
                     flight_stack_factory=armed_factory, judge=judge, detector=detector,
-                    assurances=verified_assurances, request_text=request_text,
+                    assurances=verified_assurances, request_text=flight_request_text,
                     frames_dir=run.root / "frames", clock=clock, wall_clock=wall_clock,
                     before_takeoff=before_takeoff, acceptance=acceptance,
                     disable_battery_guard=args.disable_battery_guard,
@@ -668,6 +686,7 @@ def _cmd_live(
         # judge means an offline run, which gets the deterministic answer.
         _write_operator_answer(run, manifest.run_id, request_text=request_text,
                                authorised=bool(args.i_authorise_paid_calls) and jev_factory is _default_jev)
+        _write_capture_overlays(run)
         print(json.dumps({"run_id": manifest.run_id, "terminal_state": outcome.terminal_state.value}))
         return 0
     finally:
@@ -680,6 +699,35 @@ def _cmd_live(
             except OSError as exc:
                 print(f"recording status unavailable: {exc}", file=sys.stderr)
         run.close()
+
+
+def _normalize_request_text(run, *, request_text: str, authorised: bool,
+                            wall_clock: Callable[[], datetime], normalize=None) -> str:
+    """The request text to fly: GLM's rewrite when authorised and it worked,
+    else the original. Never raises; a changed text is recorded as
+    ``REQUEST_NORMALIZED`` with both texts."""
+    if not authorised:
+        return request_text
+    try:
+        if normalize is None:
+            from sentinel.room import request_normalizer
+
+            normalize = request_normalizer.normalize_request
+        live_stack.provider_environ()  # fill OPENROUTER_API_KEY from .env, as Jev does
+        normalized, model = normalize(request_text, authorised=True)
+        if not isinstance(normalized, str) or not normalized.strip():
+            raise ValueError("empty normalized request")
+        normalized = normalized.strip()
+        if normalized == request_text:
+            return request_text
+        run.append_event("REQUEST_NORMALIZED", {"original": request_text, "normalized": normalized,
+                                                "model": model}, now=wall_clock())
+    except Exception as exc:  # fail-open: the mission never blocks on this step
+        print(f"request normalization unavailable, flying the original request: {exc}"[:400],
+              file=sys.stderr)
+        return request_text
+    print(f"request normalized: {request_text!r} -> {normalized!r}", file=sys.stderr)
+    return normalized
 
 
 def _write_operator_answer(run, run_id: str, *, request_text: str, authorised: bool) -> None:
@@ -697,6 +745,19 @@ def _write_operator_answer(run, run_id: str, *, request_text: str, authorised: b
             print(f"operator answer ({document['source']}): {document['operator_answer']}", file=sys.stderr)
     except Exception as exc:  # the answer is a courtesy; the run is already recorded
         print(f"operator answer unavailable: {exc}", file=sys.stderr)
+
+
+def _write_capture_overlays(run) -> None:
+    """Best effort, after terminal.json: copies of the captures with their
+    verified VLM boxes drawn on; never changes the CLI's outcome."""
+    try:
+        from sentinel.room.capture_overlays import render_run_overlays
+
+        written = render_run_overlays(run.root)
+        if written:
+            print(f"capture overlays: {len(written)} in {written[0].parent}", file=sys.stderr)
+    except Exception as exc:
+        print(f"capture overlays unavailable: {exc}", file=sys.stderr)
 
 
 def _cmd_replay(args: argparse.Namespace) -> int:
@@ -781,12 +842,24 @@ def build_parser() -> argparse.ArgumentParser:
     live_parser.add_argument("--location", default=None)
     live_parser.add_argument("--date", default=None)
     live_parser.add_argument("--i-authorise-paid-calls", action="store_true")
+    # Live 2026-09-26: with no battery gate at all the packs drained to 9 %
+    # and 14 % (l3-20260926-111405, -114306), the first ending on a
+    # motor-stop mid-turn. The operator's remedy is a REACTIVE floor, not
+    # the predictive one: worst-case projections refuse takeoff around 70 %
+    # and turn back mid-mission, which cripples a demo, while the reactive
+    # gate (ReserveGuard with the predictive guard disabled) flies normally
+    # and orders the safe return once a validated reading drops below the
+    # profile's 22 % landing floor. So the default stays disable_battery_guard
+    # = True (reactive floor only); --enable-battery-guard opts into the full
+    # predictive projections.
     battery_guard = live_parser.add_mutually_exclusive_group()
     battery_guard.add_argument("--disable-battery-guard", dest="disable_battery_guard",
                                action="store_true", default=True,
-                               help="skip projected battery cost in Live mode (default; keeps the landing floor)")
+                               help="reactive-floor-only battery gating (default): fly normally, safe return below "
+                                    "the profile's landing floor")
     battery_guard.add_argument("--enable-battery-guard", dest="disable_battery_guard",
-                               action="store_false", help="enforce projected battery cost in Live mode")
+                               action="store_false",
+                               help="operator opt-in: full projected battery cost and floor admission in Live mode")
     live_parser.add_argument("--site", default=None)
     live_parser.add_argument("--assurance", action="append", default=[])
     live_parser.add_argument("--clock-domain-id", default=None)

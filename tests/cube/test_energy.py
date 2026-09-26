@@ -428,15 +428,32 @@ def test_dry_run_can_replay_scripted_battery_and_motor_time_sequences() -> None:
     ]
 
 
-def test_a_disabled_battery_guard_continues_below_the_floor_and_on_stale_telemetry() -> None:
-    guard = ReserveGuard(_profile(landing_floor_pct=20), clock=lambda: 100.0, disable_predictive_guard=True)
+def test_a_disabled_battery_guard_keeps_only_the_reactive_landing_floor() -> None:
+    # Live 2026-09-26 (l3-20260926-111405): with no floor at all a recovery
+    # loop drained the pack to 9% and the motors cut mid-turn. The
+    # predictive projections stay off (the Tello's reading is too unstable
+    # to price worst cases from), but one reactive gate remains: a
+    # validated reading below the landing floor orders the safe return.
+    guard = ReserveGuard(_profile(landing_floor_pct=22), clock=lambda: 100.0, disable_predictive_guard=True)
     common = dict(next_plan=_plan("next", 60), recovery_plan=None, provider_wait_s=10.0,
                   termination_plan=_plan("home-and-land", 30))
 
-    low = guard.assess(current=_sample(5, 99.0), **common)
-    stale = guard.assess(current=_sample(5, 1.0), **common)
+    healthy = guard.assess(current=_sample(40, 99.0), **common)
+    assert healthy.decision is ReserveDecision.CONTINUE and healthy.action_cost_pct == 0
+    at_floor = guard.assess(current=_sample(22, 100.0), **common)
+    assert at_floor.decision is ReserveDecision.CONTINUE  # 22 is the floor, not below it
+    below = guard.assess(current=_sample(21, 101.0), **common)
+    assert below.decision is ReserveDecision.RETURN_NOW
+    # The validated minimum is what gates: a reading that jumps back up
+    # never un-orders the return.
+    assert guard.assess(current=_sample(60, 102.0), **common).decision is ReserveDecision.RETURN_NOW
 
-    assert low.decision is ReserveDecision.CONTINUE and low.action_cost_pct == 0
-    assert stale.decision is ReserveDecision.CONTINUE
-    guard.latch_return(low)
-    assert guard.assess(current=_sample(4, 100.0), **common).decision is ReserveDecision.RETURN_NOW
+
+def test_a_disabled_battery_guard_still_honours_a_latched_return() -> None:
+    guard = ReserveGuard(_profile(landing_floor_pct=22), clock=lambda: 100.0, disable_predictive_guard=True)
+    common = dict(next_plan=_plan("next", 60), recovery_plan=None, provider_wait_s=10.0,
+                  termination_plan=_plan("home-and-land", 30))
+    healthy = guard.assess(current=_sample(50, 99.0), **common)
+    assert healthy.decision is ReserveDecision.CONTINUE
+    guard.latch_return(healthy)
+    assert guard.assess(current=_sample(50, 100.0), **common).decision is ReserveDecision.RETURN_NOW

@@ -411,10 +411,17 @@ class ReserveGuard:
         valid_sample = bound_sample and self._sample_is_current(current, self._now())
         can_terminate = usable_battery - termination_cost >= self.profile.landing_floor_pct
         if self.disable_predictive_guard:
-            # Live demo: the Tello's battery reading is too unstable to gate
-            # on. No floor, no projected cost, no telemetry-validity landing;
-            # the aircraft's own firmware low-battery landing still applies.
-            decision = ReserveDecision.RETURN_NOW if self._return_latched else ReserveDecision.CONTINUE
+            # Live demo: the Tello's battery reading is too unstable to price
+            # worst cases from -- no projected cost, no telemetry-validity
+            # landing. One reactive gate remains (live 2026-09-26,
+            # l3-20260926-111405: with no floor at all a recovery loop
+            # drained the pack to 9% and the motors cut mid-turn): a
+            # validated reading below the landing floor orders the safe
+            # return, on the running minimum so a reading that jumps back up
+            # never un-orders it.
+            low = usable_battery < self.profile.landing_floor_pct
+            decision = (ReserveDecision.RETURN_NOW if self._return_latched or low
+                        else ReserveDecision.CONTINUE)
         elif not valid_sample:
             decision = ReserveDecision.LAND_CONTINGENCY
         elif self._return_latched:

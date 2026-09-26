@@ -674,7 +674,11 @@ class RoomAgentService:
                 judge=judge, detector=world.detector,
                 assurances=room_rehearsal.rehearsal_assurances(run.id, binding.site),
                 request_text=run.request_text, frames_dir=run_dir / "frames", clock=time.monotonic,
-                wall_clock=lambda: datetime.now(timezone.utc), before_takeoff=lambda: None)
+                wall_clock=lambda: datetime.now(timezone.utc), before_takeoff=lambda: None,
+                # The rehearsal previews the demo: same battery gating as the
+                # live CLI default (reactive floor only, no predictive
+                # projections -- those refuse takeoff near 70%).
+                disable_battery_guard=True)
         except live_session.LiveSessionError as exc:
             run.status = "REFUSED"
             run.error = str(exc)

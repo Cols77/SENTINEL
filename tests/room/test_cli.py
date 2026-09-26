@@ -1275,6 +1275,19 @@ def test_runbook_full_flight_command_uses_l0s_tested_connectivity_timing():
     assert str(parsed.connectivity_max_age_s) != _flag_value(full_flight_section, "--connectivity-max-age-s")
 
 
+def test_live_sessions_default_to_the_reactive_floor_with_predictive_as_opt_in():
+    # Live 2026-09-26: with no battery gate the packs drained to 9 % and
+    # 14 % -- but the predictive projections refuse takeoff near 70 %,
+    # which cripples a demo. The default is reactive-floor-only gating
+    # (disable_battery_guard=True feeds ReserveGuard's reactive branch);
+    # --enable-battery-guard opts into the full projections.
+    base = ["live", "--execute", "--manifest", "m", "--authorization-digest", "d",
+            "--capability", "count_return", "--grant-registry", "r", "--run-root", "rr"]
+    assert cli.build_parser().parse_args(base).disable_battery_guard is True
+    assert cli.build_parser().parse_args([*base, "--disable-battery-guard"]).disable_battery_guard is True
+    assert cli.build_parser().parse_args([*base, "--enable-battery-guard"]).disable_battery_guard is False
+
+
 def test_default_request_text_matches_the_runbook():
     runbook = (Path(__file__).resolve().parents[2] / "docs" / "room-agent-live-runbook.md").read_text(encoding="utf-8")
     assert " ".join(cli.DEFAULT_REQUEST_TEXT.split()) in " ".join(runbook.split())

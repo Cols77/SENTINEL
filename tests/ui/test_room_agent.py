@@ -1,4 +1,4 @@
-"""Task C: Mission Control's room-agent architecture, through the service API.
+﻿"""Task C: Mission Control's room-agent architecture, through the service API.
 
 Rehearsal runs the production room composition over the fake CanningSt
 aircraft (``sentinel.ui.room_rehearsal``); nothing reaches hardware, the
@@ -154,7 +154,12 @@ def test_a_rehearsal_run_reaches_an_answer_and_returns_home(tmp_path, fast):
         store.close()
     assert observed
     assert all(len(payload["count_evidences"]) == 3 for payload in observed)
-    assert run["captures"] == room.run.world.detector.calls == 3 * len(observed)
+    # Every credited observe carries exactly 3 frames (asserted above); the
+    # raw capture/detector-call counts may exceed 3-per-observe since
+    # perception prefetch also sends retaken or aborted legs' frames, whose
+    # results are discarded, never credited.
+    assert run["captures"] >= 3 * len(observed)
+    assert room.run.world.detector.calls >= 3 * len(observed)
     assert len(run["detections"]) >= 4
     assert any(d["confidence"] == "low" for d in run["detections"])
     assert run["decisions"] and all(d["reason"] for d in run["decisions"])
@@ -165,8 +170,13 @@ def test_a_rehearsal_run_reaches_an_answer_and_returns_home(tmp_path, fast):
     assert service.registry.get(service.config.run_id) is None
 
 
-@pytest.mark.parametrize("battery,succeeds", [(69, False), (70, True)])
+@pytest.mark.parametrize("battery,succeeds", [(21, False), (50, True)])
 def test_rehearsal_sweep_battery_admission(tmp_path, fast, monkeypatch, battery, succeeds):
+    # The rehearsal now gates like the live default: reactive floor only
+    # (live 2026-09-26: packs drained to 9% and 14% with no gate at all,
+    # while the predictive projections refuse takeoff near 70%). Below the
+    # 22% floor the first assessment orders the safe landing before any
+    # capture; above it the whole sweep flies.
     original_build = room_rehearsal.build_world
 
     def build_with_battery(*args, **kwargs):
@@ -179,21 +189,30 @@ def test_rehearsal_sweep_battery_admission(tmp_path, fast, monkeypatch, battery,
     with client:
         run = _run(client, room)
     assert run["captures"] == (18 if succeeds else 0)
-    assert run["status"] == ("COMPLETED" if succeeds else "SAFE_LANDED")
-    assert run["returned_home"] and run["landing"]["state"] == "LANDED"
+    # Below the floor the session is refused on the ground: taking off to
+    # immediately land again serves nobody.
+    assert run["status"] == ("COMPLETED" if succeeds else "REFUSED")
+    if succeeds:
+        assert run["returned_home"] and run["landing"]["state"] == "LANDED"
+    else:
+        assert run["took_off"] is False  # refused on the ground, nothing flew
 
 
-def test_scenario_b_a_tag_loss_during_the_sweep_coasts_and_the_count_still_completes(tmp_path, fast):
-    """Permissive positioning: the scenario's tag loss no longer forces a
-    recovery (and a possible landing); the tracker coasts through it and the
-    mission answers, returns and lands."""
+def test_scenario_b_a_tag_loss_during_the_sweep_ends_bounded_and_safe(tmp_path, fast):
+    """Scenario (b)'s gust permanently narrows the tag view, so every
+    off-axis look loses its fix and those zones can never complete. The
+    mission must neither land in place nor loop on them: after
+    OBSERVE_PREEMPTED_LIMIT interruptions per zone the views are dropped,
+    the session answers explicitly incomplete, returns and lands. (Before
+    the bound this test hung the full 120 s wait re-choosing one zone ~50
+    times â€” the same shape as live l3-20260926-111405, which drained the
+    battery to 9%.)"""
     service, room, client = _client(tmp_path)
     with client:
         run = _run(client, room, scenario="b")
-    assert run["status"] == "COMPLETED", run["error"]
+    assert run["status"] == "INCOMPLETE_RETURNED", run["error"]
     states = [row["state"] for row in run["reanchor_log"] if row["kind"] == "LOCALIZATION"]
     assert "COASTING" in states and "LOST" not in states[1:]
-    assert run["answer"]["summary"].startswith("phones:")
     assert run["returned_home"] is True and run["landing"]["state"] == "LANDED"
 
 
@@ -342,9 +361,13 @@ def test_in_live_nothing_but_the_battery_status_read_happens_before_approval(tmp
         catalogue = state["catalogue"]
         assert {m["id"]: m["available"] for m in catalogue["modes"]}["LIVE"] is True
         assert catalogue["local_ip"] == "192.168.10.2"
-        # The Prepare panel's battery reading is live, from a link this cycle opened and closed itself.
-        assert state["preparation"]["battery_percent"] == 61
-        assert ("TelloLink", "192.168.10.2") in calls and "battery_read" in calls
+        # Disabled 2026-09-25 pre-demo: DJITelloPy's receivers are process-global,
+        # so the prepare-time battery probe left UDP 8889 bound in the server and
+        # the propose gate read it as another session owning the drone. Until a
+        # subprocess probe (or an owner-aware gate) re-enables it, the Prepare
+        # panel shows "unknown" and no pre-approval drone link is opened at all.
+        assert state["preparation"]["battery_percent"] is None
+        assert "battery_read" not in calls and ("TelloLink", "192.168.10.2") not in calls
         proposed = client.post("/api/v1/room-agent/proposals",
                                json=dict(mode="LIVE", scenario="a", request_text=REQUEST)).json()
         assert proposed["status"] == "ACKNOWLEDGED", proposed
@@ -365,6 +388,9 @@ def test_in_live_nothing_but_the_battery_status_read_happens_before_approval(tmp
     assert argv.count("--assurance") == 2
     assert argv[argv.index("--site") + 1].endswith("canningst-site.json")
     assert argv[argv.index("--profile-file") + 1].endswith("canningst-flight-profile.json")
+    # Mission Control flies with the CLI's default: the predictive battery
+    # guard and its 22 % floor on (live 2026-09-26 drained to 9 % without).
+    assert "--disable-battery-guard" not in argv
     assert run["status"] == "REFUSED" and "connectivity preflight" in run["error"]
 
 

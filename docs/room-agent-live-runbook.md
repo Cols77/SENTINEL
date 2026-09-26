@@ -285,9 +285,9 @@ WP5 trials in `C:/coding/sentinel/.worktrees/integration/artifacts/trials/`
 | File | What it is |
 |---|---|
 | `canningst-flight-profile.json` | `room-calibration-profile-v1`, kind `flight`, state `CALIBRATION` (legal only under a TRIAL grant), speeds 20/50 cm/s, the p90 whole-flight battery burn, the sampled pose-drift envelope |
-| `canningst-energy.json` | `EnergyProfile`, `execution_scope: CALIBRATION` (the supervisor admits it in REAL mode only under a TRIAL acceptance grant), aircraft `tello-canningst`, **0.288 %/s** |
+| `canningst-energy.json` | `EnergyProfile`, `execution_scope: CALIBRATION` (the supervisor admits it in REAL mode only under a TRIAL acceptance grant), aircraft `tello-canningst`, **0.288 %/s**, landing floor **22 %** (declared 2026-09-26, was 20) |
 | `canningst-drift.json` | `pose-drift-v1`: `xy_drift_per_cm` **0.157** (the robust statistic, declared in the policy), measured `heading_drift_per_cm` 0.022 and `max_height_error_cm` 20; every other limit is declared in `canningst-policy.json` (hover drift `xy_drift_cm_s` **0.05 cm/s**, an operator judgment, see below) |
-| `canningst-command-limits.json` | `trim_rounds: 0`, `localise: false` (the supervisor refuses conditional trims) |
+| `canningst-command-limits.json` | `trim_rounds: 0`, `localise: false` (the supervisor refuses conditional trims), `translation_speed_cm_s: 40` (2026-09-26; inside the validated 20-50 cm/s, at most the 40 cm/s inset-free leg speed) |
 | `canningst-policy.json` | the declared margins and limits the recordings cannot measure, the excluded run and its reason, and the robust-drift rule |
 
 How the numbers are derived (Task B2):
@@ -433,14 +433,18 @@ python scripts/room_assurance.py --site fixtures/room_agent/v1/canningst-site.js
 3. **Pre-flight checklist (before the motors-on step).** Do not run step 4
    until every line is true:
 
-   - [ ] Battery at least **20 %** (check in the Tello app or the L0 line
-         `battery=<n>%`). This is the landing reserve floor, not an
-         unconditional takeoff permit. Each observation is admitted only
-         while it can still pay, above that floor, its own worst case, a
-         recovery and the whole return (35 % center, 40 % left/right at
-         0.288 %/s): the center needs about 55 %, left/right about 60 %;
-         below that the aircraft returns. Below about 45 % takeoff itself is
-         refused. A real observation burns about 5-8 %.
+   - [ ] Battery at least **22 %** (check in the Tello app or the L0 line
+         `battery=<n>%`). Default battery gating is the REACTIVE floor
+         (2026-09-26): the flight proceeds at any admissible charge and the
+         supervisor orders the safe return once a validated reading drops
+         below the 22 % landing floor; a below-floor start is refused on
+         the ground. A real observation burns about 5-8 %, so plan roughly
+         floor + 8 % per remaining zone of margin. `--enable-battery-guard`
+         opts into the full predictive projections instead; under those the
+         per-zone thresholds (computed for the old 20 % floor and 20 cm/s:
+         center about 55 %, left/right about 60 %, takeoff refused below
+         about 45 %) are stricter and have not been recomputed for the
+         22 % floor and 40 cm/s speed.
    - [ ] The Tello sits on the start mark (250, 190 cm), nose toward the tag
          stands, and both tags are in view of its camera.
    - [ ] Clear distance **measured with the tape** in each move direction
