@@ -1512,3 +1512,95 @@ def test_a_tracker_lost_after_a_fix_still_blocks_takeoff(safety):
     samples["pose"] = supervisor.tracker.mark_lost()
     with pytest.raises(ValueError, match="LOCALIZATION_LOST"):
         supervisor.validate_start()
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-26: the CanningSt battery floor is supervisor-owned (22 %)
+# ---------------------------------------------------------------------------
+
+def _canningst_energy():
+    from pathlib import Path
+    from sentinel.room import live_session
+    return live_session.load_energy_profile(
+        Path(__file__).resolve().parents[2] / "fixtures" / "room_agent" / "v1" / "profiles" / "canningst-energy.json")
+
+
+def _floor_guarded(safety, *, disable_predictive_guard=False):
+    """The fixture supervisor pricing energy with the committed CanningSt
+    burn rate and landing floor (bindings are the fixture's, not these)."""
+    supervisor, _, clock, *_ = safety
+    committed = _canningst_energy()
+    profile = replace(supervisor.reserve.profile, landing_floor_pct=committed.landing_floor_pct,
+                      percent_per_second_upper=committed.percent_per_second_upper)
+    supervisor.reserve = ReserveGuard(profile, clock, disable_predictive_guard=disable_predictive_guard)
+    supervisor.validate_bindings = lambda site: None
+    return supervisor
+
+
+def _zone_cost(safety, plan):
+    supervisor, _, clock, samples, *_ = safety
+    samples["energy"] = EnergySample(90, clock())
+    admitted = supervisor.assess(request(safety, plan), supervisor.site)
+    assert admitted.transition == "CONTINUE", admitted.reason
+    return admitted.energy.action_cost_pct
+
+
+def test_work_whose_projection_crosses_the_22_percent_floor_is_a_mandatory_return(safety):
+    # Live 2026-09-26 (l3-20260926-111405): with the predictive guard off the
+    # battery drained to 9 % and the flight ended on a motor-stop mid-turn.
+    # The supervisor, not Jev, returns once the next zone would land below 22 %.
+    supervisor, store, clock, samples, *_ = safety
+    _floor_guarded(safety)
+    assert supervisor.reserve.profile.landing_floor_pct == 22
+    zone = checkpoint(samples["pose"], command(seconds=30))
+    cost = _zone_cost(safety, zone)
+    samples["energy"] = EnergySample(22 + cost, clock())
+    affordable = supervisor.assess(request(safety, zone), supervisor.site)
+    assert affordable.transition == "CONTINUE"
+    assert dict(affordable.energy.components)["predictive_guard_disabled"] == 0.0
+    samples["energy"] = EnergySample(22 + cost - 1, clock())
+    crossing = supervisor.assess(request(safety, zone), supervisor.site)
+    assert (crossing.transition, crossing.reason) == ("RETURN_NOW", "OPTIONAL_WORK_UNAFFORDABLE")
+    assert crossing.energy.projected_landing_pct == 21 and crossing.energy.landing_floor_pct == 22
+    executor = Executor(store, clock)
+    supervisor.dispatch(crossing, executor)
+    assert supervisor.reserve.return_latched and "CAPTURE" not in executor.calls
+
+
+def test_below_the_floor_with_no_affordable_return_the_supervisor_lands_in_place(safety):
+    supervisor, _, clock, samples, *_ = safety
+    _floor_guarded(safety)
+    samples["energy"] = EnergySample(21, clock())
+    outcome = supervisor.assess(request(safety, checkpoint(samples["pose"], command(seconds=30))), supervisor.site)
+    assert (outcome.transition, outcome.reason) == ("LAND_CONTINGENCY", "RETURN_ENERGY_UNAVAILABLE")
+
+
+def test_the_operator_override_still_disables_the_predictive_floor(safety):
+    # The explicit --disable-battery-guard override keeps the 2026-09-24
+    # behaviour: no projected cost, so the same crossing continues.
+    supervisor, _, clock, samples, *_ = safety
+    zone = checkpoint(samples["pose"], command(seconds=30))
+    _floor_guarded(safety)
+    cost = _zone_cost(safety, zone)
+    _floor_guarded(safety, disable_predictive_guard=True)
+    samples["energy"] = EnergySample(22 + cost - 1, clock())
+    outcome = supervisor.assess(request(safety, zone), supervisor.site)
+    assert outcome.transition == "CONTINUE"
+    assert dict(outcome.energy.components)["predictive_guard_disabled"] == 1.0
+
+
+def test_a_declared_translation_speed_is_bound_by_the_calibration_hash_and_its_absence_changes_nothing():
+    import hashlib
+    import json
+    room_site = site()
+    profile = EnergyProfile("energy", room_site.cube_site_sha256, "aircraft", .01, 1, 20, 2, "SIMULATION_ONLY")
+    drift = tracker()[0].profile
+    base = CommandLimits(trim_rounds=0, localise=False)
+    faster = replace(base, translation_speed_cm_s=40)
+    assert calibration_hashes(profile, drift, base, room_site) != calibration_hashes(profile, drift, faster, room_site)
+    # Grants issued before the field existed still bind: an undeclared speed
+    # hashes exactly as the limits did without it.
+    legacy = {k: v for k, v in asdict(base).items() if k != "translation_speed_cm_s"}
+    digest = hashlib.sha256(json.dumps({"commands": legacy, "landing_upper_bound_s": 10.0}, sort_keys=True,
+                                       separators=(",", ":")).encode("utf-8")).hexdigest()
+    assert digest in calibration_hashes(profile, drift, base, room_site)

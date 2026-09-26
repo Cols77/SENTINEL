@@ -272,7 +272,22 @@ CONFIDENCE_GATE_REFUSALS = frozenset({
     "MISSING_OR_NON_MAX_SELECTION", "PROVIDER_ERROR",
 })
 
-_NON_BURNING_REFUSALS = CONFIDENCE_GATE_REFUSALS | {"STALE_DECISION"}
+#: A look interrupted by the supervisor's own mandatory safety action
+#: (live l3-20260926-111405: localization recovery between looks) says
+#: nothing about the zone itself, so it stays offerable.
+OBSERVE_PREEMPTED = "OBSERVE_PREEMPTED"
+
+_NON_BURNING_REFUSALS = CONFIDENCE_GATE_REFUSALS | {"STALE_DECISION", OBSERVE_PREEMPTED}
+
+
+def _interruption_note(outcomes: tuple[ToolOutcome, ...], candidate_id: str) -> str:
+    """Live l3-20260926-111405: Jev re-chose one zone 8 times, six of them
+    interrupted by recovery, with no history to go on. Name the count so the
+    chooser can weigh a zone that keeps getting interrupted."""
+    count = sum(1 for o in outcomes if o.candidate_id == candidate_id and o.refusal_code == OBSERVE_PREEMPTED)
+    if not count:
+        return ""
+    return f"; {count} earlier attempt(s) at this pose were interrupted by a mandatory safety action"
 
 
 def _burns(outcome: ToolOutcome) -> bool:
@@ -281,10 +296,19 @@ def _burns(outcome: ToolOutcome) -> bool:
     return outcome.refusal_code is not None and outcome.refusal_code not in _NON_BURNING_REFUSALS
 
 
+#: Interruptions tolerated on unchanged coverage before the view is dropped.
+#: Rehearsal scenario (b) re-chose one zone 50 times in 400 s, every attempt
+#: preempted by recovery at look 3 because the pose's last look cannot hold a
+#: fix; left offerable forever, the session never answered. Interruptions
+#: recorded against other coverage (another zone credited since) do not count.
+OBSERVE_PREEMPTED_LIMIT = 3
+
+
 def _observe_suppressed(outcomes: tuple[ToolOutcome, ...], candidate_id: str, digest: str) -> bool:
-    return any(o.candidate_id == candidate_id and o.relevant_state_sha256 == digest
-               and (_burns(o) or o.code == "OBSERVE_SUCCEEDED")
-               for o in outcomes)
+    same = [o for o in outcomes if o.candidate_id == candidate_id and o.relevant_state_sha256 == digest]
+    if sum(o.refusal_code == OBSERVE_PREEMPTED for o in same) >= OBSERVE_PREEMPTED_LIMIT:
+        return True
+    return any(_burns(o) or o.code == "OBSERVE_SUCCEEDED" for o in same)
 
 
 def _answer_suppressed(outcomes: tuple[ToolOutcome, ...], candidate_id: str, digest: str) -> bool:
@@ -339,7 +363,10 @@ def _observe_candidate(objective: GoalObjective, pose_id: str, description: str,
                    f"Approximate direct distance from the drone's "
                    f"{'current position' if origin is not None else 'nominal home'}: {distance_cm:.0f} cm; "
                    "battery cost is assessed by the supervisor.")
-    failures = [o for o in outcomes if o.candidate_id == candidate_id and o.refusal_code is not None]
+    # An interrupted look is counted by the builders' interruption note, not
+    # reported as a failure of the zone.
+    failures = [o for o in outcomes if o.candidate_id == candidate_id
+                and o.refusal_code not in (None, OBSERVE_PREEMPTED)]
     if failures:
         last = failures[-1]
         description += (f" Tried {len(failures)} time(s) before; last attempt failed ({last.code}"
@@ -618,7 +645,8 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
                         region_candidates.append(candidate)
                 continue
             description = (f"Observe declared pose {pose_id}, the requested region for objective "
-                           f"{objective.objective_id}; {_coverage_gain_description(pose_id, site, coverage)}.")
+                           f"{objective.objective_id}; {_coverage_gain_description(pose_id, site, coverage)}"
+                           f"{_interruption_note(outcomes, f'OBSERVE:{objective.objective_id}:{pose_id}')}.")
             candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version,
                                            origin)
             if candidate is None:
@@ -637,7 +665,8 @@ def build_observation_candidates(objectives: tuple[GoalObjective, ...], site: Ro
             if benefit <= 0:
                 continue
             description = (f"Observe declared pose {pose_id} for objective {objective.objective_id}: "
-                           f"{_coverage_gain_description(pose_id, site, coverage)}.")
+                           f"{_coverage_gain_description(pose_id, site, coverage)}"
+                           f"{_interruption_note(outcomes, f'OBSERVE:{objective.objective_id}:{pose_id}')}.")
             candidate = _observe_candidate(objective, pose_id, description, site, coverage, outcomes, snapshot_version,
                                            origin)
             if candidate is not None:

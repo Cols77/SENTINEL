@@ -19,15 +19,29 @@ ROOT = Path(__file__).resolve().parents[2]
 DEMO_DRIFT = ROOT / "fixtures" / "room_agent" / "v1" / "profiles" / "canningst-demo-drift.json"
 
 
-def test_the_demo_drift_profile_only_raises_the_xy_uncertainty_limit():
+def test_the_demo_drift_profile_only_raises_the_declared_demo_limits():
+    # Three operator-declared demo raises, each named by its own evidence ref:
+    # the 60 cm predicted-position-error limit (2026-09-25 live: rear zones
+    # refused at look 2 under 30 cm), the 540 deg yaw budget for demo360's
+    # backward looks (three 90-plus-deg turns per sweep exceed the measured
+    # profile's 360), and the 45 deg heading-uncertainty budget (2026-09-26
+    # live l3-20260926-111405: every fixless rear-wall sweep tripped the 15
+    # deg forecast ~70 s in, so the zone could never complete and the battery
+    # drained re-trying it; raised generously for the demo, to be fine-tuned
+    # down later). Every other gate stays live.
     base = json.loads((mission.PROFILES / "canningst-drift.json").read_text(encoding="utf-8"))
     demo = json.loads(DEMO_DRIFT.read_text(encoding="utf-8"))
     changed = {key for key in base.keys() | demo.keys() if base.get(key) != demo.get(key)}
-    assert changed == {"profile_id", "evidence_refs", "max_xy_uncertainty_cm"}
+    assert changed == {"profile_id", "evidence_refs", "max_xy_uncertainty_cm", "max_yaw_deg",
+                       "max_heading_uncertainty_deg"}
     assert demo["max_xy_uncertainty_cm"] == 60
+    assert demo["max_yaw_deg"] == 540
+    assert demo["max_heading_uncertainty_deg"] == 45
     assert demo["validated"] is True
     assert demo["evidence_refs"] == [*base["evidence_refs"],
-                                     "operator-declared:demo-uncertainty-limit-20260925"]
+                                     "operator-declared:demo-uncertainty-limit-20260925",
+                                     "operator-declared:max-yaw-540-backward-look-20260925",
+                                     "operator-declared:heading-uncertainty-45-backward-sweep-20260926"]
 
 
 def test_the_prepare_script_offers_the_demo_scenario_on_the_compact_site():

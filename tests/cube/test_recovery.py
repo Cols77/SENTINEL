@@ -524,10 +524,31 @@ def test_a_coherent_burst_that_contradicts_the_position_history_reanchors_there(
     assert value.health.state == LocalizationState.ANCHORED and value.health.position.x_cm == 140
 
 
-def test_a_coherent_burst_at_an_unexpected_heading_rejects_only_that_action():
+def test_a_coherent_joint_burst_at_an_unexpected_heading_is_believed_not_contradicted():
+    # Live 2026-09-26 (l3-20260926-101602): after demo360's large turns the
+    # dead-reckoned heading was off by more than the 20 deg jump gate, so
+    # every burst the scan took measured a "contradictory" heading and the
+    # episode died at the deadline, landing the aircraft in place. Two mapped
+    # tags give an absolute heading: a fresh, internally coherent joint burst
+    # is believed over the motion history (as its position already is) -- the
+    # off-canonical heading is then handed to the restore turn, never rejected
+    # as a contradiction. The gate stays for single-tag views.
     recovery, value, clock = controller()
     action = recovery.next_action(value.health, environment(), ())
     sample = tuple(replace(report, fix=replace(report.fix, heading_deg=140)) for report in reports(clock))
+    outcome = recovery.assess_burst(action, sample)
+    assert outcome.reason != "contradictory_heading", outcome.reason
+    assert not outcome.accepted and outcome.reason == "restore_canonical_heading"
+    assert value.health.state != LocalizationState.LOST
+
+
+def test_a_single_tag_burst_at_an_unexpected_heading_is_still_rejected():
+    from sentinel.cube.recovery import SINGLE_TAG_SOURCE
+    recovery, value, clock = controller()
+    action = recovery.next_action(value.health, environment(), ())
+    sample = tuple(replace(report, fix=replace(report.fix, heading_deg=140, tag_ids=(1,),
+                                               source=SINGLE_TAG_SOURCE, xy_uncertainty_cm=15))
+                   for report in reports(clock))
     outcome = recovery.assess_burst(action, sample)
     assert not outcome.accepted and outcome.reason == "contradictory_heading"
     assert value.health.state != LocalizationState.LOST

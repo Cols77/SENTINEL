@@ -40,8 +40,14 @@ def _sha(value) -> str:
 
 def calibration_hashes(energy, drift, limits, site, landing_upper_bound_s=10.0) -> tuple[str, ...]:
     """Bind the exact calibrations, command limits, tag map and surveyed site."""
+    commands = asdict(limits)
+    if commands.get("translation_speed_cm_s") is None:
+        # An undeclared translation speed hashes as the limits did before the
+        # field existed, so grants already issued for them still bind; a
+        # declared one is part of what the grant binds.
+        commands.pop("translation_speed_cm_s", None)
     return tuple(sorted((_sha(asdict(energy)), _sha(asdict(drift) if drift is not None else None),
-                         _sha({"commands": asdict(limits), "landing_upper_bound_s": landing_upper_bound_s}),
+                         _sha({"commands": commands, "landing_upper_bound_s": landing_upper_bound_s}),
                          _sha(room_site_document(site)), site.tag_map_sha256)))
 
 
@@ -366,6 +372,11 @@ class SafetySupervisor:
                          or not math.isclose(pose.position.x_cm, home_pose.x_cm, abs_tol=tolerance)
                          or not math.isclose(pose.position.y_cm, home_pose.y_cm, abs_tol=tolerance)):
                 # The policy must describe the actual pad and touchdown level.
+                print(f"landing entry skipped ({entry.contingency_id}): projected end "
+                      f"({pose.position.x_cm:.0f},{pose.position.y_cm:.0f}) vs home "
+                      f"({home_pose.x_cm:.0f},{home_pose.y_cm:.0f}) tolerance {tolerance:.1f} cm, "
+                      f"z_band {entry.z_band_cm[0]} vs pad {site.home.nominal_pose.z_cm}",
+                      file=sys.stderr, flush=True)
                 continue
             try:
                 admitted = admit_terminal_contingency(site, self._assurances(),
@@ -373,8 +384,20 @@ class SafetySupervisor:
                     session_id=self.session_id, clock_domain_id=self.clock_domain_id,
                     now_monotonic_ms=now * 1000, pose=pose, energy_available=energy_available,
                     drift_profile=self.tracker.profile, clock_guard=copy(self.clock_guard))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as exc:
+                # Live 2026-09-26 (l3-20260926-135519): a refusal here ends
+                # the mission before its first zone, and the audit records
+                # only TERMINATION_LANDING_INVALID -- name the entry and the
+                # swallowed error so the next refusal is diagnosable.
+                print(f"landing admission error ({entry.contingency_id}, {trigger}): "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
                 admitted = None
+            if admitted is None:
+                print(f"landing admission refused ({entry.contingency_id}, {trigger}): pose "
+                      f"({pose.position.x_cm:.0f},{pose.position.y_cm:.0f},{pose.position.z_cm:.0f}) "
+                      f"state {pose.state.value} xy_unc {pose.xy_uncertainty_cm:.1f} home "
+                      f"({home_pose.x_cm:.0f},{home_pose.y_cm:.0f},{home_pose.z_cm:.0f}) home={home} "
+                      f"descent={require_descent}", file=sys.stderr, flush=True)
             if admitted is not None:
                 return admitted
         return None
@@ -1233,13 +1256,25 @@ class SafetySupervisor:
                     session_id=self.session_id, clock_domain_id=self.clock_domain_id,
                     navigation_contingency_id=navigation.contingency_id,
                     now_monotonic_ms=self.clock() * 1000, mapped_heading_tag_ids=self.mapped_heading_tag_ids)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as exc:
+                print(f"voluntary reanchor refused: recovery environment invalid "
+                      f"({type(exc).__name__}: {exc})", file=sys.stderr, flush=True)
                 return "REANCHOR_REFUSED", None
             # Peek the policy's next action: a voluntary attempt that has run
             # out of admissible actions is refused here and never reaches
             # _recover's contingency/emergency landing.
             action = voluntary.next_action(current.request.pose, environment, ())
             if action.kind in {"CONTINGENCY", "EMERGENCY"}:
+                # Live 2026-09-26 (l3-20260926-142659): three silent refusals
+                # here left the operator asking why -- name the policy's own
+                # reason and the pose it judged.
+                pose = current.request.pose
+                print(f"voluntary reanchor refused: no admissible recovery action "
+                      f"({action.kind}, reason={getattr(action, 'reason', None)}, "
+                      f"contingency={getattr(action, 'contingency_id', None)}) at "
+                      f"({pose.position.x_cm:.0f},{pose.position.y_cm:.0f},{pose.position.z_cm:.0f}) "
+                      f"state {pose.state.value} xy_unc {pose.xy_uncertainty_cm:.1f}",
+                      file=sys.stderr, flush=True)
                 return "REANCHOR_REFUSED", None
             result = self._recover(current, executor, voluntary=True)
             if isinstance(result, TerminalOutcome) or self._returning or self._terminal:
@@ -1250,10 +1285,13 @@ class SafetySupervisor:
                     and health.state == LocalizationState.ANCHORED):
                 return "REANCHORED", result
             if result.status != "RECOVERY_PENDING":
+                print(f"voluntary reanchor refused: attempt ended {result.status}",
+                      file=sys.stderr, flush=True)
                 return "REANCHOR_REFUSED", result
             current = self.prepare(snapshot_version=self.store.session_version(self.session_id))
             if current.transition != "CONTINUE":
                 return "_DISPATCH", current
+        print("voluntary reanchor refused: attempt budget exhausted", file=sys.stderr, flush=True)
         return "REANCHOR_REFUSED", None
 
     def _recovery_contingency(self, action, current, executor):

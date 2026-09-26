@@ -415,6 +415,35 @@ def test_room_scope_suppresses_a_view_after_observe_succeeded():
     assert {c.candidate_id.split(":")[-1] for c in remaining} == {POSE_B}
 
 
+def test_room_scope_drops_a_view_once_its_looks_are_preempted_the_limit_times():
+    # Rehearsal scenario (b) re-chose one zone 50 times in 400 s: every
+    # attempt was interrupted by recovery at look 3, and a non-burning
+    # interruption kept it offered forever. Interruptions stay retryable up
+    # to the limit on unchanged coverage, then the view is dropped.
+    from sentinel.room.candidates import OBSERVE_PREEMPTED, OBSERVE_PREEMPTED_LIMIT
+
+    site = _site(coverage_cells=(ROOM_CELL,), pose_visibility=((POSE_A, ("room-floor",)), (POSE_B, ("room-floor",))))
+    coverage = project_coverage((ROOM_CELL,), ())
+    objective = _objective("g1", 1, "ROOM")
+    first_pass = build_observation_candidates((objective,), site, coverage, (), 1)
+    candidate = next(c for c in first_pass if c.candidate_id.endswith(POSE_A))
+
+    def preempted(digest, n):
+        return ToolOutcome(candidate.candidate_id, candidate.kind.value, digest, OBSERVE_PREEMPTED,
+                           OBSERVE_PREEMPTED, (), None, f"evt-{n}")
+
+    below = tuple(preempted(candidate.relevant_state_sha256, n) for n in range(OBSERVE_PREEMPTED_LIMIT - 1))
+    assert candidate.candidate_id in {c.candidate_id for c in
+                                      build_observation_candidates((objective,), site, coverage, below, 1)}
+    at_limit = below + (preempted(candidate.relevant_state_sha256, "last"),)
+    remaining = build_observation_candidates((objective,), site, coverage, at_limit, 1)
+    assert {c.candidate_id.split(":")[-1] for c in remaining} == {POSE_B}
+    # Interruptions recorded against other coverage do not count toward it.
+    stale = below + (preempted("older-coverage", "old"),)
+    assert candidate.candidate_id in {c.candidate_id for c in
+                                      build_observation_candidates((objective,), site, coverage, stale, 1)}
+
+
 def test_room_scope_orders_by_descending_benefit_before_cost():
     # POSE_B sees both cells (benefit 2) while POSE_A sees only one
     # (benefit 1) and is otherwise no farther from home -- benefit must

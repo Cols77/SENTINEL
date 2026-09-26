@@ -572,10 +572,15 @@ class RecoveryController:
                                          sum(math.cos(math.radians(fix.heading_deg)) for fix in fixes))) % 360
         # Fresh, mapped, distinct and internally coherent two-tag evidence is
         # the best pose there is: when it contradicts the motion history's
-        # position, the history was wrong, so the burst re-anchors. A heading
-        # far from the one this action rotated to rejects only this action
-        # (the scan tries its next heading); it never latches LOST.
-        if heading_distance(heading, action.heading_deg) > profile.max_fix_heading_jump_deg:
+        # position -- or, live 2026-09-26 (l3-20260926-101602), its heading,
+        # off by more than this gate after demo360's large turns -- the
+        # history was wrong, so the burst is believed (a far-off-canonical
+        # heading then goes to the restore turn below, with the measured
+        # heading adopted by the rotation accounting). One tag cannot rule
+        # out an aliased view, so only a single-tag heading far from the one
+        # this action rotated to still rejects the action (the scan tries
+        # its next heading); it never latches LOST.
+        if single and heading_distance(heading, action.heading_deg) > profile.max_fix_heading_jump_deg:
             return reject("contradictory_heading")
         # A single tag cannot rule out a flipped pose: it re-anchors only a
         # position it agrees with (never a jump), and never latches LOST.
