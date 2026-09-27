@@ -1643,7 +1643,13 @@ class RoomController:
                     terminal = self.supervisor.refresh_failure(self.flight_executor)
                     return self._preempted(session_id, None, terminal)
                 if admission.transition == "REFUSE":
-                    drift = admission.reason == "LOCALIZATION_RECOVERY_REQUIRED"
+                    # PROJECTED_TERMINATION_PATH_INVALID is the same drift
+                    # budget refusing, seen from the return leg (live
+                    # l3-20260927-113526: both wall zones refused after the
+                    # fixless backward looks, and the rescue never ran); the
+                    # align-and-fix-stop relief applies to both codes.
+                    drift = admission.reason in ("LOCALIZATION_RECOVERY_REQUIRED",
+                                                 "PROJECTED_TERMINATION_PATH_INVALID")
                     rerouted = False
                     if drift and not aligned:
                         # Live 2026-09-25: facing 95 deg, the turns back to the tags

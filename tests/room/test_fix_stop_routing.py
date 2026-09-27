@@ -249,6 +249,33 @@ def test_a_zone_refused_on_drift_flies_one_fix_stop_then_is_observed(tmp_path, h
     assert f"re-anchored via {CENTER_FRONT} on the way" in outcome["detail"]
 
 
+def test_a_zone_refused_on_the_fixless_way_home_flies_one_fix_stop_then_is_observed(tmp_path):
+    # Live l3-20260927-113526: after the fixless backward looks, both wall
+    # zones were refused PROJECTED_TERMINATION_PATH_INVALID ("the way home
+    # would not stay clear of the walls without a tag fix") and the rescue
+    # never ran -- it only recognised LOCALIZATION_RECOVERY_REQUIRED -- so
+    # the mission answered INCOMPLETE with the walls unobserved. The same
+    # drift budget refuses both codes; the same align-and-fix-stop applies.
+    site = canningst_site()
+    reachable = {Position(r.x_cm, r.y_cm, r.z_cm)
+                 for r in (resolve_pose_id(site, p) for p in (CENTER_FRONT, CENTER_REAR, LEFT_FRONT))}
+
+    def admit(plan, sup):
+        if plan.checkpoint_id == f"OBSERVE:g1:{LEFT_FRONT}" and sup.tracker.health.position not in reachable:
+            return "REFUSE", "PROJECTED_TERMINATION_PATH_INVALID"
+        return "CONTINUE", "ADMITTED"
+
+    sup = ScriptedSupervisor(site, admit=admit, after_dispatch=_moves)
+    controller, store, captured = _rig(tmp_path, sup)
+
+    outcome = _observe(controller, store, LEFT_FRONT)
+
+    assert outcome["code"] == "OBSERVE_SUCCEEDED", outcome
+    assert [c for c in sup.dispatched if c.startswith("TRANSIT:")] == [f"TRANSIT:{CENTER_FRONT}"]
+    assert captured == ["obs-1", "obs-2", "obs-3"]
+    assert f"re-anchored via {CENTER_FRONT} on the way" in outcome["detail"]
+
+
 def test_a_zone_directly_admitted_flies_no_transit(tmp_path):
     sup = ScriptedSupervisor(canningst_site(), admit=lambda plan, sup: ("CONTINUE", "ADMITTED"),
                              after_dispatch=_moves)

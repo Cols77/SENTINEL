@@ -588,6 +588,51 @@ def test_measure_home_reads_height_passively_issuing_no_sdk_command(tmp_path):
     assert tello.sent.count("height?") == 2
 
 
+def test_home_height_lagging_at_zero_after_takeoff_is_re_read(tmp_path, monkeypatch):
+    # Live l3-20260927-113402: right after takeoff the state stream still said
+    # height 0, the home anchored at z 0, and the start aborted as
+    # TERMINATION_LANDING_INVALID (projected touchdown below the landing
+    # z-band). An airborne aircraft is never at pad height: re-read.
+    monkeypatch.setattr(live_stack, "HOME_HEIGHT_RETRY_S", 0.01)
+    stack, tello, _, site, _ = build_stack(tmp_path)
+    reads = []
+    real_get_height = tello.get_height
+
+    def settling_height():
+        if "takeoff" not in tello.sent:
+            return real_get_height()
+        reads.append(1)
+        tello.height_dm = 0 if len(reads) < 3 else 10  # settles on the third read
+        return real_get_height()
+
+    tello.get_height = settling_height
+    stack.refresh()
+    home = stack.executor.start(site.home)
+    assert home.pose.z_cm == 100
+    assert len(reads) >= 3
+
+
+def test_home_is_refused_when_the_airborne_height_never_settles(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(live_stack, "HOME_HEIGHT_RETRY_S", 0.01)
+    monkeypatch.setattr(live_stack, "HOME_HEIGHT_SETTLE_MAX_S", 0.05)
+    stack, tello, _, site, _ = build_stack(tmp_path)
+    real_get_height = tello.get_height
+
+    def stuck_height():
+        if "takeoff" in tello.sent:
+            tello.height_dm = 0
+        return real_get_height()
+
+    tello.get_height = stuck_height
+    stack.refresh()
+    # StepExecutor sanitizes the failure to its status; the reason reaches
+    # the console from the stack itself.
+    with pytest.raises(Exception, match="home measurement"):
+        stack.executor.start(site.home)
+    assert "never at pad height" in capsys.readouterr().err
+    assert "land" in tello.sent  # the failed start still brings the aircraft down
+
+
 def test_refresh_after_takeoff_keeps_the_tracker_anchored_through_the_climb(tmp_path):
     stack, _, tracker, site, _ = build_stack(tmp_path)
     stack.refresh()  # anchored on the pad
@@ -805,7 +850,8 @@ def test_a_home_burst_that_frames_one_tag_is_retried_and_takes_the_two_tag_fix(t
 def test_home_measurement_timeout_covers_every_short_home_burst(tmp_path):
     stack, *_ = build_stack(tmp_path)
     assert stack.executor.home_measurement_timeout_s == pytest.approx(
-        live_stack.HOME_BURST_ATTEMPTS * live_stack.HOME_BURST_MAX_S + 2 * live_stack.HEIGHT_READ_SLACK_S)
+        live_stack.HOME_BURST_ATTEMPTS * live_stack.HOME_BURST_MAX_S + 2 * live_stack.HEIGHT_READ_SLACK_S
+        + live_stack.HOME_HEIGHT_SETTLE_MAX_S)
 
 
 def test_localise_with_no_reliable_fix_fails_the_checkpoint(tmp_path):

@@ -29,6 +29,7 @@ import math
 import os
 from pathlib import Path
 import sqlite3
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -98,6 +99,14 @@ SINGLE_TAG_HEADING_UNCERTAINTY_DEG = 5.0
 #: Airborne home bursts: one retry when the first gave no two-tag fix but
 #: showed the camera framing the tags (``_frames_the_tags``).
 HOME_BURST_ATTEMPTS = 2
+#: The airborne home's height comes from the state stream, which can lag at
+#: 0 for a moment after takeoff (live l3-20260927-113402: home anchored at
+#: z 0, the projected touchdown fell below the landing z-band and the start
+#: aborted as TERMINATION_LANDING_INVALID). A hover is never below this, so
+#: a lower reading is re-read until it settles, then refused.
+MIN_AIRBORNE_HOME_Z_CM = 30
+HOME_HEIGHT_SETTLE_MAX_S = 3.0
+HOME_HEIGHT_RETRY_S = 0.5
 #: Listening time per home attempt. A hovering Tello that frames both tags
 #: delivers its readings in under a second (recorded bursts: 12 reports in
 #: 0.5-1.1 s, so localise's 8 samples take at most ~0.7 s); one that sees
@@ -831,6 +840,20 @@ class _TelloStack:
         if fix is None:
             raise LiveStackError("home: no two-tag fix after takeoff; the home is never assumed")
         z_cm = self._passive_height_cm()
+        # A state-stream height still at pad level after takeoff is a lagging
+        # altimeter, not the aircraft's altitude; anchoring the home there
+        # skews every projection (see MIN_AIRBORNE_HOME_Z_CM above).
+        settle_deadline = self.clock() + HOME_HEIGHT_SETTLE_MAX_S
+        while z_cm < MIN_AIRBORNE_HOME_Z_CM and self.clock() < settle_deadline:
+            time.sleep(HOME_HEIGHT_RETRY_S)
+            z_cm = self._passive_height_cm()
+        if z_cm < MIN_AIRBORNE_HOME_Z_CM:
+            # StepExecutor sanitizes home failures to their status, so the
+            # reason must reach the console here or nowhere.
+            message = (f"home: airborne height read {z_cm} cm from the state stream; "
+                       "an aircraft that took off is never at pad height")
+            print(message, file=sys.stderr, flush=True)
+            raise LiveStackError(message)
         if not self.tracker.initialized:
             # Takeoff is not gated on a pad fix; this airborne fix is the
             # tracker's first anchor (there is no pad anchor to climb from).
@@ -964,7 +987,7 @@ class TelloFlightStackFactory:
         executor = StepExecutor(runner, clock=clock, deadline=deadline, measure_home=stack.measure_home,
                                 command_sink=stack.command_sink, home_tolerance_cm=HOME_TOLERANCE_CM,
                                 home_measurement_timeout_s=(self.home_settle_s + HOME_BURST_ATTEMPTS * HOME_BURST_MAX_S
-                                                            + 2 * HEIGHT_READ_SLACK_S))
+                                                            + 2 * HEIGHT_READ_SLACK_S + HOME_HEIGHT_SETTLE_MAX_S))
         stack.executor = executor
         headings = mapped_heading_tag_ids(self.tag_map)
         # live_session gives the supervisor a recovery adapter exactly when
