@@ -183,8 +183,8 @@ def test_the_wide_scenario_pack_binds_its_site_and_drift_and_passes_every_gate(t
     assert _prepare(run_root, "--new-run", capsys=capsys)[0] == 2
     assert _prepare(run_root, "--new-run", "--consent-confirmed", capsys=capsys)[0] == 0
     default = _pack(run_root)
-    assert default["scenario"] == "lecture4high" and default["location"] == "LectureRoom"
-    assert Path(default["site"]).name == "lecture4-high-site.json"
+    assert default["scenario"] == "lecture4" and default["location"] == "LectureRoom"
+    assert Path(default["site"]).name == "lecture4-site.json"
     assert Path(default["tag_map"]).name == "lecture-room-map.json"
     assert Path(default["drift_profile"]).name == "canningst-demo-drift.json"
 

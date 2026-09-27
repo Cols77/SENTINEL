@@ -33,7 +33,22 @@ Pick **Room agent (Jev adaptive)** in the *Architecture* selector, choose a run 
 
   Scenario (a) spreads phones and computers over three regions, with one low-confidence phone. Scenario (b) yaws the aircraft away from the tags after the second observation, so the recovery's mapped-tag yaw scan runs before the mission resumes.
 
-- **Live** (real Tello, real detector, real Jev) runs `scripts/room_session.py live` with all of its gates. **Morning flight:** follow [the one-page checklist](docs/room-agent-morning-flight.md); `python scripts/room_live_prepare.py --run-root runs [--local-ip 192.168.10.2] [--consent-confirmed]` prepares the consent, registry, TRIAL grant, manifest, assurances and pack in one offline command and prints the launch command (`--room-live-config runs/live.pack.json`). By hand instead: first prepare the L3 inputs with [the runbook](docs/room-agent-live-runbook.md): the TRIAL grant (`room_capability.py issue-trial`), the manifest preview, and the two site assurances. The assurances are valid for 30 minutes. Then write a pack and start Mission Control with it:
+- **Live** (real Tello, real detector, real Jev) runs `scripts/room_session.py live` with all of its gates. **One command prepares every authorization** — consent, grant registry, TRIAL grant, manifest + authorization digest, the two site assurances, and the pack Mission Control reads:
+
+  ```powershell
+  $env:PYTHONPATH = "src;."
+  python scripts/room_live_prepare.py --run-root runs --consent-confirmed [--local-ip 192.168.10.2] [--scenario <name>] [--new-run]
+  ```
+
+  `--consent-confirmed` records today's filming consent for the scenario's venue; pass it only when everyone who may appear in frame has agreed. `--scenario` picks the flight geometry and venue (also shown in Mission Control's flight drop-down): the default is **`lecture4high`** (lecture room; one board look at tag-fix height, then the left, right and rear walls 30 cm up), with `lecture4`, `lecture`, `demo5`, `demo360`, `demo` and `canningst` also available. For the lecture4 demo scenarios the TRIAL grant and the floor-check assurances are valid **12 hours** from prepare; every other scenario keeps the 30-minute assurance window, so re-run prepare before each of its flights. The script prints the exact Mission Control launch command; for the lecture room it is:
+
+  ```powershell
+  $env:PYTHONPATH = "src;."
+  python -m sentinel.ui --mode live --site-profile LectureRoom --data-dir artifacts/room-live `
+    --room-live-config runs/live.pack.json --i-authorise-paid-calls
+  ```
+
+  Then open http://127.0.0.1:8771/console/, pick **Room agent (Jev adaptive)** and the flight scenario, type the request, *Propose run*, *Approve*. **Morning flight:** follow [the one-page checklist](docs/room-agent-morning-flight.md). By hand instead: prepare the L3 inputs with [the runbook](docs/room-agent-live-runbook.md) — the TRIAL grant (`room_capability.py issue-trial`), the manifest preview, and the two site assurances — then write a pack and start Mission Control with it:
 
   ```powershell
   @{ manifest = "runs/$RUN.manifest.json"; authorization_digest = $DIGEST; grant_registry = "runs/registry.json"

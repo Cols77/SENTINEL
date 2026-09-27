@@ -114,6 +114,10 @@ class FlightScenario(NamedTuple):
 #: (reported 147, to frame every person in the room) and drops the board look
 #: to middle height (reported 88) so its 210 cm tag fix stays well inside the
 #: camera's lower field of view; the operator confirmed the ceiling clearance.
+#: Live l3-20260927-111636 refused all three wall zones under it: the 59 cm
+#: climb per leg is charged like translation, putting the fixless
+#: out-and-back forecast over the 60 cm predicted-error gate, so lecture4
+#: (constant reported 117, forecast ~13 cm per leg) is the default again.
 DEMO_DRIFT_PATH = PROFILES / "canningst-demo-drift.json"
 LECTURE_TAG_MAP_PATH = REPO_ROOT / "docs" / "lecture-room-map.json"
 LOCATION = "CanningSt"
@@ -369,7 +373,7 @@ def ensure_manifest(run_root: Path, run_id: str, grant, registry_path: Path, *, 
 # -- main -----------------------------------------------------------------------
 def prepare(*, run_root: Path, local_ip: str | None, consent_confirmed: bool, run_id: str | None = None,
             new_run: bool = False, request: str = DEFAULT_REQUEST, today: str | None = None,
-            now: datetime | None = None, scenario: str = "lecture4high") -> dict:
+            now: datetime | None = None, scenario: str = "lecture4") -> dict:
     global _scenario
     if scenario not in SCENARIOS:
         raise PrepareError(f"unknown scenario {scenario!r}; choose one of {', '.join(SCENARIOS)}")
@@ -467,7 +471,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", default=None, help="use this run id (default: reuse the unflown current run "
                                                        "or make a fresh l3-<time>)")
     parser.add_argument("--new-run", action="store_true", help="always prepare a fresh run")
-    parser.add_argument("--scenario", choices=sorted(SCENARIOS), default="lecture4high",
+    parser.add_argument("--scenario", choices=sorted(SCENARIOS), default="lecture4",
                         help="flight scenario: lecture (the measured lecture room, five top-height poses, its "
                              "own tags at 49.5 cm; the default, and what Mission Control's prepare "
                              "uses -- the venue the demo is in, so an untouched drop-down cannot "

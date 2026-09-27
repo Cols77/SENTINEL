@@ -151,5 +151,8 @@ def test_lecture4high_shares_the_venue_binding_and_is_the_prepared_default():
     assert all(e["max_assurance_age_ms"] == 43200000 for e in doc["terminal_contingencies"])
     scenario = room_live_prepare.SCENARIOS["lecture4high"]
     assert scenario.site == HIGH_SITE and scenario.tag_map == TAG_MAP
+    # Live l3-20260927-111636: lecture4high's 59 cm climb per wall leg put the
+    # fixless out-and-back forecast over the 60 cm gate and every wall zone
+    # was refused, so the prepared default is lecture4 at the flown height.
     import inspect
-    assert inspect.signature(room_live_prepare.prepare).parameters["scenario"].default == "lecture4high"
+    assert inspect.signature(room_live_prepare.prepare).parameters["scenario"].default == "lecture4"
