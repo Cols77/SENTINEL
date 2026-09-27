@@ -175,16 +175,16 @@ def test_the_wide_scenario_pack_binds_its_site_and_drift_and_passes_every_gate(t
     assert "connectivity preflight not ready" in run["error"], run["error"]
     assert ("drone_probe",) in hardware.calls
 
-    # The default (Mission Control's no-argument prepare) is the lecture-room
-    # venue the demo is in (2026-09-26), so an untouched drop-down cannot
-    # prepare another room's geometry against this room's tags. Being another
-    # venue, it needs its own filming consent: the CanningSt record this test
-    # already made does not carry it.
+    # The default (Mission Control's no-argument prepare) is the lecture4
+    # demo scenario in the lecture-room venue (2026-09-27), so an untouched
+    # drop-down cannot prepare another room's geometry against this room's
+    # tags. Being another venue, it needs its own filming consent: the
+    # CanningSt record this test already made does not carry it.
     assert _prepare(run_root, "--new-run", capsys=capsys)[0] == 2
     assert _prepare(run_root, "--new-run", "--consent-confirmed", capsys=capsys)[0] == 0
     default = _pack(run_root)
-    assert default["scenario"] == "lecture" and default["location"] == "LectureRoom"
-    assert Path(default["site"]).name == "lecture-room-site.json"
+    assert default["scenario"] == "lecture4" and default["location"] == "LectureRoom"
+    assert Path(default["site"]).name == "lecture4-site.json"
     assert Path(default["tag_map"]).name == "lecture-room-map.json"
     assert Path(default["drift_profile"]).name == "canningst-demo-drift.json"
 
