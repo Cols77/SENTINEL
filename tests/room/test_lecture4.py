@@ -107,3 +107,49 @@ def test_the_prepare_script_offers_lecture4_with_the_venue_s_map():
     assert scenario.tag_map == TAG_MAP
     assert scenario.location == room_live_prepare.LECTURE_LOCATION
     assert scenario.drift == room_live_prepare.SCENARIOS["lecture"].drift
+
+
+# -- lecture4high: wall looks 30 cm up, board look at tag-framing height ------
+HIGH_SITE = FIXTURES / "lecture4-high-site.json"
+HIGH_POSES = [
+    "center-middle-middle-toward_targets",
+    "left-middle-top-left",
+    "right-middle-top-right",
+    "center-rear-top-backward",
+]
+
+
+def test_lecture4high_raises_the_walls_and_keeps_the_board_look_on_the_tags():
+    """2026-09-27 demo day: +30 cm on the wall looks to frame every person.
+    A blanket +30 would put the 210 cm tag fix 31-35 degrees below the
+    horizon, past the camera's ~31 degree lower field (8.6 degree pitch plus
+    the half-height of the frame), so the board look drops to middle height
+    instead: 18 degrees, framed with margin."""
+    site = parse_room_site(_doc(HIGH_SITE))
+    board = resolve_pose_id(site, "center-middle-middle-toward_targets")
+    assert (board.x_cm, board.y_cm, board.z_cm, board.yaw_deg) == (250, 190, 88, 90)
+    for pose_id, x, y in (("left-middle-top-left", 183, 190),
+                          ("right-middle-top-right", 317, 190),
+                          ("center-rear-top-backward", 250, 163)):
+        pose = resolve_pose_id(site, pose_id)
+        assert (pose.x_cm, pose.y_cm, pose.z_cm) == (x, y, 147), pose_id  # 117 + 30
+
+
+def test_lecture4high_shares_the_venue_binding_and_is_the_prepared_default():
+    doc = _doc(HIGH_SITE)
+    site = parse_room_site(doc)
+    lecture4 = parse_room_site(_doc(SITE))
+    assert site.site_id == "lecture-room-walls-high"
+    assert site.tag_map_sha256 == lecture4.tag_map_sha256
+    assert site.cube_site_sha256 == lecture4.cube_site_sha256
+    assert site.home == lecture4.home
+    cell_ids = {cell["cell_id"] for cell in doc["coverage_cells"]}
+    assert {cell for _, visible in doc["pose_visibility"] for cell in visible} == cell_ids
+    assert [pose_id for pose_id, _ in doc["pose_visibility"]] == HIGH_POSES
+    assert doc["pose_tag_visibility"] == [["center-middle-middle-toward_targets", [2, 4]]]
+    # Demo day: the whole-day floor-check window, as in lecture4.
+    assert all(e["max_assurance_age_ms"] == 43200000 for e in doc["terminal_contingencies"])
+    scenario = room_live_prepare.SCENARIOS["lecture4high"]
+    assert scenario.site == HIGH_SITE and scenario.tag_map == TAG_MAP
+    import inspect
+    assert inspect.signature(room_live_prepare.prepare).parameters["scenario"].default == "lecture4high"

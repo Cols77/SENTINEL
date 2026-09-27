@@ -1,0 +1,666 @@
+{
+  "clearance_provenance": "Lecture-room operator tape measurements 2026-09-26; lecture4high per the operator's 2026-09-27 demo-day request: wall looks 30 cm higher (reported 147, to see every person), the board look at middle height (reported 88) so the 210 cm tag fix stays inside the camera's 31-degree lower field; operator confirmed at least 2.6 m of clear ceiling over the flight box",
+  "corridors": [
+    {
+      "polygon_xy_cm": [
+        [
+          50,
+          50
+        ],
+        [
+          450,
+          50
+        ],
+        [
+          450,
+          400
+        ],
+        [
+          50,
+          400
+        ]
+      ],
+      "volume_id": "home-corridor",
+      "z_interval_cm": [
+        -20,
+        250
+      ]
+    }
+  ],
+  "coverage_cells": [
+    {
+      "cell_id": "floor-x130-y310",
+      "polygon_xy_cm": [
+        [
+          130,
+          310
+        ],
+        [
+          170,
+          310
+        ],
+        [
+          170,
+          350
+        ],
+        [
+          130,
+          350
+        ]
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ]
+    },
+    {
+      "cell_id": "floor-x170-y310",
+      "polygon_xy_cm": [
+        [
+          170,
+          310
+        ],
+        [
+          210,
+          310
+        ],
+        [
+          210,
+          350
+        ],
+        [
+          170,
+          350
+        ]
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ]
+    },
+    {
+      "cell_id": "floor-x290-y310",
+      "polygon_xy_cm": [
+        [
+          290,
+          310
+        ],
+        [
+          330,
+          310
+        ],
+        [
+          330,
+          350
+        ],
+        [
+          290,
+          350
+        ]
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ]
+    },
+    {
+      "cell_id": "floor-x330-y310",
+      "polygon_xy_cm": [
+        [
+          330,
+          310
+        ],
+        [
+          370,
+          310
+        ],
+        [
+          370,
+          350
+        ],
+        [
+          330,
+          350
+        ]
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ]
+    },
+    {
+      "cell_id": "floor-x130-y350",
+      "polygon_xy_cm": [
+        [
+          130,
+          350
+        ],
+        [
+          170,
+          350
+        ],
+        [
+          170,
+          390
+        ],
+        [
+          130,
+          390
+        ]
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ]
+    },
+    {
+      "cell_id": "floor-x170-y350",
+      "polygon_xy_cm": [
+        [
+          170,
+          350
+        ],
+        [
+          210,
+          350
+        ],
+        [
+          210,
+          390
+        ],
+        [
+          170,
+          390
+        ]
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ]
+    },
+    {
+      "cell_id": "floor-x210-y350",
+      "polygon_xy_cm": [
+        [
+          210,
+          350
+        ],
+        [
+          250,
+          350
+        ],
+        [
+          250,
+          390
+        ],
+        [
+          210,
+          390
+        ]
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ]
+    },
+    {
+      "cell_id": "floor-x250-y350",
+      "polygon_xy_cm": [
+        [
+          250,
+          350
+        ],
+        [
+          290,
+          350
+        ],
+        [
+          290,
+          390
+        ],
+        [
+          250,
+          390
+        ]
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ]
+    },
+    {
+      "cell_id": "floor-x290-y350",
+      "polygon_xy_cm": [
+        [
+          290,
+          350
+        ],
+        [
+          330,
+          350
+        ],
+        [
+          330,
+          390
+        ],
+        [
+          290,
+          390
+        ]
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ]
+    },
+    {
+      "cell_id": "floor-x330-y350",
+      "polygon_xy_cm": [
+        [
+          330,
+          350
+        ],
+        [
+          370,
+          350
+        ],
+        [
+          370,
+          390
+        ],
+        [
+          330,
+          390
+        ]
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ]
+    },
+    {
+      "cell_id": "floor-x90-y160",
+      "polygon_xy_cm": [
+        [
+          90,
+          160
+        ],
+        [
+          130,
+          160
+        ],
+        [
+          130,
+          200
+        ],
+        [
+          90,
+          200
+        ]
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ]
+    },
+    {
+      "cell_id": "floor-x210-y110",
+      "polygon_xy_cm": [
+        [
+          210,
+          110
+        ],
+        [
+          250,
+          110
+        ],
+        [
+          250,
+          150
+        ],
+        [
+          210,
+          150
+        ]
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ]
+    },
+    {
+      "cell_id": "floor-x370-y160",
+      "polygon_xy_cm": [
+        [
+          370,
+          160
+        ],
+        [
+          410,
+          160
+        ],
+        [
+          410,
+          200
+        ],
+        [
+          370,
+          200
+        ]
+      ],
+      "required_classes": [
+        "computer",
+        "phone",
+        "mug"
+      ],
+      "z_band_cm": [
+        -35,
+        -5
+      ]
+    }
+  ],
+  "cube_site_sha256": "0770fca67cdbf6d94ec8e65b6586196d260f962a7dee2f3f126d9935662d83b2",
+  "forbidden_volumes": [],
+  "free_space_volumes": [
+    {
+      "polygon_xy_cm": [
+        [
+          50,
+          50
+        ],
+        [
+          450,
+          50
+        ],
+        [
+          450,
+          400
+        ],
+        [
+          50,
+          400
+        ]
+      ],
+      "volume_id": "cube",
+      "z_interval_cm": [
+        -20,
+        250
+      ]
+    },
+    {
+      "polygon_xy_cm": [
+        [
+          80,
+          80
+        ],
+        [
+          420,
+          80
+        ],
+        [
+          420,
+          360
+        ],
+        [
+          80,
+          360
+        ]
+      ],
+      "volume_id": "flight",
+      "z_interval_cm": [
+        0,
+        250
+      ]
+    },
+    {
+      "polygon_xy_cm": [
+        [
+          150,
+          150
+        ],
+        [
+          350,
+          150
+        ],
+        [
+          350,
+          230
+        ],
+        [
+          150,
+          230
+        ]
+      ],
+      "volume_id": "observation",
+      "z_interval_cm": [
+        0,
+        176
+      ]
+    }
+  ],
+  "home": {
+    "heading_deg": 90,
+    "nominal_pose": {
+      "x_cm": 250,
+      "y_cm": 190,
+      "z_cm": 0
+    },
+    "pad_id": "canningst-start",
+    "route_id": "home-route"
+  },
+  "pose_tag_visibility": [
+    [
+      "center-middle-middle-toward_targets",
+      [
+        2,
+        4
+      ]
+    ]
+  ],
+  "pose_visibility": [
+    [
+      "center-middle-middle-toward_targets",
+      [
+        "floor-x130-y310",
+        "floor-x170-y310",
+        "floor-x290-y310",
+        "floor-x330-y310",
+        "floor-x130-y350",
+        "floor-x170-y350",
+        "floor-x210-y350",
+        "floor-x250-y350",
+        "floor-x290-y350",
+        "floor-x330-y350"
+      ]
+    ],
+    [
+      "left-middle-top-left",
+      [
+        "floor-x90-y160"
+      ]
+    ],
+    [
+      "right-middle-top-right",
+      [
+        "floor-x370-y160"
+      ]
+    ],
+    [
+      "center-rear-top-backward",
+      [
+        "floor-x210-y110"
+      ]
+    ]
+  ],
+  "routes": [
+    {
+      "checkpoints": [
+        {
+          "x_cm": 250,
+          "y_cm": 190,
+          "z_cm": 80
+        }
+      ],
+      "corridor_volume_ids": [
+        "home-corridor"
+      ],
+      "route_id": "home-route"
+    }
+  ],
+  "schema_version": "room-site-base-v1",
+  "semantic_frame": {
+    "envelope_volume_id": "observation",
+    "landmarks": [],
+    "left_to_right_axis_xy": [
+      1.0,
+      0.0
+    ],
+    "rear_to_front_axis_xy": [
+      0.0,
+      1.0
+    ],
+    "target_side": "FRONT"
+  },
+  "site_id": "lecture-room-walls-high",
+  "support_planes": [
+    {
+      "classes": [],
+      "plane_id": "FLOOR",
+      "z_cm": 0
+    },
+    {
+      "classes": [
+        "computer",
+        "phone",
+        "mug"
+      ],
+      "plane_id": "ground",
+      "z_cm": -35
+    }
+  ],
+  "tag_map_sha256": "7716cfb59461a226411a49e482640dd1d88e74e34632e1b3b09f083bc23b508f",
+  "terminal_contingencies": [
+    {
+      "assurance_policy_id": "operator-clear-floor-check",
+      "clearance_source": "operator-checked-clear-cube",
+      "contingency_id": "lecture-room-land-in-place-navigation",
+      "kind": "LAND_IN_PLACE",
+      "landing_polygon_xy_cm": [
+        [
+          50,
+          50
+        ],
+        [
+          450,
+          50
+        ],
+        [
+          450,
+          400
+        ],
+        [
+          50,
+          400
+        ]
+      ],
+      "max_assurance_age_ms": 43200000,
+      "required_pose_state": "COASTING",
+      "trigger": "NAVIGATION_UNAVAILABLE",
+      "z_band_cm": [
+        0,
+        250
+      ]
+    },
+    {
+      "assurance_policy_id": "operator-clear-floor-check",
+      "clearance_source": "operator-checked-clear-cube",
+      "contingency_id": "lecture-room-land-in-place-energy",
+      "kind": "LAND_IN_PLACE",
+      "landing_polygon_xy_cm": [
+        [
+          50,
+          50
+        ],
+        [
+          450,
+          50
+        ],
+        [
+          450,
+          400
+        ],
+        [
+          50,
+          400
+        ]
+      ],
+      "max_assurance_age_ms": 43200000,
+      "required_pose_state": "COASTING",
+      "trigger": "RETURN_ENERGY_UNAVAILABLE",
+      "z_band_cm": [
+        0,
+        250
+      ]
+    }
+  ]
+}
