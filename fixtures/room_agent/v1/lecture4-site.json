@@ -623,7 +623,7 @@
           400
         ]
       ],
-      "max_assurance_age_ms": 1800000,
+      "max_assurance_age_ms": 43200000,
       "required_pose_state": "COASTING",
       "trigger": "NAVIGATION_UNAVAILABLE",
       "z_band_cm": [
@@ -654,7 +654,7 @@
           400
         ]
       ],
-      "max_assurance_age_ms": 1800000,
+      "max_assurance_age_ms": 43200000,
       "required_pose_state": "COASTING",
       "trigger": "RETURN_ENERGY_UNAVAILABLE",
       "z_band_cm": [

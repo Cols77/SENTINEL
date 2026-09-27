@@ -133,7 +133,7 @@ TRIAL_PROTOCOL = "l3-canningst"
 AIRCRAFT_ID = "tello-canningst"
 DEFAULT_REQUEST = "count the phones and computers in the room"
 CURRENT_PACK_NAME = "live.pack.json"
-GRANT_LIFETIME = timedelta(hours=6)
+GRANT_LIFETIME = timedelta(hours=12)  # demo day 2026-09-27: cover the whole day on one prepare
 #: A run is reused only while its grant has at least this long left.
 GRANT_REUSE_MARGIN = timedelta(hours=1)
 #: Run events that leave a run reusable (the motors-off L0 check on its manifest).
